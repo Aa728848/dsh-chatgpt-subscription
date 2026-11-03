@@ -22,7 +22,7 @@
 | 编号 | 内容 |
 |---|---|
 | R0 | 先分诊，按复杂度决定是否展开重治理流程；绝不为 L0/L1 开启完整访谈或计划模式 |
-| R0.5 | 兼容性闸门（每个新会话一次）：检测到 Agent Teams 就**停**并把选择交给用户——本模式与 team 不兼容，没有降级路径 |
+| R0.5 | 兼容性闸门（每个新会话一次）：判据**只有** `spawn_teammate` 是否在场——在场才说明跑的是旧代 team 运行时（它顶替协调工具），此时停下交用户决策；现行 team 只加共享任务板，与调度并行 |
 | R-G | L2 规划前必须做澄清访谈：设计树 / 前沿 / 轮次，每题给推荐答案，事实自己查、决策交用户，前沿为空且用户确认后才进入规划 |
 | R1 | L2 执行拓扑按「耦合度 × 并行收益」三选一：`Lead-Core`（紧耦合跨模块由主代理连续直执）、`Hybrid`（主代理先冻结公共契约再并行外包下游）、`Fan-out`（3+ 正交子任务并行编排） |
 | R2 | 允许清单唯一真源是 `list_subagent_models`（`{}` → `{ provider }`）；派发必须显式给出拆开的 `provider` 与 `model`，直接采信工具返回值，无需去翻本地配置或代码核对 |
@@ -70,11 +70,31 @@
 
 ## 已知边界
 
-**与 Agent Teams 不兼容（刻意互斥）**：`@deepseek-ai/dsh-experimental-agent-team-profile`
-被组合进会话时，team 的 scoped 注册会顶替 `send_message` / `list_agents` / `interrupt_agent`，
-而 `tryMembership` 让 Lead 从第一轮起就是 team 成员——也就是**派发之前**协调工具已经没了。
-本模式因此不提供降级路径：persona 的 R0.5 会停下并用 `ask_user_question` 把三条出路交给用户
-（关掉 bundle 后重启并新建会话 / 换 preset / 本次直接做）。详见根 `README.md` 的同名小节。
+**与 Agent Teams 的关系按代划分**：Agent Teams 的**旧代**运行时自己拥有队友创建与消息通道
+（注册 `spawn_teammate`，并用 team 作用域注册顶替 `send_message` / `list_agents` / `interrupt_agent`），
+派发出来的子代理对它不可见、也联系不上——这一代与调度模式互斥，本模式不提供降级路径：
+persona 的 R0.5 会停下并用 `ask_user_question` 把三条出路交给用户（关掉 team 后重启并新建会话 / 换 preset / 本次直接做）。
+
+**现行**运行时（harness 0.2.2 起）已改为共享子代理语义：它只注册共享任务板
+`team_task_create` / `team_task_list` / `team_task_get` / `team_task_update` 和一段自己的 policy，
+消息与名册全部复用本模式挂载的 `list_agents` / `send_message` / `wait_agent` / `interrupt_agent`
+（它自己的 policy 就写着"任务归属人是 `list_agents` 的 agent id、要人动手就 `send_message`"）。
+因此调度模式与它**并行运行**：任务板只是可选的共同记账，绝不替代 R1 拓扑、R2 路由、R5 任务书、
+R6 验收与 R-W 等待；R0.5 只靠 `spawn_teammate` 判代，**不能**用 `wait_agent` / `send_message` /
+`list_agents` / `interrupt_agent` 判——这些工具是本模式自己挂的，在场不能证明任何 team 状态。
+
+开关打开时两套记账的分工是固定的：`dispatch_ledger` 仍是派发权威、R5 任务书仍是任务契约；团队任务板
+只用来公开跨代理的依赖（`blocked_by`）与写作用域，一条 brief 对应一条 task，由拿到它的子代理自己
+claim/complete。任务 ready 不等于开工，也不许用 `reassign` 把任务挪走以绕开 R6 验收。R0.5 在缺席判据
+下会先写一行 `Orchestration ready: subagent`，把当前模式打在第一行。
+
+**缓存侧的两个注意点**：Kimi / MiniMax 的 PTC `tools:sdk` 是冻结的**未过滤**声明
+（`ptc-sdk-cache-guard`），所以 `team_task_*` 在 SDK 里**常驻可见**、与开关无关——可见不等于可调用，
+要以 `team_task_list` 能否调通为准。反过来，开关本身会让 `team:policy` 段从空串变成整段文本，
+system prompt 因此改写一次；这与计划模式当初刻意用"尾部用户消息"规避的是同一类重建，只是这段文本
+由 harness 拥有。建议在**首个回合之前**决定 team 开关：开会话时就是目标状态则零成本，中途切换付一次前缀重建。
+插件默认开启的 `teamPolicyCacheGuard` 让这唯一一次重建也消失：守卫把 `team:policy` 段从装配里
+摘掉并捕获原文，切开关时改用尾部用户消息投递一次，关闭时补一条撤销通知——与计划模式同一套做法。
 
 本进程内 spawn 的子代理**继承父代理的 preset 组成**（同一套工具、同一套提示词段落）。
 因此子代理读到的是同一份 persona；文件开头的【角色识别】段落要求它据「首条消息是否为任务书」

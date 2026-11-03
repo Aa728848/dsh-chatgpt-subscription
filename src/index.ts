@@ -167,6 +167,10 @@ import { installCompactionPrompt, type PromptContext as CompactionPromptContext 
 import { installToolResultPrunerGuard } from './host/tool-result-pruner-guard.ts'
 import { installPlanModeCacheGuard } from './host/plan-mode-cache-guard.ts'
 import { installPtcSdkCacheGuard } from './host/ptc-sdk-cache-guard.ts'
+import {
+  installTeamPolicyCacheGuard,
+  resolveTeamPolicyCacheGuardEnabled,
+} from './host/team-policy-cache-guard.ts'
 import { installCompactionPolicyGuard } from './host/compaction-policy-guard.ts'
 import {
   installDispatchExecutionGuard,
@@ -298,6 +302,18 @@ export interface Config {
    * 的 `tools:sdk` 段与顶层工具 schema）保持逐字节恒定，前缀缓存零漂移。
    */
   dispatchExecutionGuard?: Volatile<boolean>
+  /**
+   * 「Agent Teams 策略段」缓存守卫：默认开启。
+   *
+   * 内置 `@deepseek-ai/dsh-tool-agent-team` 的 `team:policy` 段在开关关闭时是空串、
+   * 打开时是整段指引，中途切换会改写 system prompt 并刷掉整段前缀缓存。打开本开关
+   * 后守卫把该段从装配结果里摘掉，改为切换时以**尾部用户消息**投递一次（与计划模式
+   * 同一套做法），system 段因此逐字节恒定。
+   *
+   * 只有「会话中途切开关」才付那次重建；开会话时就是目标状态则本来就零成本，所以
+   * 默认开启。volatile：设置保存后下一步就生效，不重挂任何一行。
+   */
+  teamPolicyCacheGuard?: Volatile<boolean>
   /**
    * 「结果预览」总开关：Kimi 线路上超大的 `run_code` 结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
@@ -436,6 +452,8 @@ export interface ConfigInput {
   planModePipeline?: boolean
   /** 「调度执行守卫」总开关（默认开启）：执行期拦截子代理越权调用与等待期空等。 */
   dispatchExecutionGuard?: boolean
+  /** 「Agent Teams 策略段」缓存守卫（默认开启）：摘段并改为尾部投递。 */
+  teamPolicyCacheGuard?: boolean
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmup?: boolean
   /** 检索型结果投影独立开关（默认开启；只影响之后产生的新结果）。 */
@@ -490,6 +508,12 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 纯 sleep 空等。volatile 让设置保存后就地写新值，下一步就生效、不重挂任何行。
   dispatchExecutionGuard: z.boolean().default(true).volatile()
     .description('启用调度执行守卫：在执行期拦截子代理越权调用主控专用工具，并拦截等待子代理期间的纯 sleep 空等命令；不修改工具声明面，零损耗保护 Kimi 缓存。'),
+
+  // Agent Teams 策略段守卫：把内置 `team:policy` 段从 system 里摘掉，改成切开关时
+  // 尾部投递一次，避免中途开团队协作时整段前缀重建。默认开启——它不增加任何工具
+  // 声明面，只在真正切开关时才起作用。volatile：下一步就生效。
+  teamPolicyCacheGuard: z.boolean().default(true).volatile()
+    .description('把内置 Agent Teams 的 team:policy 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作时刷掉整段前缀缓存；默认开启。'),
 
   // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
   // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
@@ -648,6 +672,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const guard = installPtcSdkCacheGuard(ctx)
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: PTC SDK cache guard')
+
+  // Agent Teams 策略段：内置 team 的 `team:policy` 段在开关翻转时从空串变成整段
+  // 指引，会改写 system prompt。守卫默认开启，把这一段摘出呈现、改为尾部投递一次，
+  // system 段逐字节恒定。与计划模式守卫同一套接缝，互不重叠。
+  ctx.effect(() => {
+    const guard = installTeamPolicyCacheGuard(ctx, {
+      enabled: () => resolveTeamPolicyCacheGuardEnabled(pluginConfig),
+    })
+    return () => guard.dispose()
+  }, 'dsh-chatgpt-subscription: team policy cache guard')
 
   ctx.effect(() => {
     const guard = installCompactionPolicyGuard(ctx)

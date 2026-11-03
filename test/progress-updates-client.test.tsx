@@ -349,6 +349,7 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.querySelector('[data-dsh-part="settings-row-cache-wait-warmup"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-plan-mode-pipeline"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-dispatch-execution-guard"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-team-policy-cache-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-language"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-panel"]')).not.toBeNull()
@@ -359,12 +360,13 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.textContent).toContain(zh.settingsCacheWaitWarmupName)
     expect(container.textContent).toContain(zh.settingsPlanModePipelineName)
     expect(container.textContent).toContain(zh.settingsDispatchExecutionGuardName)
+    expect(container.textContent).toContain(zh.settingsTeamPolicyCacheGuardName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
     expect(container.textContent).toContain(zh.settingsLanguageName)
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(9)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(10)
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {
@@ -488,6 +490,39 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
       openPanel: vi.fn(), close: vi.fn(),
     } as never)))
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-dispatch-execution-guard-switch"]')?.disabled).toBe(true)
+  })
+
+  it('Agent Teams 策略段开关缺键时读成开，显式 false 才回显关闭', async () => {
+    // 缺键 = 开：宿主 schema 上是 default(true)，老配置没有这个键时界面必须同样读成开。
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: fakeForm({}),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-team-policy-cache-guard-switch"]')?.getAttribute('aria-checked')).toBe('true')
+
+    // 显式 false 才是关：这一行读的是「不等于 false」，不是「等于 true」。
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: fakeForm({ teamPolicyCacheGuard: false }),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-team-policy-cache-guard-switch"]')?.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('Agent Teams 策略段开关写回的是本插件 Config 的 teamPolicyCacheGuard', async () => {
+    const form = fakeForm({})
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    const toggle = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-team-policy-cache-guard-switch"]')!
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    await act(async () => { toggle.click() })
+    // 缺键读成开，所以点一下写的是 false。
+    expect(form.writes).toEqual([['teamPolicyCacheGuard', false]])
+  })
+
+  it('没有设置服务时 Agent Teams 策略段开关是禁用的', async () => {
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-team-policy-cache-guard-switch"]')?.disabled).toBe(true)
   })
 
   it('未声明检索字段时设置页默认开启', async () => {

@@ -80,6 +80,13 @@ export interface ProgressUpdatesSettingsValues {
    * 关着」与「实际是开着的」会同时成立。
    */
   dispatchExecutionGuard?: boolean
+  /**
+   * Agent Teams 策略段缓存守卫开关（缺键 = 开）。
+   *
+   * 与宿主 src/index.ts 的 Config 同一个对象里的字段、名字逐字一致；宿主那边是
+   * default(true)，所以缺键时界面必须同样读成开。
+   */
+  teamPolicyCacheGuard?: boolean
 }
 
 /** 输出语言的三种取值，供界面侧声明变量类型。 */
@@ -95,6 +102,7 @@ export type ProgressUpdatesField =
   | 'cacheWaitWarmup'
   | 'planModePipeline'
   | 'dispatchExecutionGuard'
+  | 'teamPolicyCacheGuard'
 
 /**
  * 候选条目 id，按可能性从高到低。

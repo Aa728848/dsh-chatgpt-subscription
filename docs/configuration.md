@@ -75,6 +75,7 @@
 | `progressUpdatesLanguage` | `'auto' \| 'zh' \| 'en' \| 'ru'` | `'auto'` | **热生效（volatile）** | 进展汇报输出语言 |
 | `planModePipeline` | `boolean` | `true` | **热生效（volatile）** | 是否在 `dispatch` 预设下开放 `enter_plan_mode` / `leave_plan_mode` |
 | `dispatchExecutionGuard` | `boolean` | `true` | **热生效（volatile）** | 执行期拦截子代理越权调用主控专用工具、拦截空 `sleep` 及校验 Mandate v2 账本 |
+| `teamPolicyCacheGuard` | `boolean` | `true` | **热生效（volatile）** | 把内置 Agent Teams 的 `team:policy` 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作刷掉整段前缀缓存 |
 | `cacheWarmup` | `boolean` | `true` | **热生效（volatile）** | Kimi Code 命令/日志大结果 `ref://` 预览与 `cache_warmup_result` 补读 |
 | `cacheWarmupRetrieval` | `boolean` | `true` | **热生效（volatile）** | Kimi Code 明确导航意图下的文件/网页检索结果大纲投影 |
 | `cacheWaitWarmup` | `boolean` | `true` | **热生效（volatile）** | Kimi Code 主会话空闲等待子代理期间的缓存保活 |

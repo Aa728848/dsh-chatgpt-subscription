@@ -82,5 +82,5 @@
 | --- | --- | --- |
 | **调用 `subagent` 被拒，提示必须成对提供 `provider` 与 `model`** | 会话记录了子代理模型允许列表，本插件的 `subagentModelAuthorization` 守卫禁止省略参数静默继承主模型 | 让 Agent 先调用一次 `list_subagent_models` 获取当前会话已授权的 `{ provider, model }` 清单并显式传参；或在 DSH **Plugins → 子智能体** 设置卡中勾选需要授权的模型 |
 | **调用 `subagent_fork` 被拒** | `subagent_fork` 强制继承当前父会话路由，而当前主代理所用的模型既不在子代理白名单内、也未开启允许父路由 Fork 自继承 | 在 **Plugins → 子智能体** 设置卡中开启「允许 `subagent_fork` 继承主模型」（全局或针对当前主模型），或将当前主模型勾选进白名单，或改用显式指定白名单内模型的 `subagent` |
-| **新建 `dispatch` 会话首轮即停下并提示与 Agent Teams 冲突** | Profile 同时启用了 `@deepseek-ai/dsh-experimental-agent-team-profile`，其工具注册遮蔽了 `send_message` / `list_agents` / `interrupt_agent` 且不支持按任务选模型 | 按提问选项处理：① 在插件管理中禁用 Agent Teams bundle，重启 DSH 后**新建会话**；② 切换其它 Agent Preset；③ 选择本会话不走子代理编排由主代理直接执行 |
+| **新建 `dispatch` 会话首轮即停下并提示与 Agent Teams 冲突** | 会话里存在旧代 team 运行时（注册了 `spawn_teammate` 并顶替 `send_message` / `list_agents` / `interrupt_agent`）；现行 team 只追加 `team_task_*` 任务板、不顶替协调工具，不会触发本闸门 | 按提问选项处理：① 移除旧代 team 运行时，重启 DSH 后**新建会话**；② 切换其它 Agent Preset；③ 选择本会话不走子代理编排由主代理直接执行 |
 | **`dispatch` 会话里子代理调用 `ask_user_question` / `enter_plan_mode` 或执行纯 `sleep` 被拦截** | `dispatchExecutionGuard`（默认开启）在执行期保护编排纪律：主控工具只归主代理，等待子代理应结束本轮靠通知唤醒而非 `sleep` 空转 | 属正常护栏行为；子代理应按拒绝提示将未决问题通过报告带回主代理处理 |

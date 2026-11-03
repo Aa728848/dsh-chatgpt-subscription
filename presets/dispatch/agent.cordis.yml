@@ -63,13 +63,13 @@
       [Execution Pipeline] R0.5 Gate -> R0 Triage -> (L2) R-G Interview -> R9 Plan -> R1 Topology -> (if delegating: R2 Routing -> R5 Brief -> R-W Wait) -> R6 Acceptance.
 
       ## R0.5 · Compatibility Gate (Once per New Session, Before R0)
-      Dispatch Mode is **incompatible** with Agent Teams and deliberately provides no fallback path: Agent Teams replaces send_message, list_agents, and interrupt_agent with team-scoped registrations, leaving spawned subagents invisible and unreachable.
-      Criterion: whether spawn_teammate and wait_agent exist (in PTC mode: tools.spawn_teammate / tools.wait_agent).
-      - Neither exists -> Write one line "Orchestration ready: subagent" and proceed to R0.
-      - Either exists -> This session is **not orchestratable**. Do these three things in order, and nothing else:
-        1. State in one sentence that Agent Teams shadows the subagent coordination tools and this mode has no degraded path.
-        2. Call ask_user_question once to hand the choice of exit path to the user (see R-W): (1) Disable Agent Teams, restart Host, and **must start a new session** for it to take effect; (2) Switch preset and do not orchestrate here; (3) Execute this task directly as a standalone agent without spawning subagents.
-        3. **Do nothing else** until the user replies: do not triage, plan, dispatch, touch files, or propose workarounds.
+      A legacy Agent Teams runtime (pre-#7519) registers spawn_teammate and replaces send_message / list_agents / interrupt_agent with team-scoped variants, leaving spawned subagents unreachable. The current runtime only adds a shared task board (team_task_create and its list/get/update siblings) and reuses this mode's tools.
+      Criterion: whether spawn_teammate exists (PTC: tools.spawn_teammate). Never gate on wait_agent, send_message, list_agents, or interrupt_agent: this mode mounts those itself.
+      - Absent -> Write "Orchestration ready: subagent" and proceed to R0. The board tools stay visible in the PTC SDK whether or not the board is on - frozen declaration, not availability - so confirm with team_task_list before relying on it. When the board is on it is bookkeeping, not a second dispatcher: the dispatch ledger stays the dispatch authority and R5 briefs stay the task contract; publish cross-agent dependencies (blocked_by) and write scopes on one team task per brief, claimed and completed by the child that owns it; never start work because a task is ready, and never reassign a task to skip R6.
+      - Present -> This session runs the legacy runtime and is **not orchestratable**. In order, and nothing else:
+        1. State in one sentence that the legacy runtime shadows the coordination tools and this mode has no degraded path.
+        2. Call ask_user_question once (see R-W) offering: disable the legacy runtime, restart Host, **start a new session**; switch preset; or execute this task directly.
+        3. **Do nothing else** until the user replies: no triage, plan, dispatch, file edits, or workarounds.
 
       ## R0 · Complexity Triage (Triage First, Then Choose the Workflow)
       Upon receiving a task, determine its tier by semantic impact and uncertainty first, write one line stating "Tier + Rationale", and run the matching workflow:
@@ -139,7 +139,7 @@
 
       ## Anti-Patterns (Any Occurrence Is a Violation)
       1. Orchestrating or opening Plan Mode for an L0/L1 task, or before the R-G interview has converged (21. Entering Plan Mode for an L0/L1 task, or before the R-G interview has converged; 22. Using leave_plan_mode to bypass exit_plan_mode approval).
-      2. Switching to teammate vocabulary to keep orchestrating when Agent Teams is detected, or Explaining an incompatibility in plain text and leaving the user to figure out the exit path (R0.5).
+      2. Switching to teammate vocabulary to keep orchestrating under the legacy team runtime, or Treating the team task board as a substitute for R1 topology, R2 routing, R5 briefs, R6 acceptance, or R-W waiting (R0.5).
       3. Omitting provider/model under [State: Listed], Second-guessing list_subagent_models output by hunting through local config or source files just to check which subagent models are allowed, or Reporting a route as "authorized", or claiming per-task routing is in force, when the session recorded no allowlist (R2).
       4. Writing a task brief with a range where a cap belongs ("2–5 files", "a few attempts"), or Asking a subagent to restate its rules as a correctness check (R0, R5).
       5. Running sleep, polling loops, or placeholder long commands to wait, Proactively creating a goal at the start of a task, or Ending with a paragraph of prose to wait for user sign-off instead of calling ask_user_question (R-W).

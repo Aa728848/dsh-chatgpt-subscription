@@ -578,36 +578,47 @@ describe('the persona block the declaration transcribes', () => {
     }
   })
 
-  it('refuses to orchestrate under Agent Teams instead of adapting to it', () => {
-    // The field report: with the Agent Teams bundle composed, the preset kept
-    // dispatching while the team-scoped send_message / list_agents /
-    // interrupt_agent shadowed the subagent ones — children became invisible
-    // and unreachable, and the "switch vocabulary" branch made that failure
-    // silent instead of loud. Both copies must stop at a compatibility gate
-    // and hand the decision to the user; the degraded branch must be gone
-    // from both, in every spelling it ever had.
+  it('gates on the legacy team runtime only, and runs beside the current one', () => {
+    // Agent Teams moved: the current runtime only adds a shared task board and
+    // reuses the subagent coordination tools this preset mounts, so a gate keyed
+    // on wait_agent / send_message / list_agents fires in EVERY dispatch session
+    // because those tools are ours. The gate must key on spawn_teammate, which
+    // only the legacy runtime registered, and must say that the current runtime
+    // runs beside dispatch instead of replacing it.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
       // Detection survives unchanged, and still runs before triage.
       expect(persona).toContain('## R0.5 · Compatibility Gate')
-      expect(persona).toContain('whether spawn_teammate and wait_agent exist')
-      // The incompatibility is stated as a mechanism, not a preference...
-      expect(persona).toContain('Dispatch Mode is **incompatible** with Agent Teams')
-      expect(persona).toContain('replaces send_message, list_agents, and interrupt_agent')
-      // ...and it gates the WHOLE flow rather than selecting a vocabulary.
-      expect(persona).toContain('This session is **not orchestratable**')
-      expect(persona).toContain('do not triage, plan, dispatch, touch files')
-      // The exit is the user's, taken through the question tool (R-W).
-      expect(persona).toContain('Call ask_user_question once to hand the choice of exit path to the user')
-      // And the fix needs a new session: this one's tool surface is fixed.
-      expect(persona).toContain('**must start a new session** for it to take effect')
+      expect(persona).toContain('Criterion: whether spawn_teammate exists')
+      // The tools this mode mounts itself can never be the criterion.
+      expect(persona).toContain('Never gate on wait_agent, send_message, list_agents, or interrupt_agent')
+      // The generations are told apart by mechanism, not preference.
+      expect(persona).toContain('A legacy Agent Teams runtime (pre-#7519)')
+      expect(persona).toContain('replaces send_message / list_agents / interrupt_agent with team-scoped variants')
+      expect(persona).toContain('team_task_create and its list/get/update siblings')
+      // Coexistence is explicit: the board is bookkeeping, never a dispatcher.
+      expect(persona).toContain("reuses this mode's tools")
+      expect(persona).toContain('Orchestration ready: subagent')
+      // The frozen PTC declaration keeps the board tools visible when it is off,
+      // so presence is not availability and the gate must not key on it.
+      expect(persona).toContain('frozen declaration, not availability')
+      expect(persona).toContain('confirm with team_task_list before relying on it')
+      expect(persona).toContain('bookkeeping, not a second dispatcher')
+      expect(persona).toContain('the dispatch ledger stays the dispatch authority and R5 briefs stay the task contract')
+      expect(persona).toContain('never start work because a task is ready')
+      expect(persona).toContain('never reassign a task to skip R6')
+      // The legacy exit stays: stop, hand the choice to the user, new session.
+      expect(persona).toContain('This session runs the legacy runtime and is **not orchestratable**')
+      expect(persona).toContain('no triage, plan, dispatch, file edits')
+      expect(persona).toContain('Call ask_user_question once (see R-W) offering')
+      expect(persona).toContain('**start a new session**')
       // The anti-patterns that let the old degraded branch back in.
-      expect(persona).toContain('Switching to teammate vocabulary to keep orchestrating when Agent Teams is detected')
-      expect(persona).toContain('Explaining an incompatibility in plain text and leaving the user to figure out the exit path')
-      // No trace of the vocabulary switch remains in either copy.
+      expect(persona).toContain('Switching to teammate vocabulary to keep orchestrating under the legacy team runtime')
+      expect(persona).toContain('Treating the team task board as a substitute for R1 topology')
+      // No trace of the stale premise survives in either copy.
+      expect(persona).not.toContain('Dispatch Mode is **incompatible** with Agent Teams')
+      expect(persona).not.toContain('whether spawn_teammate and wait_agent exist')
       expect(persona).not.toContain('## R-T')
-      expect(persona).not.toContain('team_task_*')
-      expect(persona).not.toContain('wait_agent()')
       expect(persona).not.toContain('spawn_teammate 没有 provider/model')
       expect(persona).not.toContain('不要把子代理 session id 交给 send_message')
       expect(persona).not.toContain('说明你是子代理或 teammate')
@@ -953,7 +964,10 @@ describe('the persona block the declaration transcribes', () => {
     // The compact brief form and the three new anti-patterns.
     expect(prefix).toContain('Compact Delta Brief')
     expect(prefix).toContain('use a Compact Delta Brief by default')
-    expect(prefix.length).toBeLessThan(18500)
+    // Raised from 18500 when R0.5 gained the team-board contract: the ceiling
+    // still catches unbounded growth, it just budgets the coexistence rule the
+    // current harness needs.
+    expect(prefix.length).toBeLessThan(19000)
     expect(prefix).toContain('23. Asking the user about an implementation detail an existing-standard in the repository already settles')
     expect(prefix).toContain('24. Penalizing a clean status: hand_back scope escalation as a failed run')
     expect(prefix).toContain('25. Accepting a visible UI change without Before & After comparison evidence')

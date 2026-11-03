@@ -1,5 +1,6 @@
 /**
- * 设置页里的「进展更新」分区：说明 + 七行卡片（进展 / 两个缓存开关 / 计划模式管线 / 阈值 / 语言 / 面板）。
+ * 设置页里的「进展更新」分区：说明 + 十行卡片（进展 / 三个缓存开关 / 计划模式管线 /
+ * 调度执行守卫 / Agent Teams 策略段 / 阈值 / 语言 / 面板）。
  *
  * ## 视觉来源
  *
@@ -171,6 +172,20 @@ function DispatchGuardMark(): ReactNode {
   )
 }
 
+/**
+ * 「Agent Teams 策略段」标记：一块带勾选行的共享任务板。
+ * @returns 与其它行同规格的 20px 图标。
+ */
+function TeamBoardMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="4.5" width="13" height="11" rx="2" />
+      <path d="m6.5 8.4 1.4 1.4 2.4-2.6" />
+      <path d="M12 8.6h2M6.5 12.8h7.5" />
+    </svg>
+  )
+}
+
 function PanelMark(): ReactNode {
   return (
     <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -247,7 +262,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'planModePipeline' | 'dispatchExecutionGuard', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'planModePipeline' | 'dispatchExecutionGuard' | 'teamPolicyCacheGuard', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -262,6 +277,8 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   // 缺键 = 开：宿主 schema 上是 default(true)，老配置没有这个键时界面必须同样读成开，
   // 否则用户看到的是关着、而守卫其实照旧生效。
   const dispatchExecutionGuard = value.dispatchExecutionGuard !== false
+  // 缺键 = 开：宿主 schema 上是 default(true)，缺键时界面必须同样读成开。
+  const teamPolicyCacheGuard = value.teamPolicyCacheGuard !== false
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
     ? value.progressUpdatesNudgeThreshold
     : NUDGE_THRESHOLD_DEFAULT
@@ -283,7 +300,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'planModePipeline' | 'dispatchExecutionGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'planModePipeline' | 'dispatchExecutionGuard' | 'teamPolicyCacheGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -466,6 +483,27 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             data-dsh-part="settings-dispatch-execution-guard-switch"
             disabled={!writable}
             onClick={() => { write('dispatchExecutionGuard', 'dispatchExecutionGuard', !dispatchExecutionGuard) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-team-policy-cache-guard"
+          brand="#8a5a9e"
+          mark={<TeamBoardMark />}
+          name={translate('settingsTeamPolicyCacheGuardName')}
+          note={failure?.row === 'teamPolicyCacheGuard' ? failure.text : translate('settingsTeamPolicyCacheGuardNote')}
+          danger={failure?.row === 'teamPolicyCacheGuard'}
+          enabled={teamPolicyCacheGuard}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={teamPolicyCacheGuard}
+            aria-label={translate('settingsTeamPolicyCacheGuardName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-team-policy-cache-guard-switch"
+            disabled={!writable}
+            onClick={() => { write('teamPolicyCacheGuard', 'teamPolicyCacheGuard', !teamPolicyCacheGuard) }}
           />
         </CardRow>
 

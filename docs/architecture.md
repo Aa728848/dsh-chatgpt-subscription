@@ -108,7 +108,7 @@
    - 详见 [presets/dispatch/README.md](../presets/dispatch/README.md)。
    - 通过 `R0` 分诊（L0 直做 / L1 轻量 / L2 完整治理）、`R-G` 澄清访谈、`R9` 计划模式管线、`R1` 拓扑选择（`Lead-Core` / `Hybrid` / `Fan-out`）、`R2` 显式子代理模型路由与 `R6` 证据验收组织复杂工程任务。
    - `dispatch_ledger` 在根工具注册面上静态注册，通过尾部工具返回按需提供 Mandate v2 协议与可复制头部骨架，配合 `ctx.tools.guard()` 防重、验血缘与防越权，**全程零工具声明面变动、零前缀缓存漂移**。
-   - 与实验性 `@deepseek-ai/dsh-experimental-agent-team-profile`（Agent Teams）刻意互斥（后者会遮蔽 `send_message` / `list_agents` / `interrupt_agent` 且不支持按任务选模型），`R0.5` 会在首轮检测并交由用户决策。
+   - 与 Agent Teams 的关系按代划分：**旧代**运行时（注册 `spawn_teammate` 并顶替 `send_message` / `list_agents` / `interrupt_agent`）与调度模式互斥，`R0.5` 会首轮检测并交由用户决策；**现行**运行时只追加共享任务板 `team_task_*` 并复用 `list_agents` / `send_message` / `wait_agent`，与调度模式并行运行。开关打开时分工固定：`dispatch_ledger` 仍是派发权威、R5 任务书仍是任务契约，任务板只公开跨代理依赖与写作用域（一条 brief 一条 task，由子代理 claim/complete，ready 不等于开工，不得用 `reassign` 绕开 R6）。
 
 2. **子代理模型授权守卫（`subagent-model-authorization.ts` + 客户端增强卡片）**
    - 修补 DSH 默认允许省略 `provider`/`model` 静默继承主模型绕过白名单的缺口：记录了白名单的会话调用 `subagent` 时必须成对显式传入合法 `{ provider, model }`（连 PTC `run_code` 内通过 SDK 发起的调用一并拦截）；调用 `subagent_fork` 等继承类工具时则校验父会话当前实际路由是否在白名单内（或对当前主模型显式开启了允许同路由 `subagent_fork` 自继承）。
@@ -119,6 +119,8 @@
    - `ptc-sdk-cache-guard.ts`：冻结前缀敏感线路在 PTC 模式下的 `tools:sdk` 声明段。
    - `tool-result-pruner-guard.ts` & `entry-tool-result-pruner.ts`：在 `kimi-code` 与 `minimax-code` 上默认跳过历史工具结果中部修剪（改写历史工具结果会导致后续数十万 token 前缀缓存全部失效重建，得不偿失）。
    - `compaction-route/`：在 `llm/stream` 瀑布层识别 `purpose: 'compaction'` 请求，支持把上下文摘要改派给更轻量/便宜的模型，具备视频安全回退、图片占位替换与完整摘要缓冲保护。
+   - 与内置 Agent Teams 的交叉点：`tools:sdk` 冻结取**未过滤**定义（`when` 门控的工具也在内），故 `team_task_*` 在 Kimi/MiniMax 的 SDK 中常驻可见——可见不等于可调用，判断可调用性要看调用结果；开关切换本身会让 `team:policy` 段从空串变成文本、改写 system prompt 一次，属于计划模式那类重建，但这段文本由 harness 拥有。
+   - `team-policy-cache-guard.ts`（默认开启，`teamPolicyCacheGuard`）：把上面那处重建也压平——装配时摘掉 `team:policy` 段并捕获它当时的正文，开关打开后在 `agent/pre-step` 以尾部用户消息投递一次，关闭时补一条撤销通知；投递的是官方当次原文，不落本包副本，harness 改措辞不会过期。
 
 ---
 
