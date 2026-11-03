@@ -199,7 +199,11 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
   }
 
   const activeModelKey = state.activeTarget
-  const overrideKeys = Object.keys(state.overridesByMainModel)
+  const overrideKeys = [...new Set([
+    ...Object.keys(state.overridesByMainModel),
+    ...Object.keys(state.forkOverridesByMainModel),
+  ])]
+  const activeAnyOverridden = state.activeTargetOverridden || state.activeTargetForkOverridden
   const limitsHeadingId = headingId + '-limits'
   const modelsHeadingId = headingId + '-models'
   const mainModelId = headingId + '-main-model'
@@ -347,7 +351,7 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
                       disabled={disabled}
                       onClick={() => { props.setActiveTarget(key) }}
                     >
-                      {mainModelName(key) + ' (' + String(state.overridesByMainModel[key]?.length ?? 0) + ')'}
+                      {mainModelName(key) + ' (' + String(state.overridesByMainModel[key]?.length ?? state.defaultCount) + ')'}
                     </button>
                   ))}
                 </div>
@@ -361,8 +365,10 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
                           {withCount(t('subagentTargetOverrideStatus'), state.activeTargetCount)}
                         </p>
                       )
-                      : <p className="dsh-subagent-hint">{t('subagentTargetFollowGlobalStatus')}</p>}
-                  {activeModelKey !== GLOBAL_TARGET && state.activeTargetOverridden
+                      : state.activeTargetForkOverridden
+                        ? <p className="dsh-subagent-hint">{t('subagentTargetForkOnlyOverrideStatus')}</p>
+                        : <p className="dsh-subagent-hint">{t('subagentTargetFollowGlobalStatus')}</p>}
+                  {activeModelKey !== GLOBAL_TARGET && activeAnyOverridden
                     ? (
                       <button
                         type="button"
@@ -376,6 +382,44 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
                     )
                     : null}
                 </div>
+              </fieldset>
+
+              <fieldset className="dsh-subagent-fork-card" data-dsh-part="subagent-fork-card">
+                <legend>{t('subagentForkTitle')}</legend>
+                <div className="dsh-subagent-fork-head">
+                  <div className="dsh-subagent-fork-title-group">
+                    <span className="dsh-subagent-fork-label">{t('subagentForkToggle')}</span>
+                    {activeModelKey !== GLOBAL_TARGET && state.activeTargetForkOverridden
+                      ? (
+                        <span className="dsh-subagent-badges">
+                          <span className="dsh-subagent-override-tag">{t('overridden')}</span>
+                          <button
+                            type="button"
+                            className="dsh-subagent-reset-link"
+                            data-dsh-part="subagent-fork-reset"
+                            disabled={disabled}
+                            onClick={() => { props.resetActiveTargetFork() }}
+                          >
+                            {t('reset')}
+                          </button>
+                        </span>
+                      )
+                      : null}
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={state.activeTargetAllowParentFork}
+                    aria-label={t('subagentForkToggle')}
+                    className="dsh-subagent-switch"
+                    data-dsh-part="subagent-fork-switch"
+                    disabled={disabled}
+                    onClick={() => { props.toggleAllowParentFork() }}
+                  >
+                    <span className="dsh-subagent-switch-thumb" />
+                  </button>
+                </div>
+                <p className="dsh-subagent-hint">{t('subagentForkHint')}</p>
               </fieldset>
 
               {state.catalogStatus === 'loading'

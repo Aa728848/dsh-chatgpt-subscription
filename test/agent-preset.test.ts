@@ -947,6 +947,16 @@ describe('the persona block the declaration transcribes', () => {
     // exemption and the visual-evidence gate the plan itself has to name.
     expect(section).toContain('existing-standard')
     expect(section).toContain('Before and After visual evidence')
+
+    // L2 decouples full governance from execution topology (Lead-Core / Hybrid /
+    // Fan-out) and remains strictly model- and provider-agnostic.
+    for (const topology of ['Lead-Core', 'Hybrid', 'Fan-out']) {
+      expect(prefix).toContain(topology)
+      expect(section).toContain(topology)
+    }
+    for (const text of [prefix, section]) {
+      expect(text).not.toMatch(/k3\.1-pro|kimi-code|Kimi Code|gpt-5|claude-opus|deepseek-v/i)
+    }
   })
 })
 

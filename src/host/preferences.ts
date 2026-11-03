@@ -14,6 +14,7 @@ import {
   isProxyMode,
   isSearchProviderPreference,
   isCompactionRouteTarget,
+  mergeSubagentAllowParentForkByMainModel,
   mergeSubagentModelsByMainModel,
   normalizeSubagentModelRoutes,
 } from '../shared/preferences.ts'
@@ -83,6 +84,8 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
     // agent to another, with one fallback list for every other main model.
     subagentDefaultModels: subagentModelRoutes.default([]),
     subagentModelsByMainModel: z.dict(subagentModelRoutes).default({}),
+    subagentDefaultAllowParentFork: z.boolean().default(DEFAULT_PREFERENCES.subagentDefaultAllowParentFork ?? false),
+    subagentAllowParentForkByMainModel: z.dict(z.boolean()).default({}),
   })
 
   // Harness 0.1.7 replaced the register seam, so the plugin owns the storage:
@@ -171,6 +174,20 @@ class SettingsPreferenceStore implements PreferenceStoreHandle {
       )
       if (merged === null) throw new PreferenceError('Unsupported subagentModelsByMainModel preference.')
       normalized.subagentModelsByMainModel = merged
+    }
+    if (patch.subagentDefaultAllowParentFork !== undefined) {
+      if (typeof patch.subagentDefaultAllowParentFork !== 'boolean') {
+        throw new PreferenceError('Unsupported subagentDefaultAllowParentFork preference.')
+      }
+      normalized.subagentDefaultAllowParentFork = patch.subagentDefaultAllowParentFork
+    }
+    if (patch.subagentAllowParentForkByMainModel !== undefined) {
+      const merged = mergeSubagentAllowParentForkByMainModel(
+        this.scope.get().subagentAllowParentForkByMainModel,
+        patch.subagentAllowParentForkByMainModel,
+      )
+      if (merged === null) throw new PreferenceError('Unsupported subagentAllowParentForkByMainModel preference.')
+      normalized.subagentAllowParentForkByMainModel = merged
     }
     if (patch.customProxyUrl !== undefined) {
       if (patch.customProxyUrl !== null) {

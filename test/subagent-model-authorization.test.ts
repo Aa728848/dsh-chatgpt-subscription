@@ -6,12 +6,14 @@ import {
   type PolicySession,
   type SessionsResolver,
   type SubagentModelSelectionPreference,
+  DEFAULT_PARENT_FORK_TOOLS,
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
   UNRESTRICTED_ROUTING_NOTICE,
   authorizedRoutesFor,
   createSubagentAuthorization,
   delegationDenialReason,
   delegationModeOf,
+  effectiveAllowParentFork,
   effectiveAllowedRoutes,
   enrichListSubagentModelsOutput,
   explicitRoutePair,
@@ -926,6 +928,80 @@ describe('route-parameter adaptivity', () => {
     expect(routeParameterProbe({ tools: {} } as never)).toBeUndefined()
     const throwing = routeParameterProbe({ tools: { definitions: () => { throw new Error('no scope') } } } as never)
     expect(throwing?.({}, 'subagent')).toBeUndefined()
+  })
+
+  it('unlocks subagent_fork via allowParentFork without adding the main model to spawn allowlist or spawn_teammate', () => {
+    expect(DEFAULT_PARENT_FORK_TOOLS).toEqual(['subagent_fork'])
+    const K31_PRO: AllowedModelRoute = { provider: 'kimi-code', model: 'k3.1-pro' }
+    const FAST_CHILD: AllowedModelRoute = { provider: 'kimi-code', model: 'k2.7-code-highspeed' }
+
+    const merged = mergePreferenceOverrides(
+      { enabled: true, allowedModels: [FAST_CHILD] },
+      {
+        defaultAllowedModels: [FAST_CHILD],
+        byMainModel: { 'kimi-code/k3.1-pro': [FAST_CHILD] },
+        defaultAllowParentFork: false,
+        allowParentForkByMainModel: { 'kimi-code/k3.1-pro': true },
+      },
+    )!
+    const mainAgent = { session: routedSession([FAST_CHILD], K31_PRO) }
+
+    // 1. Cold-spawn allowlist and discovery still exclude k3.1-pro.
+    expect(effectiveAllowedRoutes(mainAgent, merged, NO_SESSIONS)).toEqual([FAST_CHILD])
+    expect(enrichListSubagentModelsOutput('kimi-code/k3.1-pro — K3.1 Pro\nkimi-code/k2.7-code-highspeed — K2.7 HS', [FAST_CHILD]))
+      .not.toContain('k3.1-pro')
+    expect(delegationDenialReason(
+      mainAgent, 'subagent', { provider: 'kimi-code', model: 'k3.1-pro' },
+      merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toContain('is not on the Session allowlist')
+
+    // 2. Same-model subagent_fork is allowed when allowParentFork is true for k3.1-pro.
+    expect(effectiveAllowParentFork(mainAgent, merged, NO_SESSIONS)).toBe(true)
+    expect(delegationDenialReason(
+      mainAgent, 'subagent_fork', {},
+      merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toBeUndefined()
+
+    // 3. Explicit or partial route override on subagent_fork is still rejected.
+    expect(delegationDenialReason(
+      mainAgent, 'subagent_fork', { provider: 'kimi-code', model: 'k2.7-code-highspeed' },
+      merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toContain('accepts no')
+    expect(delegationDenialReason(
+      mainAgent, 'subagent_fork', { provider: 'kimi-code' },
+      merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toContain('accepts no')
+
+    // 4. spawn_teammate remains governed by the standard inherit check.
+    expect(delegationDenialReason(
+      mainAgent, 'spawn_teammate', {},
+      merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toContain('spawn_teammate')
+
+    // 5. Another main model without allowParentFork still falls back to defaultAllowParentFork (false).
+    const otherMain = { session: routedSession([FAST_CHILD], { provider: 'antigravity', model: 'claude-opus-4-6' }) }
+    expect(effectiveAllowParentFork(otherMain, merged, NO_SESSIONS)).toBe(false)
+    expect(delegationDenialReason(
+      otherMain, 'subagent_fork', {},
+      merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toContain('subagent_fork')
+
+    // 6. Mid-session switch away from the locked main model does not carry k3.1-pro's fork right onto an unauthorized route.
+    let liveRoute: AllowedModelRoute = K31_PRO
+    const switchableSession: PolicySession = {
+      eventAt: (seq: number) => (seq === 0 ? { type: 'subagent/model-selection-policy', data: { allowedModels: [FAST_CHILD] } } : undefined),
+      requestHeader: () => ({ config: liveRoute }),
+    }
+    const switchableAgent: AuthorizationAgent = { session: switchableSession }
+    expect(delegationDenialReason(
+      switchableAgent, 'subagent_fork', {},
+      merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toBeUndefined()
+    liveRoute = OPUS
+    expect(delegationDenialReason(
+      switchableAgent, 'subagent_fork', {},
+      merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
+    )).toContain('antigravity/claude-opus-4-6')
   })
 })
 

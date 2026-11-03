@@ -363,6 +363,46 @@ describe('subagent settings card', () => {
     const tag = document.querySelector('style[data-plugin-css$="/subagent"]')
     expect(tag).not.toBeNull()
     expect(tag!.textContent).toContain('.dsh-subagent-form')
+    expect(tag!.textContent).toContain('.dsh-subagent-fork-card')
     tag!.remove()
+  })
+
+  it('supports global and per-main-model allowParentFork overrides and resets cleanly', async () => {
+    const { controller, face, savePreferences } = await renderCard({
+      defaults: [{ provider: 'codex-chatgpt', model: 'gpt-5.6-mini' }],
+    })
+    const forkSwitch = () => container.querySelector('[data-dsh-part="subagent-fork-switch"]') as HTMLButtonElement
+    expect(forkSwitch().getAttribute('aria-checked')).toBe('false')
+
+    // Switch to a main model and override ONLY its same-model fork policy (keeping global subagent list).
+    await act(async () => { face.setActiveTarget('kimi-code/kimi-for-coding') })
+    expect(forkSwitch().getAttribute('aria-checked')).toBe('false')
+    await act(async () => { forkSwitch().click() })
+    expect(forkSwitch().getAttribute('aria-checked')).toBe('true')
+    expect(container.textContent).toContain(zh.subagentTargetForkOnlyOverrideStatus)
+    expect(container.querySelector('[data-dsh-part="subagent-fork-reset"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="subagent-reset-to-global"]')).not.toBeNull()
+
+    // Save and verify the fork override is persisted without forcing a model-list override.
+    await act(async () => { (container.querySelector('[data-dsh-part="subagent-save"]') as HTMLButtonElement).click() })
+    const saved = savePreferences.mock.calls[0]?.[0] as unknown as {
+      subagentDefaultAllowParentFork: boolean
+      subagentAllowParentForkByMainModel: Record<string, boolean | null>
+      subagentModelsByMainModel: Record<string, SubagentModelRoute[] | null>
+    }
+    expect(saved.subagentDefaultAllowParentFork).toBe(false)
+    expect(saved.subagentAllowParentForkByMainModel).toEqual({ 'kimi-code/kimi-for-coding': true })
+    expect(saved.subagentModelsByMainModel).toEqual({})
+
+    // Resetting the fork override sends null to clear the key on next save.
+    await act(async () => { (container.querySelector('[data-dsh-part="subagent-fork-reset"]') as HTMLButtonElement).click() })
+    expect(forkSwitch().getAttribute('aria-checked')).toBe('false')
+    expect(container.textContent).toContain(zh.subagentTargetFollowGlobalStatus)
+    await act(async () => { (container.querySelector('[data-dsh-part="subagent-save"]') as HTMLButtonElement).click() })
+    const cleared = savePreferences.mock.calls[1]?.[0] as unknown as {
+      subagentAllowParentForkByMainModel: Record<string, boolean | null>
+    }
+    expect(cleared.subagentAllowParentForkByMainModel['kimi-code/kimi-for-coding']).toBeNull()
+    controller.dispose()
   })
 })

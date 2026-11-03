@@ -184,6 +184,19 @@ export type SubagentModelsByMainModelDto = Record<string, SubagentModelRouteDto[
  */
 export type SubagentModelsByMainModelUpdateDto = Record<string, SubagentModelRouteDto[] | null>
 
+/**
+ * Per-main-model `subagent_fork` self-inheritance policy, keyed by the main
+ * model's `provider/model`. An absent key falls back to
+ * `subagentDefaultAllowParentFork`.
+ */
+export type SubagentAllowParentForkByMainModelDto = Record<string, boolean>
+
+/**
+ * An override patch for {@link SubagentAllowParentForkByMainModelDto}: a boolean
+ * sets that key's policy, `null` clears the key back to the global default.
+ */
+export type SubagentAllowParentForkByMainModelUpdateDto = Record<string, boolean | null>
+
 export interface SubscriptionPreferencesDto {
   enabled?: boolean
   quickQuotaVisible: boolean
@@ -205,6 +218,10 @@ export interface SubscriptionPreferencesDto {
   subagentDefaultModels?: SubagentModelRouteDto[]
   /** Authorized child routes per main agent model, keyed by `provider/model`. */
   subagentModelsByMainModel?: SubagentModelsByMainModelDto
+  /** Whether `subagent_fork` may inherit the parent route when a main model has no dedicated fork override. */
+  subagentDefaultAllowParentFork?: boolean
+  /** Per-main-model `subagent_fork` self-inheritance policy, keyed by `provider/model`. */
+  subagentAllowParentForkByMainModel?: SubagentAllowParentForkByMainModelDto
   writable: boolean
 }
 
@@ -225,6 +242,10 @@ export interface SubscriptionPreferencesUpdateDto {
   subagentDefaultModels?: SubagentModelRouteDto[]
   /** Merge per-main-model routes; `null` (or `[]`) clears one key. */
   subagentModelsByMainModel?: SubagentModelsByMainModelUpdateDto
+  /** Replace the fallback `subagent_fork` self-inheritance policy. */
+  subagentDefaultAllowParentFork?: boolean
+  /** Merge per-main-model `subagent_fork` overrides; `null` clears one key. */
+  subagentAllowParentForkByMainModel?: SubagentAllowParentForkByMainModelUpdateDto
 }
 
 /** One model a compaction target may be pointed at. */

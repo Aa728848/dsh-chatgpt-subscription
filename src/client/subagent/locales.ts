@@ -63,11 +63,16 @@ export const zh = {
   subagentChipGlobal: '全局默认 ({count})',
   subagentTargetGlobalHint: '正在编辑全局默认子代理模型列表；未单独配置专属列表的主代理将使用此列表。',
   subagentTargetOverrideStatus: '已为该主代理单独配置 {count} 个子代理模型',
+  subagentTargetForkOnlyOverrideStatus: '子代理模型列表跟随全局默认；已为该主代理单独配置同源分叉策略',
   subagentTargetFollowGlobalStatus: '当前跟随全局默认列表（勾选或取消下方模型即可为该主代理创建专属列表）',
   subagentResetToGlobal: '恢复跟随全局默认',
   subagentOverrideBadge: '（已覆盖）',
   subagentPreferencesLoadFailed: '无法读取已保存的子代理模型偏好；保存时将以当前界面为准。',
   subagentModelPerTargetRequired: '保存前请至少选择一个模型（或点击「恢复跟随全局默认」）。',
+
+  subagentForkTitle: '同源分叉',
+  subagentForkToggle: '允许同源分叉（subagent_fork 继承当前主代理模型）',
+  subagentForkHint: '开启后，subagent_fork 可直接继承当前主代理模型以复用会话上下文与前缀缓存，无需将该主模型加入下方冷启动可选列表；不影响冷启动 subagent 与团队派生。',
 } as const
 
 /** 本命名空间的字典键联合。 */
@@ -119,11 +124,16 @@ export const en: Record<SubagentLocaleKey, string> = {
   subagentChipGlobal: 'Global default ({count})',
   subagentTargetGlobalHint: 'Editing the global default subagent model list; main agents without their own list use it.',
   subagentTargetOverrideStatus: 'This main agent has {count} dedicated subagent models',
+  subagentTargetForkOnlyOverrideStatus: 'Subagent models follow the global default; same-model fork is overridden for this main agent',
   subagentTargetFollowGlobalStatus: 'Currently following the global default list (tick or untick a model below to create a dedicated list for this main agent)',
   subagentResetToGlobal: 'Follow the global default again',
   subagentOverrideBadge: ' (overridden)',
   subagentPreferencesLoadFailed: 'Saved subagent model preferences could not be read; saving will use what this page shows.',
   subagentModelPerTargetRequired: 'Select at least one model before saving (or choose "Follow the global default again").',
+
+  subagentForkTitle: 'Same-model fork',
+  subagentForkToggle: 'Allow same-model fork (subagent_fork inherits the main agent model)',
+  subagentForkHint: 'When enabled, subagent_fork may inherit the main agent model to reuse conversation context and prefix cache without adding that model to the cold-spawn list below; cold-spawn subagent and teammate creation remain governed by the list.',
 }
 
 /** 与其余线路同形的字典包（四个内置语言 id 都指向那两份）。 */

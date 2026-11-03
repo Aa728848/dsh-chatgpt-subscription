@@ -185,4 +185,28 @@ describe('subagent route audit', () => {
     const noList: AuditedSessions = { get: id => (id === 'c1' ? child : undefined) }
     expect(childRoutesOf(parent, noList).map(entry => entry.childId)).toEqual(['c1'])
   })
+
+  it('exempts same-as-parent fork children when allowParentFork is active while still flagging spawn violations', () => {
+    const parent = session(
+      'p',
+      [{ type: 'subagent/model-selection-policy', data: { allowedModels: ALLOWED } }, { type: 'subagent/catalog', data: { childId: 'fork-1' } }, { type: 'subagent/catalog', data: { childId: 'spawn-1' } }],
+      {},
+      { config: { provider: 'kimi-code', model: 'k3.1-pro' } },
+    )
+    const forkChild = session(
+      'fork-1',
+      [{ type: 'subagent/descriptor', data: { provider: 'fork', agentProvider: 'kimi-code', agentModel: 'k3.1-pro' } }],
+      { parentSession: 'p', origin: 'subagent' },
+    )
+    const spawnChild = session(
+      'spawn-1',
+      [{ type: 'subagent/descriptor', data: { provider: 'spawn', agentProvider: 'kimi-code', agentModel: 'k3.1-pro' } }],
+      { parentSession: 'p', origin: 'subagent' },
+    )
+    const resolver: AuditedSessions = {
+      get: id => (id === 'p' ? parent : id === 'fork-1' ? forkChild : id === 'spawn-1' ? spawnChild : undefined),
+    }
+    expect(auditChildRoutes(parent, resolver, ALLOWED).map(v => v.finding.childId)).toEqual(['fork-1', 'spawn-1'])
+    expect(auditChildRoutes(parent, resolver, ALLOWED, { allowParentFork: true }).map(v => v.finding.childId)).toEqual(['spawn-1'])
+  })
 })

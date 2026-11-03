@@ -289,6 +289,11 @@ function routeAllowed(
   return allowed.some(entry => entry.provider === route.provider && entry.model === route.model)
 }
 
+export interface AuditChildRoutesOptions {
+  /** Whether same-route `fork`-provider children are authorized on the parent route. */
+  readonly allowParentFork?: boolean
+}
+
 /**
  * Fold one parent session's children into the violations worth reporting.
  * A finding with an unresolvable route is reported as neither: guessing would
@@ -296,18 +301,21 @@ function routeAllowed(
  * @param parent - the parent session to audit.
  * @param sessions - registry used to resolve children and parents.
  * @param allowed - routes the parent Session authorized, when it recorded any.
+ * @param options - optional parent-fork exemption matching the live guard.
  * @returns violations, ordered as the children were discovered.
  */
 export function auditChildRoutes(
   parent: AuditedSession,
   sessions: AuditedSessions,
   allowed: readonly AuditedRoute[] | undefined,
+  options?: AuditChildRoutesOptions,
 ): RouteViolation[] {
   if (allowed === undefined || allowed.length === 0) return []
   const violations: RouteViolation[] = []
   for (const finding of childRoutesOf(parent, sessions)) {
     const effective = effectiveRouteOf(finding, sessions)
     if (routeAllowed(allowed, effective)) continue
+    if (options?.allowParentFork === true && finding.provider === 'fork' && effective.sameAsParent) continue
     violations.push({
       finding,
       route: { provider: effective.provider, model: effective.model },

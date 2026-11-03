@@ -115,6 +115,14 @@ export interface SubagentSettingsState {
   activeTargetOverridden: boolean
   /** 当前目标生效的条数。 */
   activeTargetCount: number
+  /** 全局默认是否允许同源分叉。 */
+  defaultAllowParentFork: boolean
+  /** 按主代理模型单独覆盖的同源分叉策略。 */
+  forkOverridesByMainModel: Readonly<Record<string, boolean>>
+  /** 当前目标生效的同源分叉开关态。 */
+  activeTargetAllowParentFork: boolean
+  /** 当前目标是否已单独覆盖同源分叉策略。 */
+  activeTargetForkOverridden: boolean
   /** 偏好文档读取状态。 */
   preferencesStatus: 'idle' | 'loading' | 'ready' | 'error'
 }
@@ -125,8 +133,10 @@ export interface SubagentSettingsActions {
   resetLimit: (field: 'maxDepth' | 'maxActiveSubagents') => void
   toggleEnabled: () => void
   toggleModel: (key: string) => void
+  toggleAllowParentFork: () => void
   setActiveTarget: (target: string) => void
   resetActiveTarget: () => void
+  resetActiveTargetFork: () => void
   retryCatalog: () => void
   save: () => void
   discard: () => void
@@ -144,10 +154,12 @@ export interface SubagentCatalogGroup {
   models: Array<{ id: string; name: string }>
 }
 
-/** 偏好文档里与子代理模型有关的两项。 */
+/** 偏好文档里与子代理模型有关的四项。 */
 export interface SubagentModelPreferences {
   subagentDefaultModels?: SubagentModelRoute[]
   subagentModelsByMainModel?: Record<string, SubagentModelRoute[] | null>
+  subagentDefaultAllowParentFork?: boolean
+  subagentAllowParentForkByMainModel?: Record<string, boolean | null>
 }
 
 /** 一条 configForm 变更指令。 */
@@ -257,6 +269,27 @@ function sameOverrides(
   return leftKeys.every((key, index) => key === rightKeys[index] && sameRouteSet(left[key] ?? [], right[key] ?? []))
 }
 
+function normalizeForkOverrides(raw: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return out
+  for (const [rawKey, value] of Object.entries(raw as Record<string, unknown>)) {
+    const key = rawKey.trim()
+    if (parseRouteKey(key) === undefined || typeof value !== 'boolean') continue
+    out[key] = value
+  }
+  return out
+}
+
+function sameForkOverrides(
+  left: Readonly<Record<string, boolean>>,
+  right: Readonly<Record<string, boolean>>,
+): boolean {
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  if (leftKeys.length !== rightKeys.length) return false
+  return leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key])
+}
+
 /** 最小快照 store：`useSyncExternalStore` 要求引用在两次变更之间稳定。 */
 function createStore<T>(initial: T): SnapshotStore<T> & { setState(next: T): void } {
   let snapshot = initial
@@ -334,6 +367,8 @@ function readLocalBackup(): SubagentModelPreferences | undefined {
     return {
       subagentDefaultModels: Array.isArray(parsed.subagentDefaultModels) ? cloneRoutes(parsed.subagentDefaultModels) : [],
       subagentModelsByMainModel: parsed.subagentModelsByMainModel ?? {},
+      subagentDefaultAllowParentFork: parsed.subagentDefaultAllowParentFork === true,
+      subagentAllowParentForkByMainModel: normalizeForkOverrides(parsed.subagentAllowParentForkByMainModel),
     }
   } catch {
     return undefined
@@ -349,9 +384,19 @@ function writeLocalBackup(patch: SubagentModelPreferences): void {
       if (v === null || !Array.isArray(v) || v.length === 0) delete mergedOverrides[k]
       else mergedOverrides[k] = cloneRoutes(v)
     }
+    const mergedForkOverrides: Record<string, boolean> = normalizeForkOverrides(prev?.subagentAllowParentForkByMainModel)
+    for (const [k, v] of Object.entries(patch.subagentAllowParentForkByMainModel ?? {})) {
+      const trimmed = k.trim()
+      if (v === null) delete mergedForkOverrides[trimmed]
+      else if (typeof v === 'boolean' && parseRouteKey(trimmed) !== undefined) mergedForkOverrides[trimmed] = v
+    }
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({
       subagentDefaultModels: Array.isArray(patch.subagentDefaultModels) ? cloneRoutes(patch.subagentDefaultModels) : (prev?.subagentDefaultModels ?? []),
       subagentModelsByMainModel: mergedOverrides,
+      subagentDefaultAllowParentFork: typeof patch.subagentDefaultAllowParentFork === 'boolean'
+        ? patch.subagentDefaultAllowParentFork
+        : (prev?.subagentDefaultAllowParentFork === true),
+      subagentAllowParentForkByMainModel: mergedForkOverrides,
     }))
   } catch {
     // ignore storage errors
@@ -359,7 +404,7 @@ function writeLocalBackup(patch: SubagentModelPreferences): void {
 }
 
 /**
- * 读本插件偏好里的子代理模型两项。
+ * 读本插件偏好里的子代理模型配置。
  * @returns 偏好切片；读取失败时 undefined（卡片照常可用，只是从空列表起步）。
  */
 export async function readSubagentPreferences(): Promise<SubagentModelPreferences | undefined> {
@@ -374,12 +419,22 @@ export async function readSubagentPreferences(): Promise<SubagentModelPreference
       ? cloneRoutes(preferences.subagentDefaultModels)
       : []
     const serverByMain = preferences.subagentModelsByMainModel ?? {}
-    if (serverDefaults.length === 0 && Object.keys(serverByMain).length === 0 && local !== undefined) {
+    const serverDefaultFork = preferences.subagentDefaultAllowParentFork === true
+    const serverForkByMain = normalizeForkOverrides(preferences.subagentAllowParentForkByMainModel)
+    if (
+      serverDefaults.length === 0
+      && Object.keys(serverByMain).length === 0
+      && !serverDefaultFork
+      && Object.keys(serverForkByMain).length === 0
+      && local !== undefined
+    ) {
       return local
     }
     return {
       subagentDefaultModels: serverDefaults,
       subagentModelsByMainModel: serverByMain,
+      subagentDefaultAllowParentFork: serverDefaultFork,
+      subagentAllowParentForkByMainModel: serverForkByMain,
     }
   } catch {
     return local
@@ -479,6 +534,8 @@ export class SubagentSettingsController {
   private draftEnabled: boolean | undefined
   private draftDefault: SubagentModelRoute[] | undefined
   private draftOverrides: Record<string, SubagentModelRoute[]> | undefined
+  private draftDefaultFork: boolean | undefined
+  private draftForkOverrides: Record<string, boolean> | undefined
   private draftRevision: number | undefined
 
   private activeTarget: string = GLOBAL_TARGET
@@ -544,8 +601,10 @@ export class SubagentSettingsController {
       resetLimit: (field) => { this.resetLimit(field) },
       toggleEnabled: () => { this.toggleEnabled() },
       toggleModel: (key) => { this.toggleModel(key) },
+      toggleAllowParentFork: () => { this.toggleAllowParentFork() },
       setActiveTarget: (target) => { this.setActiveTarget(target) },
       resetActiveTarget: () => { this.resetActiveTarget() },
+      resetActiveTargetFork: () => { this.resetActiveTargetFork() },
       retryCatalog: () => { void this.loadCatalogOnce() },
       save: () => { void this.save() },
       discard: () => { this.discard() },
@@ -622,6 +681,14 @@ export class SubagentSettingsController {
     return out
   }
 
+  private currentDefaultFork(): boolean {
+    return this.preferences?.subagentDefaultAllowParentFork === true
+  }
+
+  private currentForkOverrides(): Record<string, boolean> {
+    return normalizeForkOverrides(this.preferences?.subagentAllowParentForkByMainModel)
+  }
+
   // ── 草稿派生 ────────────────────────────────────────────────────────────
 
   private enabled(): boolean {
@@ -639,6 +706,20 @@ export class SubagentSettingsController {
     return out
   }
 
+  private defaultAllowParentFork(): boolean {
+    return this.draftDefaultFork ?? this.currentDefaultFork()
+  }
+
+  private forkOverrides(): Record<string, boolean> {
+    return { ...(this.draftForkOverrides ?? this.currentForkOverrides()) }
+  }
+
+  private activeAllowParentFork(): boolean {
+    if (this.activeTarget === GLOBAL_TARGET) return this.defaultAllowParentFork()
+    const own = this.forkOverrides()[this.activeTarget]
+    return typeof own === 'boolean' ? own : this.defaultAllowParentFork()
+  }
+
   /** 当前目标生效的列表（专属列表优先，否则回落到全局默认）。 */
   private activeRoutes(): SubagentModelRoute[] {
     if (this.activeTarget === GLOBAL_TARGET) return this.defaultRoutes()
@@ -651,6 +732,8 @@ export class SubagentSettingsController {
     this.draftEnabled = this.currentEnabled()
     this.draftDefault = this.currentDefault()
     this.draftOverrides = this.currentOverrides()
+    this.draftDefaultFork = this.currentDefaultFork()
+    this.draftForkOverrides = this.currentForkOverrides()
     this.draftRevision = this.modelSelection.getSnapshot().revision
   }
 
@@ -662,6 +745,8 @@ export class SubagentSettingsController {
     this.draftEnabled = undefined
     this.draftDefault = undefined
     this.draftOverrides = undefined
+    this.draftDefaultFork = undefined
+    this.draftForkOverrides = undefined
     this.draftRevision = undefined
     this.failed = false
   }
@@ -743,13 +828,44 @@ export class SubagentSettingsController {
     this.publish()
   }
 
-  /** 让当前目标恢复「跟随全局默认」：删掉它的专属列表。 */
+  /** 切换当前目标的同源分叉（`subagent_fork`）开关。 */
+  private toggleAllowParentFork(): void {
+    if (this.saving || !this.enabled()) return
+    if (this.modelSelection.getSnapshot().status !== 'ready') return
+    this.ensureDraft()
+    if (this.activeTarget === GLOBAL_TARGET) {
+      this.draftDefaultFork = !this.defaultAllowParentFork()
+    } else {
+      const forkOverrides = this.draftForkOverrides ?? this.currentForkOverrides()
+      const current = forkOverrides[this.activeTarget] ?? this.defaultAllowParentFork()
+      forkOverrides[this.activeTarget] = !current
+      this.draftForkOverrides = forkOverrides
+    }
+    this.failed = false
+    this.publish()
+  }
+
+  /** 让当前主代理的同源分叉策略单独恢复「跟随全局默认」。 */
+  private resetActiveTargetFork(): void {
+    if (this.saving || this.activeTarget === GLOBAL_TARGET) return
+    this.ensureDraft()
+    const forkOverrides = this.draftForkOverrides ?? this.currentForkOverrides()
+    delete forkOverrides[this.activeTarget]
+    this.draftForkOverrides = forkOverrides
+    this.failed = false
+    this.publish()
+  }
+
+  /** 让当前目标恢复「跟随全局默认」：删掉它的专属列表与专属同源分叉覆盖。 */
   private resetActiveTarget(): void {
     if (this.saving || this.activeTarget === GLOBAL_TARGET) return
     this.ensureDraft()
     const overrides = this.draftOverrides ?? this.currentOverrides()
     delete overrides[this.activeTarget]
     this.draftOverrides = overrides
+    const forkOverrides = this.draftForkOverrides ?? this.currentForkOverrides()
+    delete forkOverrides[this.activeTarget]
+    this.draftForkOverrides = forkOverrides
     this.failed = false
     this.publish()
   }
@@ -807,6 +923,7 @@ export class SubagentSettingsController {
   /** 主代理模型下拉的分组（目录分组 + 已保存但不可用的孤儿）。 */
   private mainModelGroups(): SubagentMainModelGroup[] {
     const overrides = this.overrides()
+    const forkOverrides = this.forkOverrides()
     const groups: SubagentMainModelGroup[] = []
     for (const group of this.catalogGroups) {
       if (!group.provider || group.provider === 'undefined') continue
@@ -814,7 +931,8 @@ export class SubagentSettingsController {
         .filter(model => Boolean(model.id) && model.id !== 'undefined')
         .map(model => {
           const key = `${group.provider}/${model.id}`
-          return { key, model: model.id, modelName: model.name, overridden: overrides[key] !== undefined }
+          const overridden = overrides[key] !== undefined || forkOverrides[key] !== undefined
+          return { key, model: model.id, modelName: model.name, overridden }
         })
       if (models.length > 0) groups.push({ provider: group.provider, providerName: group.providerName, models })
     }
@@ -827,7 +945,8 @@ export class SubagentSettingsController {
     for (const group of this.catalogGroups) {
       for (const model of group.models) known.add(`${group.provider}/${model.id}`)
     }
-    return Object.keys(this.overrides()).filter(key => !known.has(key))
+    const keys = new Set([...Object.keys(this.overrides()), ...Object.keys(this.forkOverrides())])
+    return [...keys].filter(key => !known.has(key))
   }
 
   // ── 保存 ────────────────────────────────────────────────────────────────
@@ -841,30 +960,46 @@ export class SubagentSettingsController {
     const desiredEnabled = this.enabled()
     const desiredDefault = this.defaultRoutes()
     const desiredOverrides = this.overrides()
+    const desiredDefaultFork = this.defaultAllowParentFork()
+    const desiredForkOverrides = this.forkOverrides()
     const generation = this.saveGeneration
     this.saving = true
     this.failed = false
     this.publish()
     try {
-      // 1) 本插件偏好：默认列表 + 每个主代理模型的补丁（null = 删除该键）。
+      // 1) 本插件偏好：默认列表 + 每个主代理模型的补丁（null = 删除该键）+ 同源分叉策略。
       const initial = this.currentOverrides()
       const patch: Record<string, SubagentModelRoute[] | null> = {}
       for (const key of new Set([...Object.keys(initial), ...Object.keys(desiredOverrides)])) {
         const list = desiredOverrides[key]
         patch[key] = list !== undefined && list.length > 0 ? cloneRoutes(list) : null
       }
+      const initialFork = this.currentForkOverrides()
+      const forkPatch: Record<string, boolean | null> = {}
+      for (const key of new Set([...Object.keys(initialFork), ...Object.keys(desiredForkOverrides)])) {
+        const flag = desiredForkOverrides[key]
+        forkPatch[key] = typeof flag === 'boolean' ? flag : null
+      }
       await this.savePreferences({
         subagentDefaultModels: cloneRoutes(desiredDefault),
         subagentModelsByMainModel: patch,
+        subagentDefaultAllowParentFork: desiredDefaultFork,
+        subagentAllowParentForkByMainModel: forkPatch,
       })
       if (this.disposed || generation !== this.saveGeneration) return
       const nextOverrides: Record<string, SubagentModelRoute[] | null> = {}
       for (const [k, v] of Object.entries(desiredOverrides)) {
         if (v.length > 0) nextOverrides[k] = cloneRoutes(v)
       }
+      const nextForkOverrides: Record<string, boolean> = {}
+      for (const [k, v] of Object.entries(desiredForkOverrides)) {
+        if (typeof v === 'boolean') nextForkOverrides[k] = v
+      }
       this.preferences = {
         subagentDefaultModels: cloneRoutes(desiredDefault),
         subagentModelsByMainModel: nextOverrides,
+        subagentDefaultAllowParentFork: desiredDefaultFork,
+        subagentAllowParentForkByMainModel: nextForkOverrides,
       }
       this.preferencesStatus = 'ready'
 
@@ -977,8 +1112,12 @@ export class SubagentSettingsController {
     const enabled = this.enabled()
     const desiredDefault = this.defaultRoutes()
     const desiredOverrides = this.overrides()
+    const desiredDefaultFork = this.defaultAllowParentFork()
+    const desiredForkOverrides = this.forkOverrides()
     const currentOverrides = this.currentOverrides()
     const currentDefault = this.currentDefault()
+    const currentDefaultFork = this.currentDefaultFork()
+    const currentForkOverrides = this.currentForkOverrides()
 
     const union = new Map<string, SubagentModelRoute>()
     for (const route of desiredDefault) union.set(routeKey(route), route)
@@ -989,6 +1128,8 @@ export class SubagentSettingsController {
     const modelsDirty = this.currentEnabled() !== enabled
       || !sameRouteSet(currentDefault, desiredDefault)
       || !sameOverrides(currentOverrides, desiredOverrides)
+      || currentDefaultFork !== desiredDefaultFork
+      || !sameForkOverrides(currentForkOverrides, desiredForkOverrides)
       || (this.draftDefault !== undefined && !sameRouteSet(hostAllowed, [...union.values()]))
 
     const depthPersistedOverridden = userHas(limitsSnapshot.user, 'maxDepth')
@@ -1007,6 +1148,7 @@ export class SubagentSettingsController {
       || (enabled && (desiredDefault.length === 0 || emptyOverride))
 
     const activeOverridden = this.activeTarget !== GLOBAL_TARGET && desiredOverrides[this.activeTarget] !== undefined
+    const activeForkOverridden = this.activeTarget !== GLOBAL_TARGET && desiredForkOverrides[this.activeTarget] !== undefined
     return {
       available: limitsAvailable || modelsAvailable,
       writable: (limitsAvailable ? limitsSnapshot.writable : true) && (modelsAvailable ? modelSnapshot.writable : true),
@@ -1027,6 +1169,10 @@ export class SubagentSettingsController {
       candidates: this.candidates(),
       activeTargetOverridden: activeOverridden,
       activeTargetCount: this.activeRoutes().length,
+      defaultAllowParentFork: desiredDefaultFork,
+      forkOverridesByMainModel: desiredForkOverrides,
+      activeTargetAllowParentFork: this.activeAllowParentFork(),
+      activeTargetForkOverridden: activeForkOverridden,
       preferencesStatus: this.preferencesStatus,
     }
   }

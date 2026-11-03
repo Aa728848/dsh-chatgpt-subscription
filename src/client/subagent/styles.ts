@@ -472,10 +472,47 @@ export const SUBAGENT_CSS = `
   border-radius: var(--dsw-radius-lg, 10px);
 }
 
-.dsh-subagent-models > legend {
+.dsh-subagent-models > legend,
+.dsh-subagent-fork-card > legend {
   padding: 0 4px;
   font-size: 12px;
   color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-subagent-fork-card {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-lg, 10px);
+  background: transparent;
+}
+
+.dsh-subagent-fork-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+}
+
+.dsh-subagent-fork-title-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dsh-subagent-fork-label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
 }
 
 .dsh-subagent-group {

@@ -17,6 +17,7 @@ import { contextWindowLimitForModel, isCodexModelId } from '../shared/model-cata
 import {
   isCodexReasoningSummary,
   isCompactionRouteTarget,
+  mergeSubagentAllowParentForkByMainModel,
   mergeSubagentModelsByMainModel,
   normalizeSubagentModelRoutes,
 } from '../shared/preferences.ts'
@@ -554,6 +555,18 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
       throw new PreferenceError('subagentModelsByMainModel must map "provider/model" keys to arrays of { provider, model } routes, or null to clear one.')
     }
     patch.subagentModelsByMainModel = value.subagentModelsByMainModel as SubscriptionPreferencesUpdateDto['subagentModelsByMainModel']
+  }
+  if ('subagentDefaultAllowParentFork' in value) {
+    if (typeof value.subagentDefaultAllowParentFork !== 'boolean') {
+      throw new PreferenceError('subagentDefaultAllowParentFork must be a boolean.')
+    }
+    patch.subagentDefaultAllowParentFork = value.subagentDefaultAllowParentFork
+  }
+  if ('subagentAllowParentForkByMainModel' in value) {
+    if (mergeSubagentAllowParentForkByMainModel(current.subagentAllowParentForkByMainModel, value.subagentAllowParentForkByMainModel) === null) {
+      throw new PreferenceError('subagentAllowParentForkByMainModel must map "provider/model" keys to booleans, or null to clear one.')
+    }
+    patch.subagentAllowParentForkByMainModel = value.subagentAllowParentForkByMainModel as SubscriptionPreferencesUpdateDto['subagentAllowParentForkByMainModel']
   }
   if ('contextWindowOverrides' in value) {
     if (!isRecord(value.contextWindowOverrides)) throw new PreferenceError('contextWindowOverrides must be an object.')

@@ -811,9 +811,13 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
             const current = preferences.status()
             const defaultAllowedModels = current.subagentDefaultModels ?? []
             const byMainModel = current.subagentModelsByMainModel ?? {}
+            const defaultAllowParentFork = current.subagentDefaultAllowParentFork
+            const allowParentForkByMainModel = current.subagentAllowParentForkByMainModel ?? {}
             return {
               ...defaultAllowedModels.length > 0 ? { defaultAllowedModels } : {},
               ...Object.keys(byMainModel).length > 0 ? { byMainModel } : {},
+              ...defaultAllowParentFork === true ? { defaultAllowParentFork: true } : {},
+              ...Object.keys(allowParentForkByMainModel).length > 0 ? { allowParentForkByMainModel } : {},
             }
           },
         })
@@ -1462,10 +1466,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         : (override !== undefined && override.length > 0
           ? override
           : (fallback.length > 0 ? fallback : audited))
+      const forkOverride = mainRoute === undefined
+        ? undefined
+        : (current.subagentAllowParentForkByMainModel ?? {})[`${mainRoute.provider}/${mainRoute.model}`]
+      const allowParentFork = typeof forkOverride === 'boolean'
+        ? forkOverride
+        : current.subagentDefaultAllowParentFork === true
       return Promise.resolve({
         sessionId,
         allowedModels: (allowed ?? []).map(route => ({ provider: route.provider, model: route.model })),
-        violations: auditChildRoutes(target, sessions, allowed).map(violation => ({
+        violations: auditChildRoutes(target, sessions, allowed, { allowParentFork }).map(violation => ({
           childId: violation.finding.childId,
           parentId: violation.finding.parentId ?? null,
           provider: violation.finding.provider ?? null,
@@ -1908,6 +1918,7 @@ export type {
 } from './host/reasoning-collapse-guard/index.ts'
 export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts'
 export {
+  DEFAULT_PARENT_FORK_TOOLS,
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
   SUBAGENT_MODEL_SELECTION_NAMESPACE,
   SUBAGENT_POLICY_EVENT,
@@ -1915,6 +1926,7 @@ export {
   createSubagentAuthorization,
   delegationDenialReason,
   delegationModeOf,
+  effectiveAllowParentFork,
   inheritOverrideReason,
   inheritRouteDenialReason,
   inheritedRouteOf,
@@ -1938,6 +1950,7 @@ export {
   violationText,
 } from './host/subagent-route-audit.ts'
 export type {
+  AuditChildRoutesOptions,
   AuditedRoute,
   AuditedSession,
   AuditedSessions,

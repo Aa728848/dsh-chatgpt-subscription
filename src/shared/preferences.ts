@@ -4,6 +4,7 @@ import type {
   CodexReasoningSummary,
   ProxyMode,
   SearchProviderPreference,
+  SubagentAllowParentForkByMainModelDto,
   SubagentModelRouteDto,
   SubagentModelsByMainModelDto,
   SubscriptionPreferencesDto,
@@ -31,6 +32,8 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   // document stays exactly as small as the choices it actually carries.
   subagentDefaultModels: [],
   subagentModelsByMainModel: {},
+  subagentDefaultAllowParentFork: false,
+  subagentAllowParentForkByMainModel: {},
 }
 
 export const SEARCH_PROVIDER_DSH: SearchProviderPreference = 'dsh'
@@ -175,6 +178,64 @@ export function subagentModelsForMainModel(
   if (provider.length === 0 || model.length === 0) return undefined
   const routes = byMainModel[`${provider}/${model}`]
   return routes === undefined || routes.length === 0 ? undefined : routes
+}
+
+/**
+ * Merge one `subagentAllowParentForkByMainModel` patch into the stored map.
+ *
+ * `null` clears one key so that main model falls back to
+ * `subagentDefaultAllowParentFork`; a boolean sets an explicit per-main-model
+ * override (`true` OR `false`, since overriding a `true` global default back to
+ * `false` for one main model is legitimate).
+ * @param current - Map already stored in the preferences document.
+ * @param patch - Incoming patch from a settings card or a route body.
+ * @returns the merged map, or null when any key or value is malformed.
+ */
+export function mergeSubagentAllowParentForkByMainModel(
+  current: SubagentAllowParentForkByMainModelDto | undefined,
+  patch: unknown,
+): SubagentAllowParentForkByMainModelDto | null {
+  const patchRecord = asRecord(patch)
+  if (patchRecord === undefined) return null
+  const merged: SubagentAllowParentForkByMainModelDto = {}
+  if (current !== undefined) {
+    for (const [k, v] of Object.entries(current)) {
+      if (typeof v === 'boolean' && isValidMainModelKey(k)) merged[k.trim()] = v
+    }
+  }
+  for (const [rawKey, rawValue] of Object.entries(patchRecord)) {
+    const key = rawKey.trim()
+    if (!isValidMainModelKey(key)) return null
+    if (rawValue === null) {
+      delete merged[key]
+      continue
+    }
+    if (typeof rawValue !== 'boolean') return null
+    merged[key] = rawValue
+  }
+  return merged
+}
+
+/**
+ * Resolve whether `subagent_fork` may inherit the parent route for a main model.
+ * @param byMainModel - Per-main-model boolean overrides, when configured.
+ * @param defaultAllow - Fallback boolean when the main model has no override.
+ * @param provider - Main agent provider id.
+ * @param model - Main agent model id.
+ * @returns whether same-route parent fork is authorized.
+ */
+export function subagentAllowParentForkForMainModel(
+  byMainModel: Readonly<Record<string, boolean>> | undefined,
+  defaultAllow: boolean | undefined,
+  provider: string | undefined,
+  model: string | undefined,
+): boolean {
+  if (byMainModel !== undefined && provider !== undefined && model !== undefined
+    && provider.length > 0 && model.length > 0) {
+    const specific = byMainModel[`${provider}/${model}`]
+    if (typeof specific === 'boolean') return specific
+  }
+  return defaultAllow === true
 }
 
 /** Re-exported so the host parsers share one definition with the DTO. */

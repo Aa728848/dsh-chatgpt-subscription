@@ -49,6 +49,13 @@ export const DEFAULT_DELEGATION_TOOLS: readonly string[] = ['subagent']
 export const DEFAULT_SUBAGENT_INHERIT_TOOLS: readonly string[] = ['subagent_fork', 'spawn_teammate']
 
 /**
+ * Inherit-mode tools that fork the caller's own conversation context on the
+ * caller's own route (as opposed to multi-agent team spawning such as
+ * `spawn_teammate`). Only these tools are unlocked by `allowParentFork`.
+ */
+export const DEFAULT_PARENT_FORK_TOOLS: readonly string[] = ['subagent_fork']
+
+/**
  * How one delegation tool resolves the child route this guard authorizes.
  *
  * `explicit` — the tool exposes `provider`/`model`, so the call must name the
@@ -87,6 +94,10 @@ export interface SubagentRoutingOverrides {
   readonly defaultAllowedModels?: readonly AllowedModelRoute[]
   /** Authorized child routes per main agent model, keyed by `provider/model`. */
   readonly byMainModel?: Readonly<Record<string, readonly AllowedModelRoute[]>>
+  /** Whether `subagent_fork` may inherit the parent route when a main model has no dedicated fork override. */
+  readonly defaultAllowParentFork?: boolean
+  /** Per-main-model `subagent_fork` self-inheritance policy, keyed by `provider/model`. */
+  readonly allowParentForkByMainModel?: Readonly<Record<string, boolean>>
 }
 
 /** Resolved model-selection preference read from the Host settings document. */
@@ -103,6 +114,10 @@ export interface SubagentModelSelectionPreference {
    * a key here is governed by that entry instead of the fallback list.
    */
   readonly byMainModel?: Readonly<Record<string, readonly AllowedModelRoute[]>>
+  /** Fallback `subagent_fork` self-inheritance policy when `allowParentForkByMainModel` carries no entry for the main model. */
+  readonly defaultAllowParentFork?: boolean
+  /** Per-main-model `subagent_fork` self-inheritance policy, keyed by `provider/model`. */
+  readonly allowParentForkByMainModel?: Readonly<Record<string, boolean>>
 }
 
 /** One durable Session record this module reads: its events and its lineage. */
@@ -334,6 +349,12 @@ const lockedRootMainRoutes = new WeakMap<object, AllowedModelRoute>()
  * the durable policy event is a snapshot: one Session is governed by one policy.
  */
 const lockedRootAllowedRoutes = new WeakMap<object, readonly AllowedModelRoute[]>()
+
+/**
+ * Authorized `allowParentFork` posture per root Session, locked on first evaluation
+ * alongside {@link lockedRootAllowedRoutes} so one Session is governed by one policy.
+ */
+const lockedRootAllowParentFork = new WeakMap<object, boolean>()
 
 /**
  * Narrow one candidate route pair into an exact route.
@@ -819,6 +840,43 @@ export function mainModelRoutesFor(
 }
 
 /**
+ * Resolve whether `subagent_fork` is authorized to inherit the root main model's
+ * own route even when that route is absent from the cold-spawn allowlist.
+ * @param agent - Calling agent.
+ * @param preference - Current Host preference, when composed.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param lockSnapshot - Freeze the resolved posture for this Session now.
+ * @returns whether same-route parent forking is authorized for the Session's main model.
+ */
+export function effectiveAllowParentFork(
+  agent: AuthorizationAgent | undefined,
+  preference: SubagentModelSelectionPreference | undefined,
+  sessions: SessionsResolver,
+  lockSnapshot = false,
+): boolean {
+  if (preference !== undefined && !preference.enabled) return true
+  const inherited = inheritedRouteOf(agent)
+  const { rootSession, mainRoute } = resolveRootSessionAndMainRoute(agent, sessions, inherited, lockSnapshot)
+  const lockable = typeof rootSession === 'object' && rootSession !== null
+  const locked = lockable ? lockedRootAllowParentFork.get(rootSession) : undefined
+  const allowedForMain = locked !== undefined
+    ? locked
+    : (() => {
+        const specific = mainRoute === undefined
+          ? undefined
+          : preference?.allowParentForkByMainModel?.[`${mainRoute.provider}/${mainRoute.model}`]
+        const resolved = typeof specific === 'boolean' ? specific : preference?.defaultAllowParentFork === true
+        if (lockable && (lockSnapshot || headerRouteOf(rootSession) !== undefined)) {
+          lockedRootAllowParentFork.set(rootSession, resolved)
+        }
+        return resolved
+      })()
+  if (!allowedForMain) return false
+  if (inherited.provider === undefined || inherited.model === undefined || mainRoute === undefined) return false
+  return inherited.provider === mainRoute.provider && inherited.model === mainRoute.model
+}
+
+/**
  * State a Session's routing posture in the `list_subagent_models` result.
  *
  * Calling `list_subagent_models({})` upstream returns only provider names
@@ -949,20 +1007,26 @@ export function mergePreferenceOverrides(
 ): SubagentModelSelectionPreference | undefined {
   const hasDefault = overrides?.defaultAllowedModels !== undefined
   const hasByMain = overrides?.byMainModel !== undefined
+  const hasDefaultFork = overrides?.defaultAllowParentFork !== undefined
+  const hasForkByMain = overrides?.allowParentForkByMainModel !== undefined
   if (base === undefined) {
-    if (!hasDefault && !hasByMain) return undefined
+    if (!hasDefault && !hasByMain && !hasDefaultFork && !hasForkByMain) return undefined
     return {
       enabled: true,
       allowedModels: overrides?.defaultAllowedModels ?? [],
       ...hasDefault ? { defaultAllowedModels: overrides?.defaultAllowedModels } : {},
       ...hasByMain ? { byMainModel: overrides?.byMainModel } : {},
+      ...hasDefaultFork ? { defaultAllowParentFork: overrides?.defaultAllowParentFork } : {},
+      ...hasForkByMain ? { allowParentForkByMainModel: overrides?.allowParentForkByMainModel } : {},
     }
   }
-  if (!hasDefault && !hasByMain) return base
+  if (!hasDefault && !hasByMain && !hasDefaultFork && !hasForkByMain) return base
   return {
     ...base,
     ...hasDefault ? { defaultAllowedModels: overrides?.defaultAllowedModels } : {},
     ...hasByMain ? { byMainModel: overrides?.byMainModel } : {},
+    ...hasDefaultFork ? { defaultAllowParentFork: overrides?.defaultAllowParentFork } : {},
+    ...hasForkByMain ? { allowParentForkByMainModel: overrides?.allowParentForkByMainModel } : {},
   }
 }
 
@@ -1127,6 +1191,7 @@ export function delegationDenialReason(
   inheritToolNames: readonly string[] = [],
   declaresRouteParameters?: RouteParameterProbe,
   lockSnapshot = true,
+  parentForkToolNames: readonly string[] = DEFAULT_PARENT_FORK_TOOLS,
 ): string | undefined {
   const mode = delegationModeOf(
     [
@@ -1145,12 +1210,17 @@ export function delegationDenialReason(
   const requestedProvider = asString(request['provider'])
   const requestedModel = asString(request['model'])
   if (mode === 'inherit') {
-    // An inherit-mode tool has no route parameters, so a named pair can only be
-    // an attempt to re-route the child away from the route the tool exists to
-    // preserve. Check it before the inherited route: it is the more precise
-    // diagnostic, and it holds even when the inherited route is authorized.
-    if (requestedProvider !== undefined && requestedModel !== undefined) {
-      return inheritOverrideReason(toolName, requestedProvider, requestedModel)
+    // An inherit-mode tool has no route parameters, so a named pair (or half of
+    // one) can only be an attempt to re-route the child away from the route the
+    // tool exists to preserve. Check it before the inherited route: it is the
+    // more precise diagnostic, and it holds even when the inherited route (or
+    // `allowParentFork`) is authorized.
+    if (requestedProvider !== undefined || requestedModel !== undefined) {
+      return inheritOverrideReason(toolName, requestedProvider ?? '', requestedModel ?? '')
+    }
+    if (parentForkToolNames.includes(toolName)
+      && effectiveAllowParentFork(agent, preference, sessions, lockSnapshot)) {
+      return undefined
     }
     return inheritedRouteDenial(agent, toolName, allowed)
   }
