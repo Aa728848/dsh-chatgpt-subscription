@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.57.0 - 2026-11-03
+
+- **[team] 与内置 Agent Teams 共存：修正 R0.5 判据，并把策略段改成尾部投递**
+  - **前提已变**：harness `#7519` 之后，Agent Teams 不再自己拥有队友创建与消息通道（`spawn_teammate` 已移除），消息与名册改为复用子代理工具；内置团队工具只剩共享任务板 `team_task_create/list/get/update`。旧 R0.5 的「`spawn_teammate` 或 `wait_agent` 任一在场就停」在本代恒真——`wait_agent` 正是 `dispatch` preset 自己挂的工具，每个会话首轮都会被误判为不可编排。
+  - R0.5 改为只按 `spawn_teammate` 判代：旧代运行时仍停下并把选择交给用户；现行运行时与调度模式并行，并写明「任务板只是记账，`dispatch_ledger` 仍是派发权威、R5 任务书仍是任务契约，ready 不等于开工，不得用 `reassign` 绕开 R6」。
+  - 新增 `team-policy-cache-guard`（默认开启，`teamPolicyCacheGuard`）：装配时摘掉内置 `team:policy` 段并捕获官方当次原文，切开关时以尾部用户消息投递一次、关闭时补一条撤销通知；该段从未出现时只报一条 warn。与计划模式守卫同一套接缝，中途切团队开关不再改写 system prompt。
+  - 设置卡新增「智能体团队策略段」一行（zh/en/ru），语义与宿主 schema 一致（缺键＝开）。
+  - **验证**：`npm run typecheck` 0 错误；全量 360 文件 / 6574 项，**6565 通过 / 9 跳过**；`lib/` 干净重建、`npm pack --dry-run` 与真机设置页视觉检查通过。
+
+
 ## 0.56.0 - 2026-11-03
 
 - **[dispatch] L2 执行拓扑与同路由父 fork 策略**
