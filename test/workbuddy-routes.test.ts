@@ -541,6 +541,23 @@ describe('WorkBuddy model selection', () => {
     expect(resolved).toEqual(available)
   })
 
+  it('still recognises a default the table shipped before this refresh', () => {
+    // The retired set names two ids the 2026-11-04 read dropped (`kimi-k2.6` is
+    // gone from both regions, `hy4-preview` is intl-only). Without that
+    // recognition every existing install would look like a hand-picked short
+    // list, and the picker would quietly narrow to it.
+    const available = ['glm-5.3', 'deepseek-v4.1-flash', 'hy4std', 'kimi-k3.1-pro', 'grok-4.7']
+    expect(resolveEnabledModelIds(
+      ['glm-5.3', 'deepseek-v4.1-flash', 'hy4-preview', 'kimi-k2.6'],
+      available,
+      true,
+    )).toEqual(available)
+    // Dropping one entry is an edit, and an edit is honoured exactly — the ids
+    // the account cannot call are filtered, the rest is untouched.
+    expect(resolveEnabledModelIds(['glm-5.3', 'deepseek-v4.1-flash', 'hy4-preview'], available, true))
+      .toEqual(['glm-5.3', 'deepseek-v4.1-flash'])
+  })
+
   it('honours an explicit selection exactly, dropping ids the region lost', () => {
     const available = ['glm-5.3', 'kimi-k3']
     expect(resolveEnabledModelIds(['glm-5.3', 'gemini-3.5-flash'], available, true)).toEqual(['glm-5.3'])
@@ -556,9 +573,16 @@ describe('WorkBuddy model selection', () => {
     expect(glm.defaultContextWindow).toBe(1_000_000)
     expect(glm.contextWindow).toBe(500_000)
     expect(glm.supportsImage).toBe(true)
-    // The card offers what the model ACCEPTS plus, because the entry allows it,
-    // the level that switches the trace off entirely.
-    expect(glm.reasoningEfforts).toEqual(['none', 'low', 'high', 'max'])
+    // The card offers what the model ACCEPTS; the level that switches the trace
+    // off is added only for an entry that allows it. `glm-5.3` is served by both
+    // regions and cn refuses that switch, so the merged entry may not offer it.
+    expect(glm.reasoningEfforts).toEqual(['low', 'high', 'max'])
+  })
+
+  it('adds the thinking-off level only when every serving region allows it', () => {
+    // cn-only and permitted there, so the level appears...
+    const kimi = buildModelOptions(FALLBACK_MODELS, ['kimi-k2.8-preview'], ['kimi-k2.8-preview'], {})
+    expect(kimi[0]?.reasoningEfforts).toEqual(['none', 'low', 'high', 'max'])
   })
 
   it('passes the published multiplier through, every region the entry carries', () => {
@@ -618,20 +642,20 @@ describe('WorkBuddy catalog credit invariants', () => {
   })
 
   it('ships a rate for every model the gateway rated, per the measured table', () => {
-    // The counts below are the transcription's own audit: 43 of the 49 shipped
-    // rows carry a rate, and exactly eight are rated by BOTH regions.
+    // The counts below are the transcription's own audit: 48 of the 49 shipped
+    // rows carry a rate (`default-model` publishes an empty string), and exactly
+    // seven are rated by BOTH regions.
     const rated = FALLBACK_MODELS.filter((model) => model.credits !== undefined)
     const bothRegions = rated.filter((model) => Object.keys(model.credits!).length === 2)
-    expect(rated).toHaveLength(43)
+    expect(rated).toHaveLength(48)
     expect(bothRegions.map((model) => model.id)).toEqual([
-      'glm-5.3',
-      'glm-5.3-flash',
-      'glm-5.2',
-      'kimi-k2.8-preview',
-      'kimi-k2.6',
       'deepseek-v4.1-flash',
-      'hy4-preview',
+      'glm-5.3-flash',
       'hy3',
+      'glm-5.3',
+      'glm-5.2',
+      'minimax-m3.1-flash',
+      'kimi-k3.1-pro',
     ])
     // The one measured disagreement: 0.11 on cn against 0.00 on intl.
     expect(FALLBACK_MODELS.find((m) => m.id === 'deepseek-v4.1-flash')?.credits)
@@ -807,10 +831,12 @@ describe('WorkBuddy routes', () => {
     expect(JSON.parse(allowed.captured.body).ok).toBe(true)
   })
 
-  it('keeps offering the unlisted models once the live catalog loads', async () => {
+  it('takes a published catalog as complete, since the gateway no longer hides any id', async () => {
     // A reachable gateway replaces the shipped table with the list it publishes,
     // so a model it serves without listing would disappear from the picker the
-    // moment the catalog arrives. The merge is the only thing preventing that.
+    // moment the catalog arrived — that merge is why this test exists. The
+    // 2026-11-04 read found every id published, so the seam is a no-op now and
+    // the payload alone decides what is offered.
     const online = (async () => new Response(JSON.stringify(CONFIG), { status: 200 })) as unknown as typeof fetch
     const credentials: WorkBuddyCredentials = {
       accessToken: 't',
@@ -824,9 +850,9 @@ describe('WorkBuddy routes', () => {
       source: 'desktop',
     }
     const ids = (await loadConfigCatalog(credentials, { fetchFn: online })).map((model) => model.id)
-    for (const id of ['gpt-6-sol', 'gpt-6-luna', 'gemini-3.8-flash']) expect(ids).toContain(id)
+    expect(ids).toEqual(['glm-5.3', 'deepseek-v4.1-flash', 'minimax-m3', 'kimi-k2-thinking'])
     // The payload is the authority on what it does describe: a published entry
-    // is never overwritten by the fallback row that shadows its id.
+    // is never duplicated by the fallback row that shadows its id.
     expect(new Set(ids).size).toBe(ids.length)
   })
 

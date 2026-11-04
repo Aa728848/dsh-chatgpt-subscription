@@ -19,6 +19,7 @@ import {
   modelsForRegion,
   resolveWorkBuddyModel,
   workBuddyModelVendor,
+  type WorkBuddyModelEntry,
 } from '../src/host/workbuddy/model-catalog.ts'
 import {
   ERROR_CODE,
@@ -569,19 +570,33 @@ describe('WorkBuddy fallback catalog', () => {
       .filter((model) => model.defaultReasoningEffort !== null
         && !model.reasoningEfforts.includes(model.defaultReasoningEffort))
     expect(violations).toEqual([])
-    // The transcribed value is what the gateway declared; convergence is what
-    // turns it into a level the request can carry.
-    expect(FALLBACK_MODELS.find((m) => m.id === 'minimax-m3')!.defaultReasoningEffort).toBe('medium')
-    expect(resolveWorkBuddyModel('minimax-m3').defaultReasoningEffort).toBe('high')
+    // The 2026-11-04 transcription needs no convergence at all — every published
+    // default is already a rung of its own ladder — so the rule is exercised on
+    // the shape the live catalog can still produce: the gateway names `medium`
+    // for a model that exposes only low/high/max.
+    const declared: WorkBuddyModelEntry = {
+      ...resolveWorkBuddyModel('kimi-k2.8-preview'),
+      id: 'effort-only',
+      reasoningEfforts: ['low', 'high', 'max'],
+      defaultReasoningEffort: 'medium',
+    }
+    expect(declared.defaultReasoningEffort).toBe('medium')
+    expect(resolveWorkBuddyModel('effort-only', [declared]).defaultReasoningEffort).toBe('high')
   })
 
   it('filters the catalog by region, since a wrong-region call is a 400', () => {
     const cn = modelsForRegion('cn').map((m) => m.id)
     const intl = modelsForRegion('intl').map((m) => m.id)
-    expect(intl).toContain('gemini-3.5-flash')
-    expect(cn).not.toContain('gemini-3.5-flash')
-    // intl started serving GLM-5.3-Flash alongside cn; asking a region for a
-    // model it dropped is the 400 `code 11102` this filter exists to avoid.
+    // Both directions are real: intl serves Grok-4.7 where cn does not, and cn
+    // serves Hunyuan 4 proper (`hy4std`) where intl still has only the preview.
+    expect(intl).toContain('grok-4.7')
+    expect(cn).not.toContain('grok-4.7')
+    expect(cn).toContain('hy4std')
+    expect(intl).not.toContain('hy4std')
+    expect(intl).toContain('hy4-preview')
+    expect(cn).not.toContain('hy4-preview')
+    // Both regions serve GLM-5.3-Flash; asking a region for a model it dropped
+    // is the 400 `code 11102` this filter exists to avoid.
     expect(intl).toContain('glm-5.3-flash')
     expect(cn).toContain('glm-5.3-flash')
     expect(intl).toContain('kimi-k3')
@@ -600,7 +615,12 @@ describe('WorkBuddy fallback catalog', () => {
     expect(flash.maxTokens).toBe(32000)
     expect(resolveWorkBuddyModel('glm-5.3').maxTokens).toBe(48000)
     expect(resolveWorkBuddyModel('glm-5.2').maxTokens).toBe(48000)
-    expect(resolveWorkBuddyModel('kimi-k2.8-preview').maxTokens).toBe(32000)
+    // Two rows that gained a second region with a larger served default: the
+    // smaller default is the window both backends honour.
+    expect(resolveWorkBuddyModel('minimax-m3.1-flash').contextWindow).toBe(300000)
+    expect(resolveWorkBuddyModel('minimax-m3.1-flash').maxContextWindow).toBe(1000000)
+    expect(resolveWorkBuddyModel('kimi-k3.1-pro').contextWindow).toBe(300000)
+    expect(resolveWorkBuddyModel('kimi-k3.1-pro').maxContextWindow).toBe(1000000)
   })
 
   it('groups the picker by vendor, since the gateway interleaves them', () => {
@@ -640,22 +660,25 @@ describe('WorkBuddy fallback catalog', () => {
     expect(deepseek.indexOf('deepseek-v4.1-flash')).toBeLessThan(deepseek.indexOf('deepseek-v4.1-flash-sg'))
   })
 
-  it('offers the models the gateway serves but never publishes', () => {
-    // Measured on the international backend: these answer a normal streaming
-    // completion with 200 while being absent from `/v3/config`. They have to be
-    // in the shipped table, because that is what a first run before sign-in,
-    // and any gateway failure, falls back to.
+  it('keeps the ids that used to be served without being published', () => {
+    // Measured 2026-10-09 on the international backend: these answered a normal
+    // streaming completion with 200 while `/v3/config` said nothing about them,
+    // so their windows and ladders had to be inherited from a sibling. The
+    // 2026-11-04 read publishes all three, which makes them ordinary catalog
+    // rows — and the figures below are now the measured ones, not the inherited
+    // ones (`gpt-6-sol` serves a 1M window, not the 400000 it was credited with,
+    // and its ladder has four rungs rather than `gpt-6-astra`'s five).
     const intl = modelsForRegion('intl').map((m) => m.id)
     const cn = modelsForRegion('cn').map((m) => m.id)
     for (const id of ['gpt-6-sol', 'gpt-6-luna', 'gemini-3.8-flash']) {
       expect(intl).toContain(id)
       expect(cn).not.toContain(id)
     }
-    // The reasoning ladder was measured, not read off the name: gpt-6-sol takes
-    // exactly the levels gpt-6-astra publishes and refuses `minimal`.
+    expect(resolveWorkBuddyModel('gpt-6-sol').contextWindow).toBe(1_000_000)
     expect(resolveWorkBuddyModel('gpt-6-sol').reasoningEfforts)
-      .toEqual(resolveWorkBuddyModel('gpt-6-astra').reasoningEfforts)
-    expect(resolveWorkBuddyModel('gpt-6-luna').reasoningEfforts).not.toContain('minimal')
+      .toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(resolveWorkBuddyModel('gemini-3.8-flash').contextWindow).toBe(300_000)
+    expect(resolveWorkBuddyModel('gemini-3.8-flash').defaultReasoningEffort).toBe('medium')
   })
 
   it('resolves an unknown id to a text-only entry rather than a real model', () => {

@@ -563,8 +563,9 @@ export async function fetchConfigCatalog(
   }
   const parsed = parseConfigModels(await response.json(), credentials.region)
   // The gateway serves models it does not list, and this list replaces the
-  // shipped table; without the merge they vanish from the picker at the moment
-  // the catalog loads. See UNPUBLISHED_MODELS for what each row was measured.
+  // shipped table; without the merge such a row would vanish from the picker the
+  // moment the catalog loaded. The unlisted set is empty as of the 2026-11-04
+  // read — see UNPUBLISHED_MODELS for the seam and what it is waiting for.
   return withUnpublishedModels(parsed, credentials.region)
 }
 

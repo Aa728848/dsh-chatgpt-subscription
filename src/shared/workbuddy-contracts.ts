@@ -126,14 +126,14 @@ export const WORKBUDDY_STANDARD_EFFORTS: readonly WorkBuddyReasoningEffort[] =
  * Snap a level onto the nearest rung a model's ladder actually exposes.
  *
  * The gateway names a default from a wider vocabulary than the ladder it
- * publishes for the same model: an effort-only entry (minimax-m3, kimi-k3,
- * `glm-5.3` in the cn region) reports `effort: 'medium'` while exposing only
- * `low`/`high`/`max`. Letting that value through is not cosmetic — a default
- * outside the ladder is discarded by the level-resolution step, the request
- * then carries no `reasoning_effort`, and the model returns an EMPTY
- * `reasoning_content` (measured on minimax-m3: 0 characters across three
- * samples, versus 282-659 with the field). Ties resolve upward, which is the
- * mapping the sibling Kimi line documents for `medium`. A ladder that names
+ * publishes for the same model: an effort-only entry — the shape `kimi-k3`
+ * publishes — names a single default while exposing only `low`/`high`/`max`.
+ * Letting an unlisted value through is not cosmetic — a default outside the
+ * ladder is discarded by the level-resolution step, the request then carries no
+ * `reasoning_effort`, and the model returns an EMPTY `reasoning_content`
+ * (measured on `minimax-m3` while that id was still served: 0 characters across
+ * three samples, versus 282-659 with the field). Ties resolve upward, which is
+ * the mapping the sibling Kimi line documents for `medium`. A ladder that names
  * no level (a text-only model) yields nothing to converge to.
  */
 export function convergeWorkBuddyEffort(

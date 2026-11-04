@@ -34,9 +34,9 @@ import {
   type WorkBuddyPreferenceStore,
 } from './token-store.ts'
 import {
-  DEFAULT_VISIBLE_MODEL_IDS,
   FALLBACK_MODELS,
   defaultContextWindowFor,
+  isUntouchedModelSelection,
   maxOutputTokensFor,
   modelsForRegion,
   resolveWorkBuddyModel,
@@ -205,11 +205,7 @@ export function resolveEnabledModelIds(
   enabled = true,
 ): string[] {
   if (!enabled) return []
-  const shippedDefaults = new Set(DEFAULT_VISIBLE_MODEL_IDS)
-  const isUntouchedDefault = stored.length > 0
-    && stored.length === shippedDefaults.size
-    && stored.every((id) => shippedDefaults.has(id))
-  if (isUntouchedDefault) return [...available]
+  if (isUntouchedModelSelection(stored)) return [...available]
   const known = new Set(available)
   return stored.filter((id) => known.has(id))
 }

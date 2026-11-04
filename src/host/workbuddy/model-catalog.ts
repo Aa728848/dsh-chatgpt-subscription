@@ -8,24 +8,41 @@
  * and the exact reasoning ladder it accepts — so this route prefers the live
  * catalog and keeps the table below only as an offline fallback.
  *
- * The fallback is a verbatim transcription of a live `/v3/config` read, not
- * hand-written guesses: an earlier revision of this file guessed context
- * windows from vendor marketing and was wrong in both directions (`glm-5.3`
- * and `kimi-k3` are 1M, not 200K/256K).
+ * The fallback transcribes a live `/v3/config` read — merged across regions by
+ * the rule below, never guessed: an earlier revision of this file guessed
+ * context windows from vendor marketing and was wrong in both directions
+ * (`glm-5.3` and `kimi-k3` are 1M, not 200K/256K).
  *
  * One entry serves both regions, so a model the regions disagree about needs a
- * merged figure. The rule is asymmetric on purpose: the **larger maximum** is
- * kept, while the **served default** and the **output cap** take the **smaller**
- * of the two. Over-declaring either one is a hard failure — DSH would send a
- * request the gateway rejects — whereas under-declaring only compresses a
- * conversation earlier than needed, and both remain overridable per model from
- * the settings card. Measured disagreements (`glm-5.3-flash`, `glm-5.3`,
- * `glm-5.2`, `kimi-k2.8-preview` served 300000/48000/48000/32000 by intl
- * against 1000000/64000/64000/64000 by cn) are reconciled that way.
+ * merged figure. The rule is asymmetric on purpose, and every half of it is
+ * decided by what happens when the declaration is WRONG.
  *
- * The regions also do not serve the same ids. intl added `glm-5.3-flash` and
- * keeps `gemini-3.5-flash`, `kimi-k3` and the `*-model` aliases to itself; cn
- * keeps `glm-5.3-flash`, `kimi-k3-1` and its own `-x` variants.
+ * Figures this route only ever *sends* take the conservative side: the **served
+ * default window**, the **output cap**, the **reasoning ladder** and the two
+ * capability flags are the **intersection** of what the regions publish — the
+ * smaller window, the smaller cap, the rungs both backends accept, and `false`
+ * for image input or for switching thinking off as soon as one region says no.
+ * Only the **maximum** window takes the larger of the two. Over-declaring any of
+ * them is a hard failure: DSH would send a request the gateway answers 400 (a
+ * context length it will not serve, an `effort` or thinking shape it rejects, an
+ * image to a text-only model), while under-declaring only compresses a
+ * conversation earlier than needed or hides an option, and every figure stays
+ * overridable per model from the settings card.
+ *
+ * Measured disagreements reconciled that way on the 2026-11-04 read:
+ * `glm-5.3-flash` 300000/32000 on intl against 1000000/131072 on cn;
+ * `glm-5.3` and `glm-5.2` cap output at 48000 on intl against 64000 on cn;
+ * `deepseek-v4.1-flash`, `minimax-m3.1-flash` and `kimi-k3.1-pro` serve 300000
+ * by default on intl against 1000000 on cn; `glm-5.3`, `glm-5.3-flash` and
+ * `glm-5.2` accept switching thinking off on intl but not on cn; and the two
+ * `glm-5.2` ladders share only `high`.
+ *
+ * The regions also do not serve the same ids. intl keeps the `gpt-6*` and
+ * `gpt-5*` families, `grok-4.7`, `gemini-3.8-flash`, `kimi-k3`, `hy4-preview`
+ * and the `*-model` aliases to itself; cn keeps Hunyuan 4 proper (`hy4std`,
+ * `hy4free`), `hy4-preview-x`, `hunyuan-chat`, `space-bunny`, `step-5-preview`,
+ * `mimo-v2.6-pro` and its own `-1`/`-x` variants. Seven ids are served by
+ * both; a catalog refresh that moves the boundary must move `regions` with it.
  *
  * `regions` is a routing fact, not a preference: asking a region for a model it
  * does not serve answers 400 `code 11102`.
@@ -108,81 +125,28 @@ export interface WorkBuddyModelEntry {
 /**
  * Models the gateway serves but does not publish in `/v3/config`.
  *
- * The catalog is a published list, not the served one: measured on the
- * international backend, `gpt-6-sol`, `gpt-6-luna` and `gemini-3.8-flash` all
- * answer a normal streaming completion with 200 while being absent from
+ * The catalog is a published list, not the served one: measured 2026-10-09 on
+ * the international backend, `gpt-6-sol`, `gpt-6-luna` and `gemini-3.8-flash`
+ * all answered a normal streaming completion with 200 while being absent from
  * `/v3/config` entirely, and a reachable gateway *replaces* the shipped table
- * with that list. Without these rows the picker would simply never show them, so
- * they are declared here and merged into a live catalog too
- * ({@link withUnpublishedModels}) rather than living in the fallback alone.
+ * with that list — so a row living only in the fallback would drop out of the
+ * picker the moment the catalog loaded.
  *
- * What each row records, and how it was established, differs by field:
- *
- * - **Existence, the reasoning ladder, image support** were measured against the
- *   live endpoint, not inferred from the name. A rejected level answers 400
- *   `code 11133` with `extError` `400002`; `gpt-6-sol` takes exactly the ladder
- *   `gpt-6-astra` publishes (`minimal` refused, `low`/`medium`/`high`/`xhigh`/
- *   `max` accepted) and both accept a 1x1 PNG.
- * - **Context window, output cap and `canDisableThinking` are inherited from the
- *   published sibling in the same family** — `gpt-6-astra` for `gpt-6-sol` and
- *   `gpt-6-luna`, `gemini-3.5-flash` for `gemini-3.8-flash`. They are marked
- *   here rather than measured because the gateway publishes nothing for these
- *   ids and offers no cheap way to read the real figure: it accepts a
- *   `max_tokens` larger than any published window (even for `gpt-6-astra`, whose
- *   own catalog caps at 128000), so the number is neither enforced nor
- *   discoverable from the request side.
- *
- * Every field stays overridable per model from the settings card, and an
- * inherited window errs low rather than high: over-declaring overflows the
- * gateway mid-session, while under-declaring only compresses earlier.
+ * The list is empty as of the 2026-11-04 read: all three ids are published now,
+ * with figures measured on the wire, and their rows therefore live in
+ * {@link FALLBACK_MODELS} like any other. The seam stays rather than being
+ * deleted because the gap it covers belongs to the gateway, not to those three
+ * models: the next id it serves without listing belongs here, and
+ * {@link withUnpublishedModels} is what keeps such a row offered.
  */
-export const UNPUBLISHED_MODELS: readonly WorkBuddyModelEntry[] = [
-  {
-    id: 'gpt-6-sol',
-    name: 'GPT-6-Sol',
-    contextWindow: 400000,
-    maxContextWindow: 1000000,
-    maxTokens: 128000,
-    regions: ['intl'],
-    supportsImage: true,
-    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    defaultReasoningEffort: 'high',
-    canDisableThinking: true,
-    description: 'OpenAI 旗舰模型，擅长复杂推理与长程任务',
-  },
-  {
-    id: 'gpt-6-luna',
-    name: 'GPT-6-Luna',
-    contextWindow: 400000,
-    maxContextWindow: 1000000,
-    maxTokens: 128000,
-    regions: ['intl'],
-    supportsImage: true,
-    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    defaultReasoningEffort: 'high',
-    canDisableThinking: true,
-    description: 'OpenAI 轻量模型，响应快速，适合日常任务',
-  },
-  {
-    id: 'gemini-3.8-flash',
-    name: 'Gemini-3.8-Flash',
-    contextWindow: 1000000,
-    maxContextWindow: 1000000,
-    maxTokens: 65536,
-    regions: ['intl'],
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
-    canDisableThinking: false,
-    description: '能力均衡，适合日常使用',
-  },
-]
+export const UNPUBLISHED_MODELS: readonly WorkBuddyModelEntry[] = []
 
 /**
  * Offline fallback catalog, transcribed from a live `/v3/config` read.
  *
- * Used when the gateway cannot be reached (first run before sign-in, or a
- * network failure); a reachable gateway always wins.
+ * Last transcribed 2026-11-04 from both backends. Used when the gateway cannot
+ * be reached (first run before sign-in, or a network failure); a reachable
+ * gateway always wins.
  */
 export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
   {
@@ -199,20 +163,6 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     description: '优秀的编码模型，适合日常使用',
   },
   {
-    id: 'default',
-    name: 'Default',
-    contextWindow: 56000,
-    maxContextWindow: 56000,
-    maxTokens: 24000,
-    regions: ['cn'],
-    credits: { cn: '2.00' },
-    supportsImage: false,
-    reasoningEfforts: [],
-    defaultReasoningEffort: null,
-    canDisableThinking: false,
-    description: '',
-  },
-  {
     id: 'fast-model',
     name: 'Fast',
     contextWindow: 200000,
@@ -222,7 +172,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     credits: { intl: '0.34' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
+    defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '响应快，适合简单任务',
   },
@@ -236,7 +186,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     credits: { intl: '0.59' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
+    defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '速度与质量兼顾，日常工作首选',
   },
@@ -254,22 +204,52 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     canDisableThinking: false,
     description: '高质量输出，胜任复杂任务',
   },
+    // intl serves 300000 by default and allows 1M; cn serves 1M outright, so
+    // the smaller served default is the window both regions honour.
   {
-    id: 'deep-model',
-    name: 'Deep',
-    contextWindow: 200000,
-    maxContextWindow: 200000,
-    maxTokens: 24000,
-    regions: ['intl'],
-    credits: { intl: '3.33' },
+    id: 'deepseek-v4.1-flash',
+    name: 'Deepseek-V4.1-Flash',
+    contextWindow: 300000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
+    regions: ['intl', 'cn'],
+    credits: { cn: '0.11', intl: '0.00' },
     supportsImage: true,
-    reasoningEfforts: [],
-    defaultReasoningEffort: null,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '深度推理，适合深度分析与难题',
+    description: 'DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态',
   },
-  // Served but absent from `/v3/config`; see {@link UNPUBLISHED_MODELS}.
-  ...UNPUBLISHED_MODELS.filter((model) => model.id === 'gpt-6-sol' || model.id === 'gpt-6-luna'),
+  {
+    id: 'deepseek-v4.1-flash-sg',
+    name: 'Deepseek-V4.1-Flash',
+    contextWindow: 300000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
+    regions: ['intl'],
+    credits: { intl: '0.03' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: 'DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态',
+  },
+    // intl serves 300000 by default and caps output at 32000; cn serves 1M and
+    // allows 131072. Both figures take the smaller side.
+  {
+    id: 'glm-5.3-flash',
+    name: 'GLM-5.3-Flash',
+    contextWindow: 300000,
+    maxContextWindow: 1000000,
+    maxTokens: 32000,
+    regions: ['intl', 'cn'],
+    credits: { cn: '0.08', intl: '0.08' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '原生多模态模型，擅长视觉理解与专业任务',
+  },
   {
     id: 'gpt-6-astra',
     name: 'GPT-6-Astra',
@@ -283,6 +263,36 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     defaultReasoningEffort: 'high',
     canDisableThinking: true,
     description: 'OpenAI 旗舰模型，擅长复杂推理与长程任务',
+  },
+    // The preview build. cn replaced it with `hy4std`/`hy4free`; intl keeps
+    // serving it, so this row is now intl-only and must not be offered to cn.
+  {
+    id: 'hy4-preview',
+    name: 'Hy4 Preview',
+    contextWindow: 200000,
+    maxContextWindow: 1000000,
+    maxTokens: 64000,
+    regions: ['intl'],
+    credits: { intl: '0.29' },
+    supportsImage: true,
+    reasoningEfforts: ['high'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '混元思考模型，具有增强的推理能力',
+  },
+  {
+    id: 'hy3',
+    name: 'Hy3',
+    contextWindow: 192000,
+    maxContextWindow: 192000,
+    maxTokens: 64000,
+    regions: ['intl', 'cn'],
+    credits: { cn: '0.00', intl: '0.00' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'high'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '混元思考模型，具有增强的推理能力',
   },
   {
     id: 'gpt-5.6-sol',
@@ -354,150 +364,81 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     canDisableThinking: false,
     description: 'OpenAI 旗舰编码模型，擅长长程任务',
   },
+    // intl caps output at 48000 where cn allows 64000, and only intl lets the
+    // trace be switched off.
   {
     id: 'glm-5.3',
     name: 'GLM-5.3',
     contextWindow: 1000000,
     maxContextWindow: 1000000,
-    // intl caps output at 48000 where cn allows 64000.
     maxTokens: 48000,
     regions: ['intl', 'cn'],
-    credits: { cn: '0.79', intl: '0.79' },
+    credits: { cn: '0.69', intl: '0.69' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
-    canDisableThinking: true,
+    canDisableThinking: false,
     description: '能力均衡，适合日常使用',
   },
-  {
-    id: 'glm-5.3-flash',
-    name: 'GLM-5.3-Flash',
-    // intl serves 300000 by default and allows 1000000; cn serves 1000000 by
-    // default, so the smaller served default is the one both regions honour.
-    contextWindow: 300000,
-    maxContextWindow: 1000000,
-    // intl caps output at 32000 where cn allows 131072.
-    maxTokens: 32000,
-    regions: ['intl', 'cn'],
-    credits: { cn: '0.06', intl: '0.06' },
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'high',
-    canDisableThinking: true,
-    description: '原生多模态模型，擅长视觉理解与专业任务',
-  },
+    // intl caps output at 48000 where cn allows 64000, and the two region
+    // ladders share exactly the `high` rung.
   {
     id: 'glm-5.2',
     name: 'GLM-5.2',
     contextWindow: 1000000,
     maxContextWindow: 1000000,
-    // intl caps output at 48000 where cn allows 64000.
     maxTokens: 48000,
     regions: ['intl', 'cn'],
     credits: { cn: '0.79', intl: '0.79' },
     supportsImage: true,
-    reasoningEfforts: ['high', 'xhigh'],
+    reasoningEfforts: ['high'],
     defaultReasoningEffort: 'high',
-    canDisableThinking: true,
+    canDisableThinking: false,
     description: '1M 上下文，擅长长程任务',
   },
+    // intl serves 300000 by default and allows 1M; cn serves 1M outright.
   {
-    id: 'glm-5.1',
-    name: 'GLM-5.1',
-    contextWindow: 200000,
-    maxContextWindow: 200000,
-    maxTokens: 48000,
-    regions: ['cn'],
-    credits: { cn: '0.79' },
+    id: 'minimax-m3.1-flash',
+    name: 'MiniMax-M3.1-Flash',
+    contextWindow: 300000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
+    regions: ['intl', 'cn'],
+    credits: { cn: '0.08', intl: '0.08' },
     supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultReasoningEffort: 'max',
     canDisableThinking: false,
-    description: '',
+    description: '原生多模态，擅长office、agentic、编程任务，推理速度优异',
   },
+    // intl serves 300000 by default and allows 1M; cn serves 1M outright.
   {
-    id: 'glm-5v-turbo',
-    name: 'GLM-5v-Turbo',
-    contextWindow: 200000,
-    maxContextWindow: 200000,
-    maxTokens: 64000,
-    regions: ['cn'],
-    credits: { cn: '0.71' },
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
-    canDisableThinking: false,
-    description: '',
-  },
-  {
-    id: 'glm-5.0',
-    name: 'GLM-5.0',
-    contextWindow: 200000,
-    maxContextWindow: 200000,
-    maxTokens: 48000,
-    regions: ['cn'],
-    credits: { cn: '0.80' },
-    supportsImage: false,
-    reasoningEfforts: [],
-    defaultReasoningEffort: null,
-    canDisableThinking: false,
-    description: '',
-  },
-  {
-    id: 'glm-5.0-turbo',
-    name: 'GLM-5.0-Turbo',
-    contextWindow: 200000,
-    maxContextWindow: 200000,
-    maxTokens: 48000,
-    regions: ['cn'],
-    credits: { cn: '0.95' },
-    supportsImage: false,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
-    canDisableThinking: false,
-    description: '',
-  },
-  {
-    id: 'glm-4.7',
-    name: 'GLM-4.7',
-    contextWindow: 200000,
-    maxContextWindow: 200000,
-    maxTokens: 48000,
-    regions: ['cn'],
-    credits: { cn: '0.23' },
-    supportsImage: false,
-    reasoningEfforts: [],
-    defaultReasoningEffort: null,
-    canDisableThinking: false,
-    description: '',
-  },
-  {
-    id: 'glm-4.6v',
-    name: 'GLM-4.6V',
-    contextWindow: 128000,
-    maxContextWindow: 128000,
+    id: 'kimi-k3.1-pro',
+    name: 'Kimi-K3.1-Pro',
+    contextWindow: 300000,
+    maxContextWindow: 1000000,
     maxTokens: 32000,
-    regions: ['cn'],
-    credits: { cn: '0.11' },
+    regions: ['intl', 'cn'],
+    credits: { cn: '0.97', intl: '0.97' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '',
+    description: 'Kimi 全新旗舰模型，3万亿级参数。办公、代码、3D 创作与长程 Agent 能力全面升级。',
   },
   {
-    id: 'glm-4.6',
-    name: 'GLM-4.6',
-    contextWindow: 168000,
-    maxContextWindow: 168000,
+    id: 'kimi-k3.1-pro-highspeed',
+    name: 'Kimi-K3.1-Pro-Highspeed',
+    contextWindow: 300000,
+    maxContextWindow: 1000000,
     maxTokens: 32000,
-    regions: ['cn'],
-    credits: { cn: '0.23' },
-    supportsImage: false,
-    reasoningEfforts: [],
-    defaultReasoningEffort: null,
+    regions: ['intl'],
+    credits: { intl: '1.56' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '',
+    description: 'K3.1 Pro 高速版本，响应速度提升至 K3.1 Pro 的 2–3 倍，交互更流畅。',
   },
   {
     id: 'kimi-k3',
@@ -509,127 +450,99 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     credits: { intl: '1.62' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
+    defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。',
   },
   {
-    id: 'kimi-k3-1',
-    name: 'Kimi-K3',
-    contextWindow: 1000000,
-    maxContextWindow: 1000000,
-    maxTokens: 32000,
-    regions: ['cn'],
-    credits: { cn: '1.62' },
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
-    canDisableThinking: false,
-    description: '擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。',
-  },
-  {
-    id: 'kimi-k2.8-preview',
-    name: 'Kimi-K2.8-Preview',
-    // intl serves 300000 by default and caps output at 32000; cn serves
-    // 1000000 by default and allows 64000.
-    contextWindow: 300000,
-    maxContextWindow: 1000000,
-    maxTokens: 32000,
-    regions: ['intl', 'cn'],
-    credits: { cn: '0.77', intl: '0.77' },
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'high',
-    canDisableThinking: true,
-    description: '擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。',
-  },
-  {
-    id: 'kimi-k2.7',
-    name: 'Kimi-K2.7-Code',
-    contextWindow: 256000,
-    maxContextWindow: 256000,
-    maxTokens: 32000,
-    regions: ['cn'],
-    credits: { cn: '0.57' },
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
-    canDisableThinking: false,
-    description: '',
-  },
-  {
-    id: 'kimi-k2.6',
-    name: 'Kimi-K2.6',
-    contextWindow: 256000,
-    maxContextWindow: 256000,
-    maxTokens: 32000,
-    regions: ['intl', 'cn'],
-    credits: { cn: '0.52', intl: '0.52' },
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
-    canDisableThinking: false,
-    description: '多模态模型，适合日常任务',
-  },
-  {
-    id: 'kimi-k2.5',
-    name: 'Kimi-K2.5',
-    contextWindow: 164000,
-    maxContextWindow: 164000,
-    maxTokens: 32000,
-    regions: ['cn'],
-    credits: { cn: '0.45' },
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'high',
-    canDisableThinking: false,
-    description: '',
-  },
-  {
-    id: 'kimi-k2-thinking',
-    name: 'Kimi-K2-Thinking',
-    contextWindow: 164000,
-    maxContextWindow: 164000,
-    maxTokens: 32000,
-    regions: ['cn'],
-    credits: { cn: '0.54' },
-    supportsImage: false,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'high',
-    canDisableThinking: false,
-    description: '',
-  },
-  {
-    id: 'deepseek-v4.1-flash',
-    name: 'Deepseek-V4.1-Flash',
-    contextWindow: 300000,
-    maxContextWindow: 1000000,
+    id: 'grok-4.7',
+    name: 'Grok-4.7',
+    contextWindow: 200000,
+    maxContextWindow: 500000,
     maxTokens: 128000,
-    regions: ['intl', 'cn'],
-    credits: { cn: '0.11', intl: '0.00' },
+    regions: ['intl'],
+    credits: { intl: '1.90' },
     supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: 'DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态',
+    description: 'SpaceXAI 打造的前沿模型，专为编程、智能体任务及知识型工作而设计。',
+  },
+    // Served but unpublished on the 2026-10-09 read, published by 2026-11-04;
+    // the window inherited from `gemini-3.5-flash` is replaced by the real one.
+  {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini-3.8-Flash',
+    contextWindow: 300000,
+    maxContextWindow: 1000000,
+    maxTokens: 65536,
+    regions: ['intl'],
+    credits: { intl: '0.95' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'medium', 'high'],
+    defaultReasoningEffort: 'medium',
+    canDisableThinking: false,
+    description: '能力均衡，适合日常使用',
   },
   {
-    id: 'deepseek-v4.1-flash-sg',
-    name: 'Deepseek-V4.1-Flash',
-    contextWindow: 300000,
+    id: 'gpt-6-sol',
+    name: 'GPT-6-Sol',
+    contextWindow: 1000000,
     maxContextWindow: 1000000,
     maxTokens: 128000,
     regions: ['intl'],
-    credits: { intl: '0.03' },
+    credits: { intl: '1.33' },
     supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: 'DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态',
+    description: '专为复杂编码和智能体工作流构建的模型',
+  },
+  {
+    id: 'gpt-6-luna',
+    name: 'GPT-6-Luna',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
+    regions: ['intl'],
+    credits: { intl: '0.07' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '专为单一聚焦、高吞吐量任务打造的高效模型',
+  },
+  {
+    id: 'gpt-6.1-sol',
+    name: 'GPT-6.1-Sol',
+    contextWindow: 272000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
+    regions: ['intl'],
+    credits: { intl: '1.33' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '专为复杂编码和智能体工作流构建的模型',
+  },
+  {
+    id: 'default',
+    name: 'Default',
+    contextWindow: 56000,
+    maxContextWindow: 56000,
+    maxTokens: 24000,
+    regions: ['cn'],
+    credits: { cn: '2.00' },
+    supportsImage: false,
+    reasoningEfforts: [],
+    defaultReasoningEffort: null,
+    canDisableThinking: false,
+    description: '',
   },
   {
     id: 'deepseek-v4-pro',
-    name: 'Deepseek-V4-Pro',
+    name: 'DeepSeek-V4-Pro',
     contextWindow: 1000000,
     maxContextWindow: 1000000,
     maxTokens: 128000,
@@ -670,47 +583,158 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     description: '',
   },
   {
-    id: 'hy4-preview',
-    name: 'Hy4 preview',
+    id: 'minimax-m2.5',
+    name: 'MiniMax-M2.5',
     contextWindow: 200000,
-    maxContextWindow: 1000000,
-    maxTokens: 64000,
-    regions: ['intl', 'cn'],
-    credits: { cn: '0.29', intl: '0.29' },
-    supportsImage: true,
-    reasoningEfforts: ['high'],
+    maxContextWindow: 200000,
+    maxTokens: 48000,
+    regions: ['cn'],
+    credits: { cn: '0.18' },
+    supportsImage: false,
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '混元思考模型，具有增强的推理能力',
+    description: '',
   },
   {
-    // Replaces `hy4-preview-x`, which the cn backend no longer serves.
-    id: 'hy4-preview-f',
-    name: 'Hy4 preview',
+    id: 'minimax-m2.7',
+    name: 'MiniMax-M2.7',
+    contextWindow: 200000,
+    maxContextWindow: 200000,
+    maxTokens: 48000,
+    regions: ['cn'],
+    credits: { cn: '0.19' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '',
+  },
+  {
+    id: 'glm-5.0',
+    name: 'GLM-5.0',
+    contextWindow: 200000,
+    maxContextWindow: 200000,
+    maxTokens: 48000,
+    regions: ['cn'],
+    credits: { cn: '0.80' },
+    supportsImage: false,
+    reasoningEfforts: [],
+    defaultReasoningEffort: null,
+    canDisableThinking: false,
+    description: '',
+  },
+  {
+    id: 'glm-5.0-turbo',
+    name: 'GLM-5.0-Turbo',
+    contextWindow: 200000,
+    maxContextWindow: 200000,
+    maxTokens: 48000,
+    regions: ['cn'],
+    credits: { cn: '0.95' },
+    supportsImage: false,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '',
+  },
+  {
+    id: 'glm-4.7',
+    name: 'GLM-4.7',
+    contextWindow: 200000,
+    maxContextWindow: 200000,
+    maxTokens: 48000,
+    regions: ['cn'],
+    credits: { cn: '0.23' },
+    supportsImage: false,
+    reasoningEfforts: [],
+    defaultReasoningEffort: null,
+    canDisableThinking: false,
+    description: '',
+  },
+  {
+    id: 'glm-4.6',
+    name: 'GLM-4.6',
+    contextWindow: 168000,
+    maxContextWindow: 168000,
+    maxTokens: 32000,
+    regions: ['cn'],
+    credits: { cn: '0.23' },
+    supportsImage: false,
+    reasoningEfforts: [],
+    defaultReasoningEffort: null,
+    canDisableThinking: false,
+    description: '',
+  },
+  {
+    id: 'glm-4.6v',
+    name: 'GLM-4.6V',
+    contextWindow: 128000,
+    maxContextWindow: 128000,
+    maxTokens: 32000,
+    regions: ['cn'],
+    credits: { cn: '0.11' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '',
+  },
+  {
+    id: 'kimi-k3-1',
+    name: 'Kimi-K3',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 32000,
+    regions: ['cn'],
+    credits: { cn: '1.62' },
+    supportsImage: true,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。',
+  },
+  {
+    id: 'kimi-k2.8-preview',
+    name: 'Kimi-K2.8-Preview',
     contextWindow: 1000000,
     maxContextWindow: 1000000,
     maxTokens: 64000,
     regions: ['cn'],
-    credits: { cn: '0.00' },
+    credits: { cn: '0.77' },
     supportsImage: true,
-    reasoningEfforts: ['high'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
-    canDisableThinking: false,
-    description: '混元思考模型，具有增强的推理能力',
+    canDisableThinking: true,
+    description: 'Moonshot AI · 擅长复杂长程自主任务、知识工作与科研推理，前端开发突出',
   },
   {
-    id: 'hy3',
-    name: 'Hy3',
-    contextWindow: 192000,
-    maxContextWindow: 192000,
-    maxTokens: 64000,
-    regions: ['intl', 'cn'],
-    credits: { cn: '0.00', intl: '0.00' },
+    id: 'kimi-k2.5',
+    name: 'Kimi-K2.5',
+    contextWindow: 164000,
+    maxContextWindow: 164000,
+    maxTokens: 32000,
+    regions: ['cn'],
+    credits: { cn: '0.45' },
     supportsImage: true,
-    reasoningEfforts: ['low', 'high'],
+    reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '混元思考模型，具有增强的推理能力',
+    description: '',
+  },
+  {
+    id: 'kimi-k2-thinking',
+    name: 'Kimi-K2-Thinking',
+    contextWindow: 164000,
+    maxContextWindow: 164000,
+    maxTokens: 32000,
+    regions: ['cn'],
+    credits: { cn: '0.54' },
+    supportsImage: false,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '',
   },
   {
     id: 'hy3-x',
@@ -722,6 +746,20 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     credits: { cn: '0.05' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '混元思考模型，具有增强的推理能力',
+  },
+  {
+    id: 'hy4-preview-x',
+    name: 'Hy4 preview',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 64000,
+    regions: ['cn'],
+    credits: { cn: '0.29' },
+    supportsImage: true,
+    reasoningEfforts: ['high'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
     description: '混元思考模型，具有增强的推理能力',
@@ -755,61 +793,64 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     description: '推理速度极快，编码能力强劲，并支持原生多模态输入的匿名大模型',
   },
   {
-    id: 'minimax-m3',
-    name: 'MiniMax-M3',
-    contextWindow: 512000,
-    maxContextWindow: 512000,
+    id: 'step-5-preview',
+    name: 'Step-5-Preview',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
     maxTokens: 64000,
     regions: ['cn'],
-    credits: { cn: '0.25' },
+    credits: { cn: '0.33' },
     supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
+    reasoningEfforts: ['low', 'medium', 'high'],
+    defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '原生多模态，擅长代码、智能体任务',
+    description: '阶跃 StepFun 面向真实任务的新一代旗舰基模',
   },
   {
-    id: 'minimax-m2.7',
-    name: 'MiniMax-M2.7',
-    contextWindow: 200000,
-    maxContextWindow: 200000,
-    maxTokens: 48000,
+    id: 'mimo-v2.6-pro',
+    name: 'Xiaomi MiMo-V2.6-Pro',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 128000,
     regions: ['cn'],
-    credits: { cn: '0.19' },
+    credits: { cn: '0.13' },
     supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
-    canDisableThinking: false,
-    description: '',
-  },
-  {
-    id: 'minimax-m2.5',
-    name: 'MiniMax-M2.5',
-    contextWindow: 200000,
-    maxContextWindow: 200000,
-    maxTokens: 48000,
-    regions: ['cn'],
-    credits: { cn: '0.18' },
-    supportsImage: false,
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '',
+    description: 'Xiaomi · 旗舰推理模型，面向专业、复杂长程工作流，兼顾高阶科研与网络安全',
   },
-  ...UNPUBLISHED_MODELS.filter((model) => model.id === 'gemini-3.8-flash'),
+    // Hunyuan 4 proper, cn-only. Both GA ids are spelled `Hy4` on the wire and
+    // share one shape (1M context, 64K output, image input, a lone `high` rung);
+    // they differ only in what they cost, so the free tier's label spells that
+    // out — two rows reading `Hy4` would be indistinguishable in the card.
   {
-    id: 'gemini-3.5-flash',
-    name: 'Gemini-3.5-Flash',
+    id: 'hy4free',
+    name: 'Hy4 Free',
     contextWindow: 1000000,
     maxContextWindow: 1000000,
-    maxTokens: 65536,
-    regions: ['intl'],
-    credits: { intl: '0.99' },
+    maxTokens: 64000,
+    regions: ['cn'],
+    credits: { cn: '0.00' },
     supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'medium',
+    reasoningEfforts: ['high'],
+    defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '能力均衡，适合日常使用',
+    description: '最新旗舰模型，Agent与多模专长',
+  },
+  {
+    id: 'hy4std',
+    name: 'Hy4',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 64000,
+    regions: ['cn'],
+    credits: { cn: '0.29' },
+    supportsImage: true,
+    reasoningEfforts: ['high'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '最新旗舰模型，Agent与多模专长',
   },
 ]
 
@@ -824,9 +865,38 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
 export const DEFAULT_VISIBLE_MODEL_IDS: readonly string[] = [
   'glm-5.3',
   'deepseek-v4.1-flash',
-  'hy4-preview',
-  'kimi-k2.6',
+  'hy4std',
+  'kimi-k3.1-pro',
 ]
+
+/**
+ * Default selections this table used to ship.
+ *
+ * "Never edited" is recognised by matching the CURRENT shipped set, so replacing
+ * the set outright would turn every existing install into what looks like a user
+ * who hand-picked a short list — and the picker would quietly narrow to it,
+ * because the 2026-11-04 refresh dropped two of the retired ids outright
+ * (`kimi-k2.6` is gone from both regions, `hy4-preview` is intl-only now).
+ * Keeping the retired sets here is what lets the default move without that.
+ */
+const RETIRED_DEFAULT_SELECTIONS: readonly (readonly string[])[] = [
+  ['glm-5.3', 'deepseek-v4.1-flash', 'hy4-preview', 'kimi-k2.6'],
+]
+
+/**
+ * Whether a stored selection is still a shipped default, i.e. the user never
+ * touched the picker.
+ *
+ * Same size and same members, not order-sensitive: the card writes the list in
+ * catalog order, which one default can spell two ways.
+ */
+export function isUntouchedModelSelection(stored: readonly string[]): boolean {
+  if (stored.length === 0) return false
+  return [DEFAULT_VISIBLE_MODEL_IDS, ...RETIRED_DEFAULT_SELECTIONS].some((shipped) => {
+    const known = new Set(shipped)
+    return stored.length === known.size && stored.every((id) => known.has(id))
+  })
+}
 
 /** Every id the fallback knows, in declaration order. */
 export const WORKBUDDY_MODEL_IDS: readonly string[] = FALLBACK_MODELS.map((model) => model.id)
@@ -926,11 +996,15 @@ const WORKBUDDY_VENDOR_RULES: ReadonlyArray<{ re: RegExp; family: string }> = [
   { re: /^glm-/, family: 'zhipu' },
   { re: /^kimi-/, family: 'moonshot' },
   { re: /^deepseek-/, family: 'deepseek' },
-  // Tencent's own family: `hy3`/`hy4-preview` are Hunyuan and `hunyuan-chat`
-  // is the same vendor spelled out, so both must land in one group.
+  // Tencent's own family: `hy3`/`hy4std`/`hy4free` are Hunyuan (`hy` is the
+  // vendor's own short spelling) and `hunyuan-chat` is the same vendor spelled
+  // out, so both must land in one group.
   { re: /^hy[0-9]/, family: 'tencent' },
   { re: /^hunyuan/, family: 'tencent' },
   { re: /^minimax-/, family: 'minimax' },
+  { re: /^mimo-/, family: 'xiaomi' },
+  { re: /^step-/, family: 'stepfun' },
+  { re: /^grok-/, family: 'xai' },
   { re: /^space-bunny$/, family: 'space-bunny' },
 ]
 
