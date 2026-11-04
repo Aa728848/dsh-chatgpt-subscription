@@ -4,7 +4,7 @@
 
 - **[codex] 同一工作空间下的不同用户不再互相覆盖：账号池改用「工作空间 + 用户」复合身份（#85）**
   - **缺陷**：账号池的去重键是 `accountId ?? email`，而 `accountId` 来自 `chatgpt_account_id`——同一工作空间的每个成员都共享该值。于是添加第二个成员时命中了第一个成员的行，凭据被原地覆盖：卡片仍显示「已登录 1 个账号」，先前的账号从列表消失、无法再选回。
-  - **两种身份分开**：上游工作空间身份（`credentials.accountId` `→ chatgpt-account-id` 请求头）保持不变；本地登录身份改为 `(workspace, user)`，用户 id 优先级 `chatgpt_user_id` → `sub` → 邮箱，且工作空间 id 在有用户声明时**绝不**单独充当身份。
+  - **两种身份分开**：上游工作空间身份（`credentials.accountId`，即请求头 `chatgpt-account-id`）保持不变；本地登录身份改为 `(workspace, user)`，用户 id 优先级 `chatgpt_user_id` → `sub` → 邮箱，且工作空间 id 在有用户声明时**绝不**单独充当身份。
   - 复合身份用显式序列化（JSON 数组）后取 SHA-256 前 32 位十六进制，而不是可读拼接：避免分隔符伪造、`catalogSnapshotName` 把 `[^a-z0-9]` 折成 `_` 后的键碰撞，以及把邮箱写进快照文件名。
   - 新增 `src/host/codex-identity.ts`（`parseJwtClaims`/`extractIdentity` 迁入其中），并把它接进四处身份用途：号池 `dedupeKey`、刷新 single-flight `refreshKey`（回退 `refreshToken`）、模型目录缓存键、无号池路径的额度快照键。
   - **顺带修掉的两处同源问题**：目录缓存原本是单槽且失败回退不看 key，会把 A 账号的目录当成 B 的答案；改为按身份键的有界 Map（8 条）+ 按身份重放持久化快照，失败只回退到**当前身份自己**的条目。`credentials.userId` 随凭据持久化，令令牌轮换不再让一个账号看起来像两个。
