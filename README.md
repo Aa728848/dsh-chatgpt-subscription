@@ -75,7 +75,7 @@
 ## 环境要求
 
 - **操作系统**：Windows（需内置 PowerShell 以支持 CurrentUser DPAPI）、macOS 或 Linux
-- **运行时**：Node.js（建议 22+）与 npm
+- **运行时**：Node.js **≥ 22.19**（内置 `undici` 8 的下限，已写入 `package.json` 的 `engines`；建议 24 LTS）与 npm
 - **宿主版本**：DeepSeek Harness `@deepseek-ai/dsh` `0.1.2-alpha.5` 至 `0.2.2-alpha.3`
 
 ---

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **[packaging] 补上 `engines.node`：把「旧 LTS 装得上、跑起来才炸」变成安装期可见**
+  - 用户反馈称 `package.json` 没有 `engines` 字段、建议补 `">=18.0.0"`。缺字段属实，建议值不成立：`dependencies` 的 `undici ^8.10.0` 自声明 `node >=22.19.0`，且被 tsdown 内联进 `lib/index.js`（宿主侧约 4.2 MB 单文件），代理与 fetch 走的就是这份代码。`>=18.0.0` 会把 Node 18/20 判成受支持，问题只从「装的时候就报」推迟到「运行到代理/流式请求时炸」。
+  - 按真实下限声明 `"engines": { "node": ">=22.19.0" }`；README「环境要求」同步写明该数字与来源。
+  - `test/package-integrity.test.ts` 新增断言：`engines.node` 必须存在、必须是 `>=X.Y.Z` 写法、且不弱于内置 undici 的下限（防止日后又退回 `>=18.0.0` 这类口号值）。
+  - **验证**：`npm run typecheck` 0 错误；`npx vitest run test/package-integrity.test.ts` 全通过。
+
 ## 0.57.0 - 2026-11-03
 
 - **[team] 与内置 Agent Teams 共存：修正 R0.5 判据，并把策略段改成尾部投递**

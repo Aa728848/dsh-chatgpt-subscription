@@ -87,6 +87,30 @@ describe('Package Integrity & BOM Checks', () => {
     }
   })
 
+  it('declares a Node engines floor at least as new as the transport it bundles', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'))
+    const node = pkg.engines?.node
+
+    // Without an engines floor npm installs this plugin happily on an old LTS and
+    // the failure only surfaces at runtime, as a syntax/runtime error inside the
+    // bundled transport rather than as an install-time refusal.
+    expect(node, 'package.json must declare engines.node').toBeTruthy()
+
+    const floor = String(node).match(/^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/)
+    expect(floor, `engines.node must be a plain ">=X.Y.Z" floor, got ${String(node)}`).toBeTruthy()
+
+    const declared = [Number(floor![1]), Number(floor![2] ?? 0), Number(floor![3] ?? 0)]
+    // undici ^8 is bundled into lib/index.js and declares node >=22.19.0. A weaker
+    // floor would advertise support for a runtime the bundled transport cannot use,
+    // which is exactly what this guard exists to stop (>=18.0.0 was proposed once).
+    const required = [22, 19, 0]
+    const comparison = declared[0] - required[0] || declared[1] - required[1] || declared[2] - required[2]
+    expect(
+      comparison >= 0,
+      `engines.node ${String(node)} is weaker than the bundled undici floor >=22.19.0`,
+    ).toBe(true)
+  })
+
   it('ensures built lib/index.js does not statically import CallId from @deepseek-ai/dsh-llm', () => {
     const libIndexPath = path.join(ROOT_DIR, 'lib', 'index.js')
     if (fs.existsSync(libIndexPath)) {
