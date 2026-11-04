@@ -14,6 +14,7 @@ import type {
   QuotaStatusDto,
   QuotaWindowDto,
 } from '../shared/contracts.ts'
+import { codexAccountIdentity } from './codex-identity.ts'
 import { OAuthService } from './oauth-service.ts'
 import { codexHeaders, retryAfterMs } from './wire-auth.ts'
 import type { StoredOAuthCredentials } from './token-store.ts'
@@ -622,6 +623,15 @@ function isWindow(value: QuotaWindowDto | null): value is QuotaWindowDto {
   return value !== null
 }
 
+/**
+ * The identity a reading is filed under when no pool row names one.
+ *
+ * The composite local login identity, for the same reason the pool dedupes on it:
+ * with several accounts in one composition, a workspace id alone would make two
+ * members of that workspace share a slot — each showing the other's numbers. The
+ * trailing fallbacks are for a credential that states nothing about itself, which
+ * is the single-account case, where there is nobody to mix up.
+ */
 function identityKey(credentials: StoredOAuthCredentials): string {
-  return credentials.accountId ?? credentials.email ?? credentials.planType ?? 'signed-in'
+  return codexAccountIdentity(credentials) ?? credentials.planType ?? 'signed-in'
 }

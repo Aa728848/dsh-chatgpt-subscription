@@ -304,10 +304,16 @@ describe('an adopted snapshot is borrowed, never owned', () => {
     const pool = new CodexAccountPool({ store: new MemoryTokenStore(), backend: backend as never })
     const sourcePath = 'C:\\Users\\a\\.codex\\auth.json'
     // The SAME account, imported and then signed in through this plugin. The
-    // dedupe key is the accountId, and the imported snapshot states the very id
-    // the managed sign-in does — which is the only thing that lets one row be
-    // recognized as the other without asking the user.
-    const imported = { ...adoptedCredential(1, 3_600_000, sourcePath), accountId: 'acct-1' }
+    // dedupe key is the (workspace, user) pair, so the two credentials have to
+    // agree on BOTH halves: the snapshot states the very id the managed sign-in
+    // does, and the user it names is the same person. That is what lets one row be
+    // recognized as the other without asking the user — and, conversely, what stops
+    // a different member of the same workspace from being folded into this row.
+    const imported = {
+      ...adoptedCredential(1, 3_600_000, sourcePath),
+      accountId: 'acct-1',
+      email: 'user1@example.com',
+    }
     await pool.addAccount(imported)
     const reauthorized = await pool.addAccount({ ...credential(1, 3_600_000), accessToken: 'managed-access-1' })
 

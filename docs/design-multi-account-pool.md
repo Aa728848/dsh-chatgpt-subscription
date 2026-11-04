@@ -94,7 +94,7 @@ export class AccountPoolCore<TCredentials, TSummary> {
 
 | 文件 | 职责 |
 |---|---|
-| `src/host/account-pool-codex.ts` | `StoredOAuthCredentials`；dedupe = `accountId ?? email`；refresh = OAuthService 的单账号刷新（轮换写回池） |
+| `src/host/codex-account-pool.ts` | `StoredOAuthCredentials`；dedupe = `codexAccountIdentity`（工作空间 + 用户复合身份的摘要，见 `src/host/codex-identity.ts`）；refresh = OAuthService 的单账号刷新（轮换写回池） |
 | `src/host/command-code/account-pool.ts` | `CommandCodeCredentials`；dedupe = `userId+keyName ?? sha256(apiKey)`；无 refresh |
 | `src/host/kimi-code/account-pool.ts` | `KimiCodeCredentials`；dedupe = `userId ?? email`；refresh = `refreshAccessToken`（保留 region/oauthHost/baseUrl） |
 
@@ -201,7 +201,7 @@ loop:
 ### 7.3 ChatGPT / Codex（改造面最大，最后做）
 
 - `oauth-service.ts`：
-  - `exchangeCode` 完成 → `pool.addAccount`（dedupe = `chatgpt_account_id`），旧单账号存储同步主账号镜像；
+  - `exchangeCode` 完成 → `pool.addAccount`（dedupe = 工作空间 + 用户复合身份——**不能**只用 `chatgpt_account_id`：同一工作空间的多个成员共享该值，只用它会把第二个成员登录变成覆盖第一个成员的行），旧单账号存储同步主账号镜像；
   - `credentials()` 改为 `pool.getEffectiveAccount` 驱动；`performRefresh` 泛化为"刷新指定账号并写回池"，400/401 → `markAuthFailed` 而非清空存储；
   - 登录流程（SSE、1455 回调、全局单流程锁）不变，天然串行添加账号。
 - `responses-client.ts`：`send` 包账号轮换环；401 → 刷新重试 → `markAuthFailed` 换号；429 → 冷却换号。`chatgpt-account-id` 头随账号凭据走（`wire-auth.ts` 已支持）。

@@ -32,6 +32,15 @@ export interface StoredOAuthCredentials extends AdoptedCredentialMarkers {
   idToken?: string
   expiresAt: number
   accountId?: string
+  /**
+   * Stable id of the human who signed in, as `codex-identity.ts` read it out of
+   * the tokens at sign-in.
+   *
+   * Persisted rather than re-derived on every read, so a rotation that hands back
+   * an opaque access token cannot make one account look like two: the field
+   * survives the rotation the same way `accountId` and `email` do.
+   */
+  userId?: string
   email?: string
   planType?: string
 }
@@ -105,6 +114,7 @@ export function parseStoredCredentials(value: unknown): StoredOAuthCredentials {
     expiresAt: record.expiresAt,
     idToken: optional('idToken'),
     accountId: optional('accountId'),
+    userId: optional('userId'),
     email: optional('email'),
     planType: optional('planType'),
   }

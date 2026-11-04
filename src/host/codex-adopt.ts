@@ -103,6 +103,7 @@
 import { readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { CODEX_AUTH_CLAIMS_KEY } from './codex-identity.ts'
 import type { StoredOAuthCredentials } from './token-store.ts'
 
 /**
@@ -139,9 +140,6 @@ export const CODEX_CLI_CHATGPT_AUTH_MODE = 'chatgpt'
 
 /** Where an adopted snapshot came from, for the card and for the pool record. */
 export const CODEX_CLI_CREDENTIAL_SOURCE = 'codex'
-
-/** Namespace the id token carries the ChatGPT account claims under. */
-const CODEX_AUTH_CLAIMS_KEY = 'https://api.openai.com/auth'
 
 /**
  * What the user is told when an adopted credential has aged out.
@@ -355,10 +353,11 @@ export function parseAdoptedCodexCredential(
   if (idToken !== undefined) {
     credentials.idToken = idToken
     // Email and plan are read out of the id token's own claims, and only when the
-    // token states them. The pool derives its account identity from either one, so
-    // a claim that is absent leaves the row falling back to the other — which is
-    // honest about knowing nothing more, where a guessed value would invent a
-    // second account the user cannot recognise.
+    // token states them. The pool derives its identity from the tokens themselves
+    // (codex-identity.ts), so nothing here is an identity field of its own: a claim
+    // that is absent leaves that derivation falling back to the next one — which is
+    // honest about knowing nothing more, where a guessed value would invent an
+    // account the user cannot recognise.
     const claims = decodeJwtClaims(idToken)
     const email = claims === undefined ? undefined : nonEmptyString(claims.email)
     if (email !== undefined) credentials.email = email
