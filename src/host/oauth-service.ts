@@ -28,6 +28,7 @@ import type { AccountRotationStrategy, PoolAccountSummaryDto } from '../shared/a
 import type { PoolStorageDto } from '../shared/contracts.ts'
 import { OAuthCallbackServer } from './callback-server.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
+import { codexAccountIdentity, extractIdentity } from './codex-identity.ts'
 import type { StoredOAuthCredentials, TokenStore } from './token-store.ts'
 
 type FetchLike = typeof fetch
@@ -38,18 +39,6 @@ interface OAuthTokenResponse {
   refresh_token?: unknown
   id_token?: unknown
   expires_in?: unknown
-}
-
-interface OAuthClaims {
-  email?: unknown
-  chatgpt_account_id?: unknown
-  chatgpt_plan_type?: unknown
-  organizations?: Array<{ id?: unknown }>
-  'https://api.openai.com/auth'?: {
-    chatgpt_account_id?: unknown
-    chatgpt_plan_type?: unknown
-    organizations?: Array<{ id?: unknown }>
-  }
 }
 
 interface ActiveLogin {
@@ -853,18 +842,6 @@ export function buildAuthorizationUrl(verifier: string, state: string): string {
   return `${OAUTH_AUTHORIZE_URL}?${params.toString()}`
 }
 
-export function parseJwtClaims(token: string | undefined): OAuthClaims | undefined {
-  if (token === undefined) return undefined
-  const parts = token.split('.')
-  if (parts.length !== 3) return undefined
-  try {
-    const value = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as unknown
-    return typeof value === 'object' && value !== null ? value as OAuthClaims : undefined
-  } catch {
-    return undefined
-  }
-}
-
 export function publicError(error: unknown, fallback: PublicErrorDto['code'] = 'internal'): PublicErrorDto {
   if (error instanceof OAuthServiceError) return { code: error.code, message: error.message }
   return { code: fallback, message: 'The ChatGPT sign-in operation failed.' }
@@ -896,38 +873,30 @@ function credentialsFromTokenResponse(
   return {
     ...base,
     accountId: identity.accountId ?? previous?.accountId,
+    // Carried across a rotation for the same reason as the two fields beside it:
+    // the pool and every per-account cache key on who signed in, and a rotation
+    // that answered without an id token must not make the row look like a
+    // different person — that is a second row the user never asked for.
+    userId: identity.userId ?? previous?.userId,
     email: identity.email ?? previous?.email,
     planType: identity.planType ?? previous?.planType,
   }
 }
 
-function extractIdentity(credentials: Pick<StoredOAuthCredentials, 'accessToken' | 'idToken'>): {
-  accountId?: string
-  email?: string
-  planType?: string
-} {
-  const result: { accountId?: string; email?: string; planType?: string } = {}
-  for (const token of [credentials.idToken, credentials.accessToken]) {
-    const claims = parseJwtClaims(token)
-    if (claims === undefined) continue
-    const nested = claims['https://api.openai.com/auth']
-    result.email ??= stringClaim(claims.email)
-    result.planType ??= stringClaim(claims.chatgpt_plan_type) ?? stringClaim(nested?.chatgpt_plan_type)
-    result.accountId ??= stringClaim(claims.chatgpt_account_id)
-      ?? stringClaim(nested?.chatgpt_account_id)
-      ?? stringClaim(claims.organizations?.[0]?.id)
-      ?? stringClaim(nested?.organizations?.[0]?.id)
-  }
-  return result
-}
-
-/** Identity one refresh is keyed by, so a rotation is never redeemed twice. */
+/**
+ * Identity one refresh is keyed by, so a rotation is never redeemed twice.
+ *
+ * The SAME key the pool dedupes on, and deliberately so: it has to separate two
+ * members of one workspace, because their grants are unrelated and sharing one
+ * in-flight refresh between them would hand one account's rotated token to the
+ * other. A workspace id alone cannot do that — it is what both members have in
+ * common — so this is the composite local login identity, with the rotating
+ * refresh token as the fallback for a credential that states nothing else. That
+ * fallback is the conservative direction: a token that differs always gets its
+ * own flight, and a flight nobody joined simply runs by itself.
+ */
 function refreshKey(credentials: StoredOAuthCredentials): string {
-  return credentials.accountId ?? credentials.email ?? credentials.refreshToken
-}
-
-function stringClaim(value: unknown): string | undefined {
-  return typeof value === 'string' && value !== '' ? value : undefined
+  return codexAccountIdentity(credentials) ?? credentials.refreshToken
 }
 
 function maskEmail(email: string | undefined): string | null {

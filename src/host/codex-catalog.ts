@@ -1,6 +1,7 @@
 import { catalogSnapshotName, readCatalogSnapshot, writeCatalogSnapshot } from './common/catalog-snapshot.ts'
 import { CODEX_MODELS_URL } from '../compat.ts'
 import { CODEX_MODEL_CATALOG } from '../shared/model-catalog.ts'
+import { codexAccountIdentity } from './codex-identity.ts'
 import type { StoredOAuthCredentials } from './token-store.ts'
 import { codexHeaders } from './wire-auth.ts'
 
@@ -48,30 +49,51 @@ interface CatalogCache {
   live: boolean
 }
 
-let catalogCache: CatalogCache | null = null
+/**
+ * How many accounts' listings are held at once.
+ *
+ * One slot was enough while a workspace id was mistaken for an account, because
+ * every member of a workspace then shared one. It is not enough now: a pool
+ * rotates between accounts, and a single slot would have each rotation evict the
+ * other account's listing and re-fetch it, which turns the 15-minute TTL into
+ * "no cache at all" for exactly the multi-account setup this line supports. The
+ * bound is the pool's own order of magnitude, so a real composition always fits
+ * and a pathological one only loses the coldest entry.
+ */
+const CATALOG_CACHE_ACCOUNTS = 8
+
+/** Listings held per login identity; see {@link CATALOG_CACHE_ACCOUNTS}. */
+const catalogCache = new Map<string, CatalogCache>()
+/** The entry {@link getCachedCatalog} answers with: the one a load last wrote. */
+let latestKey: string | null = null
 const catalogInFlight = new Map<string, Promise<readonly CodexCatalogEntry[]>>()
-let snapshotRehydrated: Promise<void> | null = null
+/** Snapshots already read back from disk, per identity. */
+const snapshotRehydrated = new Map<string, Promise<void>>()
 
 /** Drop the cached listing, forcing the next load to hit the network. */
 export function clearCachedCatalog(): void {
-  catalogCache = null
+  catalogCache.clear()
   catalogInFlight.clear()
+  latestKey = null
 }
 
 /**
  * The listing currently held, or undefined before the first load.
  *
- * Callers that need a catalog with no credential read the shipped table
- * directly; returning it here under a different entry type would force every
- * one of them to convert it.
+ * "Currently held" is the entry a load wrote last: a picker asks what the
+ * account serving it can call, and that is the account whose listing was fetched
+ * most recently. Callers that need a catalog with no credential read the shipped
+ * table directly; returning it here under a different entry type would force
+ * every one of them to convert it.
  */
 export function getCachedCatalog(): readonly CodexCatalogEntry[] | undefined {
-  return catalogCache?.models
+  return latestKey === null ? undefined : catalogCache.get(latestKey)?.models
 }
 
 /** Whether the held listing is the shipped table standing in for a failed call. */
 export function isCatalogFallback(): boolean {
-  return catalogCache !== null && !catalogCache.live
+  const latest = latestKey === null ? undefined : catalogCache.get(latestKey)
+  return latest !== undefined && !latest.live
 }
 
 export interface CodexCatalogLoadOptions {
@@ -100,8 +122,9 @@ export function loadCodexCatalog(
 ): Promise<readonly CodexCatalogEntry[]> {
   const key = accountKeyFor(credentials)
   if (options.force !== true) {
-    const cached = catalogCache
-    if (cached !== null && cached.key === key && Date.now() - cached.at < CATALOG_TTL_MS) {
+    const cached = catalogCache.get(key)
+    if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) {
+      latestKey = key
       return Promise.resolve(cached.models)
     }
   }
@@ -129,13 +152,20 @@ async function performCatalogLoad(
   const key = accountKeyFor(credentials)
   const fetchFn = options.fetchFn ?? fetch
 
-  // Rehydrate the persisted listing once per process so the first picker after a
-  // restart answers from disk instead of waiting on the network.
-  snapshotRehydrated ??= rehydrateSnapshot(key)
-  await snapshotRehydrated
+  // Rehydrate the persisted listing once per identity so the first picker after a
+  // restart answers from disk instead of waiting on the network. Per identity, not
+  // per process: each login has its own snapshot file, and rehydrating only
+  // whichever account happened to ask first left every other account cold.
+  let rehydrated = snapshotRehydrated.get(key)
+  if (rehydrated === undefined) {
+    rehydrated = rehydrateSnapshot(key)
+    snapshotRehydrated.set(key, rehydrated)
+  }
+  await rehydrated
 
-  const cached = catalogCache
-  if (cached !== null && cached.key === key && Date.now() - cached.at < CATALOG_TTL_MS) {
+  const cached = catalogCache.get(key)
+  if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) {
+    latestKey = key
     return cached.models
   }
 
@@ -157,13 +187,35 @@ async function performCatalogLoad(
     // snapshot with the shipped table.
     void writeCatalogSnapshot(catalogSnapshotName(SNAPSHOT_SCOPE, key), [...models], Date.now())
   } catch {
-    // A failed call answers with whatever is already held, which may be
-    // nothing — and the callers read that as "use the shipped table".
-    models = getCachedCatalog() ?? []
+    // A failed call answers with what is already held FOR THIS IDENTITY, which may
+    // be nothing — and the callers read that as "use the shipped table". It must
+    // not be some other account's listing: filing the fallback under whatever the
+    // cache held last would serve one member of a workspace the models another
+    // member's plan fetched, which is the mix-up the identity split exists to end.
+    models = catalogCache.get(key)?.models ?? []
     live = false
   }
-  catalogCache = { at: Date.now(), models, key, live }
+  remember(key, { at: Date.now(), models, key, live })
   return models
+}
+
+/**
+ * File one listing under its identity, keeping the map bounded.
+ *
+ * Eviction is oldest-fetch-first, which is the entry a rotation is least likely to
+ * ask for next; the bound exists so a composition that signs in far more accounts
+ * than the pool holds cannot grow this map without end.
+ */
+function remember(key: string, entry: CatalogCache): void {
+  catalogCache.set(key, entry)
+  latestKey = key
+  while (catalogCache.size > CATALOG_CACHE_ACCOUNTS) {
+    const oldest = [...catalogCache.entries()]
+      .filter(([candidate]) => candidate !== key)
+      .sort((left, right) => left[1].at - right[1].at)[0]
+    if (oldest === undefined) break
+    catalogCache.delete(oldest[0])
+  }
 }
 
 /**
@@ -178,8 +230,10 @@ async function rehydrateSnapshot(key: string): Promise<void> {
     (value) => (Array.isArray(value) ? value.flatMap((item) => parseListingEntry(item)) : undefined),
   ).catch(() => undefined)
   if (snapshot === undefined || snapshot.models.length === 0) return
-  if (catalogCache !== null) return
-  catalogCache = { at: snapshot.fetchedAt, models: snapshot.models, key, live: true }
+  // A listing already in memory wins: it is this process's newest answer for this
+  // identity, and a restart is the only case where the file is newer than nothing.
+  if (catalogCache.has(key)) return
+  remember(key, { at: snapshot.fetchedAt, models: snapshot.models, key, live: true })
 }
 
 /**
@@ -262,12 +316,19 @@ function parseEfforts(value: unknown): string[] | null {
 /**
  * Cache identity for one credential.
  *
- * The account id is the entitlement boundary: two accounts of the same user can
- * see different listings, and a pool rotates between them, so the key has to
- * follow the account rather than the person.
+ * The listing is served per PLAN, and a plan belongs to the local login — the
+ * workspace id alone is not an identity here either: two members of one workspace
+ * can hold different plans, so filing both listings under the workspace would let
+ * one member's picker answer with models the other member's plan does not serve.
+ * The key is therefore the same composite identity the pool dedupes on, and its
+ * digest form is what keeps the persisted snapshot's file name both distinct after
+ * `catalogSnapshotName` folds it and free of an email address.
+ *
+ * `'default'` answers a credential that states nothing about itself, which is the
+ * single pre-sign-in case this loader ever sees.
  */
 function accountKeyFor(credentials: StoredOAuthCredentials): string {
-  return credentials.accountId || 'default'
+  return codexAccountIdentity(credentials) ?? 'default'
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

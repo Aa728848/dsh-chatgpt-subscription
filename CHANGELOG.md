@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[codex] 同一工作空间下的不同用户不再互相覆盖：账号池改用「工作空间 + 用户」复合身份（#85）**
+  - **缺陷**：账号池的去重键是 `accountId ?? email`，而 `accountId` 来自 `chatgpt_account_id`——同一工作空间的每个成员都共享该值。于是添加第二个成员时命中了第一个成员的行，凭据被原地覆盖：卡片仍显示「已登录 1 个账号」，先前的账号从列表消失、无法再选回。
+  - **两种身份分开**：上游工作空间身份（`credentials.accountId`，即请求头 `chatgpt-account-id`）保持不变；本地登录身份改为 `(workspace, user)`，用户 id 优先级 `chatgpt_user_id` → `sub` → 邮箱，且工作空间 id 在有用户声明时**绝不**单独充当身份。
+  - 复合身份用显式序列化（JSON 数组）后取 SHA-256 前 32 位十六进制，而不是可读拼接：避免分隔符伪造、`catalogSnapshotName` 把 `[^a-z0-9]` 折成 `_` 后的键碰撞，以及把邮箱写进快照文件名。
+  - 新增 `src/host/codex-identity.ts`（`parseJwtClaims`/`extractIdentity` 迁入其中），并把它接进四处身份用途：号池 `dedupeKey`、刷新 single-flight `refreshKey`（回退 `refreshToken`）、模型目录缓存键、无号池路径的额度快照键。
+  - **顺带修掉的两处同源问题**：目录缓存原本是单槽且失败回退不看 key，会把 A 账号的目录当成 B 的答案；改为按身份键的有界 Map（8 条）+ 按身份重放持久化快照，失败只回退到**当前身份自己**的条目。`credentials.userId` 随凭据持久化，令令牌轮换不再让一个账号看起来像两个。
+  - **兼容**：旧行没有 `userId` 字段，身份从已存令牌的 claims 重新推导，因此升级后重新授权仍命中原行，不会长出重复账号；三个用户声明全缺时才退化为工作空间身份，与改动前一致。
+  - **验证**：`test/codex-account-identity.test.ts` 16 项回归（同工作空间两成员独立保存/原地更新/跨工作空间区分/旧行迁移/刷新独立/目录不串/额度不串）；把四处规则临时改回旧写法后有 6 项失败，确认测试确实能抓住该缺陷。`npm run typecheck` 0 错误；`npx vitest run` 全量通过。
+
 - **[packaging] 补上 `engines.node`：把「旧 LTS 装得上、跑起来才炸」变成安装期可见**
   - 用户反馈称 `package.json` 没有 `engines` 字段、建议补 `">=18.0.0"`。缺字段属实，建议值不成立：`dependencies` 的 `undici ^8.10.0` 自声明 `node >=22.19.0`，且被 tsdown 内联进 `lib/index.js`（宿主侧约 4.2 MB 单文件），代理与 fetch 走的就是这份代码。`>=18.0.0` 会把 Node 18/20 判成受支持，问题只从「装的时候就报」推迟到「运行到代理/流式请求时炸」。
   - 按真实下限声明 `"engines": { "node": ">=22.19.0" }`；README「环境要求」同步写明该数字与来源。

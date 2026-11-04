@@ -53,6 +53,7 @@ import {
 } from './token-store.ts'
 import { createPlatformTokenStore } from './platform-token-store.ts'
 import { ConcurrencyGate } from './common/concurrency-gate.ts'
+import { codexAccountIdentity } from './codex-identity.ts'
 import { OAuthServiceError } from './oauth-service.ts'
 import type { AccountRotationStrategy, PoolAccountQuotaDto, PoolAccountSummaryDto } from '../shared/account-pool-contracts.ts'
 import type { QuotaUsageDto } from '../shared/contracts.ts'
@@ -299,9 +300,10 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
       poolFile: codexPoolPath(),
       keychainService: 'dsh-chatgpt-subscription-pool',
       parsePoolData: parseCodexPoolData,
-      // One ChatGPT account is identified by its account id; the email is the
-      // fallback for credentials minted before the id claim was read.
-      dedupeKey: (credentials) => credentials.accountId ?? credentials.email,
+      // A local login, not a workspace: the workspace id is shared by every member
+      // of it, so keying on that alone made a second member's sign-in REPLACE the
+      // first and left the earlier one unselectable. See codex-identity.ts.
+      dedupeKey: (credentials) => codexAccountIdentity(credentials),
       defaultAlias: (credentials, position) => credentials.email ?? `账号 ${position}`,
       createAccount: ({ id, alias, credentials, addedAt, isPrimary }) => {
         const adopted = isAdoptedCodexPoolCredential(credentials)
