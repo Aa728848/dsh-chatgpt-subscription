@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.58.0 - 2026-11-04
+
 - **[harness] 支持 DSH 0.2.2-rc.1，并保留 0.2.2-alpha.3、latest 0.2.1-rc.5 与旧代兼容**
   - 开发基线切换到 `0.2.2-rc.1`，同步正式版 Cordis `4.1.0`、Loader `1.1.0` 与 Schemastery `3.19.0`；`peerDependencies` 完整保留自 `0.1.2-alpha.5` 起的全部历史子句并追加 `^0.2.2-rc.1` 及对应正式版 vendor。
   - 核对上游 `dsh-v0.2.2-alpha.3..dsh-v0.2.2-rc.1` 全部变更（387 个 `package.json`，0 个非 `package.json` 源码文件）：PTC 独立 executor、计划模式与修剪器 fork、五大宿主缓存守卫及子代理授权接缝均无需改动。上游 `dsh-tool-pwsh-persistent@0.2.2-rc.1` 已补齐发布，`npm exec --package=@deepseek-ai/dsh@0.2.2-rc.1` 闭环恢复正常。
@@ -21,6 +23,10 @@
   - 按真实下限声明 `"engines": { "node": ">=22.19.0" }`；README「环境要求」同步写明该数字与来源。
   - `test/package-integrity.test.ts` 新增断言：`engines.node` 必须存在、必须是 `>=X.Y.Z` 写法、且不弱于内置 undici 的下限（防止日后又退回 `>=18.0.0` 这类口号值）。
   - **验证**：`npm run typecheck` 0 错误；`npx vitest run test/package-integrity.test.ts` 全通过。
+
+- **[workbuddy] 同步 2026-11-04 随包模型目录与跨区保守能力合并**
+  - 按最新国区与国际区实时 `/v3/config` 刷新 `src/host/workbuddy/model-catalog.ts` 离线兜底表：仅最大窗口取并集，默认服务窗口、输出上限、思考档位与图片/关思考开关均取两区交集，避免任一区域网关返回 400；同步更新两区独有模型归属（`regions`）并清空已正式上架的 `UNPUBLISHED_MODELS`。
+  - 新增 `isUntouchedModelSelection` 兼容旧版随包默认勾选集合，未手动改过勾选的用户升级后自动获得新目录全集。
 
 ## 0.57.0 - 2026-11-03
 
