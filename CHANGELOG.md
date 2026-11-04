@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **[harness] 支持 DSH 0.2.2-rc.1，并保留 0.2.2-alpha.3、latest 0.2.1-rc.5 与旧代兼容**
+  - 开发基线切换到 `0.2.2-rc.1`，同步正式版 Cordis `4.1.0`、Loader `1.1.0` 与 Schemastery `3.19.0`；`peerDependencies` 完整保留自 `0.1.2-alpha.5` 起的全部历史子句并追加 `^0.2.2-rc.1` 及对应正式版 vendor。
+  - 核对上游 `dsh-v0.2.2-alpha.3..dsh-v0.2.2-rc.1` 全部变更（387 个 `package.json`，0 个非 `package.json` 源码文件）：PTC 独立 executor、计划模式与修剪器 fork、五大宿主缓存守卫及子代理授权接缝均无需改动。上游 `dsh-tool-pwsh-persistent@0.2.2-rc.1` 已补齐发布，`npm exec --package=@deepseek-ai/dsh@0.2.2-rc.1` 闭环恢复正常。
+  - **验证**：新基线 `0.2.2-rc.1`、精确 `0.2.2-alpha.3` 洁净室与精确 `0.2.1-rc.5`（当前 npm `latest`）洁净室结果逐项一致，强制全工程类型检查 0 错误，全量 Vitest 均为 **359 文件 / 6584 项通过**（另 2 文件 / 9 项跳过）；旧代精确 `0.1.5-rc.1` 洁净室在仅排除已知 `0.1.7+` PTC 测试文件后为 **358 文件 / 6579 项通过**（另 2 文件 / 10 项跳过）。打包产物在本机 `0.2.2-rc.1` 隔离 Web Profile 安装与启动零报错，`/status` 与 13 线路 `/hub/overview` 路由冒烟通过。详见 `.dsh/skills/dsh-harness-upgrade/references/0.2.2-rc.1.md`。
+
 - **[codex] 同一工作空间下的不同用户不再互相覆盖：账号池改用「工作空间 + 用户」复合身份（#85）**
   - **缺陷**：账号池的去重键是 `accountId ?? email`，而 `accountId` 来自 `chatgpt_account_id`——同一工作空间的每个成员都共享该值。于是添加第二个成员时命中了第一个成员的行，凭据被原地覆盖：卡片仍显示「已登录 1 个账号」，先前的账号从列表消失、无法再选回。
   - **两种身份分开**：上游工作空间身份（`credentials.accountId`，即请求头 `chatgpt-account-id`）保持不变；本地登录身份改为 `(workspace, user)`，用户 id 优先级 `chatgpt_user_id` → `sub` → 邮箱，且工作空间 id 在有用户声明时**绝不**单独充当身份。

@@ -14,7 +14,7 @@
  * ## 依赖声明
  *
  * `package.json` 里它同时出现在 `peerDependencies`（宽范围，与其余六个
- * `dsh-client-*` 相同的写法）和 `devDependencies`（`^0.2.2-alpha.3`，编译期需要）。
+ * `dsh-client-*` 相同的写法）和 `devDependencies`（`^0.2.2-rc.1`，编译期需要）。
  * 运行时不从这里取任何东西。
  *
  * @module @eddyskywalker/dsh-chatgpt-subscription/client/minimax-code/commands-contract

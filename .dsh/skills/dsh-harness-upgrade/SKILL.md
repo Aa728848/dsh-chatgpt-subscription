@@ -6,7 +6,7 @@ description: Use when the DSH harness this plugin supports moves to a new releas
 # Keeping this plugin working across DSH generations
 
 This plugin ships **one code base for every supported harness generation**
-(0.1.2-alpha.5 through 0.2.2-alpha.3 today). Users are
+(0.1.2-alpha.5 through 0.2.2-rc.1 today). Users are
 spread across `latest` / `next` / `alpha`, so a new harness release never licenses
 dropping an old one: every breaking change gets bridged at a boundary, and both
 generations keep passing tests. This skill is the procedure, the seams, and the
@@ -414,12 +414,11 @@ next upgrade starts by reading the newest file in `references/`.
 
 ## 7. Current state
 
-- Tested baseline: **0.2.2-alpha.3** (`^0.2.2-alpha.3` in `devDependencies` and `peerDependencies`); peer support 0.1.2-alpha.5
-  onwards. Forced host/client/test/scripts typecheck, build, lockfile and package checks pass; the full run is **357 files passed /
-  2 skipped; 6554 tests passed / 9 skipped / 0 failed**. The exact-0.2.1-rc.5 room has identical counts. The exact-0.1.5-rc.1
-  room passes its supported suite with **356 files passed / 2 skipped; 6549 tests passed / 10 skipped** after excluding its one
-  documented generation-bound PTC file. The old-generation declaration gaps and the published-alpha.3/GUI smoke blockers are
-  recorded in `references/0.2.2-alpha.3.md`.
+- Tested baseline: **0.2.2-rc.1** (`^0.2.2-rc.1` in `devDependencies` and `peerDependencies`, with Cordis `4.1.0`, Loader `1.1.0`, and Schemastery `3.19.0`); peer support 0.1.2-alpha.5
+  onwards. Forced host/client/test/scripts typecheck, build, lockfile and package checks pass; the full run is **359 files passed /
+  2 skipped; 6584 tests passed / 9 skipped / 0 failed**. Both the exact-0.2.2-alpha.3 and exact-0.2.1-rc.5 clean rooms have identical counts. The exact-0.1.5-rc.1
+  room passes its supported suite with **358 files passed / 2 skipped; 6579 tests passed / 10 skipped** after excluding its one
+  documented generation-bound PTC file. Details are recorded in `references/0.2.2-rc.1.md`.
 - What 0.1.7 changed, and how each was bridged: `references/0.1.7-alpha.1.md` — the
   two fatal-at-boot rewrites (conversation model, settings API). `references/0.1.7-rc.1.md`
   covers the rc.1 delta: **no behavioural change was needed**, the only seam touched
@@ -465,6 +464,7 @@ next upgrade starts by reading the newest file in `references/`.
   `references/0.2.2-alpha.3.md` covers the standalone PTC executor and batch bridge, why the plan/pruner
   forks remain necessary, model-switch compaction, the subagent parent-route and description changes, official
   Russian locales, the vendor bump, and the exact alpha.3/rc.5/old-generation verification boundaries.
+  `references/0.2.2-rc.1.md` covers 0.2.2-rc.1: zero non-`package.json` source delta from 0.2.2-alpha.3, promotion of Cordis `4.1.0` / Loader `1.1.0` / Schemastery `3.19.0`, resolution of the upstream `dsh-tool-pwsh-persistent` npm closure, identical 0.2.2-alpha.3 and 0.2.1-rc.5 clean-room outcomes, and isolated 0.2.2-rc.1 Web Host smoke verification.
   `references/cache-warmup-retrieval.md` is likewise not a harness round: it freezes the cache-warmup state machine, default-on retrieval behavior, PTC/Read JSON and PostToolDecision seams, reminder-only user-event handling, and the runtime/four-request evidence. Latest full run for that work: **310 files passed / 2 skipped; 5166 passed / 9 skipped**, plus **112 focused default-on tests**.
   `references/codex-wire-surface.md` is not a harness round but belongs in this
   list because it rewrites a compatibility seam: the Codex subscription line now

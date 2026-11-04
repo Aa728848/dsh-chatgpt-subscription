@@ -18,7 +18,7 @@
  *    `peerDependencies` 里没有它们（也不该有：装不装它们不该由本包决定），
  *    所以全部按**结构契约**描述：`SessionLike` / `SessionEventLike` /
  *    `ToolResultMessageLike` 都是本文件里的局部接口，`deepFreeze` 也是本地实现。
- *    这样从 0.1.2-alpha.5 到 0.2.2-alpha.3 的每一代 harness 都能解析这个模块。
+ *    这样从 0.1.2-alpha.5 到 0.2.2-rc.1 的每一代 harness 都能解析这个模块。
  *
  * 与官方实现的一致性以测试锁定：`test/tool-result-pruner.test.ts` 覆盖配置校验、
  * 代理对不劈开、非文本块不计价、以及 `compaction/prune` 与替换事件的先后顺序。
