@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.59.0 - 2026-11-06
+
 - **[codemode] 程序内的每条子调用重新写回会话：界面能看见「启动了哪个工具」**
   - **缺的是什么**：内核的 PTC 传输会为每条子调用 append `tool/ptc-dispatch-start` / `tool/ptc-dispatch`，界面（`tool-call-tree`）靠这一对事件把子调用画到父调用下面；本行的程序交给内核运行时执行，而那两条事件不在运行时的对外契约里，于是 Code Mode 会话里回放事件**一条都没有**（实测 26 条 `tool/call` 对 0 条 `tool/ptc-dispatch*`），一次程序在界面上只有「一行日志 + 一具黑盒」。
   - **补法**：[`src/host/codemode/transport.ts`](src/host/codemode/transport.ts) 新增 `createDispatchLog`，在子调用**真正进入执行 lane 之后**写 start、结算时写 settle，字段（`rootCallId` / `parentCallId` / `subCallId` / `name` / `arguments`）与内核逐字对齐；`subCallId` 沿用既有的 `<父>:ptc:<n>` 命名，因此 `isNestedCall` 与界面两侧都不用改。
@@ -15,7 +17,7 @@
   - 遮蔽接缝是 per-scope `ctx.tools.setExecutor()`（0.2.2+）：`describe()` 决定请求面，`execute()` 在派发前拒绝模型直呼被遮蔽的名字并给出发现指引；程序内子调用整批委托给内核原生 executor，保留完整策略 / 审批 / post-execute 管线。
   - **kimi-code 缓存前提**：说明段恒定（无计数、无 namespace 清单）；`code_run` 与 `run_code` 同等享受 `ref://` 大输出预览与 `cache_warmup_result` 精确补读。
   - 代次降级：解析不到 `@deepseek-ai/dsh-tool-executor-native` 时自动退回 `tool-executor-ptc`（或更早的 `agent-tool-presentation`），旧代行为不变。
-  - 依赖：新增 `@deepseek-ai/dsh-tool-executor-native`（真实依赖；profile 插件解析不到宿主内核包）。已知限制：不提供程序级 `sandbox_permissions` 升级，程序内子调用不写 `tool/ptc-dispatch` 回放事件。
+  - 依赖：新增 `@deepseek-ai/dsh-tool-executor-native`（真实依赖；profile 插件解析不到宿主内核包）。已知限制：不提供程序级 `sandbox_permissions` 升级。（原先还写着「程序内子调用不写回放事件」，该限制已由 0.59.0 的 `createDispatchLog` 解除，见上一条。）
 
 ## 0.58.0 - 2026-11-04
 
