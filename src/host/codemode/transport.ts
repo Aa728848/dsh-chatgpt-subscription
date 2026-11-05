@@ -61,6 +61,19 @@ export interface CatalogEntry {
   readonly isConcurrencySafe?: (args: unknown) => boolean
 }
 
+/**
+ * 一次运行拿到的会话级授权。
+ *
+ * 两项都取自**会话**而不是部署默认值：文件策略决定程序拿到的沙盒模式与写根，目录决定程序
+ * 从哪里开始（`cd` 过的会话不会退回初始目录）。取不到就留空，交给内核兜底。
+ */
+export interface RunAuthority {
+  /** 会话当前工作目录。 */
+  readonly cwd?: string
+  /** 会话级文件策略。 */
+  readonly sandboxPolicy?: unknown
+}
+
 /** 程序的运行环境句柄：由入口提供，传输层只调用。 */
 export interface CodemodeHost {
   /** 当前可调用的工具清单（含被遮蔽的）。 */
@@ -73,6 +86,13 @@ export interface CodemodeHost {
   stateOwner(agent: unknown): object
   /** 程序结束时释放 owner 的常驻环境。 */
   releaseOwner(owner: object): Promise<void>
+  /**
+   * 取这次运行的会话级授权（目录 + 文件策略）。
+   *
+   * 老代 harness 没有 `sandboxPolicy` / `workingDirectory` 服务，此时返回 `undefined`，
+   * 由 `runtime.resolve()` 或运行时自身兜底即可。
+   */
+  runAuthority?(agent: unknown, signal: AbortSignal): Promise<RunAuthority | undefined> | RunAuthority | undefined
 }
 
 /** 一次子调用请求。 */
@@ -99,6 +119,35 @@ export interface CallToolOutcome {
   readonly value?: unknown
   /** 成功时的文本内容（没有 value 时用它）。 */
   readonly text?: string
+  /**
+   * 面向前模型的内容块，原样进回放事件。
+   *
+   * 程序拿的是 `value` / `text`，这两条是给**界面**的：没有它，回放里那条子调用
+   * 只有名字没有结果，展开是个空壳。
+   */
+  readonly content?: readonly unknown[]
+  /** 工具自带的展示元数据，原样进回放事件。 */
+  readonly meta?: unknown
+  /** 失败身份（名称 / 业务码 / 原始细节），原样进回放事件。 */
+  readonly errorInfo?: { readonly name: string; readonly code: string; readonly reason?: string }
+}
+
+/** 一次运行请求（也覆盖 {@link PtcRuntimeLike.resolve} 的产物）。 */
+export interface PtcRunRequestLike {
+  /** 程序源码。 */
+  readonly program: string
+  /** 程序里可见的绑定命名空间。 */
+  readonly bindings: readonly unknown[]
+  /** 常驻环境的 owner。 */
+  readonly stateOwner?: object
+  /** 程序起点目录。 */
+  readonly cwd?: string
+  /** 已解析的文件策略（DSH 0.2.2 起 `run()` 只接受 resolve() 的产物）。 */
+  readonly sandboxPolicy?: unknown
+  /** 超时预算；`null` 表示不限。 */
+  readonly timeoutMs?: number | null
+  /** 取消信号。 */
+  readonly signal?: AbortSignal
 }
 
 /** PTC 运行时里本模块会读到的那部分（结构契约）。 */
@@ -111,14 +160,16 @@ export interface PtcRuntimeLike {
   readonly timeout?: { readonly defaultMs: number; readonly maxMs: number }
   /** 常驻状态释放。 */
   release?(owner: object): Promise<void>
+  /**
+   * 解析目录、超时与文件策略。
+   *
+   * DSH 0.2.2 起内核把「解析」与「执行」拆开：`run()` 只接受这一步的产物，直接喂原始请求
+   * 会抛 `ptc-runtime-node: run requires a resolved sandbox policy`。老代运行时没有这个方法，
+   * 那时 `run()` 自己兜底。
+   */
+  resolve?(request: PtcRunRequestLike): PtcRunRequestLike
   /** 执行一段程序。 */
-  run(request: {
-    readonly program: string
-    readonly bindings: readonly unknown[]
-    readonly stateOwner?: object
-    readonly timeoutMs?: number | null
-    readonly signal?: AbortSignal
-  }): Promise<PtcRunResultLike>
+  run(request: PtcRunRequestLike): Promise<PtcRunResultLike>
 }
 
 /** 一次程序运行的结果。 */
@@ -222,34 +273,69 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
           if (n > limit) throw new Error('program sub-call limit exceeded: ' + String(limit) + ' calls')
           const parsed = losslessArgs(rawArgs)
           const callId = String(exec.callId) + NESTED_CALL_ID_MARKER + String(n)
+          const dispatchLog = createDispatchLog(exec.agent, {
+            rootCallId: rootCallIdOf(String(exec.callId)),
+            parentCallId: String(exec.callId),
+            subCallId: callId,
+            name: entry.name,
+            arguments: parsed,
+          })
           const run = async (): Promise<unknown> => {
-            const outcome = await host.callTool({
-              name: entry.name,
-              args: parsed,
-              callId,
-              signal: nestedSignal,
-              agent: exec.agent,
-              toolSet: exec.toolSet,
-            })
+            // start 记在 lane 里而不是提交时：排队中被放弃的调用一条都不写（内核同此）。
+            dispatchLog.start()
+            let outcome: CallToolOutcome
+            try {
+              outcome = await host.callTool({
+                name: entry.name,
+                args: parsed,
+                callId,
+                signal: nestedSignal,
+                agent: exec.agent,
+                toolSet: exec.toolSet,
+              })
+            } catch (error: unknown) {
+              // 成对收尾，否则界面留下一条永远不收尾的行。
+              dispatchLog.settle({ error: error instanceof Error ? error.message : String(error) })
+              throw error
+            }
+            dispatchLog.settle(outcome)
             if (outcome.error !== undefined) throw new Error(outcome.error)
             return outcome.value !== undefined ? outcome.value : outcome.text ?? null
           }
           return isConcurrencySafe(definitions.get(entry.name), parsed) ? run() : exclusive.run(run)
         }
       }
-      const request = {
-        program: input.code,
-        bindings: [{ global: 'tools', functions }],
-        stateOwner: owner,
-        ...input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs },
-        signal: nestedSignal,
+      /**
+       * 跑一次程序：每次重取会话授权，因为重试发生在策略变更之后。
+       *
+       * `resolve()` 是新代内核的前置步骤（目录 / 超时 / 文件策略）。老代运行时没有它，
+       * 那时把原始请求直接交给 `run()` 才是当时的契约。
+       */
+      const attempt = async (): Promise<PtcRunResultLike> => {
+        const authority = await host.runAuthority?.(exec.agent, nestedSignal)
+        const request: PtcRunRequestLike = {
+          program: input.code,
+          bindings: [{ global: 'tools', functions }],
+          stateOwner: owner,
+          ...authority?.cwd === undefined ? {} : { cwd: authority.cwd },
+          ...authority?.sandboxPolicy === undefined ? {} : { sandboxPolicy: authority.sandboxPolicy },
+          ...input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs },
+          signal: nestedSignal,
+        }
+        const spec = typeof runtime.resolve === 'function' ? runtime.resolve(request) : request
+        // 快照只在这一段里可见：程序内的检索与绑定读同一份清单。
+        return await catalogScope.run(catalog, () => runtime.run(spec))
       }
       let result: PtcRunResultLike
       try {
-        // 快照只在这一段里可见：程序内的检索与绑定读同一份清单。
-        result = await catalogScope.run(catalog, () => runtime.run(request))
-      } finally {
-        // 常驻环境不在每次调用后释放：它按 owner 存活到 agent 销毁或插件卸载。
+        result = await attempt()
+      } catch (error: unknown) {
+        // 常驻环境拒绝换策略时（会话切了沙盒模式），释放后按新策略重跑一次。
+        if (!isRetainedPolicyChange(error)) throw error
+        await host.releaseOwner(owner)
+        // 重跑会重建常驻环境，owner 必须重新登记，否则新环境没人释放。
+        host.stateOwner(exec.agent)
+        result = await attempt()
       }
       if (result.error !== undefined) {
         throw new Error('program failed (' + result.error.kind + '): ' + result.error.message)
@@ -274,6 +360,133 @@ export interface TransportExecution {
   readonly agent?: unknown
   /** 步骤准入集合。 */
   readonly toolSet?: unknown
+}
+
+/** 一条子调用在会话里的回放记录。 */
+interface DispatchLog {
+  /** 子调用进入执行 lane。 */
+  start(): void
+  /** 子调用结算（成功或失败，恰好一次）。 */
+  settle(outcome: CallToolOutcome): void
+}
+
+/** 没有会话可写时的空记录。 */
+const NO_DISPATCH_LOG: DispatchLog = Object.freeze({ start() {}, settle() {} })
+
+/**
+ * 一条子调用的回放记录正文。
+ *
+ * 字段与内核自己那两条事件逐字对齐：界面靠 `parentCallId` 把它挂到父调用下面，靠
+ * `subCallId` 把 start 与 settle 配成一条。
+ */
+interface DispatchLogEntry {
+  /** 调用树的根 id。 */
+  readonly rootCallId: string
+  /** 父调用（`code_run` 自己）的 id。 */
+  readonly parentCallId: string
+  /** 子调用 id（`<父>:ptc:<n>`）。 */
+  readonly subCallId: string
+  /** 工具名。 */
+  readonly name: string
+  /** 已规范化的参数。 */
+  readonly arguments: unknown
+}
+
+/** 回放里单个文本块的上限：日志要有界，程序拿到的值不受影响。 */
+const DISPATCH_LOG_TEXT_LIMIT = 8000
+
+/**
+ * 造一条子调用的回放记录。
+ *
+ * 内核自己的 PTC 传输会为每条子调用 append `tool/ptc-dispatch-start` /
+ * `tool/ptc-dispatch`，界面（`tool-call-tree`）靠这一对事件把子调用画到父调用下面。
+ * 本行的程序交给内核运行时执行，而那两条事件不在运行时的对外契约里，只能在这里补。
+ *
+ * 三条约束：
+ *
+ * 1. **时序诚实**：`-start` 只在真正进入执行 lane 之后写，排队中的调用不写；
+ * 2. **必须成对**：只写 start 会留下永远不收尾的行，比不显示更糟；
+ * 3. **绝不带崩程序**：append 只是日志侧工作，异常一律吞掉——老代 harness 没有这两
+ *    种事件类型，那里应当表现为「没有回放」，而不是 `code_run` 失败。
+ *
+ * @param agent - 调用方 agent（`agent.session.append` 的宿主）。
+ * @param entry - 这次子调用的身份与参数。
+ * @returns 回放记录；没有会话可写时是空实现。
+ */
+function createDispatchLog(agent: unknown, entry: DispatchLogEntry): DispatchLog {
+  const session = typeof agent === 'object' && agent !== null
+    ? (agent as { session?: { append?: (type: string, data: unknown) => void } }).session
+    : undefined
+  const append = session?.append
+  if (typeof append !== 'function') return NO_DISPATCH_LOG
+  const base = {
+    rootCallId: entry.rootCallId,
+    parentCallId: entry.parentCallId,
+    subCallId: entry.subCallId,
+    name: entry.name,
+    arguments: entry.arguments,
+  }
+  const write = (type: string, data: unknown): void => {
+    try {
+      append.call(session, type, data)
+    } catch {
+      // 老代没有这两种事件类型：静默降级为「没有回放」。
+    }
+  }
+  return {
+    start() {
+      write('tool/ptc-dispatch-start', { ...base })
+    },
+    settle(outcome) {
+      write('tool/ptc-dispatch', {
+        ...base,
+        isError: outcome.error !== undefined,
+        content: clipContent(outcome.content),
+        ...outcome.meta === undefined ? {} : { meta: outcome.meta },
+        ...outcome.errorInfo === undefined ? {} : { error: outcome.errorInfo },
+      })
+    },
+  }
+}
+
+/**
+ * 把内容块裁到日志能承受的长度。
+ *
+ * 程序本身拿到的值不受影响；这里只是回放副本，所以宁可截断也不让一条子调用把整份
+ * 大文件写进会话记录。
+ *
+ * @param content - 原始内容块。
+ * @returns 可写进事件的副本。
+ */
+function clipContent(content: readonly unknown[] | undefined): readonly unknown[] {
+  if (content === undefined) return []
+  return content.map((block) => {
+    if (typeof block !== 'object' || block === null) return block
+    const record = block as Record<string, unknown>
+    const text = record['text']
+    if (typeof text !== 'string' || text.length <= DISPATCH_LOG_TEXT_LIMIT) return block
+    return { ...record, text: text.slice(0, DISPATCH_LOG_TEXT_LIMIT) + '…[truncated in dispatch log]' }
+  })
+}
+
+/**
+ * 一条调用所属调用树的根 id。
+ *
+ * `code_run` 不会被本行自己的程序嵌套调用，所以顶层工作量下就是它自己；这里仍按
+ * `:ptc:` 前缀剥一层，避免将来出现嵌套时把根写错。
+ *
+ * @param callId - 本次调用的 id。
+ * @returns 根 id。
+ */
+function rootCallIdOf(callId: string): string {
+  const at = callId.indexOf(NESTED_CALL_ID_MARKER)
+  return at > 0 ? callId.slice(0, at) : callId
+}
+
+/** 内核在常驻环境遇到策略变更时的拒绝文本；其余异常一律原样上抛。 */
+function isRetainedPolicyChange(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.includes('release the retained environment before changing its sandbox policy')
 }
 
 /** 校验并读出工具参数。 */

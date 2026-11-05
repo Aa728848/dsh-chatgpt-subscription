@@ -255,6 +255,121 @@ describe('程序传输', () => {
     expect(output.result).toBe('file body')
   })
 
+  it('新代运行时：先取会话授权再 resolve()，run() 只收到已解析的 spec', async () => {
+    const policy = { mode: 'workspace-write', workspaceRoot: 'C:/work', sessionId: 'session-1' }
+    const seen: { request?: Record<string, unknown>; spec?: Record<string, unknown> } = {}
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'v' }),
+      runAuthority: async () => ({ cwd: 'C:/work/sub', sandboxPolicy: policy }),
+      runtime: () => ({
+        resolve(request: Record<string, unknown>) {
+          seen.request = request
+          return { ...request, timeoutMs: 60_000 }
+        },
+        async run(spec: Record<string, unknown>) {
+          seen.spec = spec
+          return { value: 'ok', logs: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const output = await (definition.execute as (args: unknown, exec: unknown) => Promise<{ result?: unknown }>)({
+      code: 'return 1',
+      description: 'policy check',
+    }, { callId: 'outer', signal: new AbortController().signal, agent: {} })
+    // 策略必须来自会话，不能是未解析的空请求：内核 run() 会因此拒绝执行。
+    expect(seen.request?.['sandboxPolicy']).toBe(policy)
+    expect(seen.request?.['cwd']).toBe('C:/work/sub')
+    expect(seen.spec?.['timeoutMs']).toBe(60_000)
+    expect(output.result).toBe('ok')
+  })
+
+  it('老代运行时：没有 resolve 时把原始请求直接交给 run()', async () => {
+    const seen: { request?: Record<string, unknown> } = {}
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'v' }),
+      runtime: () => ({
+        async run(request: Record<string, unknown>) {
+          seen.request = request
+          return { value: 'legacy', logs: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const output = await (definition.execute as (args: unknown, exec: unknown) => Promise<{ result?: unknown }>)({
+      code: 'return 1',
+      description: 'legacy runtime',
+    }, { callId: 'outer', signal: new AbortController().signal })
+    expect(seen.request?.['program']).toBe('return 1')
+    expect(seen.request?.['sandboxPolicy']).toBeUndefined()
+    expect(output.result).toBe('legacy')
+  })
+
+  it('常驻环境拒绝换策略时释放 owner 并按新策略重跑一次', async () => {
+    let runs = 0
+    let released = 0
+    let owned = 0
+    const policies = [
+      { mode: 'read-only', workspaceRoot: 'C:/work', sessionId: 'session-1' },
+      { mode: 'workspace-write', workspaceRoot: 'C:/work', sessionId: 'session-1' },
+    ]
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => { owned += 1; return {} },
+      releaseOwner: async () => { released += 1 },
+      callTool: async () => ({ value: 'v' }),
+      runAuthority: () => ({ sandboxPolicy: policies[Math.min(runs, 1)] }),
+      runtime: () => ({
+        resolve: (request: unknown) => request,
+        async run() {
+          runs += 1
+          if (runs === 1) throw new Error('persistent PTC: release the retained environment before changing its sandbox policy')
+          return { value: 'retried', logs: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const output = await (definition.execute as (args: unknown, exec: unknown) => Promise<{ result?: unknown }>)({
+      code: 'return 1',
+      description: 'policy change',
+    }, { callId: 'outer', signal: new AbortController().signal, agent: {} })
+    expect(released).toBe(1)
+    // 重建的常驻环境必须重新登记，否则它没人释放。
+    expect(owned).toBe(2)
+    expect(runs).toBe(2)
+    expect(output.result).toBe('retried')
+  })
+
+  it('其余失败只抛一次，不触发释放与重试', async () => {
+    let runs = 0
+    let released = 0
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => { released += 1 },
+      callTool: async () => ({ value: 'v' }),
+      runtime: () => ({
+        resolve: (request: unknown) => request,
+        async run() {
+          runs += 1
+          throw new Error('boom')
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const run = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
+    await expect(run({ code: 'return 1', description: 'fail once' }, { callId: 'outer', signal: new AbortController().signal }))
+      .rejects.toThrow(/boom/)
+    expect(runs).toBe(1)
+    expect(released).toBe(0)
+  })
+
 it('程序内的清单快照与绑定一致：运行中改执行器级清单不影响检索源', async () => {
     const { currentCatalogSnapshot } = await import('../src/host/codemode/transport.ts')
     const calls: unknown[] = []
@@ -310,5 +425,141 @@ it('程序内的清单快照与绑定一致：运行中改执行器级清单不�
     const fallback = normalizeConfig({ maxSubCalls: -3, maxParallelSubCalls: 0 })
     expect(fallback.maxSubCalls).toBe(512)
     expect(fallback.maxParallelSubCalls).toBe(10)
+  })
+})
+
+/**
+ * 子调用回放：内核的 PTC 传输会为每条子调用写一对 `tool/ptc-dispatch-start` /
+ * `tool/ptc-dispatch`，界面靠它把子调用画到父调用下面。本行的程序不走那条传输，
+ * 所以要在这里把这一对补齐——而且必须补得**诚实**。
+ */
+describe('子调用回放', () => {
+  const rules = createRules({})
+  const catalog = [
+    { name: 'read', description: 'read a file', parameters: {}, isConcurrencySafe: () => true },
+    { name: 'edit', description: 'edit a file', parameters: {}, isConcurrencySafe: () => false },
+  ]
+
+  /** 收集 append 的假会话。 */
+  function fakeSession() {
+    const events: { type: string; data: Record<string, unknown> }[] = []
+    return {
+      events,
+      append(type: string, data: Record<string, unknown>): void {
+        events.push({ type, data })
+      },
+    }
+  }
+
+  /** 一个按脚本调用程序内工具的运行环境。 */
+  function runtimeOf(script: (tools: Record<string, (args: unknown) => Promise<unknown>>) => Promise<unknown>) {
+    return {
+      language: 'typescript',
+      programFormat: 'function-body',
+      async run(request: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+        const value = await script(request.bindings[0]!.functions)
+        return { value, logs: [] }
+      },
+    }
+  }
+
+  /** 跑一段程序。 */
+  async function run(
+    runtime: unknown,
+    callTool: (request: { name: string; args: unknown; callId: string }) => Promise<unknown>,
+    agent: unknown,
+  ): Promise<unknown> {
+    const host = { catalog: () => catalog, runtime: () => runtime, stateOwner: () => ({}), releaseOwner: async () => undefined, callTool }
+    const definition = createTransportDefinition(host as never, rules)
+    return await (definition.execute as (args: unknown, exec: unknown) => Promise<unknown>)(
+      { code: 'return 1', description: 'probe' },
+      { callId: 'outer-1', signal: new AbortController().signal, agent },
+    )
+  }
+
+  it('成对写入，父 id / 子 id / 参数与内核逐字对齐', async () => {
+    const session = fakeSession()
+    const runtime = runtimeOf(async (tools) => {
+      await tools['read']!({ file_path: 'a.ts' })
+      return 'ok'
+    })
+    await run(runtime, async () => ({ value: 'body', content: [{ type: 'text', text: 'body' }] }), { session })
+
+    expect(session.events.map((event) => event.type)).toEqual(['tool/ptc-dispatch-start', 'tool/ptc-dispatch'])
+    const [start, settle] = session.events
+    expect(start!.data).toMatchObject({
+      rootCallId: 'outer-1',
+      parentCallId: 'outer-1',
+      subCallId: 'outer-1:ptc:1',
+      name: 'read',
+      arguments: { file_path: 'a.ts' },
+    })
+    expect(settle!.data).toMatchObject({ subCallId: 'outer-1:ptc:1', name: 'read', isError: false })
+    // 内容块原样进回放：没有它，界面展开是一具空壳。
+    expect(settle!.data['content']).toEqual([{ type: 'text', text: 'body' }])
+  })
+
+  it('失败也成对收尾，并带上错误身份', async () => {
+    const session = fakeSession()
+    const runtime = runtimeOf(async (tools) => {
+      try {
+        await tools['read']!({ file_path: 'a.ts' })
+      } catch {
+        // 程序自己接住：回放置于失败之外，不得因为失败就漏写 settle。
+      }
+      return 'caught'
+    })
+    await run(runtime, async () => ({
+      error: 'boom',
+      content: [{ type: 'text', text: 'boom' }],
+      errorInfo: { name: 'ToolError', code: 'E_BOOM' },
+    }), { session })
+
+    expect(session.events).toHaveLength(2)
+    expect(session.events[1]!.data).toMatchObject({
+      isError: true,
+      error: { name: 'ToolError', code: 'E_BOOM' },
+      content: [{ type: 'text', text: 'boom' }],
+    })
+  })
+
+  it('排队中的写调用不提前记 start（时序诚实）', async () => {
+    const session = fakeSession()
+    const runtime = runtimeOf(async (tools) => {
+      await Promise.all([
+        tools['edit']!({ file_path: 'a.ts' }),
+        tools['edit']!({ file_path: 'b.ts' }),
+      ])
+      return 'ok'
+    })
+    await run(runtime, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      return { value: 'edited' }
+    }, { session })
+
+    // 两条写调用被互斥闸门串行化：start/settle 必须交替，不能两条 start 并排。
+    expect(session.events.map((event) => event.type)).toEqual([
+      'tool/ptc-dispatch-start', 'tool/ptc-dispatch',
+      'tool/ptc-dispatch-start', 'tool/ptc-dispatch',
+    ])
+    expect(session.events.filter((event) => event.type === 'tool/ptc-dispatch-start').map((event) => event.data['subCallId']))
+      .toEqual(['outer-1:ptc:1', 'outer-1:ptc:2'])
+  })
+
+  it('append 抛错不带崩程序：老代没有这两种事件时降级为「没有回放」', async () => {
+    const runtime = runtimeOf(async (tools) => await tools['read']!({ file_path: 'a.ts' }))
+    const throwing = {
+      append(): void {
+        throw new Error('unknown event type: tool/ptc-dispatch')
+      },
+    }
+    const output = await run(runtime, async () => ({ value: 'body' }), { session: throwing }) as { result?: unknown }
+    expect(output.result).toBe('body')
+  })
+
+  it('没有会话可写时一条都不写，程序照常返回', async () => {
+    const runtime = runtimeOf(async (tools) => await tools['read']!({ file_path: 'a.ts' }))
+    const output = await run(runtime, async () => ({ value: 'body' }), undefined) as { result?: unknown }
+    expect(output.result).toBe('body')
   })
 })

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[codemode] 程序内的每条子调用重新写回会话：界面能看见「启动了哪个工具」**
+  - **缺的是什么**：内核的 PTC 传输会为每条子调用 append `tool/ptc-dispatch-start` / `tool/ptc-dispatch`，界面（`tool-call-tree`）靠这一对事件把子调用画到父调用下面；本行的程序交给内核运行时执行，而那两条事件不在运行时的对外契约里，于是 Code Mode 会话里回放事件**一条都没有**（实测 26 条 `tool/call` 对 0 条 `tool/ptc-dispatch*`），一次程序在界面上只有「一行日志 + 一具黑盒」。
+  - **补法**：[`src/host/codemode/transport.ts`](src/host/codemode/transport.ts) 新增 `createDispatchLog`，在子调用**真正进入执行 lane 之后**写 start、结算时写 settle，字段（`rootCallId` / `parentCallId` / `subCallId` / `name` / `arguments`）与内核逐字对齐；`subCallId` 沿用既有的 `<父>:ptc:<n>` 命名，因此 `isNestedCall` 与界面两侧都不用改。
+  - **时序诚实**：写调用受互斥闸门串行化，start 记在 lane 里而不是提交时——排队中被放弃的调用一条都不写（与内核「调度器真的开始才记」一致），并发时的顺序不会撒谎。
+  - **成对且有界**：失败也写 settle（带 `isError` 与 `error` 身份），只写 start 会留下永远不收尾的行；回放副本的单个文本块截到 8000 字符，程序本身拿到的值不受影响。
+  - **不碰程序**：`entry-codemode.ts` 的 `callTool` 只是**多回传** `content` / `meta` / `error.info`，`value` / `text` 语义不变；append 异常一律吞掉，老代 harness 没有这两种事件时降级为「没有回放」，而不是 `code_run` 失败。
+  - **验证**：`test/codemode.test.ts` 新增 5 项（成对写入与 id 对齐 / 失败收尾 / 并发时序 / append 抛错降级 / 无会话时静默）；把 start 或 settle 各抹掉一处，各有 3 项转红。
+
 - **[preset] `dispatch`（调度模式）改用 Code Mode，替代 PTC 呈现**
   - 新增本包子入口 `./codemode`（`src/entry-codemode.ts` + `src/host/codemode/*`）：预设自身注册的工具保持原生可调，预设清单以外的工具（MCP、profile 级插件、按 agent 注册的工具集）不进入模型上下文，只能在 `code_run` 程序中通过 `code_tools_list` / `code_tools_search` / `code_tools_describe` 发现后调用。
   - 遮蔽接缝是 per-scope `ctx.tools.setExecutor()`（0.2.2+）：`describe()` 决定请求面，`execute()` 在派发前拒绝模型直呼被遮蔽的名字并给出发现指引；程序内子调用整批委托给内核原生 executor，保留完整策略 / 审批 / post-execute 管线。

@@ -44,6 +44,7 @@ import {
   type CatalogEntry,
   type CodemodeHost,
   type PtcRuntimeLike,
+  type RunAuthority,
 } from './host/codemode/transport.ts'
 
 /** Cordis 插件名。 */
@@ -78,11 +79,18 @@ interface ToolResultLike {
   /** 是否失败。 */
   readonly isError: boolean
   /** 失败时的结构化错误。 */
-  readonly error?: { readonly message?: string }
+  readonly error?: {
+    /** 给人看的一句话。 */
+    readonly message?: string
+    /** 失败身份（名称 / 业务码 / 原始细节），回放事件原样带走。 */
+    readonly info?: { readonly name?: unknown; readonly code?: unknown; readonly reason?: unknown }
+  }
   /** 成功时的规范值。 */
   readonly value?: unknown
   /** 面向前模型的内容块。 */
   readonly content?: readonly unknown[]
+  /** 工具自带的展示元数据，回放事件原样带走。 */
+  readonly meta?: unknown
 }
 
 /**
@@ -115,6 +123,49 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
     }
   }
 
+  /** 读一个内核服务（缺失或未挂载时为 undefined）。 */
+  const serviceOf = (name: string): unknown => {
+    try {
+      return context.get?.(name)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 取会话级运行授权：目录与文件策略都读内核服务，本行只转交、不自己造。
+   *
+   * `ptcRuntime.run()` 在 DSH 0.2.2 起要求已解析的策略与目录；缺了这两项，程序会带着部署
+   * 默认值（通常是 read-only 与部署根目录）执行，或者干脆被运行时拒绝。老代 harness 没有这两个
+   * 服务，返回 undefined 让它照旧兜底。
+   */
+  const runAuthority = async (agent: unknown, signal: AbortSignal): Promise<RunAuthority | undefined> => {
+    const authority: { cwd?: string; sandboxPolicy?: unknown } = {}
+    const session = typeof agent === 'object' && agent !== null
+      ? (agent as { session?: unknown }).session
+      : undefined
+    const policy = serviceOf('sandboxPolicy') as { resolve?: (request?: { session?: unknown }) => unknown } | undefined
+    if (typeof policy?.resolve === 'function') {
+      try {
+        const resolved = policy.resolve(session === undefined ? {} : { session })
+        if (resolved !== undefined) authority.sandboxPolicy = resolved
+      } catch {
+        // 解析失败不该让 code_run 直接失败：运行时会退回它自己的缺省策略。
+      }
+    }
+    const directories = serviceOf('workingDirectory') as
+      | { ensure?: (agent: unknown, signal?: AbortSignal) => Promise<string> }
+      | undefined
+    if (agent !== undefined && typeof directories?.ensure === 'function') {
+      try {
+        authority.cwd = await directories.ensure(agent, signal)
+      } catch {
+        // 目录取不到时让策略里的工作根当起点。
+      }
+    }
+    return authority
+  }
+
   const rules = createRules(config)
   const retention = createRetention(runtimeOf)
   if (typeof context.effect === 'function') {
@@ -137,6 +188,7 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
     runtime: runtimeOf,
     stateOwner: (agent) => retention.owner(agent),
     releaseOwner: (owner) => retention.release(owner),
+    runAuthority,
     async callTool(request: CallToolRequest): Promise<CallToolOutcome> {
       const call = {
         type: 'tool-call',
@@ -157,9 +209,17 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       }
       const result = batch.results?.[0]?.result
       if (result === undefined) return { error: 'sub-call produced no result' }
-      if (result.isError === true) return { error: errorTextOf(result) }
-      if (result.value !== undefined) return { value: result.value }
-      return { text: textOf(result.content) }
+      // 内容块与展示元数据只给回放事件用；程序拿的仍是 value / text。
+      const content = result.content ?? []
+      if (result.isError === true) {
+        return { error: errorTextOf(result), content, ...errorInfoOf(result) }
+      }
+      const meta = result.meta
+      return {
+        ...result.value !== undefined ? { value: result.value } : { text: textOf(result.content) },
+        content,
+        ...meta === undefined ? {} : { meta },
+      }
     },
   }
 
@@ -250,6 +310,32 @@ function errorTextOf(result: ToolResultLike): string {
   if (message !== undefined && message.length > 0) return message
   const text = textOf(result.content)
   return text.length > 0 ? text : 'tool call failed'
+}
+
+/**
+ * 读出结构化失败身份。
+ *
+ * 内核把 `result.error.info` 原样放进回放事件的 `error` 字段；缺任一必填项时给空
+ * 对象，让调用方可以无条件展开。
+ *
+ * @param result - 一条失败结果。
+ * @returns 带 `errorInfo` 的对象，或空对象。
+ */
+function errorInfoOf(result: ToolResultLike): {
+  errorInfo?: { readonly name: string; readonly code: string; readonly reason?: string }
+} {
+  const info = result.error?.info
+  if (info === undefined || info === null) return {}
+  const name = nonEmptyString(info.name)
+  const code = nonEmptyString(info.code)
+  if (name === undefined || code === undefined) return {}
+  const reason = nonEmptyString(info.reason)
+  return { errorInfo: { name, code, ...reason === undefined ? {} : { reason } } }
+}
+
+/** 非空字符串，或 `undefined`。 */
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 /** 把内容块里的文本拼起来。 */

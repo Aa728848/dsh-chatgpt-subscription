@@ -53,6 +53,9 @@ export function createRetention(runtimeOf: () => PtcRuntimeLike | undefined): Co
   return {
     owner(agent: unknown): object {
       const owner = typeof agent === 'object' && agent !== null ? agent : fallbackOwner
+      // 释放过又回来的 owner（例如策略变更后重建常驻环境）必须重新可释放，
+      // 否则它的新环境会活到进程结束。
+      released.delete(owner)
       live.add(owner)
       return owner
     },
