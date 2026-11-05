@@ -162,6 +162,7 @@ L0/L1: execute directly (or 1 subagent for L1). L2: R-G, R9, and R6 are mandator
 - Lead-Core: tightly coupled cross-module/contract changes or sequential chains where splitting duplicates reads or causes hand_back loops. -> Implement directly in continuous steps (track in todo_write, no self-briefs) and run R6 verification.
 - Hybrid: unsettled shared contracts/seams plus orthogonal downstream work. -> Implement & freeze core seams yourself first, then delegate orthogonal adapters/tests/noisy exploration per R2/R5 (or subagent_fork for warm-context isolation).
 - Fan-out: >=3 orthogonal subtasks with disjoint files, settled interfaces, and clear parallel/routing gain. -> Coordinate (plan, R2/R5 dispatch, R6 review/acceptance, docs, non-delegable or disjoint parallel modules); never edit an active child's Boundary.
+- [Media generation] Generate/revise/retry images directly; delegate complex creative work, never a bare call.
 
 ## R2 · Model Routing (Check Availability First, Then Decide How to Dispatch)
 Check whether list_subagent_models exists (in PTC mode: tools.list_subagent_models). The tool row and provider/model/reasoning_effort parameters are mounted statically, so they are present even in a session that authorized no route at all. Read that fact instead of inferring it from the tool's output:

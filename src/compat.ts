@@ -95,6 +95,15 @@ export { MINIMAX_CODE_PROVIDER_ID, MINIMAX_CODE_ROUTE_PREFIX } from './shared/mi
 export const CODEX_API_BASE = 'https://chatgpt.com/backend-api/codex' as const
 export const CODEX_RESPONSES_URL = `${CODEX_API_BASE}/responses` as const
 export const CODEX_IMAGE_GENERATION_URL = `${CODEX_API_BASE}/images/generations` as const
+/**
+ * The edit route: the same image surface, addressed for reference-image input.
+ *
+ * A generation has nothing to modify and goes to `/images/generations`; a
+ * request that names reference images is an EDIT and goes here, with those
+ * images carried inline in a JSON `images` array. It is a separate route, not a
+ * flag on the generation body, so the two are stated as two constants.
+ */
+export const CODEX_IMAGE_EDIT_URL = `${CODEX_API_BASE}/images/edits` as const
 export const CODEX_SEARCH_URL = `${CODEX_API_BASE}/alpha/search` as const
 export const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage' as const
 /**

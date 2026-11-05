@@ -3,6 +3,8 @@ import type { AttachmentStore, ImageAttachmentRef, SaveImageAttachment } from '@
 import { ANTIGRAVITY_IMAGE_MODEL, ANTIGRAVITY_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import type { AccountPoolStore } from '../src/host/antigravity/account-pool.ts'
 import {
+  ANTIGRAVITY_IMAGE_ASPECT_RATIOS,
+  ANTIGRAVITY_IMAGE_SIZES,
   buildImageRequest,
   createAntigravityImageTool,
   decodeInlineImage,
@@ -98,6 +100,50 @@ describe('Antigravity image request', () => {
     expect((buildImageRequest('x', 'p').request as { generationConfig: Record<string, unknown> }).generationConfig.imageConfig).toBeUndefined()
   })
 
+  it('offers the expanded aspect ratios and the four image sizes', () => {
+    const tool = createAntigravityImageTool(
+      poolMock(['a']).pool, store, attachmentsMock().attachments, { fetchFn: vi.fn<typeof fetch>() },
+    ) as unknown as {
+      description: string
+      parameters: { properties: Record<string, { enum: string[]; description: string }> }
+    }
+    const ratios = tool.parameters.properties.aspectRatio!.enum
+    const sizes = tool.parameters.properties.imageSize!.enum
+    // Ten square-family ratios plus the four extreme strips.
+    expect(ratios).toHaveLength(14)
+    expect([...ratios].sort()).toEqual([...ANTIGRAVITY_IMAGE_ASPECT_RATIOS].sort())
+    expect(ratios).toEqual(expect.arrayContaining(['1:4', '4:1', '1:8', '8:1']))
+    expect(sizes).toEqual(['0.5K', '1K', '2K', '4K'])
+    expect(sizes).toEqual([...ANTIGRAVITY_IMAGE_SIZES])
+  })
+
+  it('states in the description that one image is a direct call, not a subagent', () => {
+    const tool = createAntigravityImageTool(
+      poolMock(['a']).pool, store, attachmentsMock().attachments, { fetchFn: vi.fn<typeof fetch>() },
+    ) as unknown as { description: string }
+    // A single generation, a change and a retry are the calling agent's own
+    // calls; only genuinely parallel/complex creative work may be delegated.
+    expect(tool.description).toMatch(/single generation/i)
+    expect(tool.description).toMatch(/retry/i)
+    expect(tool.description).toMatch(/do not create a subagent/i)
+    expect(tool.description).toMatch(/alternative directions|complex creative/i)
+  })
+
+  it('writes only the image fields the caller stated', () => {
+    const generationConfig = (body: Record<string, unknown>) =>
+      (body.request as { generationConfig: Record<string, unknown> }).generationConfig
+
+    // Both stated: both travel, in one imageConfig.
+    expect(generationConfig(buildImageRequest('x', 'p', '1:8', '4K')).imageConfig)
+      .toEqual({ aspectRatio: '1:8', imageSize: '4K' })
+    // Size alone: no aspectRatio key is invented for it.
+    expect(generationConfig(buildImageRequest('x', 'p', undefined, '2K')).imageConfig).toEqual({ imageSize: '2K' })
+    // Ratio alone: no imageSize key is invented for it.
+    expect(generationConfig(buildImageRequest('x', 'p', '16:9')).imageConfig).toEqual({ aspectRatio: '16:9' })
+    // Neither: imageConfig stays absent rather than becoming an empty object.
+    expect(generationConfig(buildImageRequest('x', 'p')).imageConfig).toBeUndefined()
+  })
+
   it('collects final images and text, skipping thought drafts', () => {
     const parsed = parseImageResponse(sse(
       imageFrame([{ thought: true, text: 'planning' }, { thought: true, inlineData: { mimeType: 'image/png', data: 'draft' } }]),
@@ -174,6 +220,63 @@ describe('Antigravity image tool', () => {
     const deferred: unknown[] = []
     await createAntigravityImageTool(pool, store, attachments, { fetchFn }).execute({ prompt: 'fox' }, execContext(false, deferred))
     expect(deferred).toEqual([])
+  })
+
+  it('passes the aspect ratio and image size through to the upstream request', async () => {
+    const { pool } = poolMock(['a'])
+    const { attachments } = attachmentsMock()
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(sse(imageFrame([{ inlineData: { mimeType: 'image/png', data: PNG_1X1 } }]))))
+    await createAntigravityImageTool(pool, store, attachments, { fetchFn })
+      .execute({ prompt: 'fox', aspectRatio: '9:16', imageSize: '2K' }, execContext(false))
+    expect(JSON.parse(String(fetchFn.mock.calls[0]![1]?.body))).toMatchObject({
+      request: {
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio: '9:16', imageSize: '2K' } },
+      },
+    })
+  })
+
+  it('sends no imageConfig at all when neither image field is stated', async () => {
+    const { pool } = poolMock(['a'])
+    const { attachments } = attachmentsMock()
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(sse(imageFrame([{ inlineData: { mimeType: 'image/png', data: PNG_1X1 } }]))))
+    await createAntigravityImageTool(pool, store, attachments, { fetchFn }).execute({ prompt: 'fox' }, execContext(false))
+    const generationConfig = (JSON.parse(String(fetchFn.mock.calls[0]![1]?.body)).request as { generationConfig: Record<string, unknown> })
+      .generationConfig
+    expect(generationConfig).toEqual({ responseModalities: ['TEXT', 'IMAGE'] })
+    expect(generationConfig.imageConfig).toBeUndefined()
+  })
+
+  it('names the image fields a rejected request carried, and does not retry without them', async () => {
+    const { pool } = poolMock(['a'])
+    const { attachments } = attachmentsMock()
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ error: { code: 400, message: 'Invalid aspect ratio: 1:8', status: 'INVALID_ARGUMENT' } }),
+      { status: 400 },
+    ))
+    await expect(createAntigravityImageTool(pool, store, attachments, { fetchFn })
+      .execute({ prompt: 'fox', aspectRatio: '1:8', imageSize: '4K' }, execContext(false)))
+      .rejects.toMatchObject({
+        code: 'ANTIGRAVITY_IMAGE_FAILED',
+        message: expect.stringMatching(/failed \(400\)\..*aspectRatio "1:8".*imageSize "4K".*not retried.*Invalid aspect ratio/s),
+      })
+    // The refused shape is never re-sent smaller: one request, no field dropped.
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(String(fetchFn.mock.calls[0]![1]?.body)).request.generationConfig.imageConfig)
+      .toEqual({ aspectRatio: '1:8', imageSize: '4K' })
+  })
+
+  it('bounds the upstream body it quotes and says a request with no image field cannot be fixed by one', async () => {
+    const { pool } = poolMock(['a'])
+    const { attachments } = attachmentsMock()
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response('y'.repeat(2_000), { status: 400 }))
+    const error = await createAntigravityImageTool(pool, store, attachments, { fetchFn })
+      .execute({ prompt: 'fox' }, execContext(false))
+      .then(() => undefined, (caught: Error) => caught)
+    expect(error).toMatchObject({ code: 'ANTIGRAVITY_IMAGE_FAILED' })
+    expect(error!.message).toMatch(/no aspectRatio or imageSize was set/)
+    // A 2000-character body is quoted as a bounded excerpt, not in full.
+    expect(error!.message).toContain('…')
+    expect(error!.message.length).toBeLessThan(900)
   })
 
   it('cools only the Gemini allowance of a 429 account and moves to the next account', async () => {

@@ -537,6 +537,14 @@ describe('the persona block the declaration transcribes', () => {
     expect(fromYaml).toBe(declaredPrefix())
   })
 
+  it('keeps simple image generation in the current agent', () => {
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('[Media generation] Generate/revise/retry images directly')
+      expect(persona).toContain('delegate complex creative work, never a bare call')
+    }
+  })
+
   it('names no prompt variable, so a model switch cannot rewrite the prefix', () => {
     // `{{model}}` resolves from the agent's route at assembly time. Rendered
     // into the persona it makes the head of the system prompt depend on the

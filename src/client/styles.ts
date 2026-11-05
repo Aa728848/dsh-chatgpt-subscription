@@ -104,18 +104,32 @@ const CSS = `
 .dsh-codex-composer-quota[data-level=warning] strong{color:var(--dsw-alias-label-warning,#d58a24)}
 .dsh-codex-composer-quota[data-level=danger] strong{color:var(--dsw-alias-label-danger,#d94b4b)}
 .dsh-codex-image-tool{border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:flex;flex-direction:column;gap:8px;margin:4px 0 4px 4px;max-width:520px;padding:10px 12px}
-.dsh-codex-image-tool-head{align-items:center;display:flex;font-size:13px;gap:8px;min-width:0}
+/* One line, always. In a 320px column the label used to be squeezed until it
+   stacked one character per row, which reads as broken text rather than a card.
+   The dot and the label therefore keep their own size (flex:none + nowrap) and
+   the summary is the only thing that gives way — it shrinks to zero width and
+   ellipsizes, with the full prompt left in its title attribute. */
+.dsh-codex-image-tool-head{align-items:center;display:flex;flex-wrap:nowrap;font-size:13px;gap:8px;min-width:0}
 .dsh-codex-image-dot{background:var(--dsw-alias-button-info-fill,#397ee8);border-radius:50%;corner-shape:round;display:inline-block;flex:none;height:8px;width:8px}
 .dsh-codex-image-tool[data-state=error] .dsh-codex-image-dot{background:var(--dsw-alias-label-danger,#d94b4b)}
-.dsh-codex-image-title{font-weight:600}
-.dsh-codex-image-summary{color:var(--dsw-alias-label-tertiary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-codex-image-title{flex:none;font-weight:600;white-space:nowrap}
+.dsh-codex-image-summary{color:var(--dsw-alias-label-tertiary);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-codex-image-grid{display:flex;flex-wrap:wrap;gap:8px}
+/* The tray the image will land in, drawn while the call is still running so the
+   card does not jump from one text row to a full picture when the result
+   arrives. Neither dimension is set here: the view fixes the short side (height
+   for a portrait frame, width for a landscape one) and the inline aspect-ratio
+   derives the other, which is what keeps the 4:1 and 8:1 strips from being
+   clamped into squarer boxes. max-width is the card's edge. The breathe is the
+   same restrained opacity pulse the settings skeleton uses, and the
+   reduced-motion block below turns it off. */
+.dsh-codex-image-placeholder{animation:dsh-codex-pulse 2s ease-in-out infinite;background:var(--dsw-alias-bg-layer-2);border:0.5px dashed var(--dsw-alias-border-l2);border-radius:8px;display:block;flex:none;max-width:100%}
 .dsh-codex-image-preview{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:block;max-height:260px;max-width:min(100%,360px);object-fit:contain}
 .dsh-codex-image-loading,.dsh-codex-image-failed{border:0.5px dashed var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-tertiary);display:inline-flex;font-size:12px;line-height:1.4;padding:18px 20px}
 .dsh-codex-image-failed{color:var(--dsw-alias-label-danger,#d94b4b)}
 @keyframes dsh-codex-pulse{0%,100%{opacity:.45}50%{opacity:.85}}
 @media(max-width:560px){.dsh-codex-row,.dsh-codex-pref-row,.dsh-codex-quota-fact,.dsh-codex-reset-credits{align-items:flex-start;flex-direction:column;gap:3px}.dsh-codex-value,.dsh-codex-quota-fact strong{text-align:left}.dsh-codex-actions{justify-content:flex-start}.dsh-codex-grouphead{align-items:flex-start;flex-direction:column;gap:0;padding:12px 0}.dsh-codex-meter-meta{align-items:flex-start;flex-direction:column;gap:2px}.dsh-codex-errorbar{align-items:flex-start;flex-direction:column}.dsh-codex-segments{width:100%}.dsh-codex-select{max-width:none;width:100%}.dsh-codex-context-row{align-items:flex-start;flex-direction:column;gap:5px}.dsh-codex-segments label{flex:1}.dsh-codex-segments span{text-align:center}.dsh-codex-image-tool{max-width:100%;margin-left:0}}
-@media(prefers-reduced-motion:reduce){.dsh-codex-meter>span{transition:none}.dsh-codex-skeleton span{animation:none}}
+@media(prefers-reduced-motion:reduce){.dsh-codex-meter>span{transition:none}.dsh-codex-skeleton span{animation:none}.dsh-codex-image-placeholder{animation:none}}
 `
 
 /**

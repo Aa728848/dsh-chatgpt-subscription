@@ -85,7 +85,7 @@
 - **上游固定端点**（无自定义 baseURL 覆盖，保障凭据边界）：
   - OAuth 令牌：`https://auth.openai.com/oauth/token`
   - 模型响应：`https://chatgpt.com/backend-api/codex/responses`（携带 `openai-beta: responses=experimental`）
-  - 生图：`https://chatgpt.com/backend-api/codex/images/generations`（对应工具 `codex_image_generate`）
+  - 生图 / 参考图改图：`https://chatgpt.com/backend-api/codex/images/generations` 与 `https://chatgpt.com/backend-api/codex/images/edits`（对应工具 `codex_image_generate`）
   - 搜索：`https://chatgpt.com/backend-api/codex/alpha/search`（可在设置页切换为 DSH 搜索后端）
   - 额度：`https://chatgpt.com/backend-api/wham/usage`（含 Codex、Code Review 窗口、Credits 与 Reset Credits）
 - **协议与参数对齐官方 Codex CLI**：
@@ -94,7 +94,8 @@
   - 推理摘要默认省略（避免无感消耗计费生成 token），显式选择 `auto` / `concise` / `detailed` 时才发送；
   - 输出详细程度默认按目录声明发 `low`（仅对声明 `supportsOutputVerbosity` 的模型发送）；
   - **不发送 `max_output_tokens`**（订阅端点在多款模型上对显式 `max_output_tokens` 返回 400）；模型最大输出（GPT-6 系列 128K，其余 32,768）仅在本地作为 DSH 上下文压缩的输出预留（`defaultMaxTokens`）；
-  - 单次请求图片内联负载默认上限 **2 MiB**（可通过 `DSH_CODEX_MAX_IMAGE_BYTES` 覆盖），超限按最旧优先替换为可见文字占位。
+  - 单次请求图片内联负载默认上限 **2 MiB**（可通过 `DSH_CODEX_MAX_IMAGE_BYTES` 覆盖），超限按最旧优先替换为可见文字占位；
+  - 生图工具支持可选尺寸、质量、透明背景、GIF 帧参数及最多 5 张本地 PNG/JPEG/WebP 参考图；新参数仅在显式提供时发送，上游拒绝时明确报错，不静默降级。
 - **随包兜底模型表**：
   - GPT-6 家族：`gpt-6.1-sol`、`gpt-6.1-terra`（默认窗口 500K）、`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`（默认窗口 272K，最高可覆盖至 **872K**；档位 `low`/`medium`/`high`/`xhigh`/`max`，历史 `none`/`minimal` 自动折算为 `low`）；
   - GPT-5.6 及更早家族：`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex-spark`（最高可覆盖至 **1M**）；
@@ -157,7 +158,7 @@
   - 内置 Gemini 4 Argon、Gemini 3.8 / 3.7 / 3.6 / 3.5 / 3.1 Flash & Pro、Claude Opus 5.5 / Sonnet 5.5（Code Assist 托管）、`gpt-oss-120b` 等模型路由，严格一对一映射运行时 ID（不做静默跨模型降级）；
   - 支持图片输入（单次请求 base64 负载上限 **12 MiB**，超限按最旧优先替换为文本占位）；
   - 工具往返完整保留 Gemini 原始思考签名（thought signature）；
-  - 注册 `antigravity_image_generate` 工具，支持通过已登录的 Antigravity 账号直接生成图片并存入 DSH 附件系统。
+  - 注册 `antigravity_image_generate` 工具，支持通过已登录的 Antigravity 账号直接生成图片并存入 DSH 附件系统；可选 14 种比例与 0.5K/1K/2K/4K 分辨率，新参数仅在显式提供时发送，上游拒绝时明确报错。
 
 ### 宿主路由（`/antigravity/api`）
 

@@ -15,10 +15,20 @@ type FetchLike = typeof fetch
 /**
  * Aspect ratios Gemini image models accept in `imageConfig.aspectRatio`.
  * Omitted, the model picks one itself, which is what the request then does.
+ *
+ * The last four are the extreme strips: a wider or taller frame than the square
+ * family covers, useful for banners, headers and phone wallpapers.
  */
 export const ANTIGRAVITY_IMAGE_ASPECT_RATIOS = [
   '1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9',
+  '1:4', '4:1', '1:8', '8:1',
 ] as const
+
+/**
+ * Image sizes Gemini image models accept in `imageConfig.imageSize`.
+ * Omitted, the model picks one itself, which is what the request then does.
+ */
+export const ANTIGRAVITY_IMAGE_SIZES = ['0.5K', '1K', '2K', '4K'] as const
 
 /** Images one call keeps; the model normally returns one. */
 const MAX_IMAGES_PER_CALL = 4
@@ -73,7 +83,15 @@ export function buildImageRequest(
   prompt: string,
   projectId: string,
   aspectRatio?: string,
+  imageSize?: string,
 ): Record<string, unknown> {
+  // Only fields the caller actually asked for travel: a request that states
+  // neither keeps `imageConfig` absent so the model picks both itself, and a
+  // request that states one does not silently pin the other.
+  const imageConfig = {
+    ...(aspectRatio ? { aspectRatio } : {}),
+    ...(imageSize ? { imageSize } : {}),
+  }
   return {
     project: projectId,
     model: ANTIGRAVITY_IMAGE_MODEL,
@@ -81,7 +99,7 @@ export function buildImageRequest(
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
         responseModalities: ['TEXT', 'IMAGE'],
-        ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+        ...(Object.keys(imageConfig).length > 0 ? { imageConfig } : {}),
       },
     },
     requestType: 'image_gen',
@@ -210,7 +228,11 @@ export function createAntigravityImageTool(
   return defineTool({
     name: ANTIGRAVITY_IMAGE_TOOL_NAME,
     description: 'Generate an image with Gemini image generation through the signed-in Antigravity account. '
-      + 'Describe the subject, style, composition and any text to render in the prompt.',
+      + 'Describe the subject, style, composition and any text to render in the prompt. '
+      + 'Scheduling: a single generation, a change to an image already generated, and a retry of a failed attempt '
+      + 'are direct calls from the agent that needs the image — do not create a subagent just to generate one image. '
+      + 'Delegate only a task that genuinely needs several alternative directions or complex creative planning, '
+      + 'and pass the prompt that comes back to this tool.',
     parameters: {
       prompt: {
         type: 'string',
@@ -220,7 +242,14 @@ export function createAntigravityImageTool(
       aspectRatio: {
         type: 'string',
         enum: ANTIGRAVITY_IMAGE_ASPECT_RATIOS,
-        description: 'Optional aspect ratio. Omit it to let the model choose.',
+        description: 'Optional aspect ratio, one of the listed values. Omit it to let the model choose. '
+          + 'If the upstream rejects the value, re-issue the call with another value from the list rather than the same one.',
+      },
+      imageSize: {
+        type: 'string',
+        enum: ANTIGRAVITY_IMAGE_SIZES,
+        description: 'Optional output size, one of 0.5K, 1K, 2K or 4K. Omit it to let the model choose. '
+          + 'It is sent only when given, so it never overrides an aspect ratio the caller did not set.',
       },
     },
     output: {
@@ -277,7 +306,7 @@ export function createAntigravityImageTool(
         throw new HarnessError('The Antigravity line is switched off; enable it in Settings → Antigravity to generate images.', 'ANTIGRAVITY_IMAGE_DISABLED')
       }
 
-      const response = await requestImage(accountPool, store, fetchFn, prompt, args.aspectRatio, exec.signal)
+      const response = await requestImage(accountPool, store, fetchFn, prompt, args.aspectRatio, args.imageSize, exec.signal)
       if (response.images.length === 0) throw new HarnessError(noImageMessage(response), 'ANTIGRAVITY_IMAGE_EMPTY')
 
       const keep = Math.min(MAX_IMAGES_PER_CALL, attachments.imageLimits.maxImagesPerMessage, response.images.length)
@@ -344,19 +373,59 @@ async function acquireAccount(
   }
 }
 
+/**
+ * Whether a status means the upstream refused the SHAPE of the request rather
+ * than the account, the allowance or the transient state of the service.
+ */
+const PARAMETER_REJECTION_STATUSES: ReadonlySet<number> = new Set([400, 422])
+
+/**
+ * What a failed image request reports: the status, a bounded excerpt of what
+ * the upstream said, and — when the refusal was about the request — which
+ * optional fields were sent.
+ *
+ * A parameter rejection is never retried without the field it names. Dropping
+ * `aspectRatio` or `imageSize` would answer with an image that silently has a
+ * shape nobody asked for, so the caller is told which fields to change and
+ * makes that call itself.
+ */
+function imageFailureMessage(
+  status: number | undefined,
+  errorText: string,
+  sent: { aspectRatio?: string; imageSize?: string },
+): string {
+  const parts = [`Antigravity image generation failed (${status ?? 'no response'}).`]
+  if (status !== undefined && PARAMETER_REJECTION_STATUSES.has(status)) {
+    const fields = [
+      sent.aspectRatio === undefined ? undefined : `aspectRatio "${sent.aspectRatio}"`,
+      sent.imageSize === undefined ? undefined : `imageSize "${sent.imageSize}"`,
+    ].filter((field): field is string => field !== undefined)
+    parts.push(fields.length > 0
+      ? `The request itself was refused, and these optional fields were what it carried: ${fields.join(', ')}. `
+        + 'It is not retried without them: re-issue the call with a different candidate value, or omit the field, '
+        + 'because the upstream refused this request shape.'
+      : 'The request itself was refused while no aspectRatio or imageSize was set, so a different value for either '
+        + 'cannot fix it; change the prompt or check the account before retrying.')
+  }
+  const excerpt = upstreamBodyExcerpt(errorText)
+  if (excerpt !== '') parts.push(`Upstream said: ${excerpt}`)
+  return parts.join(' ')
+}
+
 async function requestImage(
   accountPool: AccountPoolStore,
   store: FileCredentialStore,
   fetchFn: FetchLike,
   prompt: string,
   aspectRatio: string | undefined,
+  imageSize: string | undefined,
   signal: AbortSignal,
 ): Promise<ImageResponse> {
   const tried = new Set<string>()
   while (true) {
     const { account, token, projectId } = await acquireAccount(accountPool, store, tried, fetchFn)
     tried.add(account.id)
-    const body = JSON.stringify(buildImageRequest(prompt, projectId || 'antigravity-default', aspectRatio))
+    const body = JSON.stringify(buildImageRequest(prompt, projectId || 'antigravity-default', aspectRatio, imageSize))
 
     let response: Response | undefined
     // The response this attempt reports. The FIRST endpoint that answers owns
@@ -418,7 +487,7 @@ async function requestImage(
       )
     }
     throw new HarnessError(
-      `Antigravity image generation failed (${status ?? 'no response'}).${errorText ? ` ${errorText}` : ''}`,
+      imageFailureMessage(status, errorText, { aspectRatio, imageSize }),
       'ANTIGRAVITY_IMAGE_FAILED',
     )
   }
