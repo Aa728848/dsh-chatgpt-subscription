@@ -1,7 +1,16 @@
 # 调度模式（dispatch）
 
-基于内置 `ptc` preset 的调度 Agent。工具面与 PTC 模式完全一致（`run_code` 呈现），
-改变的是**身份与流程纪律**。
+基于 **Code Mode** 的调度 Agent：本预设自己注册的工具保持原生可调（schema 不变），
+预设清单以外的一切（MCP 服务端工具、profile 级插件工具、按 agent 注册的工具集）不进入模型
+上下文，只能在 `code_run` 程序里用 `code_tools_search` 现查现调。改变的是**身份与流程纪律**。
+
+> 内核的 `ptc` 呈现方式只把 `run_code` 交给模型、其余名字一律硬拒，`standard` 又完全没有程序
+> 传输；「原生工具 + 程序」这个组合在内核里表达不出来，所以本预设自带一行 `code-mode`
+> （`@eddyskywalker/dsh-chatgpt-subscription/codemode`）。代次上不可用原生 executor 时，
+> `resolveDispatchPreset` 会自动退回 PTC 呈现（见 `src/host/agent-preset.ts`）。
+
+> **缓存前提**：Code Mode 的说明段是**恒定文本**（不含任何遮蔽计数或 namespace 清单），
+> 加上既有的 `ptc-sdk-cache-guard`，kimi-code / minimax-code 的前缀缓存不因 MCP 增删而失效。
 
 ## 运行骨架
 

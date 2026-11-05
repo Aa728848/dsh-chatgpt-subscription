@@ -99,7 +99,7 @@ describe('the dispatch definition', () => {
     expect(DISPATCH_PRESET.name).toBe('调度模式')
     expect(DISPATCH_PRESET.order).toBe(5)
     expect(DISPATCH_PRESET.description).toBe(
-      '基于 PTC 模式的调度 Agent：先分诊任务复杂度，L2 任务在规划前先做澄清访谈，再由主代理规划、派发子代理（显式选择子代理模型）、审查与验收。',
+      '基于 Code Mode 的调度 Agent：先分诊任务复杂度，L2 任务在规划前先做澄清访谈，再由主代理规划、派发子代理（显式选择子代理模型）、审查与验收。',
     )
   })
 
@@ -122,7 +122,7 @@ describe('the dispatch definition', () => {
       'tool-ask-user',
       'tool-todo',
       'tool-web',
-      'tool-presentation',
+      'code-mode',
       'present',
     ])
   })
@@ -146,7 +146,7 @@ describe('the dispatch definition', () => {
       '@deepseek-ai/dsh-tool-ask-user',
       '@deepseek-ai/dsh-tool-todo',
       '@deepseek-ai/dsh-tool-web',
-      '@deepseek-ai/dsh-agent-tool-presentation',
+      '@eddyskywalker/dsh-chatgpt-subscription/codemode',
       '@deepseek-ai/dsh-tool-present',
     ])
   })
@@ -229,13 +229,19 @@ describe('the dispatch definition', () => {
       modelSelection: true,
       modelDiscovery: true,
     })
-    expect(rowById('tool-presentation').config).toEqual({ mode: 'ptc' })
+    // Code Mode carries its own executor row: no mode config, and no PTС
+    // executor beside it (one executor per scope).
+    expect(rowById('code-mode')).toEqual({
+      id: 'code-mode',
+      name: '@eddyskywalker/dsh-chatgpt-subscription/codemode',
+    })
     expect(rowById('persona').config).toMatchObject({ suffix: 'Your working directory is {{cwd}}.' })
     expect((rowById('persona').config as { prefix: string }).prefix).not.toContain('{{cwd}}')
   })
 
   it('strips persona.config.suffix on >=0.2.1 where @deepseek-ai/dsh-working-directory replaces {{cwd}}', async () => {
-    expect(resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-subagent-control/list-agents')).toBe(DISPATCH_PRESET)
+    expect(resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+      || specifier === '@deepseek-ai/dsh-tool-executor-native')).toBe(DISPATCH_PRESET)
     const resolved021 = resolveDispatchPreset(specifier => specifier === WORKING_DIRECTORY_PACKAGE)
     const personaRow = resolved021.plugins.find(row => row.id === 'persona')
     expect(personaRow?.config).toBeDefined()
@@ -282,20 +288,35 @@ describe('the dispatch definition', () => {
     expect(ids).toContain('tool-subagent')
   })
 
-  it('uses the standalone PTC executor only when the harness provides it', () => {
+  it('falls back from Code Mode to PTC on generations without the native executor', () => {
+    // No native executor: the deprecated presentation row is what every
+    // generation before Code Mode ran.
     const legacy = resolveDispatchPreset(() => false)
     expect(legacy.plugins.find(row => row.id === 'tool-presentation')).toMatchObject({
       name: '@deepseek-ai/dsh-agent-tool-presentation',
       config: { mode: 'ptc' },
     })
+    expect(legacy.plugins.find(row => row.id === 'code-mode')).toBeUndefined()
 
-    const current = resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-executor-ptc')
-    expect(current.plugins.find(row => row.id === 'tool-executor-ptc')).toEqual({
+    // Native executor absent but PTC executor present: that executor replaces
+    // the deprecated row, exactly as before Code Mode existed.
+    const ptc = resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-executor-ptc')
+    expect(ptc.plugins.find(row => row.id === 'tool-executor-ptc')).toEqual({
       id: 'tool-executor-ptc',
       name: '@deepseek-ai/dsh-tool-executor-ptc',
     })
-    expect(current.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
-    expect(rowById('tool-presentation').name).toBe('@deepseek-ai/dsh-agent-tool-presentation')
+    expect(ptc.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
+    expect(ptc.plugins.find(row => row.id === 'code-mode')).toBeUndefined()
+
+    // Native executor present: the declaration is used as written, with no PTC
+    // executor row mounted beside the Code Mode row.
+    const codemode = resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-executor-native')
+    expect(codemode.plugins.find(row => row.id === 'code-mode')).toEqual({
+      id: 'code-mode',
+      name: '@eddyskywalker/dsh-chatgpt-subscription/codemode',
+    })
+    expect(codemode.plugins.find(row => row.id === 'tool-executor-ptc')).toBeUndefined()
+    expect(codemode.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
   })
 
   it('mounts the harness 0.1.7 spelling of the renamed workflow package', () => {
@@ -330,12 +351,15 @@ describe('the dispatch definition', () => {
 })
 
 describe('declaring the preset to the running harness', () => {
-  it('registers the unmodified definition on 0.1.7-0.2.0 and the suffix-stripped definition on >=0.2.1', async () => {
+  it('registers the definition unchanged when every legacy row is still available, and suffix-stripped otherwise', async () => {
     const pre021 = fakeRegistry()
     const pre021Host = fakeHost({ agentPresets: pre021.registry })
 
+    // Code Mode requires the native executor, so the unchanged declaration is
+    // only reachable when that package resolves as well.
     expect(installDispatchPreset(pre021Host.host, specifier => specifier === PRESET_REGISTRY_PACKAGE
-      || specifier === '@deepseek-ai/dsh-tool-subagent-control/list-agents')).toBe('registered')
+      || specifier === '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+      || specifier === '@deepseek-ai/dsh-tool-executor-native')).toBe('registered')
     expect(pre021Host.effects).toHaveLength(1)
     expect(pre021.register).not.toHaveBeenCalled()
 

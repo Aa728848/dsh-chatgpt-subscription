@@ -133,6 +133,15 @@ const runCodeExec = (provider = 'kimi-code', sessionId: string | undefined = 'se
   },
 } as unknown as ToolExecution)
 
+/**
+ * 造一次 `code_run`（Code Mode 预设下的程序传输）执行。
+ * @param provider - 会话被告知的线路。
+ * @param sessionId - 会话 id；传 `undefined` 模拟拿不到会话。
+ * @returns post-execute 需要的执行字段子集。
+ */
+const codeRunExec = (provider = 'kimi-code', sessionId: string | undefined = 'sess-1'): ToolExecution =>
+  ({ ...runCodeExec(provider, sessionId), name: 'code_run' } as unknown as ToolExecution)
+
 /** 造一次带最新用户意图的直接检索执行。 */
 const retrievalExec = (name: string, userText: string): ToolExecution => ({
   name,
@@ -412,6 +421,49 @@ describe('cache warmup host integration', () => {
       expect(JSON.stringify(returned)).toContain('PREVIEW')
     }
     expect(projectionCalls()).toBe(4)
+  })
+
+  it('projects a Kimi code_run result exactly like run_code', async () => {
+    const { listener } = install()
+    const original: PostToolDecision = { kind: 'accept', content: [{ type: 'text', text: 'ORIGINAL' }] }
+    const returned = await listener(codeRunExec(), fullResult(), acceptAll(original))
+    expect(projectionCalls()).toBe(1)
+    // 交给核心的就是这条传输自己的名字：预设换了，接线一个字都不用改。
+    expect((core.calls[0] as { toolName?: string }).toolName).toBe('code_run')
+    expect(JSON.stringify(returned)).toContain('PREVIEW')
+    expect(JSON.stringify(returned)).not.toContain('ORIGINAL')
+  })
+
+  it('leaves a code_run result on another provider untouched', async () => {
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept' }
+    const returned = await listener(codeRunExec('codex-chatgpt'), fullResult(), acceptAll(decision))
+    expect(returned).toBe(decision)
+    expect(projectionCalls()).toBe(0)
+  })
+
+  it('leaves near-miss tool names untouched', async () => {
+    // 精确匹配：近似名不算程序传输，一行都不改。
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept' }
+    for (const name of ['code_runner', 'run_code_v2', 'read']) {
+      const exec = { ...runCodeExec(), name } as ToolExecution
+      expect(await listener(exec, fullResult(), acceptAll(decision)), name).toBe(decision)
+    }
+    expect(projectionCalls()).toBe(0)
+  })
+
+  it('admits code_run on the retrieval-only path', async () => {
+    settings = { enabled: false, retrievalEnabled: true }
+    const { listener } = install()
+    const decision: PostToolDecision = { kind: 'accept', content: [{ type: 'text', text: 'NUMBERED-FILE' }] }
+    const projected = await listener(retrievalExec('code_run', '请定位并列出函数'), fullResult(), acceptAll(decision))
+    expect(JSON.stringify(projected)).toContain('PREVIEW')
+    expect(core.calls[0]?.navigation).toBe(true)
+    expect(core.calls[0]?.retrievalOnly).toBe(true)
+    const editing = await listener(retrievalExec('code_run', '请读取并修复这个文件'), fullResult(), acceptAll(decision))
+    expect(editing).toBe(decision)
+    expect(projectionCalls()).toBe(1)
   })
 
   it('projects a Kimi run_code result by replacing content only', async () => {

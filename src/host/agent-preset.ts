@@ -39,6 +39,23 @@ export const WORKING_DIRECTORY_PACKAGE = '@deepseek-ai/dsh-working-directory'
 /** The standalone PTC executor introduced when tool presentation split into executor plugins. */
 export const PTC_EXECUTOR_PACKAGE = '@deepseek-ai/dsh-tool-executor-ptc'
 
+/**
+ * The native executor this package delegates Code Mode execution to.
+ *
+ * A program sub-call must run through the harness's own policy, approval, and
+ * post-execute pipeline; re-implementing that pipeline is how a plugin silently
+ * drops policy. A profile plugin cannot resolve the host's kernel packages, so
+ * this package carries the executor as a real dependency and drives the host
+ * registry with it.
+ */
+export const NATIVE_EXECUTOR_PACKAGE = '@deepseek-ai/dsh-tool-executor-native'
+
+/** This package's Code Mode row: the preset's own tools stay native, the rest is program-only. */
+export const CODEMODE_PACKAGE = '@eddyskywalker/dsh-chatgpt-subscription/codemode'
+
+/** The deprecated presentation row generations without a native executor keep. */
+export const AGENT_TOOL_PRESENTATION_PACKAGE = '@deepseek-ai/dsh-agent-tool-presentation'
+
 /** The id the `dispatch` preset is selectable under. */
 export const DISPATCH_PRESET_ID = 'dispatch'
 
@@ -115,7 +132,7 @@ export type PresetInstall = 'registered' | 'legacy'
 export const DISPATCH_PRESET: PresetDefinition = {
   id: DISPATCH_PRESET_ID,
   name: '调度模式',
-  description: '基于 PTC 模式的调度 Agent：先分诊任务复杂度，L2 任务在规划前先做澄清访谈，再由主代理规划、派发子代理（显式选择子代理模型）、审查与验收。',
+  description: '基于 Code Mode 的调度 Agent：先分诊任务复杂度，L2 任务在规划前先做澄清访谈，再由主代理规划、派发子代理（显式选择子代理模型）、审查与验收。',
   order: 5,
   plugins: [
     {
@@ -400,10 +417,13 @@ Fallback is a task-scoped, non-session-wide exception for delegated briefs: it c
       name: '@deepseek-ai/dsh-tool-web',
       config: { fetch: true, searchTimeoutMs: 60000 },
     },
+    // Code Mode: the tools this preset registers stay natively callable, and
+    // everything it does not own (MCP servers, profile-level plugins, per-agent
+    // tool sets) is reachable only from inside `code_run`. The row brings its
+    // own executor, so no `tool-executor-ptc` row is mounted beside it.
     {
-      id: 'tool-presentation',
-      name: '@deepseek-ai/dsh-agent-tool-presentation',
-      config: { mode: 'ptc' },
+      id: 'code-mode',
+      name: CODEMODE_PACKAGE,
     },
     { id: 'present', name: '@deepseek-ai/dsh-tool-present' },
   ],
@@ -425,8 +445,16 @@ Fallback is a task-scoped, non-session-wide exception for delegated briefs: it c
  * the export is absent; older harnesses keep it because their main entry does not
  * register the tool.
  *
- * When the standalone PTC executor exists, it replaces the deprecated
- * agent-tool-presentation compatibility row and its `{ mode: 'ptc' }` config.
+ * Code Mode needs the native tool executor (it is the pipeline the program's
+ * sub-calls are delegated to), so that package's presence decides the
+ * presentation rows:
+ *
+ * - resolvable: the `code-mode` row mounts as-is and no PTC executor row exists
+ *   beside it (one executor per scope);
+ * - absent: the row falls back to the deprecated agent-tool-presentation row and,
+ *   when the standalone PTC executor exists, to that executor instead — the
+ *   behaviour of every generation before Code Mode.
+ *
  * @param resolves - whether a bare specifier resolves in this installation.
  * @returns the preset definition for the running harness generation.
  */
@@ -434,7 +462,8 @@ export function resolveDispatchPreset(resolves: SpecifierResolver = resolvesFrom
   const hasWorkingDirectory = resolves(WORKING_DIRECTORY_PACKAGE)
   const hasLegacyListAgents = resolves('@deepseek-ai/dsh-tool-subagent-control/list-agents')
   const hasPtcExecutor = resolves(PTC_EXECUTOR_PACKAGE)
-  if (!hasWorkingDirectory && hasLegacyListAgents && !hasPtcExecutor) return DISPATCH_PRESET
+  const hasNativeExecutor = resolves(NATIVE_EXECUTOR_PACKAGE)
+  if (!hasWorkingDirectory && hasLegacyListAgents && !hasPtcExecutor && hasNativeExecutor) return DISPATCH_PRESET
   return {
     ...DISPATCH_PRESET,
     plugins: DISPATCH_PRESET.plugins.map((row) => {
@@ -444,9 +473,10 @@ export function resolveDispatchPreset(resolves: SpecifierResolver = resolvesFrom
           config: (row.config as PresetRow[]).filter(nested => nested.id !== 'tool-subagent-list-agents'),
         }
       }
-      if (row.id === 'tool-presentation' && hasPtcExecutor) {
-        const { config: _omitted, ...rest } = row
-        return { ...rest, id: 'tool-executor-ptc', name: PTC_EXECUTOR_PACKAGE }
+      if (row.id === 'code-mode' && !hasNativeExecutor) {
+        return hasPtcExecutor
+          ? { id: 'tool-executor-ptc', name: PTC_EXECUTOR_PACKAGE }
+          : { id: 'tool-presentation', name: AGENT_TOOL_PRESENTATION_PACKAGE, config: { mode: 'ptc' } }
       }
       if (row.id !== 'persona' || !hasWorkingDirectory || typeof row.config !== 'object' || row.config === null) return row
       const { suffix: _omitted, ...rest } = row.config as Record<string, unknown>

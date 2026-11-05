@@ -37,6 +37,27 @@ const TOOL_SOURCE = /(?:^|[-_/])(?:read|view|cat|open|edit|write|patch|apply_pat
 const TOOL_RETRIEVAL = /^(?:read|web_fetch|grep|glob)$/
 
 /**
+ * PTC 家族的**程序传输**工具名（一个集合，两个名字）。
+ *
+ * 「模型写一段程序、工具调用发生在程序内部」是同一种传输，只是不同预设给主工具起
+ * 了不同名字：PTC 预设叫 `run_code`，Code Mode 预设叫 `code_run`。凡是按工具名判断
+ * 「这条结果来自程序传输」的地方都必须认这**整个集合**——名字只写一个，预设一换，
+ * 大结果的 `ref://` 预览与精确补读就会静默失效。
+ */
+export const CACHE_WARMUP_PTC_TRANSPORT_TOOLS: ReadonlySet<string> = new Set(['run_code', 'code_run'])
+
+/**
+ * 这个名字是否属于 PTC 家族的程序传输工具。
+ *
+ * 只做**精确**匹配：`code_runner` 之类的近似名不算，宁可少投影也不能误伤。
+ * @param name - 工具名。
+ * @returns 属于 {@link CACHE_WARMUP_PTC_TRANSPORT_TOOLS} 时为 true。
+ */
+export function isPtcTransportName(name: string): boolean {
+  return CACHE_WARMUP_PTC_TRANSPORT_TOOLS.has(name)
+}
+
+/**
  * 多节/多读输出进入新投影的最小长度门槛（字符）。
  *
  * 短于这个长度、又没有 spill 的普通源码与契约读一律逐字保留：
@@ -1579,8 +1600,9 @@ function planProjection(
     if (multiSection !== undefined) return multiSection
   }
   if (looksLikeContract(text)) return { kind: 'verbatim', strategy: 'verbatim-contract' }
-  // PTC 把 read 包在 run_code 里：只接受严格单一行号文件，混合输出继续原样/原日志策略。
-  if (toolName === 'run_code' && navigation === true) {
+  // 程序传输（`run_code` / `code_run`）把 read 包在程序里：只接受严格单一行号文件，
+  // 混合输出继续原样/原日志策略。
+  if (isPtcTransportName(toolName) && navigation === true) {
     const outline = planRetrievalOutline(text, 'read')
     if (outline !== undefined) return outline
     if (retrievalOnly === true) return { kind: 'verbatim', strategy: 'verbatim-intent' }
@@ -1589,7 +1611,7 @@ function planProjection(
     const outline = planRetrievalOutline(text, toolName)
     if (outline !== undefined) return outline
   }
-  // run_code 常返回 JSON envelope 或 JSON 序列化字符串：若只是轻量状态配一个超长日志字段
+  // 程序传输（run_code / code_run）常返回 JSON envelope 或 JSON 序列化字符串：若只是轻量状态配一个超长日志字段
   // （stdout/stderr/output/logs/text）或纯日志字符串，只替换日志部分；若含多份源码或被截断，则整份保持原样。
   if (isJsonDocument(text)) {
     // PTC 的 grep/glob 结构化返回：换成一节预览，路径表按行分页存回去。

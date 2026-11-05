@@ -11,7 +11,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PreviewBudget, ToolResultBlock } from '../src/host/cache-warmup/contracts.ts'
-import { projectToolResult } from '../src/host/cache-warmup/projection.ts'
+import {
+  CACHE_WARMUP_PTC_TRANSPORT_TOOLS,
+  isPtcTransportName,
+  projectToolResult,
+} from '../src/host/cache-warmup/projection.ts'
 import { FileResultReferenceStore } from '../src/host/cache-warmup/store.ts'
 
 /** 本次测试创建的临时目录。 */
@@ -430,6 +434,43 @@ describe('projectToolResult 结构化投影', () => {
     const page = await store.page({ sessionId: 'session-env', refId: result.refId!, limit: 512, maxBytes: 65_536 })
     expect(page.complete).toBe(true)
     expect(page.content).toBe(rawEnvelope)
+  })
+
+  it('code_run（Code Mode 的程序传输）与 run_code 得到同一份预览，并能精确读回原文', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const rawEnvelope = JSON.stringify({ exitCode: 1, command: 'vitest run', stdout: failingTestLog(3) })
+    // 传输族的两个名字走同一套策略：预设从 PTC 换成 Code Mode 之后行为不变。
+    for (const toolName of ['run_code', 'code_run']) {
+      const result = await projectToolResult({
+        toolName,
+        sessionId: 'session-transport',
+        content: rawEnvelope,
+        budget: WARMUP,
+        store,
+      })
+      expect(result.changed, toolName).toBe(true)
+      expect(result.metrics.strategy).toBe('test-failure')
+      expect(result.refId, toolName).toBeDefined()
+      const page = await store.page({
+        sessionId: 'session-transport',
+        refId: result.refId!,
+        limit: 512,
+        maxBytes: 65_536,
+      })
+      expect(page.complete).toBe(true)
+      expect(page.content).toBe(rawEnvelope)
+    }
+  })
+
+  it('PTC 传输族只认精确工具名：近似名与无关工具都不算', () => {
+    expect(CACHE_WARMUP_PTC_TRANSPORT_TOOLS.has('run_code')).toBe(true)
+    expect(CACHE_WARMUP_PTC_TRANSPORT_TOOLS.has('code_run')).toBe(true)
+    expect(CACHE_WARMUP_PTC_TRANSPORT_TOOLS.size).toBe(2)
+    expect(isPtcTransportName('run_code')).toBe(true)
+    expect(isPtcTransportName('code_run')).toBe(true)
+    expect(isPtcTransportName('code_runner')).toBe(false)
+    expect(isPtcTransportName('run_code_v2')).toBe(false)
+    expect(isPtcTransportName('read')).toBe(false)
   })
 
   it('含 ANSI 颜色码、Windows 路径反斜杠、双引号及双重 JSON 序列化的日志能被精确识别与预算装配', async () => {

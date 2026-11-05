@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **[preset] `dispatch`（调度模式）改用 Code Mode，替代 PTC 呈现**
+  - 新增本包子入口 `./codemode`（`src/entry-codemode.ts` + `src/host/codemode/*`）：预设自身注册的工具保持原生可调，预设清单以外的工具（MCP、profile 级插件、按 agent 注册的工具集）不进入模型上下文，只能在 `code_run` 程序中通过 `code_tools_list` / `code_tools_search` / `code_tools_describe` 发现后调用。
+  - 遮蔽接缝是 per-scope `ctx.tools.setExecutor()`（0.2.2+）：`describe()` 决定请求面，`execute()` 在派发前拒绝模型直呼被遮蔽的名字并给出发现指引；程序内子调用整批委托给内核原生 executor，保留完整策略 / 审批 / post-execute 管线。
+  - **kimi-code 缓存前提**：说明段恒定（无计数、无 namespace 清单）；`code_run` 与 `run_code` 同等享受 `ref://` 大输出预览与 `cache_warmup_result` 精确补读。
+  - 代次降级：解析不到 `@deepseek-ai/dsh-tool-executor-native` 时自动退回 `tool-executor-ptc`（或更早的 `agent-tool-presentation`），旧代行为不变。
+  - 依赖：新增 `@deepseek-ai/dsh-tool-executor-native`（真实依赖；profile 插件解析不到宿主内核包）。已知限制：不提供程序级 `sandbox_permissions` 升级，程序内子调用不写 `tool/ptc-dispatch` 回放事件。
+
 ## 0.58.0 - 2026-11-04
 
 - **[harness] 支持 DSH 0.2.2-rc.1，并保留 0.2.2-alpha.3、latest 0.2.1-rc.5 与旧代兼容**

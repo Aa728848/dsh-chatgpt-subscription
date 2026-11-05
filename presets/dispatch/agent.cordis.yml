@@ -422,15 +422,15 @@
 
 # ── presentation ────────────────────────────────────────────────────────────
 
-# PTC mode for this agent alone. The row waits for the host's script runtime
-# (`codeRuntime` up to harness 0.1.5, `ptcRuntime` from 0.1.6) rather than
-# assuming it. On harnesses with @deepseek-ai/dsh-tool-executor-ptc,
-# resolveDispatchPreset mounts that official executor directly; older ones keep
-# this deprecated compatibility row and its mode config.
-- id: tool-presentation
-  name: '@deepseek-ai/dsh-agent-tool-presentation'
-  config:
-    mode: ptc
+# Code Mode for this agent alone: the rows above stay natively callable, and
+# everything this preset does not own (MCP servers, profile-level plugins,
+# per-agent tool sets) is reachable only from inside `code_run`. The row brings
+# its own executor, so no `tool-executor-ptc` row is mounted beside it — one
+# executor per scope. resolveDispatchPreset swaps this row back to the PTC
+# executor (or the deprecated presentation row) on generations without
+# @deepseek-ai/dsh-tool-executor-native.
+- id: code-mode
+  name: '@eddyskywalker/dsh-chatgpt-subscription/codemode'
 
 # `present` ships from harness 0.1.5-alpha.2. On an earlier installation the
 # sync disables this row rather than leave the whole preset unresolvable, and

@@ -3,7 +3,8 @@
  *
  * 这个文件把核心（结果投影、预算、引用存储、指标）接到宿主上，挂四样东西：
  *
- * 1. `tools/post-execute` 上的**新结果投影**：Kimi 线路的 `run_code` 结果交给
+ * 1. `tools/post-execute` 上的**新结果投影**：Kimi 线路的程序传输结果（PTC 的
+ *    `run_code` 与 Code Mode 的 `code_run`）交给
  *    `projectToolResult`，能可靠结构化提取的大结果被换成带 `ref://` 引用的预览；
  * 2. `cache_warmup_result` 工具（`result-tool.ts`），预览的唯一精确补读入口；
  * 3. 一段**静态**系统提示词引导（见 `CACHE_WARMUP_GUIDANCE`）；
@@ -50,6 +51,7 @@ import {
   type CacheWarmupLogEvent,
   type CacheWarmupLogger,
 } from './logging.ts'
+import { CACHE_WARMUP_PTC_TRANSPORT_TOOLS, isPtcTransportName } from './projection.ts'
 import { createCacheWarmupResultTool } from './result-tool.ts'
 import { CACHE_WARMUP_RETRIEVAL_TOOLS, cacheWarmupNavigationIntentOf } from './retrieval-intent.ts'
 import type { CacheWarmupSettings } from './settings.ts'
@@ -64,18 +66,23 @@ export const CACHE_WARMUP_PROVIDER = 'kimi-code'
 
 /**
  * 默认被投影的主工具名（保留导出供向后兼容）。
+ *
+ * 它只是 PTC 家族的**第一个**名字，完整集合见
+ * {@link CACHE_WARMUP_PTC_TRANSPORT_TOOLS}：判断「这条结果来自程序传输」一律用
+ * `isPtcTransportName()`，不要再写第二个字面量比较。
  */
 export const CACHE_WARMUP_SOURCE_TOOL = 'run_code'
 
 /**
  * 允许进入结果投影的工具集合。
  *
- * 除了 PTC 的 `run_code`，宿主的独立 Shell 与后台任务输出工具（`win_bash`、
- * `bash`、`pwsh`、`job_output`）同样经常吐出整屏测试/构建日志。源码读取/编辑类
- * 工具（`read`、`edit`、`grep`、`glob`、CodeGraph 等）不在此列，保持 100% 原样。
+ * 除了 PTC 家族的程序传输（`run_code` 与 Code Mode 的 `code_run`），宿主的独立
+ * Shell 与后台任务输出工具（`win_bash`、`bash`、`pwsh`、`job_output`）同样经常
+ * 吐出整屏测试/构建日志。源码读取/编辑类工具（`read`、`edit`、`grep`、`glob`、
+ * CodeGraph 等）不在此列，保持 100% 原样。
  */
 export const CACHE_WARMUP_SOURCE_TOOLS: ReadonlySet<string> = new Set([
-  'run_code',
+  ...CACHE_WARMUP_PTC_TRANSPORT_TOOLS,
   'win_bash',
   'bash',
   'pwsh',
@@ -102,7 +109,7 @@ export const CACHE_WARMUP_SECTION_ORDER = 225
 export const CACHE_WARMUP_GUIDANCE = [
   '## Result previews',
   '',
-  'On large `run_code` results this line may replace the output with a preview: a short description plus one or more `ref://<session>/<sha256>` handles.',
+  'On large `run_code`/`code_run` results this line may replace the output with a preview: a short description plus one or more `ref://<session>/<sha256>` handles.',
   '',
   '- A preview is **not** the full result. It states `complete`, `omitted` and `nextOffset` explicitly; treat an incomplete preview as incomplete data, not as the whole output.',
   '- To read the original, call `cache_warmup_result` with `action: "page"` and that `refId`, then follow `nextOffset` until `complete` is true.',
@@ -440,7 +447,8 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
    *
    * 决策取舍写在代码里，因为它全是「什么时候**不动**」：
    * - 不是 `accept`（`block` 的 feedback 是别人的东西）；
-   * - 工具名不是 `run_code`、线路不是本线、会话拿不到；
+   * - 工具名不在源工具集合里（`run_code`/`code_run`/Shell/`job_output`）、线路不是
+ *   本线、会话拿不到；
    * - 没有存储、内容为空。
    * 上面任何一条成立就原样返回同一个决策对象。
    *
@@ -463,7 +471,7 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     if (!sourceTool && !retrievalTool) return decision
     const settings = options.settings()
     // 两组开关独立：原日志路径行为不变；检索路径只有显式 true 才开启。
-    const ptcRetrieval = exec.name === 'run_code' && settings.retrievalEnabled === true
+    const ptcRetrieval = isPtcTransportName(exec.name) && settings.retrievalEnabled === true
     if (sourceTool && !settings.enabled && !ptcRetrieval) return decision
     if (retrievalTool && settings.retrievalEnabled !== true) return decision
     const navigation = retrievalTool || ptcRetrieval ? cacheWarmupNavigationIntentOf(exec.agent) : undefined

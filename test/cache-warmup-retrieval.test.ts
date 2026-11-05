@@ -135,6 +135,17 @@ describe('retrieval projection', () => {
     expect(mixed.content).toBe('--- READ RESULT ---' + NL + content)
   })
 
+  it('admits the code_run transport on the same retrieval-only path', async () => {
+    const { store } = memoryStore()
+    const content = numberedSource()
+    const projected = await projectToolResult({ toolName: 'code_run', sessionId: 's', content, navigation: true, retrievalOnly: true, budget: BUDGET, store })
+    expect(projected.changed, JSON.stringify(projected.metrics)).toBe(true)
+    expect(projected.metrics.strategy).toBe('file-outline')
+    const mixed = await projectToolResult({ toolName: 'code_run', sessionId: 's', content: '--- READ RESULT ---' + NL + content, navigation: true, retrievalOnly: true, budget: BUDGET, store })
+    expect(mixed.changed).toBe(false)
+    expect(mixed.metrics.strategy).toBe('verbatim-intent')
+  })
+
   it('projects the canonical Read JSON Envelope used by PTC and stores the original', async () => {
     const { store, originals } = memoryStore()
     const content = readEnvelope(numberedSource())

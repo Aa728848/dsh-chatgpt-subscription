@@ -20,6 +20,7 @@ const host: UserConfig = {
     'plan-mode-pipeline': 'src/entry-plan-mode-pipeline.ts',
     'plan-mode': 'src/entry-plan-mode.ts',
     'tool-result-pruner': 'src/entry-tool-result-pruner.ts',
+    codemode: 'src/entry-codemode.ts',
   },
   outDir: 'lib',
   format: ['esm'],
