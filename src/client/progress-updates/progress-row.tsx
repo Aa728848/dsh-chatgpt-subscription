@@ -74,23 +74,37 @@ const STATE_KEYS: Record<ProgressRowState, string> = {
   error: 'rowError',
 }
 
-/** 行的外框样式。 */
+/**
+ * 行的外框样式。
+ *
+ * 字号与官方工具行标题对齐（13px）：同一条时间线上混着 12px 的进展行与 13px 的
+ * 工具行，读者看到的是两套字号。
+ */
 const rowStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: '6px',
   width: '100%',
-  fontSize: '12px',
+  fontSize: '13px',
   color: 'var(--dsw-alias-label-primary, #1f2329)',
 }
 
-/** 标题行按钮样式（整行可点，去掉原生按钮外观）。 */
+/**
+ * 标题行按钮样式（整行可点，去掉原生按钮外观）。
+ *
+ * `minHeight: 36px` 与 `padding: 6px 0` 抄的是官方工具行那层 `_row_` 的实测取值
+ * （`height:36px; min-height:36px; padding:6px 0`）。少了这两个值，进展行只有
+ * 18px 左右，夹在一排 36px 的工具行里会明显更矮、更挤——用户报的就是这个。
+ * 用 minHeight 而不是 height：正文换行、标题很长时允许它撑高，官方那种固定高度
+ * 在文字折行时会把内容裁掉。
+ */
 const headerStyle: CSSProperties = {
   display: 'flex',
-  alignItems: 'baseline',
+  alignItems: 'center',
   gap: '8px',
   width: '100%',
-  padding: '0',
+  minHeight: '36px',
+  padding: '6px 0',
   border: '0',
   background: 'transparent',
   color: 'inherit',
@@ -103,9 +117,9 @@ const headerStyle: CSSProperties = {
 const titleStyle: CSSProperties = {
   flex: '1 1 auto',
   minWidth: '0',
-  fontSize: '12px',
+  fontSize: '13px',
   fontWeight: 500,
-  lineHeight: '1.5',
+  lineHeight: '16px',
   overflowWrap: 'anywhere',
 }
 
@@ -120,6 +134,8 @@ const stateStyle: CSSProperties = {
 /**
  * 正文样式：只管外边距、字号与颜色。
  *
+ * 字号与标题一致（13px）—— 早先正文比标题小一号，展开后两节字不同大，读起来碎。
+ *
  * **不再**在这里写 `whiteSpace: 'pre-wrap'`：正文交给 {@link MarkdownLite} 渲染，
  * 换行该不该保留由它产出的块级元素决定。早先这里是纯文本 `<p>{message}</p>`，
  * 于是列表符号、`**粗体**` 和管道符表格全部原样上屏 —— 同一份进展在侧栏面板里
@@ -128,8 +144,8 @@ const stateStyle: CSSProperties = {
 const messageStyle: CSSProperties = {
   overflowWrap: 'anywhere',
   margin: '0',
-  fontSize: '12px',
-  lineHeight: '1.55',
+  fontSize: '13px',
+  lineHeight: '1.6',
   color: 'var(--dsw-alias-label-secondary, #5b6270)',
 }
 

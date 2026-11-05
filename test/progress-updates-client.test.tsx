@@ -315,6 +315,27 @@ describe('A. 对话流里的进展行', () => {
     expect(progressOfBlock({ args: argsOf({ message: '只有正文\n第二行' }) })).toEqual({ message: '只有正文\n第二行' })
     expect(progressOfBlock({ args: argsOf({}) })).toEqual({ message: '' })
   })
+
+  /**
+   * 守卫：**进展行要和官方工具行一样高**。
+   *
+   * 平台上真出现过：进展行只有 19px，夹在一排 37px 的工具行中间，明显更矮更挤
+   * （用户报"间距有别于其他工具行"）。官方的行是 `height:36px; min-height:36px;
+   * padding:6px 0`，所以这里钉住标题行的最小高度与上下内边距，防止被改回去。
+   */
+  it('标题行与官方工具行等高：最小高 36px、上下 6px 内边距', async () => {
+    const block = { kind: 'tool-result', callId: 'c-h', name: PROGRESS_UPDATE_TOOL_NAME, args: argsOf({ title: '标题', message: '正文' }) }
+    await act(async () => root.render(createElement(ProgressRow, { block } as never)))
+    const header = container.querySelector<HTMLElement>('[data-dsh-part="progress-row-header"]')!
+    expect(header.style.minHeight).toBe('36px')
+    // 上下 6px、左右 0（jsdom 把简写归一化成 "6px 0px"，按归一化后的值断言）
+    expect(header.style.paddingTop).toBe('6px')
+    expect(header.style.paddingBottom).toBe('6px')
+    expect(header.style.paddingLeft).toBe('0px')
+    expect(header.style.paddingRight).toBe('0px')
+    // 字号与官方工具行标题一致，不是更小的一档
+    expect(container.querySelector<HTMLElement>('[data-dsh-part="progress-row-title"]')!.style.fontSize).toBe('13px')
+  })
 })
 
 describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTab', () => {
