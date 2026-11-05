@@ -288,7 +288,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
     '### Discovery API (callable from inside a program)',
     '',
     '- tools.' + listTool + '({ namespace? }) - every callable tool as { name, description, namespace }, hidden ones included.',
-    '- tools.' + searchTool + '({ query, limit?, namespace? }) - ranked matches with their full parameter schemas; the intended first step.',
+    '- tools.' + searchTool + '({ query, limit?, namespace? }) - ranked matches with their full parameter schemas; the intended first step. Query with the English keywords the tool is likely named and described with (tool names and descriptions are English); a phrase in another language is only matched literally.',
     '- tools.' + describeTool + '({ name }) - one tool description and complete parameter schema.',
     '',
     'If a hidden tool name is called directly instead of from a program, the call is refused and the refusal names the discovery call to make.',

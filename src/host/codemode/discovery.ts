@@ -291,84 +291,46 @@ export function namespaceOfName(name: string): string {
   return cut < 0 ? rest : rest.slice(0, cut)
 }
 
-/** 中日韩统一表意文字范围。用 fromCharCode 拼，避免源码里的转义写错一层就静默失效。 */
-const CJK_RUN = new RegExp('[' + String.fromCharCode(0x3400) + '-' + String.fromCharCode(0x9fff) + ']+', 'g')
+/**
+ * 中日韩文字范围：扩展 A、基本区、兼容表意文字、日文假名、韩文音节。
+ *
+ * 用 fromCharCode 拼而不写转义：这个字符类写错一层反斜杠不会报错，只会让中日韩
+ * 分词整条静默失效（查询被切成空 token，然后按字母序返回一堆无关工具）。
+ */
+const CJK_RUN = new RegExp(
+  '['
+  + String.fromCharCode(0x3400) + '-' + String.fromCharCode(0x4dbf)
+  + String.fromCharCode(0x4e00) + '-' + String.fromCharCode(0x9fff)
+  + String.fromCharCode(0xf900) + '-' + String.fromCharCode(0xfaff)
+  + String.fromCharCode(0x3040) + '-' + String.fromCharCode(0x30ff)
+  + String.fromCharCode(0xac00) + '-' + String.fromCharCode(0xd7af)
+  + ']+',
+  'g',
+)
 
 /** 英文 / 数字词。 */
 const WORD_RUN = /[a-z0-9]+/g
 
 /**
- * 内置口语同义词表：中文查询里的常用词 → 英文工具描述里真实出现的词。
+ * 分词：拉丁词按词切，中日韩按单字 + 二元组（作为分词器的廉价替代）。
  *
- * MCP 工具的描述几乎全是英文，而用户的说法是中文（「查币价」「看余额」「挪文件」）。
- * 纯词法检索在这种跨语言落差上必然零命中，所以这里做一张小而准的映射表，只覆盖
- * 代理 / 交易 / 协作 / 存储这几类高频语境；命中即把英文词一并加入查询词。
- */
-const SYNONYMS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  币价: ['price', 'ticker', 'quote'],
-  价格: ['price', 'quote'],
-  行情: ['ticker', 'quote', 'market'],
-  k线: ['candle', 'ohlc', 'kline', 'candlestick'],
-  涨跌: ['ticker', 'price'],
-  余额: ['balance'],
-  结余: ['balance'],
-  下单: ['order'],
-  买入: ['buy', 'order'],
-  卖出: ['sell', 'order'],
-  订单: ['order'],
-  撤单: ['cancel', 'order'],
-  文件: ['file'],
-  目录: ['directory', 'folder'],
-  文件夹: ['directory', 'folder'],
-  消息: ['message'],
-  频道: ['channel'],
-  群组: ['channel', 'group'],
-  联系人: ['contact'],
-  客户: ['contact', 'customer', 'lead'],
-  线索: ['lead'],
-  数据库: ['sql', 'db', 'query'],
-  查询: ['query', 'search'],
-  搜索: ['search', 'query'],
-  页面: ['page'],
-  文档: ['page', 'document'],
-  合并: ['merge', 'pull'],
-  提交: ['commit', 'pull', 'push'],
-  分支: ['branch'],
-  列出: ['list'],
-  新建: ['create'],
-  创建: ['create'],
-  删除: ['delete', 'remove'],
-  更新: ['update'],
-})
-
-/**
- * 分词：英文按词，中日韩按单字与二元组，并展开同义词。
+ * **刻意不做中英对照**。工具的检索词来自工具自己（名字、描述、参数名），跨语言
+ * 落差交给模型：说明段明确要求用英文关键词检索，而模型本来就会翻译。一张手写的
+ * 同义词表只能覆盖写表的人想到的那几个词，覆盖率永远是问号，维护成本却是常态。
  *
  * @param text - 任意文本（工具名、描述、参数名或查询）。
- * @returns 查询词（可能含同义词展开，调用方负责去重）。
+ * @returns 查询词。
  */
 function tokenize(text: string): string[] {
-  const raw = String(text ?? '').toLowerCase()
-  // 中文口语常带空格（「K 线」「用 数据库 查」），先去掉空白再按包含关系展开同义词，
-  // 否则「数据库」「联系人」这种三字以上整词永远匹配不到（二元组切不出整词）。
-  const value = raw.replace(/\s+/g, '')
+  const value = String(text ?? '').toLowerCase()
   const tokens: string[] = []
-  for (const word of raw.match(WORD_RUN) ?? []) tokens.push(word)
-  for (const [key, synonyms] of Object.entries(SYNONYMS)) {
-    if (value.includes(key)) tokens.push(...synonyms)
-  }
+  for (const word of value.match(WORD_RUN) ?? []) tokens.push(word)
   for (const run of value.match(CJK_RUN) ?? []) {
     if (run.length === 1) tokens.push(run)
-    for (let index = 0; index + 1 < run.length; index += 1) {
-      const bigram = run.slice(index, index + 2)
-      tokens.push(bigram)
-      for (const synonym of SYNONYMS[bigram] ?? []) tokens.push(synonym)
-    }
-    for (const synonym of SYNONYMS[run] ?? []) tokens.push(synonym)
+    for (let index = 0; index + 1 < run.length; index += 1) tokens.push(run.slice(index, index + 2))
   }
   return tokens
 }
-
 /**
  * 参数名也是强信号：`instId`、`sql`、`channel` 这类词往往只出现在参数里，而它恰恰是
  * 用户或模型用来定位工具的那个词。
@@ -492,8 +454,10 @@ function scoreOf(
     score += weight * (inDescription > 0 ? 1 + Math.min(inDescription, 2) * 0.5 : 0)
   }
   const name = indexed.entry.name.toLowerCase()
-  const compact = query.trim().toLowerCase().replace(/\s+/g, '')
-  if (compact.length > 1 && name.replace(/[^a-z0-9]/g, '').includes(compact.replace(/[^a-z0-9]/g, ''))) score += 12
+  const wanted = query.trim().toLowerCase()
+  // 精确名字命中压过一切（模型常常已经知道名字，只是不确定是否被遮蔽）。
+  if (wanted.length > 0 && (name === wanted || name.endsWith('__' + wanted))) score += 50
+  else if (wanted.length > 1 && name.includes(wanted)) score += 12
   return score
 }
 

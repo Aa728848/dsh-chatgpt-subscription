@@ -1,9 +1,15 @@
 /**
- * 程序内检索的**行为基线**：口语化中文查询必须能找到工具。
+ * 程序内检索的**行为基线**。
  *
- * 这一组断言不是词法细节测试，而是「模型实际会不会空手而归」的度量。基线值来自实测：
- * 修复前零命中 4/16、top1 4/16、top8 9/16；修复后零命中 0、top1 14/16、top8 16/16。
- * 阈值留出余量（零命中必须为 0，top8 ≥ 15/16），改动检索算法时它可以立刻报警。
+ * 分两组，各自回答一个不同的问题：
+ *
+ * 1. **英文关键词**（模型按说明段被要求写的形态）：名字/描述/参数名三种线索都要能命中，
+ *    门槛卡在 top1 ≥ 14/16、top8 = 16/16。这是检索算法本身的健康度。
+ * 2. **中文口语**（用户在对话里怎么说）：检索**不要求命中**——跨语言交给模型翻译，工具层
+ *    只保证「不空手而归」，即零命中时必须退化为按 namespace 分组的浏览清单。
+ *
+ * 这两组的差别是刻意的：如果哪天有人往检索里加回一张中英对照表，第 2 组会变绿，但
+ * 第 1 组才是真实主路径；而第 2 组的门槛只锁「不空手」，不会逼着后来者继续穷举。
  *
  * @module test/codemode-retrieval
  */
@@ -47,28 +53,70 @@ const queries: [string, string | undefined][] = [
   ['order', 'mcp__okx__place_order'],
 ]
 
+const englishQueries: [string, string][] = [
+  ['ticker BTC', 'mcp__okx__get_ticker'],
+  ['candles kline', 'mcp__okx__get_candles'],
+  ['place order', 'mcp__okx__place_order'],
+  ['account balance', 'mcp__okx__get_balance'],
+  ['post message channel', 'mcp__slack__post_message'],
+  ['move file', 'mcp__fs__move_file'],
+  ['list directory', 'mcp__fs__list_directory'],
+  ['pull requests', 'mcp__github__list_pull_requests'],
+  ['create issue', 'mcp__github__create_issue'],
+  ['sql query', 'mcp__db__run_query'],
+  ['search contacts', 'mcp__crm__search_contacts'],
+  ['instId', 'mcp__okx__get_ticker'],
+  ['git repo', 'mcp__github__list_pull_requests'],
+  ['notion page', 'mcp__notion__create_page'],
+  ['slack channels', 'mcp__slack__list_channels'],
+  ['mcp__okx__get_ticker', 'mcp__okx__get_ticker'],
+]
+
+/** 跑一组查询，返回统计与逐条结果。 */
+async function runQueries(queries: readonly [string, string][]) {
+  const rules = createRules({})
+  const defs = createDiscoveryDefinitions(rules, () => catalog, () => null) as {
+    name: string
+    execute: (args: unknown) => Promise<{ tools: { name: string }[]; fallback?: boolean }>
+  }[]
+  const search = defs.find((definition) => definition.name === 'code_tools_search')!
+  let zero = 0
+  let top1 = 0
+  let top8 = 0
+  const rows: string[] = []
+  for (const [query, expected] of queries) {
+    const { tools, fallback } = await search.execute({ query, limit: 8 })
+    const names = tools.map((tool) => tool.name)
+    const anyHit = names.includes(expected)
+    const first = names[0] === expected
+    if (names.length === 0) zero += 1
+    if (first) top1 += 1
+    if (anyHit) top8 += 1
+    rows.push((first ? 'TOP1 ' : anyHit ? 'TOP8 ' : 'MISS ') + query
+      + ' -> ' + (names[0] ?? '(empty)') + (fallback === true ? ' [browse]' : '') + ' [' + expected + ']')
+  }
+  return { zero, top1, top8, rows }
+}
+
 describe('程序内检索的行为基线', () => {
-  it('口语化查询零命中为 0，top8 召回不低于 15/16', async () => {
+  it('英文关键词：top1 ≥ 14/16，top8 全中', async () => {
+    const { top1, top8, rows } = await runQueries(englishQueries)
+    expect(top8, rows.join('\n')).toBe(englishQueries.length)
+    expect(top1, rows.join('\n')).toBeGreaterThanOrEqual(14)
+  })
+
+  it('中文口语：不空手而归——零命中时退化为按 namespace 分组的浏览清单', async () => {
     const rules = createRules({})
     const defs = createDiscoveryDefinitions(rules, () => catalog, () => null) as {
-      name: string; execute: (args: unknown) => Promise<{ tools: { name: string }[] }>
+      name: string
+      execute: (args: unknown) => Promise<{ tools: { name: string }[]; fallback?: boolean }>
     }[]
-    const search = defs.find((d) => d.name === 'code_tools_search')!
-    let zero = 0, top1 = 0, top8 = 0
-    const rows: string[] = []
-    for (const [query, expected] of queries) {
-      const { tools } = await search.execute({ query, limit: 8 })
-      const names = tools.map((t) => t.name)
-      const anyHit = names.includes(expected!)
-      const first = names[0] === expected
-      if (names.length === 0) zero += 1
-      if (first) top1 += 1
-      if (anyHit) top8 += 1
-      rows.push((first ? 'TOP1 ' : anyHit ? 'TOP8 ' : 'MISS ') + query + ' -> ' + (names[0] ?? '(空)') + ' [' + expected + ']')
+    const search = defs.find((definition) => definition.name === 'code_tools_search')!
+    for (const query of ['查币价 BTC', '找联系人', '把文件挪到别处', '下单买 100 USDT']) {
+      const { tools, fallback } = await search.execute({ query, limit: 8 })
+      // 允许命中（例如中文描述的工具），但绝不允许返回空数组。
+      expect(tools.length, query).toBeGreaterThan(0)
+      if (fallback === true) expect(tools.length, query).toBeLessThanOrEqual(8)
     }
-    // 失败时把逐条结果打进断言消息，省去再跑一次定位。
-    expect(zero, rows.join('\n')).toBe(0)
-    expect(top8, rows.join('\n')).toBeGreaterThanOrEqual(15)
-    expect(top1, rows.join('\n')).toBeGreaterThanOrEqual(12)
   })
 })
