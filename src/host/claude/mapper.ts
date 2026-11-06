@@ -1561,7 +1561,7 @@ export function countClaudeCacheBreakpoints(body: unknown): number {
 }
 
 /** One tool definition in the wire shape. */
-function wireTool(tool: { name: string; description?: string; parameters?: unknown }, names: ClaudeToolNames): AnthropicBlock {
+function wireTool(tool: { name: string; description?: string; parameters?: unknown; deferLoading?: true }, names: ClaudeToolNames): AnthropicBlock {
   const schema: Record<string, unknown> = isRecord(tool.parameters)
     ? { ...tool.parameters }
     : { type: 'object', properties: {} }
@@ -1572,7 +1572,99 @@ function wireTool(tool: { name: string; description?: string; parameters?: unkno
     name: claudeWireToolName(tool.name, names),
     description: tool.description ?? '',
     input_schema: schema,
+    // A deferred definition stays in the request but out of the system-prompt
+    // prefix, which is what lets a tool arrive mid-conversation without the
+    // cached prefix changing underneath it.
+    ...(tool.deferLoading === true ? { defer_loading: true as const } : {}),
   }
+}
+
+/**
+ * The stand-in declaration a request needs when every real tool is deferred.
+ *
+ * The vendor's rule is that at least one tool must stay active: a request whose
+ * declarations are all deferred has no active declaration, and a tool change
+ * stated in that state would move the start of the rendered prompt. Transcribed
+ * from the harness's own anthropic-messages adapter, which inserts the same
+ * placeholder for the same reason.
+ */
+const CLAUDE_TOOL_UPDATE_PLACEHOLDER = {
+  name: 'tool_update_placeholder',
+  description: 'Reserved. Keeps one tool declaration active so a mid-conversation tool change stays in the history. Never call it.',
+  parameters: { type: 'object', properties: {} },
+}
+
+/** Whether one message states a tool change this wire can carry. */
+function claudeMessageStatesToolChange(message: Message): boolean {
+  return Array.isArray(message.content) && message.content.some((block) => isRecord(block)
+    && (block.type === 'tool-addition' || block.type === 'tool-removal'))
+}
+
+/**
+ * The fallback statement of one tool change, for a history position the vendor
+ * will not accept a mid-conversation system message in.
+ *
+ * The declarations are untouched in both shapes: this only tells the model what
+ * changed, and it is deliberately imperative for a removal because the
+ * declaration is still there and could otherwise still be called.
+ */
+function claudeToolChangeNote(message: Message): string {
+  const added: string[] = []
+  const removed: string[] = []
+  for (const block of message.content as readonly unknown[]) {
+    if (!isRecord(block)) continue
+    const name = typeof block.toolName === 'string' ? block.toolName.trim() : ''
+    if (name === '') continue
+    if (block.type === 'tool-addition') added.push(name)
+    else if (block.type === 'tool-removal') removed.push(name)
+  }
+  const notes: string[] = []
+  if (added.length > 0) notes.push(`[The tool(s) ${added.map((name) => `"${name}"`).join(', ')} are now available.]`)
+  if (removed.length > 0) {
+    notes.push(`[The tool(s) ${removed.map((name) => `"${name}"`).join(', ')} are no longer available. Do not call them again: any call will fail.]`)
+  }
+  return notes.join('\n')
+}
+
+/** Whether any message states a tool change that this wire can carry. */
+export function claudeHasToolChanges(options: GenerateOptions): boolean {
+  return options.messages.some((message) => message.role === 'developer'
+    && Array.isArray(message.content)
+    && message.content.some((block) => isRecord(block)
+      && (block.type === 'tool-addition' || block.type === 'tool-removal')))
+}
+
+/**
+ * Whether a BUILT payload carries a `tool_addition` / `tool_removal` block.
+ *
+ * Read off the body rather than from the request, so the beta header and the
+ * blocks it licenses cannot disagree about one request.
+ */
+export function claudeBodyHasToolChanges(payload: Record<string, unknown>): boolean {
+  const messages = payload['messages']
+  if (!Array.isArray(messages)) return false
+  return (messages as Record<string, unknown>[]).some((message) => {
+    const content = message['content']
+    return Array.isArray(content) && (content as Record<string, unknown>[]).some((block) =>
+      block['type'] === 'tool_addition' || block['type'] === 'tool_removal')
+  })
+}
+
+/**
+ * The wire tool list for one request.
+ *
+ * Deferred declarations travel with `defer_loading` so they stay out of the
+ * prefix. When EVERY declaration is deferred and the history states a change,
+ * one placeholder is prepended: the vendor refuses a tool change on a request
+ * that has no active declaration at all.
+ */
+function claudeWireTools(options: GenerateOptions, names: ClaudeToolNames): AnthropicBlock[] {
+  const tools = options.tools ?? []
+  const needsPlaceholder = tools.length > 0
+    && tools.every((tool) => tool.deferLoading === true)
+    && claudeHasToolChanges(options)
+  const all = needsPlaceholder ? [CLAUDE_TOOL_UPDATE_PLACEHOLDER, ...tools] : tools
+  return all.map((tool) => wireTool(tool, names))
 }
 
 /**
@@ -1599,6 +1691,19 @@ function claudeSystemContent(message: Message, images: ResolvedRequestImages): A
     }
     if (block.type === 'image') {
       blocks.push(imageBlockFor(block, images))
+    }
+    // A tool change stated here keeps the declaration list at the head exactly
+    // as the conversation started it: the addition names a declaration already
+    // in `tools`, and the removal withdraws it from this point onward without
+    // dropping the definition. Both are beta shapes, licensed by the header the
+    // request builder derives from this same body.
+    if (block.type === 'tool-addition' || block.type === 'tool-removal') {
+      const name = typeof block.toolName === 'string' ? block.toolName.trim() : ''
+      if (name === '') continue
+      blocks.push({
+        type: block.type === 'tool-addition' ? 'tool_addition' : 'tool_removal',
+        tool: { type: 'tool_reference', name: claudeWireToolName(name) },
+      })
     }
   }
   return blocks
@@ -1893,7 +1998,9 @@ export function buildClaudeRequestBody(
   const { thinking, outputConfig } = claudeThinking(options.model, effort, level, maxTokens, request.thinkingBudgets, catalog)
 
   const entries: ClaudeWireEntry[] = []
-  for (const message of messagesForTheWire(options)) {
+  const wire = messagesForTheWire(options)
+  for (let index = 0; index < wire.length; index += 1) {
+    const message = wire[index] as Message
     // A historical system message KEEPS ITS OWN SLOT when the model accepts a
     // mid-conversation system message. It applies from that point in the
     // conversation onward, so it has to stay where it was written: folding it
@@ -1903,6 +2010,29 @@ export function buildClaudeRequestBody(
     // thinking blocks that were signed against the old prefix.
     if (message.role === 'system') {
       entries.push({ role: 'system', content: claudeSystemContent(message, images) })
+      continue
+    }
+    // A developer message that states a tool change becomes a system turn: the
+    // vendor carries `tool_addition` / `tool_removal` in a `role: "system"`
+    // message and nowhere else. Text in the same message rides along, which the
+    // vendor also allows explicitly. A developer message WITHOUT a change keeps
+    // its old shape (a user turn) so this branch changes nothing else.
+    if (message.role === 'developer' && claudeMessageStatesToolChange(message)) {
+      // The vendor accepts such a message only directly after a user turn and
+      // only when an assistant turn follows or it ends the list; any other
+      // position is a 400. When the history does not offer a legal slot, the
+      // change is stated as a user-turn note instead: the declarations stay put
+      // either way, so the prefix is safe in both shapes.
+      const previous = wire[index - 1]
+      const next = wire[index + 1]
+      const legal = previous !== undefined && wireRoleOf(previous) === 'user'
+        && (next === undefined || wireRoleOf(next) === 'assistant')
+      if (legal) {
+        entries.push({ role: 'system', content: claudeSystemContent(message, images) })
+        continue
+      }
+      const note = claudeToolChangeNote(message)
+      if (note !== '') entries.push({ role: 'user', content: [{ type: 'text', text: note }] })
       continue
     }
     if (isToolResultMessage(message)) {
@@ -1932,7 +2062,7 @@ export function buildClaudeRequestBody(
     system: buildClaudeSystemBlocks(options, caching, cacheTtl),
     messages: mergeClaudeMessages(entries),
     ...(options.tools !== undefined && options.tools.length > 0
-      ? { tools: options.tools.map((tool) => wireTool(tool, names)) }
+      ? { tools: claudeWireTools(options, names) }
       : {}),
     ...(thinking === undefined ? {} : { thinking }),
     ...(outputConfig === undefined ? {} : { output_config: outputConfig }),

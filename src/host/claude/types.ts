@@ -161,6 +161,17 @@ export function isClaudeCacheTtl(value: unknown): value is ClaudeCacheTtl {
  */
 export const THINKING_BINDING_CONTROLS_BETA = 'thinking-binding-controls-2026-08-01'
 
+/**
+ * Licenses a mid-conversation `tool_addition` / `tool_removal` block.
+ *
+ * A tool change stated inside a `role: "system"` message is a beta shape: without
+ * this marker the blocks are an unknown content type and the request is refused.
+ * The name carries its own date because the vendor versions the shape, so a
+ * future revision arrives as a new constant rather than as a silent behaviour
+ * change under the old one.
+ */
+export const INLINE_TOOLS_BETA = 'inline-tools-2026-09-15'
+
 /** Anthropic protocol revision sent as `anthropic-version`. */
 export const ANTHROPIC_VERSION = '2023-06-01'
 

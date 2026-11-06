@@ -127,6 +127,7 @@ import {
   ERROR_CODE_CLIENT_VERSION_TOO_OLD,
   ERROR_TYPE,
   EXTENDED_CACHE_TTL_BETA,
+  INLINE_TOOLS_BETA,
   INTERLEAVED_THINKING_BETA,
   MESSAGES_PATH,
   MODELS_DISCOVERY_TIMEOUT_MS,
@@ -243,6 +244,12 @@ export interface ClaudeHeaderOptions {
    * licenses it, so the header and the body cannot disagree.
    */
   cacheTtl?: ClaudeCacheTtl
+  /**
+   * Whether this request's body states a mid-conversation tool change; adds the
+   * beta that licenses `tool_addition` / `tool_removal` blocks. Without it those
+   * blocks are an unknown content type.
+   */
+  toolChanges?: boolean
   /** HTTP method. `content-type` is emitted unless this is a GET. */
   method?: 'GET' | 'POST' | string
   /** Which product identity to report. Defaults to the Messages-API one. */
@@ -269,7 +276,7 @@ function isHaikuModel(modelId: string): boolean {
  * Order is not observable — the server parses the header as a set — so the order
  * below is chosen for readability in a log rather than to match a reference.
  */
-export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinking' | 'thinkingBinding' | 'cacheTtl'> = {}): string[] {
+export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinking' | 'thinkingBinding' | 'cacheTtl' | 'toolChanges'> = {}): string[] {
   const betas: string[] = []
   // The haiku exclusion is the reference's own rule, not this module's taste:
   // a haiku id is served without the claude-code identity beta.
@@ -282,6 +289,10 @@ export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinki
   // asking for `ttl: '1h'` without the marker is refused. Deriving it from the
   // tier rather than from a setting means a caller cannot desynchronize the two.
   if (options.cacheTtl === '1h') betas.push(EXTENDED_CACHE_TTL_BETA)
+  // Same rule as the tier above: the header follows the BODY. A request that
+  // states a tool change carries the blocks, so the marker is derived from the
+  // request itself rather than from a setting a caller could forget to set.
+  if (options.toolChanges === true) betas.push(INLINE_TOOLS_BETA)
   return betas
 }
 

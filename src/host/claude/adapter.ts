@@ -167,6 +167,7 @@ import {
   claudeMinCliVersionFor,
   claudeModelSupportsImage,
   claudeReasoningEfforts,
+  claudeSupportsMidConversationSystemMessages,
   defaultContextWindowFor,
   maxOutputTokensFor,
   resolveClaudeModel,
@@ -183,6 +184,7 @@ import {
   assertStreamComplete,
   buildClaudeRequestBody,
   claudeBodyBindsThinking,
+  claudeBodyHasToolChanges,
   claudeRequestThinks,
   claudeToolNames,
   closeStream,
@@ -361,6 +363,28 @@ class ClaudeAccountTokenStore implements ClaudeTokenStore {
   }
 }
 
+/**
+ * Whether this model may state a tool change in the history.
+ *
+ * Gated on the same capability that licenses a mid-conversation system message,
+ * because that message is what carries the change: a model that folds those
+ * messages back into the top-level `system` field cannot take a tool change
+ * without moving the head, which is the cost the capability exists to avoid.
+ *
+ * `DSH_CLAUDE_TOOL_UPDATE=0` turns it off for one account without a code change,
+ * mirroring the escape hatch kimi-code and the codex line carry.
+ *
+ * @param modelId - exact model id.
+ * @returns the mode to declare, or undefined when every request must restate the
+ * complete tool list.
+ */
+export function toolUpdateMode(modelId: string): 'in-history' | undefined {
+  if (!claudeSupportsMidConversationSystemMessages(modelId)) return undefined
+  const raw = (process.env.DSH_CLAUDE_TOOL_UPDATE ?? '').trim().toLowerCase()
+  if (raw !== '' && ['0', 'false', 'no', 'off', 'none'].includes(raw)) return undefined
+  return 'in-history'
+}
+
 export class ClaudeAdapter extends LlmAdapter {
   /** Null keeps the pre-pool single-credential path. */
   private readonly accountPool: ClaudeAccountPoolLike | null
@@ -503,6 +527,12 @@ export class ClaudeAdapter extends LlmAdapter {
       inputModalities: entry.supportsImage ? ['text', 'image'] : ['text'],
       context: { contextWindow: contextWindow || DEFAULT_CONTEXT_WINDOW },
       ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, maxOutputTokensFor(modelId, catalog)),
+      // `toolUpdate: 'in-history'` for models that accept a mid-conversation
+      // system message: a tool change then rides a `tool_addition` /
+      // `tool_removal` block in that message, the declaration list at the head
+      // never changes, and a withdrawn tool keeps its declaration so the cached
+      // prefix survives. `DSH_CLAUDE_TOOL_UPDATE=0` turns it off per account.
+      ...(toolUpdateMode(modelId) === undefined ? {} : { toolUpdate: toolUpdateMode(modelId) }),
       // No `systemPromptUpdate: 'in-history'`: the system prompt travels in the
       // body's own `system` field and never as a message, so this route cannot
       // read a later system message as the effective prompt.
@@ -677,6 +707,9 @@ export class ClaudeAdapter extends LlmAdapter {
           // Read off the body just built: the vendor documents block_binding
           // without its beta as a 400 on every request.
           thinkingBinding: claudeBodyBindsThinking(payload),
+          // Read off the body too: the blocks and the beta that licenses them
+          // must come from the same request or neither is trustworthy.
+          toolChanges: claudeBodyHasToolChanges(payload),
           // The header follows the tier the body just asked for.
           cacheTtl,
           method: 'POST',
