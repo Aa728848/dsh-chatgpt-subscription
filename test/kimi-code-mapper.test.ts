@@ -417,6 +417,11 @@ describe('buildAnthropicRequest', () => {
             { type: 'tool-call', id: 'call_1', name: 'read', arguments: '{"path":"a"}' },
           ],
         } as Message,
+        // The call is answered: an unanswered tool_use is an orphan the mapper
+        // drops, and this test is about the reasoning block surviving with it.
+        { role: 'tool', source: { kind: 'tool', callId: 'call_1' }, content: [
+          { type: 'tool-result', toolCallId: 'call_1', content: [{ type: 'text', text: 'file' }] },
+        ] } as unknown as Message,
       ],
     }))
     const messages = body.messages as Array<Record<string, unknown>>

@@ -772,15 +772,20 @@ describe('Message projection', () => {
           { type: 'text', text: 'let me look' },
           { type: 'tool-call', id: 'toolu_1', name: 'read_file', arguments: '{"path":"a.txt","limit":10}' },
         ] },
+        // A call is only legal on this wire when a result answers it; the
+        // projection is what this test asserts, so the pair is completed here.
+        { role: 'user', source: { kind: 'tool', callId: 'toolu_1' }, content: [
+          { type: 'tool-result', toolCallId: 'toolu_1', content: [{ type: 'text', text: 'contents' }] },
+        ] },
       ],
     }) as unknown as GenerateOptions)
-    expect(messagesOf(built)).toEqual([{
+    expect(messagesOf(built)[0]).toEqual({
       role: 'assistant',
       content: [
         { type: 'text', text: 'let me look' },
         { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.txt', limit: 10 } },
       ],
-    }])
+    })
     // The image-free text content stays a plain string elsewhere; this is the
     // assistant turn, whose content is always blocks.
     expect(typeof messagesOf(built)[0]!.content).not.toBe('string')
@@ -809,6 +814,12 @@ describe('Message projection', () => {
   it('marks an errored tool result and merges a run of consecutive user turns', () => {
     const built = buildClaudeRequestBody(options({
       messages: [
+        // The two calls the results below answer: a result that follows no call
+        // is rejected by the wire, and the mapper repairs the pairing.
+        { role: 'assistant', source: { kind: 'model', provider: PROVIDER_ID, model: 'm' }, content: [
+          { type: 'tool-call', id: 'a', name: 'Read', arguments: '{}' },
+          { type: 'tool-call', id: 'b', name: 'Read', arguments: '{}' },
+        ] },
         { role: 'user', source: { kind: 'tool', callId: 'a' }, content: [
           { type: 'tool-result', toolCallId: 'a', content: [{ type: 'text', text: 'boom' }], isError: true },
         ] },
@@ -819,9 +830,10 @@ describe('Message projection', () => {
       ],
     }) as unknown as GenerateOptions)
     const messages = messagesOf(built)
-    expect(messages).toHaveLength(1)
-    expect(messages[0]!.role).toBe('user')
-    expect(messages[0]!.content).toEqual([
+    expect(messages).toHaveLength(2)
+    expect(messages[0]!.role).toBe('assistant')
+    expect(messages[1]!.role).toBe('user')
+    expect(messages[1]!.content).toEqual([
       { type: 'tool_result', tool_use_id: 'a', content: 'boom', is_error: true },
       { type: 'tool_result', tool_use_id: 'b', content: 'fine' },
       // The marker sits on the tail of the MERGED turn, which is the text turn.
@@ -1195,13 +1207,25 @@ describe('Request image edge limits', () => {
     }))
   }
 
-  /** The wide comparison image, returned inside a tool result as read_image delivers it. */
+  /**
+   * The call and the result that carries the wide comparison image, as read_image
+   * delivers it. The call travels with the result because a bare tool result is
+   * not a legal request: the wire rejects a result that follows no call, so the
+   * mapper repairs the pairing and the image would never reach the assertion.
+   */
   function wideToolResult() {
-    return {
-      role: 'user',
-      source: { kind: 'tool', callId: 'read' },
-      content: [{ type: 'tool-result', toolCallId: 'read', content: [{ type: 'text', text: 'compare' }, shot('wide', 2904, 1272)] }],
-    }
+    return [
+      {
+        role: 'assistant',
+        source: { kind: 'model', provider: PROVIDER_ID, model: 'm' },
+        content: [{ type: 'tool-call', id: 'read', name: 'read_image', arguments: '{}' }],
+      },
+      {
+        role: 'user',
+        source: { kind: 'tool', callId: 'read' },
+        content: [{ type: 'tool-result', toolCallId: 'read', content: [{ type: 'text', text: 'compare' }, shot('wide', 2904, 1272)] }],
+      },
+    ]
   }
 
   type Version = { width: number; height: number; mediaType: string; data: Uint8Array }
@@ -1225,7 +1249,7 @@ describe('Request image edge limits', () => {
   }
 
   it('sends a wide image as stored while the request carries twenty images or fewer', async () => {
-    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD - 1), wideToolResult()] }) as unknown as GenerateOptions
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD - 1), ...wideToolResult()] }) as unknown as GenerateOptions
     expect(requestImageEdgeLimit(request)).toBe(MAX_IMAGE_EDGE)
 
     const { reader, reads, requests } = recordingReader()
@@ -1236,7 +1260,7 @@ describe('Request image edge limits', () => {
   })
 
   it('downscales only the images over 2000 px once the request carries more than twenty', async () => {
-    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), wideToolResult()] }) as unknown as GenerateOptions
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), ...wideToolResult()] }) as unknown as GenerateOptions
     expect(requestImageEdgeLimit(request)).toBe(MANY_IMAGE_EDGE)
 
     const { reader, reads, requests } = recordingReader()
@@ -1262,7 +1286,7 @@ describe('Request image edge limits', () => {
     const repeated = Array.from({ length: MANY_IMAGE_THRESHOLD }, () => shot('same', 10, 10))
     const atLimit = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: repeated }] }) as unknown as GenerateOptions
     expect(requestImageEdgeLimit(atLimit)).toBe(MAX_IMAGE_EDGE)
-    const overLimit = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: repeated }, wideToolResult()] }) as unknown as GenerateOptions
+    const overLimit = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: repeated }, ...wideToolResult()] }) as unknown as GenerateOptions
     expect(requestImageEdgeLimit(overLimit)).toBe(MANY_IMAGE_EDGE)
   })
 
@@ -1306,7 +1330,7 @@ describe('Request image edge limits', () => {
   })
 
   it('turns the image into a visible placeholder instead of sending the original when no small version can be made', async () => {
-    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), wideToolResult()] }) as unknown as GenerateOptions
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), ...wideToolResult()] }) as unknown as GenerateOptions
 
     // A backend that cannot derive request versions rejects the call.
     const unsupported = recordingReader(async () => { throw new Error('ATTACHMENT_PROJECTION_UNSUPPORTED') })
@@ -1321,7 +1345,7 @@ describe('Request image edge limits', () => {
   })
 
   it('propagates cancellation from the downscale instead of degrading it to a placeholder', async () => {
-    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), wideToolResult()] }) as unknown as GenerateOptions
+    const request = options({ messages: [...history(MANY_IMAGE_THRESHOLD), ...wideToolResult()] }) as unknown as GenerateOptions
     const controller = new AbortController()
     const abort = new DOMException('stopped', 'AbortError')
     const { reader } = recordingReader(async () => {
@@ -1935,6 +1959,11 @@ describe('The finish chunk survives DSH\'s lossless-JSON check', () => {
       messages: [
         { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] },
         assistant,
+        // The call the assistant turn just made, answered: a signed thinking
+        // block is only replayed on a legal turn, and an unanswered call is not.
+        { role: 'user', source: { kind: 'tool', callId: 'toolu_01' }, content: [
+          { type: 'tool-result', toolCallId: 'toolu_01', content: [{ type: 'text', text: 'file' }] },
+        ] },
       ],
     }) as unknown as GenerateOptions)
     const messages = messagesOf(body)

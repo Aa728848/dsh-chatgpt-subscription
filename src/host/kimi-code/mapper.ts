@@ -40,6 +40,7 @@ import {
 } from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
+import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 // Schema normalization and image resolution are provider-neutral behaviour, not
 // Kimi preferences; they are shared with the other lines that send inline media.
 import { normalizeKimiToolSchema, stripMetaSchema } from '../common/tool-schema.ts'
@@ -2125,7 +2126,7 @@ export function buildAnthropicRequest(
   // The cache breakpoint goes on the last block of the LAST message, AFTER the
   // merge — so it lands on the final tool_result of a merged user turn rather
   // than on a block the merge later moved.
-  const messages = mergeAnthropicMessages(entries)
+  const messages = cleanOrphanedToolCalls(mergeAnthropicMessages(entries), mergeAnthropicMessages)
   const lastMessage = messages[messages.length - 1]
   if (lastMessage !== undefined && Array.isArray(lastMessage.content) && lastMessage.content.length > 0) {
     const lastBlock = lastMessage.content[lastMessage.content.length - 1]

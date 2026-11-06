@@ -79,6 +79,7 @@ import {
   type TokenUsage,
 } from '../common/llm-compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
+import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import { stripMetaSchema } from '../common/tool-schema.ts'
 import { repairMinimaxToolArguments } from './runtime-enhancements.ts'
 import { estimatedInputTokens } from '../common/prompt-estimate.ts'
@@ -673,94 +674,6 @@ function mergeAnthropicMessages(
   return merged
 }
 
-/**
- * 清掉没有配对的工具调用。
- *
- * MiniMax 的 Anthropic 兼容端点对工具消息序列是**强校验**的：`tool_result` 必须紧跟在
- * 发出对应 `tool_use` 的 assistant 消息之后，且每个 `tool_use` 都要有结果。少一个配对，
- * 整个请求就是 `400 invalid params`（错误码 2013），而且不可重试——同一份请求体再发一次
- * 还是 400，整段会话就此卡死。
- *
- * 孤儿从哪来都有：一个工具调用还没派发会话就断了（模型点了工具、宿主没跑成）；一段历史在
- * 压缩或换 provider 时只剩结果没了调用；或者模型直接叫了一个**它工具清单里根本没有**的
- * 名字——最后一种在 Code Mode 下被 progress-update 的催促文案触发过：催促里点名
- * `progress_update`，而那个名字不在模型的工具清单里，调用没有被派发，历史就此留下一个
- * 没有结果的 `tool_use`，之后每一轮都是 400。
- *
- * 这里只做**配对**，不做别的判断：配不上的 `tool_use` 与 `tool_result` 一起丢掉，消息因此
- * 空掉的就整条去掉，剩下的相邻同角色消息再折叠一次。
- *
- * @param messages - 已折叠过的消息列表。
- * @returns 配对完整、且没有空消息的消息列表。
- */
-export function cleanOrphanedToolCalls(
-  messages: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>,
-): Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> {
-  const result: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
-  // 待应答的调用：所属 assistant 消息在 result 里的下标 + 块下标 + id。
-  let pending: Array<{ messageIndex: number; blockIndex: number; id: string }> = []
-
-  /**
-   * 丢掉没有被结果应答的调用。
-   * @param answered - 已经被结果应答的 id 集合。
-   */
-  const dropUnanswered = (answered: ReadonlySet<string>): void => {
-    const byMessage = new Map<number, number[]>()
-    for (const call of pending) {
-      if (answered.has(call.id)) continue
-      const indices = byMessage.get(call.messageIndex)
-      if (indices === undefined) byMessage.set(call.messageIndex, [call.blockIndex])
-      else indices.push(call.blockIndex)
-    }
-    for (const [messageIndex, indices] of byMessage) {
-      const message = result[messageIndex]
-      if (message === undefined) continue
-      message.content = message.content.filter((_block, index) => !indices.includes(index))
-    }
-    pending = []
-  }
-
-  for (const message of messages) {
-    if (message.role === 'assistant') {
-      // 上一条 assistant 的调用如果到这里还没人应答，它就是孤儿：新的 assistant 轮次
-      // 不会替它作答。
-      dropUnanswered(new Set())
-      const messageIndex = result.length
-      for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
-        const block = message.content[blockIndex]
-        if (block.type !== 'tool_use') continue
-        const id = asString(block.id)
-        if (id === undefined) continue
-        pending.push({ messageIndex, blockIndex, id })
-      }
-      result.push({ role: 'assistant', content: [...message.content] })
-      continue
-    }
-    // user 消息：只有紧跟着的那条 assistant 的调用才算数。配不上的结果丢掉——留着它就是
-    // 「tool call result does not follow tool call」。
-    const answered = new Set<string>()
-    const content: AnthropicBlock[] = []
-    for (const block of message.content) {
-      if (block.type === 'tool_result') {
-        const id = asString(block.tool_use_id)
-        if (id === undefined || !pending.some((call) => call.id === id)) continue
-        answered.add(id)
-        content.push(block)
-        continue
-      }
-      content.push(block)
-    }
-    dropUnanswered(answered)
-    result.push({ role: 'user', content })
-  }
-  // 历史以 assistant 轮次收尾时，它那些没人应答的调用同样是孤儿。
-  dropUnanswered(new Set())
-
-  const nonEmpty = result.filter((message) => message.content.length > 0)
-  // 清空之后一条都不剩时，宁可原样发出去：空消息列表是另一种失败。
-  return nonEmpty.length === 0 ? messages : mergeAnthropicMessages(nonEmpty)
-}
-
 /** The catalog entry for one request's model, or undefined when it is unknown. */
 function catalogEntry(modelId: string): MinimaxCodeCatalogModel | undefined {
   return minimaxCodeModelDef(modelId)
@@ -1114,7 +1027,7 @@ export function buildMinimaxRequest(
     // their own builders for the same reason (kimi-code/mapper.ts,
     // claude/mapper.ts).
     stream: true,
-    messages: cleanOrphanedToolCalls(mergeAnthropicMessages(entries)),
+    messages: cleanOrphanedToolCalls(mergeAnthropicMessages(entries), mergeAnthropicMessages),
     // A cache breakpoint cannot sit on a plain string, so the system prompt
     // takes the block-array form while caching is on - the shape MiniMax's
     // explicit-caching page marks - and stays the measured string when it is

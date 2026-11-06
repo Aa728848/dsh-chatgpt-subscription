@@ -32,6 +32,7 @@ import {
   type TokenUsage,
 } from '../common/llm-compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
+import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import {
   MAX_REQUEST_IMAGE_BYTES,
   NO_RESOLVED_IMAGES,
@@ -1210,6 +1211,28 @@ function messagesAssistantContent(message: Message): AnthropicBlock[] {
 }
 
 /**
+ * Merge neighbouring same-role turns.
+ *
+ * DSH history can hold two user messages in a row (an injected context notice
+ * followed by the real turn) and a tool result is itself a user-role message;
+ * the Messages wire wants one user turn, so consecutive turns of one role are
+ * folded together in order.
+ */
+function mergeAnthropicMessages(entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>): Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> {
+  const merged: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
+  for (const entry of entries) {
+    if (entry.content.length === 0) continue
+    const last = merged[merged.length - 1]
+    if (last !== undefined && last.role === entry.role) {
+      last.content = [...last.content, ...entry.content]
+      continue
+    }
+    merged.push({ role: entry.role, content: [...entry.content] })
+  }
+  return merged
+}
+
+/**
  * Build one `/v1/messages` body.
  *
  * `stream: true` is mandatory: the adapter reads every response as SSE, and a
@@ -1234,12 +1257,13 @@ export function buildMessagesRequest(
       ? messagesUserContent(message, images)
       : messagesAssistantContent(message)
     if (content.length === 0) continue
-    const previous = entries[entries.length - 1]
-    // Adjacent same-role turns are ONE turn on this wire, which is also what
-    // keeps parallel tool results in a single user turn.
-    if (previous !== undefined && previous.role === role) previous.content.push(...content)
-    else entries.push({ role, content })
+    entries.push({ role, content })
   }
+  // Adjacent same-role turns are ONE turn on this wire, which is also what keeps
+  // parallel tool results in a single user turn. A tool call with no result is
+  // not legal here at all - the endpoint rejects the whole request - so the
+  // pairing is repaired before anything is sent.
+  const messages = cleanOrphanedToolCalls(mergeAnthropicMessages(entries), mergeAnthropicMessages)
 
   const system = leadingSystemTextRaw(options)
   const tools = options.tools ?? []
@@ -1252,7 +1276,7 @@ export function buildMessagesRequest(
     model: options.model,
     max_tokens: maxTokens,
     stream: true,
-    messages: entries,
+    messages,
     ...(system === undefined ? {} : { system }),
     ...(tools.length > 0
       ? {

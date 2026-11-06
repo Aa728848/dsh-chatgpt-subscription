@@ -200,6 +200,7 @@ import {
 } from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
+import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import {
   claudeModelBindsThinkingToPrefix,
   claudeModelCanDisableThinking,
@@ -2060,7 +2061,7 @@ export function buildClaudeRequestBody(
     max_tokens: maxTokens,
     stream: true,
     system: buildClaudeSystemBlocks(options, caching, cacheTtl),
-    messages: mergeClaudeMessages(entries),
+    messages: cleanOrphanedToolCalls(mergeClaudeMessages(entries), mergeClaudeMessages),
     ...(options.tools !== undefined && options.tools.length > 0
       ? { tools: claudeWireTools(options, names) }
       : {}),

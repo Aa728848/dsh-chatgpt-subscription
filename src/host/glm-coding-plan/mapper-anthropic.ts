@@ -97,6 +97,7 @@ import {
   type TokenUsage,
 } from '../common/llm-compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
+import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import { stripMetaSchema } from '../common/tool-schema.ts'
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
@@ -679,7 +680,7 @@ export function buildGlmAnthropicRequest(
   // 最新一条非 system 消息挂缓存断点：这一轮请求的末尾就是前缀缓存要覆盖到的位置。
   // 官方客户端的断点也只落在这一条上（`finalizeLatestNonSystemMessageCacheControl`：
   // 先清掉其它消息上的断点，再把断点挪到最后一条非 system 消息）。
-  const merged = mergeAnthropicMessages(entries)
+  const merged = cleanOrphanedToolCalls(mergeAnthropicMessages(entries), mergeAnthropicMessages)
   const lastMessageIndex = merged.length - 1
   const messages = lastMessageIndex < 0
     ? merged

@@ -22,6 +22,7 @@ import {
 } from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
+import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import { anthropicThinkingBudget, declaredMaxOutputTokens, wireReasoningEffort } from './types.ts'
 import type { CommandCodeWire } from '../../shared/command-code-contracts.ts'
 
@@ -746,7 +747,7 @@ export function buildAnthropicRequest(
   return {
     model: options.model,
     max_tokens: maxTokens,
-    messages: mergeAnthropicMessages(entries),
+    messages: cleanOrphanedToolCalls(mergeAnthropicMessages(entries), mergeAnthropicMessages),
     ...(system === undefined ? {} : { system: anthropicSystemBlocks(system) }),
     ...(options.temperature === undefined || budget !== undefined ? {} : { temperature: options.temperature }),
     ...(options.stop && options.stop.length > 0 ? { stop_sequences: options.stop } : {}),

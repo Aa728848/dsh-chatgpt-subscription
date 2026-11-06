@@ -85,4 +85,12 @@ describe('createNudgeContext', () => {
     expect(NUDGE_TEXT).toContain('one short title line')
     expect(createNudgeContext(1).content).toEqual([{ type: 'text', text: NUDGE_TEXT }])
   })
+
+  it('两种调用面都点到：直呼，以及程序里的 tools.progress_update', () => {
+    // Code Mode / PTC 下模型只看得见程序传输工具，只写直呼形式会让它发出一个自己清单里
+    // 没有的名字——那次调用不会派发，历史里留下没有结果的 tool_use（issue #89）。
+    expect(NUDGE_TEXT).toContain('await tools.progress_update')
+    expect(NUDGE_TEXT).toContain('code_run')
+    expect(NUDGE_TEXT).toContain('run_code')
+  })
 })
