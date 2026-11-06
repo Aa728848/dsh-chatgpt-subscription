@@ -590,6 +590,70 @@ describe('OpenAI stream parsing', () => {
     expect(block).toMatchObject({ type: 'tool-call', name: 'read', arguments: '{"path":"a"}' })
   })
 
+  it('splits a second parallel call that reuses index 0 with a different id', () => {
+    const state = createStreamState('openai')
+    const chunks = [
+      ...processOpenAIStreamLine(frame({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_00_a', function: { name: 'progress_update', arguments: '{"title":"x"}' } }] }, finish_reason: null }],
+      }), state),
+      ...processOpenAIStreamLine(frame({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_01_b', function: { name: 'code_run', arguments: '{"code":"1"}' } }] }, finish_reason: null }],
+      }), state),
+      ...processOpenAIStreamLine(frame({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }), state),
+    ]
+    const tools = chunks.flatMap((chunk) => (chunk.type === 'block-end' ? [chunk.block] : []))
+      .filter((entry) => entry.type === 'tool-call')
+    expect(tools).toHaveLength(2)
+    expect(tools).toMatchObject([
+      { type: 'tool-call', id: 'call_00_a', name: 'progress_update', arguments: '{"title":"x"}' },
+      { type: 'tool-call', id: 'call_01_b', name: 'code_run', arguments: '{"code":"1"}' },
+    ])
+    expect(chunks.filter((chunk) => chunk.type === 'block-start' && chunk.blockType === 'tool-call')).toHaveLength(2)
+  })
+
+  it('keeps index 0 and index 1 parallel calls in their own blocks', () => {
+    const state = createStreamState('openai')
+    const chunks = [
+      ...processOpenAIStreamLine(frame({
+        choices: [{ delta: { tool_calls: [
+          { index: 0, id: 'call_a', function: { name: 'read', arguments: '{"pa' } },
+          { index: 1, id: 'call_b', function: { name: 'write', arguments: '{"pa' } },
+        ] }, finish_reason: null }],
+      }), state),
+      ...processOpenAIStreamLine(frame({
+        choices: [{ delta: { tool_calls: [
+          { index: 0, function: { arguments: 'th":"a"}' } },
+          { index: 1, function: { arguments: 'th":"b"}' } },
+        ] }, finish_reason: null }],
+      }), state),
+      ...processOpenAIStreamLine(frame({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }), state),
+    ]
+    const tools = chunks.flatMap((chunk) => (chunk.type === 'block-end' ? [chunk.block] : []))
+      .filter((entry) => entry.type === 'tool-call')
+    expect(tools).toHaveLength(2)
+    expect(tools).toMatchObject([
+      { type: 'tool-call', id: 'call_a', name: 'read', arguments: '{"path":"a"}' },
+      { type: 'tool-call', id: 'call_b', name: 'write', arguments: '{"path":"b"}' },
+    ])
+  })
+
+  it('adopts the first real id for an index that opened without one', () => {
+    const state = createStreamState('openai')
+    const chunks = [
+      ...processOpenAIStreamLine(frame({
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'read', arguments: '{"a"' } }] }, finish_reason: null }],
+      }), state),
+      ...processOpenAIStreamLine(frame({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_late', function: { arguments: ':1}' } }] }, finish_reason: null }],
+      }), state),
+      ...processOpenAIStreamLine(frame({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }), state),
+    ]
+    const tools = chunks.flatMap((chunk) => (chunk.type === 'block-end' ? [chunk.block] : []))
+      .filter((entry) => entry.type === 'tool-call')
+    expect(tools).toHaveLength(1)
+    expect(tools).toMatchObject([{ type: 'tool-call', id: 'call_late', name: 'read', arguments: '{"a":1}' }])
+  })
+
   it('reads usage including cached tokens, and reports it when the stream closes', () => {
     const state = createStreamState('openai')
     state.finishReason = 'stop'

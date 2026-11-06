@@ -806,6 +806,23 @@ function applyToolDelta(entry: Record<string, unknown>, state: QoderStreamState)
   const out: StreamChunk[] = []
 
   let call = state.toolCalls.get(wireIndex)
+  const incomingId = asString(entry.id)
+  // 网关在流第二个并行调用时省略 `index`（或重复 `0`）会把两次调用并进同一个块：
+  // 后到的 id/name 覆盖先前的，两段参数碎片还会拼成 `{...}{...}` —— 那不是 JSON。
+  // 已经定下的 id 之后又来了不同的非空 id，就是一次新调用：这里先把被顶掉的那次
+  // 结清（与 closeToolCalls 同一套 id 归一化），新调用再另开自己的块。
+  if (call !== undefined && incomingId !== undefined && call.id !== 'call_' + wireIndex && incomingId !== call.id) {
+    const closedBlock: OutboundContentBlock = {
+      type: 'tool-call',
+      id: toToolCallId(call.id),
+      name: call.name,
+      arguments: call.arguments === '' ? '{}' : call.arguments,
+    }
+    state.blocks[call.blockIndex] = closedBlock
+    out.push({ type: 'block-end', index: call.blockIndex, block: closedBlock })
+    state.toolCalls.delete(wireIndex)
+    call = undefined
+  }
   if (call === undefined) {
     const opened = openToolCall(state, entry, wireIndex)
     out.push(...opened.chunks)

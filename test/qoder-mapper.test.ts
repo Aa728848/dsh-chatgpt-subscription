@@ -195,6 +195,30 @@ function envelope(inner: unknown, statusCodeValue = 200): string {
 }
 
 describe('processQoderStreamLine（信封 SSE）', () => {
+  it('复用同一个 index 0 但 id 不同的第二次调用拆成两个块', () => {
+    const state = createQoderStreamState()
+    const out: unknown[] = []
+    for (const chunk of processQoderStreamLine(envelope({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_00_a', function: { name: 'progress_update', arguments: '{"title":"x"}' } }] } }],
+    }), state)) out.push(chunk)
+    for (const chunk of processQoderStreamLine(envelope({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_01_b', function: { name: 'code_run', arguments: '{"code":"1"}' } }] } }],
+    }), state)) out.push(chunk)
+    for (const chunk of processQoderStreamLine(envelope({
+      choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+    }), state)) out.push(chunk)
+
+    const blocks = out
+      .filter((chunk) => (chunk as { type: string }).type === 'block-end')
+      .map((chunk) => (chunk as { block: Record<string, unknown> }).block)
+      .filter((block) => block.type === 'tool-call')
+    // 被顶掉的那次调用保留自己的 id / 名字 / 参数，两次调用不串味。
+    expect(blocks).toEqual([
+      { type: 'tool-call', id: 'call_00_a', name: 'progress_update', arguments: '{"title":"x"}' },
+      { type: 'tool-call', id: 'call_01_b', name: 'code_run', arguments: '{"code":"1"}' },
+    ])
+  })
+
   it('content / reasoning / tool_calls / usage / finish 全链路', () => {
     const state = createQoderStreamState()
     const out: unknown[] = []

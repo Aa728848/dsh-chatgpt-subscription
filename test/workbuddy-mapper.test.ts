@@ -290,6 +290,22 @@ describe('WorkBuddy stream decoding', () => {
     const end = out.find((c: any) => c.type === 'block-end') as any
     expect(end.block).toMatchObject({ type: 'tool-call', name: 'read_file', arguments: '{"path":"a"}' })
   })
+  it('splits a second parallel call that reuses index 0 with a different id', () => {
+    const state = createStreamState()
+    const out = [
+      ...processStreamLine(frame({ tool_calls: [{ index: 0, id: 'call_00_a', function: { name: 'progress_update', arguments: '{"title":"x"}' } }] }), state),
+      ...processStreamLine(frame({ tool_calls: [{ index: 0, id: 'call_01_b', function: { name: 'code_run', arguments: '{"code":"1"}' } }] }), state),
+      ...processStreamLine('data: [DONE]', state),
+    ]
+    const ends = out.filter((c: any) => c.type === 'block-end')
+    expect(ends).toHaveLength(2)
+    // The superseded call keeps its own id, name and arguments: neither call is
+    // overwritten and the two argument fragments are never concatenated.
+    expect(ends.map((c: any) => c.block)).toEqual([
+      { type: 'tool-call', id: 'call_00_a', name: 'progress_update', arguments: '{"title":"x"}' },
+      { type: 'tool-call', id: 'call_01_b', name: 'code_run', arguments: '{"code":"1"}' },
+    ])
+  })
   it('opens a no-argument tool call as a tool use with its name on the first delta', () => {
     const state = createStreamState()
     const out = [

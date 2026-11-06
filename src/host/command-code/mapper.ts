@@ -1135,6 +1135,25 @@ function applyOpenAIToolDelta(entry: Record<string, unknown>, state: CommandCode
   const out: StreamChunk[] = []
 
   let call = state.toolCalls.get(wireIndex)
+  const incomingId = asString(entry.id)
+  // A gateway that omits `index` (or repeats `0`) while streaming a second
+  // parallel call would otherwise fold two calls into one block: the later id
+  // and name would overwrite the earlier ones and both argument fragments would
+  // concatenate into `{...}{...}`, which is not JSON. A different non-empty id
+  // behind an already settled id IS a new call, so the superseded one is closed
+  // here and the new one opens its own block.
+  if (call !== undefined && incomingId !== undefined && call.id !== `call_${wireIndex}` && incomingId !== call.id) {
+    const closedBlock: OutboundContentBlock = {
+      type: 'tool-call',
+      id: toToolCallId(call.id),
+      name: call.name,
+      arguments: call.arguments === '' ? '{}' : call.arguments,
+    }
+    state.blocks[call.blockIndex] = closedBlock
+    out.push({ type: 'block-end', index: call.blockIndex, block: closedBlock })
+    state.toolCalls.delete(wireIndex)
+    call = undefined
+  }
   if (call === undefined) {
     out.push(...closeCurrent(state))
     const blockIndex = state.blocks.length

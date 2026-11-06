@@ -467,6 +467,22 @@ describe('工具调用与参数', () => {
     expect((end.block as any).arguments).toBe('{}')
   })
 
+  it('复用同一个 index 0 但 id 不同的第二次调用要拆成两块', () => {
+    const chunks = runStream([
+      sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_00_a', function: { name: 'progress_update', arguments: '{"title":"x"}' } }] } }] }),
+      sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_01_b', function: { name: 'code_run', arguments: '{"code":"1"}' } }] } }] }),
+      sse({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+      sse('[DONE]'),
+    ])
+    const ends = chunks.filter((c) => c.type === 'block-end')
+    expect(ends).toHaveLength(2)
+    // 被顶掉的那次调用保留自己的 id / 名字 / 参数，两次调用不串味。
+    expect(ends.map((c) => c.block)).toEqual([
+      { type: 'tool-call', id: 'call_00_a', name: 'progress_update', arguments: '{"title":"x"}' },
+      { type: 'tool-call', id: 'call_01_b', name: 'code_run', arguments: '{"code":"1"}' },
+    ])
+  })
+
   it('并行工具调用按线上序号分别成块', () => {
     const chunks = runStream([
       sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'a', function: { name: 'f', arguments: '{}' } }] } }] }),

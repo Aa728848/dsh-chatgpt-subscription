@@ -712,6 +712,23 @@ export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): A
         if (!isRecord(call)) continue
         const index = Number(call.index ?? 0)
         let block = toolBlocks.get(index)
+        // A gateway that omits `index` (or repeats `0`) while streaming a second
+        // parallel call would otherwise fold two calls into one block: the later
+        // id and name would overwrite the earlier ones and both argument
+        // fragments would concatenate into `{...}{...}`, which is not JSON. A
+        // different non-empty id behind an already settled id IS a new call, so
+        // it opens its own block here; the superseded block stays in `order` and
+        // still receives its own block-end in the terminal chunks.
+        if (
+          block !== undefined &&
+          typeof call.id === 'string' &&
+          call.id.length > 0 &&
+          block.callId !== undefined &&
+          block.callId.length > 0 &&
+          block.callId !== call.id
+        ) {
+          block = undefined
+        }
         if (block === undefined) {
           block = open('tool-call') as OpenTool
           toolBlocks.set(index, block)
@@ -719,7 +736,9 @@ export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): A
         }
         const fn = isRecord(call.function) ? call.function : {}
         block.callId = acceptIdentity(block.callId, call.id)
-        block.name = acceptIdentity(block.name, fn.name)
+        // Only a call that never named itself may be named: a later chunk must
+        // never rewrite an already established tool name.
+        if (block.name === undefined || block.name === '') block.name = acceptIdentity(block.name, fn.name)
         const fragment = typeof fn.arguments === 'string' ? fn.arguments : ''
         block.text += fragment
         yield {

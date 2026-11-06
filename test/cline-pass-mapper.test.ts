@@ -126,6 +126,82 @@ describe('Cline Pass stream translation', () => {
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
   })
 
+  it('splits a second parallel call that reuses index 0 with a different id', async () => {
+    const chunks = []
+    for await (const chunk of translate(frames(
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_00_a', function: { name: 'progress_update', arguments: '{"title":"x"}' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_01_b', function: { name: 'code_run', arguments: '{"code":"1"}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      '[DONE]',
+    ))) chunks.push(chunk)
+    const tools = chunks
+      .filter((chunk) => chunk.type === 'block-end')
+      .map((chunk) => (chunk as { block: { type: string; id?: string; name?: string; arguments?: string } }).block)
+      .filter((block) => block.type === 'tool-call')
+    expect(tools.map((block) => [block.id, block.name, block.arguments])).toEqual([
+      ['call_00_a', 'progress_update', '{"title":"x"}'],
+      ['call_01_b', 'code_run', '{"code":"1"}'],
+    ])
+    expect(chunks.filter((chunk) => chunk.type === 'block-start' && (chunk as { blockType: string }).blockType === 'tool-call'))
+      .toHaveLength(2)
+  })
+
+  it('keeps index 0 and index 1 parallel calls in their own blocks', async () => {
+    const chunks = []
+    for await (const chunk of translate(frames(
+      { choices: [{ delta: { tool_calls: [
+        { index: 0, id: 'call_a', function: { name: 'read', arguments: '{"pa' } },
+        { index: 1, id: 'call_b', function: { name: 'write', arguments: '{"pa' } },
+      ] } }] },
+      { choices: [{ delta: { tool_calls: [
+        { index: 0, function: { arguments: 'th":"a"}' } },
+        { index: 1, function: { arguments: 'th":"b"}' } },
+      ] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      '[DONE]',
+    ))) chunks.push(chunk)
+    const tools = chunks
+      .filter((chunk) => chunk.type === 'block-end')
+      .map((chunk) => (chunk as { block: { type: string; id?: string; name?: string; arguments?: string } }).block)
+      .filter((block) => block.type === 'tool-call')
+    expect(tools.map((block) => [block.id, block.name, block.arguments])).toEqual([
+      ['call_a', 'read', '{"path":"a"}'],
+      ['call_b', 'write', '{"path":"b"}'],
+    ])
+  })
+
+  it('adopts the first real id for an index that opened without one', async () => {
+    const chunks = []
+    for await (const chunk of translate(frames(
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'read', arguments: '{"a"' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_late', function: { arguments: ':1}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      '[DONE]',
+    ))) chunks.push(chunk)
+    const tools = chunks
+      .filter((chunk) => chunk.type === 'block-end')
+      .map((chunk) => (chunk as { block: { type: string; id?: string; name?: string; arguments?: string } }).block)
+      .filter((block) => block.type === 'tool-call')
+    expect(tools).toHaveLength(1)
+    expect([tools[0].id, tools[0].name, tools[0].arguments]).toEqual(['call_late', 'read', '{"a":1}'])
+  })
+
+  it('never rewrites a tool name that is already established inside one block', async () => {
+    const chunks = []
+    for await (const chunk of translate(frames(
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_a', function: { name: 'read', arguments: '' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_a', function: { name: 'write', arguments: '{"a":1}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      '[DONE]',
+    ))) chunks.push(chunk)
+    const tools = chunks
+      .filter((chunk) => chunk.type === 'block-end')
+      .map((chunk) => (chunk as { block: { type: string; id?: string; name?: string; arguments?: string } }).block)
+      .filter((block) => block.type === 'tool-call')
+    expect(tools).toHaveLength(1)
+    expect([tools[0].id, tools[0].name, tools[0].arguments]).toEqual(['call_a', 'read', '{"a":1}'])
+  })
+
   it('reports a content-free completion as an empty-response failure', async () => {
     const chunks = []
     for await (const chunk of translate(frames({ choices: [{ delta: {} }] }, '[DONE]'))) chunks.push(chunk)

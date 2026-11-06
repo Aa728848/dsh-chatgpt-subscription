@@ -551,6 +551,21 @@ describe('Step Code SSE 流：tool_calls 分片聚合', () => {
     expect(blocks.map((block) => (block.type === 'tool-call' ? block.name : '')).join('')).toBe('read_file')
   })
 
+  it('★ 复用同一个 index 0 但 id 不同的第二次调用要拆成两块', () => {
+    const state = createStreamState()
+    const out = [
+      ...processStreamLine(frame({ tool_calls: [{ index: 0, id: 'call_00_a', function: { name: 'progress_update', arguments: '{"title":"x"}' } }] }), state),
+      ...processStreamLine(frame({ tool_calls: [{ index: 0, id: 'call_01_b', function: { name: 'code_run', arguments: '{"code":"1"}' } }] }), state),
+    ]
+    const blocks = [...blockEnds(out), ...blockEnds(processStreamLine('data: [DONE]', state))]
+
+    expect(blocks).toHaveLength(2)
+    expect(blocks.map((block) => (block.type === 'tool-call' ? block.id : ''))).toEqual(['call_00_a', 'call_01_b'])
+    expect(blocks.map((block) => (block.type === 'tool-call' ? block.name : ''))).toEqual(['progress_update', 'code_run'])
+    expect(blocks.map((block) => (block.type === 'tool-call' ? block.arguments : '')))
+      .toEqual(['{"title":"x"}', '{"code":"1"}'])
+  })
+
   it('index 相同的分片归同一个调用，index 不同的分成两个调用（且按 index 顺序收尾）', () => {
     const state = createStreamState()
     const out = [

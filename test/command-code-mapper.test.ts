@@ -413,6 +413,27 @@ describe('Command Code OpenAI stream decoding', () => {
     expect(state.done).toBe(true)
   })
 
+  it('splits a second parallel call that reuses index 0 with a different id', () => {
+    const state = createStreamState('openai')
+    const chunks: StreamChunk[] = []
+    for (const line of [
+      frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_00_a', function: { name: 'progress_update', arguments: '{"title":"x"}' } }] } }] }),
+      frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_01_b', function: { name: 'code_run', arguments: '{"code":"1"}' } }] } }] }),
+      frame({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+    ]) {
+      for (const chunk of processOpenAIStreamLine(line, state)) chunks.push(chunk)
+    }
+    const tools = chunks
+      .filter((chunk) => chunk.type === 'block-end')
+      .map((chunk) => chunk.block)
+      .filter((block) => block.type === 'tool-call')
+    expect(tools).toHaveLength(2)
+    expect(tools).toMatchObject([
+      { type: 'tool-call', id: 'call_00_a', name: 'progress_update', arguments: '{"title":"x"}' },
+      { type: 'tool-call', id: 'call_01_b', name: 'code_run', arguments: '{"code":"1"}' },
+    ])
+  })
+
   it('stops emitting once the stream has finished', () => {
     const state = createStreamState('openai')
     processOpenAIStreamLine(frame({ choices: [{ delta: { content: 'a' }, finish_reason: 'stop' }] }), state)
