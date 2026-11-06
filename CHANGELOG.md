@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.61.0 - 2026-11-06
+
+- **[codemode] 对齐内核 PTC 提交车道、发现工具输出 Schema 与信封/无损 JSON 契约**
+  - **恒定说明段修正**：修复 `tools.read` 示例误将返回信封当字符串使用的问题，改读 `r.lines` / `page["lines"]`；补充 `glob` / `grep` / `read` / `win_bash` / `job_list` 及三个发现工具的真实返回结构，并明确内核 `ptc-runtime-node` 禁止参数对象与 `return` 值包含 `undefined` 属性值。
+  - **发现工具补齐返回定义**：`code_tools_search`（含 `browseByNamespace` 兜底分支）与 `code_tools_describe` 新增 `namespace` 与可选 `output` schema；`code` 参数缺失或为空时回显实际传入键名辅助一步自愈。
+  - **运行时对齐内核 `PtcExecutor`**：新增 `createCommitLane` 使子调用 `tool/ptc-dispatch` 落盘、图片/`additionalContexts` 延迟注入与 `exclusive` 写屏障严格按提交顺序结算，接入 `tools/ptc-dispatch-log` 瀑布，并监听会话 `sandbox/mode` 变更实时中止模式不匹配的在飞程序。
+
+- **[host / plan-mode] 补齐提问坍塌拦截、计划模式纯文本收尾提醒与跨回合后台任务幂等恢复（零 Kimi 缓存漂移）**
+  - **`ask_user_question` 执行期结构守卫**：`dispatch-execution-guard` 新增 `validateAskUserQuestionArgs`，在弹窗前拦截空/纯标点/重复 `id`、重复 `question`、顶层错位 `label`/`description` 与 `options*` 坍塌键，保留合法无选项开放提问，不改动任何工具 Schema。
+  - **计划模式纯文本收尾单次自动提醒**：`entry-plan-mode` 与 `plan-mode-cache-guard` 新增跨 `isolate` 隔离域可见的 `installPlanModeExitReminder`，当主控在计划模式下无在跑子代理、无挂起退出且仅以纯文本 `stop` 结束回合时，空闲后自动追加最多 1 次尾部提醒催调 `exit_plan_mode` / `ask_user_question`。
+  - **已结算后台任务跨回合幂等守卫**：新增 `settled-job-guard`，当可续接会话在 `interrupt_agent` 触发内核 `disposeOwned` 清空内存表后被重唤醒并调用 `job_kill` / `job_output` 时，自动回查当前会话自身的 `job/settled` 持久记录并幂等返回终态，消除假性 `unknown job` 报错。
+
+- **[mappers] 修复全部 8 条 OpenAI 流式映射器同 `index` 并行工具调用粘连**
+  - `opendesign`、`cline-pass`、`kimi-code`、`command-code`、`glm-coding-plan`（OpenAI 面）、`qoder`、`step-code`、`workbuddy` 在同一流式 `index` 上收到携带不同非空 `call.id` 的新工具调用时，自动结清前一块并开启独立 `tool-call` 块，消除 `{...}{...}` 参数拼接导致的 `expected an arguments object` 与 `invalid arguments` 报错。
+
+- **[claude / codex] 支持会话中途增删工具不重写请求头前缀，并统一拦截孤儿工具调用（#89, #90）**
+  - `codex-chatgpt`（Responses）经历史与 `additional_tools` 承载会话中途新增工具；`claude-subscription`（Anthropic Messages）接入 `tool_addition` / `tool_removal` 块承载中途工具变更，避免顶层工具表抖动破坏前缀缓存。
+  - 所有 Anthropic Messages 形态线路统一清理未配对的孤儿 `tool_use` / `tool_result`，并将 `progress-updates` 催促文案同步指向当前可达的直接调用或 `code_run` / `run_code` 程序调用形态。
+
 - **[preset] 删除 `dispatch` 的 R0.5 兼容性闸门：调度模式以 harness ≥ 0.2.1-rc.2 为下限**
   - **前提已消失**：旧代 Agent Teams 运行时（注册 `spawn_teammate` 并用 team 作用域顶替 `send_message` / `list_agents` / `interrupt_agent`，导致派出的子代理失联）在 harness **0.2.1-rc.2** 被整体移除，现行 team 只剩共享任务板。闸门的判据在新代恒为"缺席"，代价却是每个新会话先跑一次 `code_run` 枚举工具清单——只为走到唯一那个分支。
   - **删的是什么**：persona 的 `## R0.5 · Compatibility Gate` 整段（判据、"`Orchestration ready: subagent`"打点、以及"停下并用 `ask_user_question` 把三条出路交给用户"的旧代出口），流水线行里的 `R0.5 Gate ->`，子代理豁免列表里的 `R0.5`，反模式第 2 条的 `(R0.5)` 标记（改为 `(R1, R6)`）。两份副本（`presets/dispatch/agent.cordis.yml` 与 `src/host/agent-preset.ts`）同步删除。
