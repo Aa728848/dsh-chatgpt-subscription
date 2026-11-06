@@ -283,16 +283,16 @@ export function buildCodemodeSectionText(input: SectionInput): string {
         '```py',
         '# standard tools and hidden tools alike',
         'import asyncio',
-        'files = await tools.glob({"pattern": "src/**/*.ts"})',
-        'rows = await asyncio.gather(*(tools.read({"file_path": f}) for f in files))',
+        'found = await tools.glob({"pattern": "src/**/*.ts"})',
+        'rows = await asyncio.gather(*(tools.read({"file_path": p}) for p in found["paths"]))',
         '[r.splitlines()[0] for r in rows if "TODO" in r]',
         '```',
       ]
     : [
         '```js',
         '// standard tools and hidden tools alike',
-        'const files = await tools.glob({ pattern: "src/**/*.ts" })',
-        'const rows = await Promise.all(files.map((f) => tools.read({ file_path: f })))',
+        'const { paths } = await tools.glob({ pattern: "src/**/*.ts" })',
+        'const rows = await Promise.all(paths.map((p) => tools.read({ file_path: p })))',
         retained
           ? 'rows.filter((r) => r.includes("TODO")).map((r) => r.split("\\n")[0])'
           : 'return rows.filter((r) => r.includes("TODO")).map((r) => r.split("\\n")[0])',
@@ -315,6 +315,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
         ? '- A retained TypeScript REPL: top-level declarations, await, and a final expression. Its variables and imported modules survive into your later programs in this session.'
         : '- Erasable TypeScript, run as the body of an async function: top-level await and return work.'),
     '- Only what you return or console.log reaches the conversation; every intermediate result stays in the program, so filter and aggregate there instead of returning raw payloads.',
+    '- Every tool result is a named-field object, never a bare array: `glob` answers `{ root, paths }` and ' + listTool + ' answers `{ tools }`. Read the field before you map or filter it — calling `.filter` on the envelope throws.',
     '- Prefer batching multi-step read/search chains inside one ' + run + ' program instead of issuing many sequential single-tool turns.',
     '- Independent read-only calls may overlap under Promise.all; mutating calls run alone, in submission order.',
     '- A failed sub-call rejects; try/catch or Promise.allSettled it to keep the calls that succeeded. Completed calls are real side effects and are not rolled back.',

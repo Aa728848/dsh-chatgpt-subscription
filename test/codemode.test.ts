@@ -46,6 +46,20 @@ describe('Code Mode 说明段', () => {
     expect(repl).toContain('rows.filter')
     expect(repl).not.toContain('return rows.filter')
   })
+
+  it('示例读 glob 结果的 paths 字段，而不是把整个信封当数组', () => {
+    const rules = createRules({})
+    const base = { runToolName: rules.options.runToolName, metaTools: rules.options.metaTools }
+    // 回归：typed tool output 之后 `glob` 回 `{ root, paths }`。示例若写 `files.map(...)`，
+    // 照抄的程序会以 `files.map is not a function` 整段失败（曾让每次新会话的启动探测崩掉）。
+    const js = buildCodemodeSectionText({ ...base, programFormat: 'function-body' })
+    expect(js).toContain('const { paths } = await tools.glob')
+    expect(js).not.toContain('files.map')
+    expect(js).toContain('named-field object')
+    const py = buildCodemodeSectionText({ ...base, language: 'python', programFormat: 'function-body' })
+    expect(py).toContain('found["paths"]')
+    expect(py).not.toContain('for f in files')
+  })
 })
 
 describe('遮蔽规则', () => {
