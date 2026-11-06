@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   BUNDLED_PRESET_IDS,
@@ -11,6 +12,7 @@ import {
   reconcilePackageNames,
   reconcilePreset,
   resolvesFromHere,
+  resolvesFromInstallation,
   rewritePresetFile,
   syncPresetTrees,
 } from '../src/host/preset-sync.ts'
@@ -184,6 +186,62 @@ describe('candidate package roots', () => {
   })
 })
 
+describe('resolution from the installation that mounts the preset', () => {
+  const LEGACY_LIST_AGENTS = '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+  function harnessEntry(root: string): string {
+    const entry = join(root, 'harness', 'bin', 'dsh')
+    mkdirSync(join(entry, '..'), { recursive: true })
+    writeFileSync(entry, '#!/usr/bin/env node\n')
+    return entry
+  }
+
+  it('ignores a stale profile export the current harness no longer ships', () => {
+    const root = tempDir()
+    const entry = harnessEntry(root)
+    const current = join(root, 'harness', 'node_modules', '@deepseek-ai', 'dsh-tool-subagent-control')
+    const stale = join(root, 'profile', 'node_modules', '@deepseek-ai', 'dsh-tool-subagent-control')
+    mkdirSync(current, { recursive: true })
+    mkdirSync(stale, { recursive: true })
+    writeFileSync(join(current, 'package.json'), JSON.stringify({ exports: { '.': './lib/index.js' } }))
+    writeFileSync(join(stale, 'package.json'), JSON.stringify({
+      exports: { '.': './lib/index.js', './list-agents': './lib/list-agents.js' },
+    }))
+    const staleResolution = pathToFileURL(join(stale, 'lib', 'list-agents.js')).href
+
+    expect(resolvesFromInstallation(LEGACY_LIST_AGENTS, entry, () => staleResolution)).toBe(false)
+
+    // The same stale profile remains harmless when an older harness really
+    // ships the export: the harness manifest, not the plugin location, wins.
+    writeFileSync(join(current, 'package.json'), JSON.stringify({
+      exports: { '.': './lib/index.js', './list-agents': './lib/list-agents.js' },
+    }))
+    expect(resolvesFromInstallation(LEGACY_LIST_AGENTS, entry, () => staleResolution)).toBe(true)
+  })
+
+  it('keeps resolving the plugin-owned rows and its native executor dependency', () => {
+    const root = tempDir()
+    const entry = harnessEntry(root)
+    for (const specifier of [
+      '@eddyskywalker/dsh-chatgpt-subscription/plan-mode',
+      '@deepseek-ai/dsh-tool-executor-native',
+    ]) {
+      const resolved = pathToFileURL(join(root, 'profile', 'plugin-dependency', `${packageNameForTest(specifier)}.js`)).href
+      expect(resolvesFromInstallation(specifier, entry, () => resolved)).toBe(true)
+    }
+  })
+
+  it('retains the plugin-local resolver fallback without a harness entry', () => {
+    expect(resolvesFromInstallation('@deepseek-ai/dsh-not-a-published-package', '', () => 'file:///legacy.js')).toBe(true)
+    expect(resolvesFromInstallation('@deepseek-ai/dsh-not-a-published-package', '', undefined)).toBe(false)
+  })
+})
+
+/** A readable filename for the plugin-resolution test above. */
+function packageNameForTest(specifier: string): string {
+  return specifier.replaceAll('/', '-').replaceAll('@', '')
+}
+
 describe('package name reconciliation', () => {
   /** The row the dispatch preset carries, naming the package as it was up to harness 0.1.5. */
   const BUNDLED_ROW = "      name: '@deepseek-ai/dsh-workflow-worker-thread'\n"
@@ -246,6 +304,23 @@ describe('package name reconciliation', () => {
     expect(packageInstalled('@deepseek-ai/dsh-sample-pkg', [root])).toBe(true)
   })
 
+  it('does not let an older package in another root override the nearest manifest', () => {
+    const currentRoot = tempDir()
+    const staleRoot = tempDir()
+    const pkg = '@deepseek-ai/dsh-sample-pkg'
+    const currentDir = join(currentRoot, 'node_modules', '@deepseek-ai', 'dsh-sample-pkg')
+    const staleDir = join(staleRoot, 'node_modules', '@deepseek-ai', 'dsh-sample-pkg')
+    mkdirSync(currentDir, { recursive: true })
+    mkdirSync(staleDir, { recursive: true })
+    writeFileSync(join(currentDir, 'package.json'), JSON.stringify({ exports: { '.': './lib/index.js' } }))
+    writeFileSync(join(staleDir, 'package.json'), JSON.stringify({
+      exports: { '.': './lib/index.js', './list-agents': './lib/list-agents.js' },
+    }))
+
+    expect(packageInstalled(`${pkg}/list-agents`, [currentRoot, staleRoot])).toBe(false)
+    expect(packageInstalled(`${pkg}/list-agents`, [staleRoot])).toBe(true)
+  })
+
   it('ships the row the harness renamed, under its pre-0.1.6 name', () => {
     const bundled = readFileSync(join(bundledPresetsRoot(), 'dispatch', 'agent.cordis.yml'), 'utf8')
     expect(bundled).toContain(`name: '${RENAMED}'`)
@@ -302,6 +377,18 @@ describe('rows the installation cannot mount', () => {
   it('ships the row enabled in the bundle, for the sync to disable where it must', () => {
     const bundled = readFileSync(join(bundledPresetsRoot(), 'dispatch', 'agent.cordis.yml'), 'utf8')
     expect(bundled).toContain(`- id: present\n  name: '${PRESENT}'`)
+  })
+
+  const LEGACY_LIST_AGENTS = '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+  const LEGACY_LIST_AGENTS_ROW = `    - id: tool-subagent-list-agents\n      name: '${LEGACY_LIST_AGENTS}'\n`
+
+  it('disables only the standalone list-agents row where its export is absent', () => {
+    const withSibling = `${LEGACY_LIST_AGENTS_ROW}    - id: tool-subagent\n      name: '@deepseek-ai/dsh-tool-subagent'\n`
+    expect(reconcilePreset(withSibling, () => false)).toBe(
+      `${LEGACY_LIST_AGENTS_ROW}      disabled: true\n    - id: tool-subagent\n      name: '@deepseek-ai/dsh-tool-subagent'\n`,
+    )
+    expect(reconcilePreset(LEGACY_LIST_AGENTS_ROW, name => name === LEGACY_LIST_AGENTS))
+      .toBe(LEGACY_LIST_AGENTS_ROW)
   })
 
   /**

@@ -3,7 +3,7 @@ import { isSameOriginMutation } from '../common/same-origin.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { FALLBACK_MODELS, PROVIDER_ID, PROVIDER_NAME, QUOTA_CACHE_TTL_MS, resolveApiEnv } from './types.ts'
-import { SHIPPED_DEFAULT_ADDED_MODEL_IDS, SHIPPED_DEFAULT_RETIRED_MODEL_IDS } from './model-catalog.ts'
+import { SHIPPED_DEFAULT_MIGRATIONS } from './model-catalog.ts'
 import { resolveZeroDataRetention } from './adapter.ts'
 import {
   FileCredentialStore,
@@ -113,16 +113,20 @@ export function resolveEnabledModelIds(
 /**
  * Whether a stored selection still is a shipped default.
  *
- * The current one, and the one the previous release shipped: the refresh moved
- * a handful of models in and out of the default, and the difference between the
- * two defaults is exactly the pair of id lists the catalog records.
+ * Walk the recorded catalog refreshes newest-first. Each step reconstructs one
+ * earlier default, so users who never edited either the immediate previous
+ * release or an older recorded release still receive the current catalog.
  */
 function isUneditedSelection(stored: readonly string[], shipped: ReadonlySet<string>): boolean {
   if (stored.length === 0) return false
   if (sameSelection(stored, shipped)) return true
-  const previous = new Set([...shipped].filter((id) => !SHIPPED_DEFAULT_ADDED_MODEL_IDS.includes(id)))
-  for (const id of SHIPPED_DEFAULT_RETIRED_MODEL_IDS) previous.add(id)
-  return sameSelection(stored, previous)
+  let previous = new Set(shipped)
+  for (const migration of SHIPPED_DEFAULT_MIGRATIONS) {
+    previous = new Set([...previous].filter((id) => !migration.added.includes(id)))
+    for (const id of migration.retired) previous.add(id)
+    if (sameSelection(stored, previous)) return true
+  }
+  return false
 }
 
 /** Whether two id lists name exactly the same models, in any order. */

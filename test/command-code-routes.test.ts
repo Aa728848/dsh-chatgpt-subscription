@@ -30,8 +30,7 @@ import {
 } from '../src/host/command-code/types.ts'
 import {
   commandCodeModelDef,
-  SHIPPED_DEFAULT_ADDED_MODEL_IDS,
-  SHIPPED_DEFAULT_RETIRED_MODEL_IDS,
+  SHIPPED_DEFAULT_MIGRATIONS,
 } from '../src/host/command-code/model-catalog.ts'
 
 function tmp(prefix: string): string {
@@ -258,18 +257,17 @@ describe('Command Code model options', () => {
     expect(resolveEnabledModelIds([], catalog)).toEqual([])
   })
 
-  it('still reads a selection from the previous release as unedited', () => {
-    // A user who never touched the selection still carries the list the
-    // previous release shipped. The 1.88.2 refresh moved models in and out of
-    // the default, so that list no longer equals the current one; reading it as
-    // edited would hide every model the refresh added behind a list nobody
-    // touched.
+  it.each([
+    { label: '1.88.2', migrations: 1, size: 94 },
+    { label: '1.88.1', migrations: 2, size: 85 },
+  ])('still reads the unedited $label default after later catalog refreshes', ({ migrations, size }) => {
     const catalog = parseProviderModels(CATALOG)
-    const previous = FALLBACK_MODELS
-      .map((model) => model.id)
-      .filter((id) => !SHIPPED_DEFAULT_ADDED_MODEL_IDS.includes(id))
-    for (const id of SHIPPED_DEFAULT_RETIRED_MODEL_IDS) previous.push(id)
-    expect(previous).toHaveLength(85)
+    let previous = FALLBACK_MODELS.map((model) => model.id)
+    for (const migration of SHIPPED_DEFAULT_MIGRATIONS.slice(0, migrations)) {
+      previous = previous.filter((id) => !migration.added.includes(id))
+      previous.push(...migration.retired)
+    }
+    expect(previous).toHaveLength(size)
     expect(resolveEnabledModelIds(previous, catalog)).toEqual(catalog.map((model) => model.id))
   })
 

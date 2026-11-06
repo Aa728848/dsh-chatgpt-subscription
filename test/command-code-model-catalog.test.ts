@@ -37,10 +37,10 @@ describe('Command Code model catalog against the official registry', () => {
     // embeds. It is the independent half of the parity check: the table in
     // src/ is a transcription, and this is what it has to match.
     expect(fixture.source.package).toBe('command-code')
-    expect(fixture.source.version).toBe('1.88.2')
+    expect(fixture.source.version).toBe('1.88.4')
     expect(fixture.source.artifact).toBe('dist/cli.mjs')
     expect(fixture.source.catalogVersion).toMatch(/^[0-9a-f]{64}$/)
-    expect(fixture.models.length).toBeGreaterThan(0)
+    expect(fixture.models).toHaveLength(109)
   })
 
   it('carries every model the official registry declares, in registry order', () => {
@@ -70,9 +70,9 @@ describe('Command Code model catalog against the official registry', () => {
     expect(declared.map((model) => model.id)).toEqual(
       fixture.models.filter((model) => model.maxOutputTokens !== null).map((model) => model.id),
     )
-    // Ten of the registry's models carry a cap; the rest say the provider
+    // Thirteen of the registry's models carry a cap; the rest say the provider
     // decides, and the plugin must not invent one for them.
-    expect(declared.length).toBe(10)
+    expect(declared.length).toBe(13)
     for (const model of declared) {
       expect(declaredMaxOutputTokens(model.id)).toBe(model.maxTokens)
     }
@@ -110,6 +110,21 @@ describe('Command Code model catalog against the official registry', () => {
     // `off`, DSH spells it `none`.
     expect(commandCodeModelDef('deepseek/deepseek-v4.1-flash')?.reasoningEfforts).toEqual(['off', 'low', 'high', 'max'])
     expect(reasoningEffortsFor('deepseek/deepseek-v4.1-flash')).toEqual(['none', 'low', 'high', 'max'])
+  })
+
+  it('declares the official crouton-alpha image and reasoning capabilities', () => {
+    const id = 'stealth/crouton-alpha'
+    expect(commandCodeModelDef(id)).toMatchObject({
+      name: 'Crouton Alpha',
+      inputModalities: ['text', 'image'],
+      reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      contextWindow: 1048576,
+      maxTokens: 943718,
+      hidden: false,
+    })
+    expect(inputModalitiesFor(id)).toEqual(['text', 'image'])
+    expect(reasoningEffortsFor(id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(declaredMaxOutputTokens(id)).toBe(943718)
   })
 
   it('narrows the registry file modality away at the harness boundary', () => {

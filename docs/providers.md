@@ -37,7 +37,7 @@
 | `antigravity` | Antigravity | Google Code Assist（Gemini） | Google OAuth（Web 或 CLI `antigravity-login`） | 内置路由与能力表 + 项目目录探测 | `/antigravity/api` |
 | `kimi-code` | Kimi Code | OpenAI Chat Completions（可选 Anthropic Messages） | RFC 8628 设备码（`auth.kimi.com` / `.ai`） | 实时 `/v1/models` + 随包兜底 | `/kimi-code/api` |
 | `minimax-code` | MiniMax Code（编程订阅） | Anthropic Messages | 复用/导入桌面端 `auth.json` 或 RFC 8628 设备码 | 随包硬编码目录（4 款模型） | `/minimax-code/api` |
-| `command-code` | Command Code | Anthropic Messages（`claude-*`）/ OpenAI Chat Completions（其余） | 浏览器 loopback OAuth（`127.0.0.1:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 106 条能力表 | `/command-code/api` |
+| `command-code` | Command Code | Anthropic Messages（`claude-*`）/ OpenAI Chat Completions（其余） | 浏览器 loopback OAuth（`127.0.0.1:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 109 条能力表 | `/command-code/api` |
 | `glm-coding-plan` | GLM（ZCode 账号） | Anthropic Messages（Coding Plan 端点） | ZCode 浏览器轮询 OAuth / 手工粘贴 / 只读导入 ZCode | 随包目录（转录自官方 `zcode-builtin.json`） | `/glm-coding-plan/api` |
 | `step-code` | Step Code（Step Plan 订阅） | OpenAI Chat Completions | 云端轮询浏览器授权 / Platform API Key / 只读导入 `stepcode` | 纯实时运行时发现 | `/step-code/api` |
 | `cline-pass` | Cline Pass | OpenAI Chat Completions | WorkOS 设备码 OAuth（自动续期）/ API Key 兼容回退 | 随包兜底 + `recommended-models` / models.dev / 网关目录 | `/cline-pass/api` |
@@ -214,7 +214,7 @@
   - 支持浏览器 loopback OAuth（`127.0.0.1:5959` 起顺延）或手动粘贴 Studio API Key，保存前均经 `/alpha/whoami` 校验；
   - 按模型 ID 自动分流：`claude-*` 走 Anthropic Messages（`/provider/v1/messages`，`system` 使用带 `ephemeral` 缓存断点的块数组，缺省 `max_tokens: 64000`），其余模型走 OpenAI Chat Completions（`/provider/v1/chat/completions`）。
 - **模型目录与隐私控制**：
-  - 实时目录取自公开 `/provider/v1/models`，多模态与思考档位查随包完整转录的官方 `command-code@1.88.2` 注册表（106 条模型记录，不做模型名前缀猜测），单次请求图片预算 **12 MiB**；
+  - 实时目录取自公开 `/provider/v1/models`，多模态与思考档位查随包完整转录的官方 `command-code@1.88.4` 注册表（109 条模型记录，不做模型名前缀猜测），单次请求图片预算 **12 MiB**；
   - 支持零数据保留（Zero Data Retention）：设置 `DSH_COMMAND_CODE_ZDR=1`（或 `CMD_ZDR=1`）时强制附加 `x-cmd-zdr: 1`，若上游无满足 ZDR 的渠道（422 `cmd_zdr_no_providers`）则严格闭锁报错，绝不静默剥离隐私头重试；
   - 若 `command-code` 路由被内置 `llm-pi-ai` 同名配置占用，设置卡会清晰提示冲突并在移除占用后自动接管。
 

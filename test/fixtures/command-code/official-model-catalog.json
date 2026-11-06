@@ -1,10 +1,10 @@
 {
   "source": {
     "package": "command-code",
-    "version": "1.88.2",
+    "version": "1.88.4",
     "artifact": "dist/cli.mjs",
     "table": "embedded model registry (canonical spec table) cross-checked against the embedded catalog payload",
-    "catalogVersion": "7f405e24044e414ddf7d5b73eb3b80016c7274e86a98299ef61cefaf4efce7b9"
+    "catalogVersion": "b21583dbdf3e90f95560cf976a9d952223ecde4c36add131aae481df8b25428c"
   },
   "redaction": "Pricing, plan gates, behaviour profiles, aliases, notices, badges and vendor labels are dropped; only the capability facts the plugin acts on are kept. `hidden` is the union of the two official sources, which disagree on the two free-tier aliases `minimax/minimax-m3.1-flash:free` and `ornith/ornith-1.5-122b:free`. `contextWindow` is the effective official value: the registry value, or the official 200000 default where the registry declares none.",
   "models": [
@@ -1351,6 +1351,24 @@
       "hidden": false
     },
     {
+      "id": "stealth/crouton-alpha",
+      "name": "Crouton Alpha",
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "reasoningEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "contextWindow": 1048576,
+      "maxOutputTokens": 943718,
+      "hidden": false
+    },
+    {
       "id": "reflection/beam:free",
       "name": "Beam 1.0",
       "inputModalities": [
@@ -1369,7 +1387,7 @@
     },
     {
       "id": "poolside/laguna-s-2.1-free",
-      "name": "Laguna S 2.1",
+      "name": "Laguna S 2.1 (Free)",
       "inputModalities": [
         "text"
       ],
@@ -1403,6 +1421,36 @@
       "contextWindow": 262144,
       "maxOutputTokens": 32768,
       "hidden": false
+    },
+    {
+      "id": "inclusionai/ling-3.1-flash-1019",
+      "name": "Ling 3.1 Flash 1019",
+      "inputModalities": [
+        "text"
+      ],
+      "reasoningEfforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "contextWindow": 1000000,
+      "maxOutputTokens": 262144,
+      "hidden": false
+    },
+    {
+      "id": "inclusionai/ling-3.1-flash-1019:free",
+      "name": "Ling 3.1 Flash 1019",
+      "inputModalities": [
+        "text"
+      ],
+      "reasoningEfforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "contextWindow": 1000000,
+      "maxOutputTokens": 262144,
+      "hidden": true
     },
     {
       "id": "meta/muse-spark-1.1",

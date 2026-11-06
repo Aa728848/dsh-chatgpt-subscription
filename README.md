@@ -37,7 +37,7 @@
 | `antigravity` | Google Antigravity | Google Code Assist（Gemini） | Google OAuth（Web 界面或 CLI `antigravity-login`） | 内置路由表 + 项目可用模型探测 |
 | `kimi-code` | Kimi Code 编程订阅 | OpenAI Chat Completions（可选 Anthropic） | RFC 8628 设备码授权（国区 / 国际区） | 实时 `/v1/models` + 随包兜底 |
 | `minimax-code` | MiniMax Code 编程订阅 | Anthropic Messages | 复用/导入本机桌面端 `auth.json` 或 RFC 8628 设备码 | 随包硬编码目录（上游未开放订阅侧 `/v1/models`） |
-| `command-code` | Command Code | Anthropic（`claude-*`）/ OpenAI（其余） | 浏览器 loopback OAuth（`:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 106 条能力表 |
+| `command-code` | Command Code | Anthropic（`claude-*`）/ OpenAI（其余） | 浏览器 loopback OAuth（`:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 109 条能力表 |
 | `glm-coding-plan` | GLM Coding Plan（国区 BigModel / 国际区 Z.ai） | Anthropic Messages（套餐专用端点） | ZCode 浏览器轮询 OAuth / 手工粘贴 / 只读导入 ZCode | 随包目录（源自官方 `zcode-builtin.json`） |
 | `step-code` | StepFun Step Plan 订阅 / 开放平台 | OpenAI Chat Completions | 云端轮询浏览器授权 / Platform API Key / 只读导入 `stepcode` | 纯实时运行时发现 |
 | `cline-pass` | Cline Pass | OpenAI Chat Completions | WorkOS 设备码 OAuth（自动续期）/ API Key 兼容回退 | 随包兜底 + 官方推荐与上游网关目录补全 |

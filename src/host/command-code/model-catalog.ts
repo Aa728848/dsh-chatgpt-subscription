@@ -21,8 +21,8 @@
  * `deepseek/deepseek-v4.1-flash` and `deepseek/deepseek-v4-flash-vision-exp` take
  * images, and `z-ai/glm-5.3-flash` takes images while `zai-org/GLM-5.3` does not.
  *
- * THE TABLE BELOW is the registry `command-code@1.88.2` embeds in its CLI
- * bundle (`dist/cli.mjs`), transcribed in full: 106 entries, in registry order.
+ * THE TABLE BELOW is the registry `command-code@1.88.4` embeds in its CLI
+ * bundle (`dist/cli.mjs`), transcribed in full: 109 entries, in registry order.
  * The redacted snapshot of that registry is checked in under
  * `test/fixtures/command-code/official-model-catalog.json`, and
  * `test/command-code-model-catalog.test.ts` compares this table against it
@@ -893,6 +893,15 @@ export const COMMAND_CODE_MODELS: readonly CommandCodeModelDef[] = [
     hidden: false,
   },
   {
+    id: 'stealth/crouton-alpha',
+    name: 'Crouton Alpha',
+    inputModalities: ['text', 'image'],
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    contextWindow: 1048576,
+    maxTokens: 943718,
+    hidden: false,
+  },
+  {
     id: 'reflection/beam:free',
     name: 'Beam 1.0',
     inputModalities: ['text'],
@@ -903,7 +912,7 @@ export const COMMAND_CODE_MODELS: readonly CommandCodeModelDef[] = [
   },
   {
     id: 'poolside/laguna-s-2.1-free',
-    name: 'Laguna S 2.1',
+    name: 'Laguna S 2.1 (Free)',
     inputModalities: ['text'],
     reasoningEfforts: [],
     contextWindow: 256000,
@@ -927,6 +936,24 @@ export const COMMAND_CODE_MODELS: readonly CommandCodeModelDef[] = [
     contextWindow: 262144,
     maxTokens: 32768,
     hidden: false,
+  },
+  {
+    id: 'inclusionai/ling-3.1-flash-1019',
+    name: 'Ling 3.1 Flash 1019',
+    inputModalities: ['text'],
+    reasoningEfforts: ['low', 'medium', 'high'],
+    contextWindow: 1000000,
+    maxTokens: 262144,
+    hidden: false,
+  },
+  {
+    id: 'inclusionai/ling-3.1-flash-1019:free',
+    name: 'Ling 3.1 Flash 1019',
+    inputModalities: ['text'],
+    reasoningEfforts: ['low', 'medium', 'high'],
+    contextWindow: 1000000,
+    maxTokens: 262144,
+    hidden: true,
   },
   {
     id: 'meta/muse-spark-1.1',
@@ -1035,39 +1062,53 @@ export function commandCodeModelDef(modelId: string): CommandCodeModelDef | unde
 }
 
 /**
- * Model ids the 1.88.2 catalog refresh added to the shipped default selection.
+ * One catalog refresh's changes to the shipped default selection, newest first.
  *
- * The shipped default is the set of models the settings card offers before the
- * user edits it, and a stored selection that still equals it counts as "never
- * edited" (see `resolveEnabledModelIds` in `./routes.ts`). A refresh that
- * changed the default without saying so would make every untouched selection
- * from the previous release look edited, and the models this release adds
- * would stay hidden behind a list nobody touched. These two lists carry that
- * change: the retired ids are the ones the previous default had and this one
- * does not, and the added ids are the ones it gained.
+ * Applying these in order reconstructs every earlier unedited selection: remove
+ * the ids that refresh added, then restore the ids it retired. Keeping each
+ * generation separate matters once two refreshes have shipped; folding their
+ * additions into one list would skip the intermediate default entirely.
  */
-export const SHIPPED_DEFAULT_ADDED_MODEL_IDS: readonly string[] = [
-  'claude-haiku-5-5',
-  'gpt-6.1-terra',
-  'moonshotai/Kimi-K3.1-Pro',
-  'minimax/minimax-m3.1-flash',
-  'ornith/ornith-1.5-122b',
-  'Qwen/Qwen3.8-Max-Prime',
-  'google/gemini-4-argon',
-  'nvidia/nemotron-3.5-super-vl',
-  'stealth/glyph-cluster:free',
-  'reflection/beam:free',
-  'inclusionai/ling-3.1-flash',
-  'meta/muse-spark-open',
-  'meta/muse-wonder-1.0',
-  'mistral/mistral-large-4',
-]
+export interface ShippedDefaultMigration {
+  version: string
+  added: readonly string[]
+  retired: readonly string[]
+}
 
-/** Model ids the 1.88.2 catalog refresh dropped from the shipped default selection. */
-export const SHIPPED_DEFAULT_RETIRED_MODEL_IDS: readonly string[] = [
-  'xiaomi/mimo-v2.5-pro',
-  'xiaomi/mimo-v2.5',
-  'stealth/space-bunny-alpha',
-  'inclusionai/ling-3.0-flash-sante:free',
-  'inclusionai/ling-3.1-flash:free',
+/** Default-selection deltas recognized by `resolveEnabledModelIds` in `./routes.ts`. */
+export const SHIPPED_DEFAULT_MIGRATIONS: readonly ShippedDefaultMigration[] = [
+  {
+    version: '1.88.4',
+    added: [
+      'stealth/crouton-alpha',
+      'inclusionai/ling-3.1-flash-1019',
+    ],
+    retired: [],
+  },
+  {
+    version: '1.88.2',
+    added: [
+      'claude-haiku-5-5',
+      'gpt-6.1-terra',
+      'moonshotai/Kimi-K3.1-Pro',
+      'minimax/minimax-m3.1-flash',
+      'ornith/ornith-1.5-122b',
+      'Qwen/Qwen3.8-Max-Prime',
+      'google/gemini-4-argon',
+      'nvidia/nemotron-3.5-super-vl',
+      'stealth/glyph-cluster:free',
+      'reflection/beam:free',
+      'inclusionai/ling-3.1-flash',
+      'meta/muse-spark-open',
+      'meta/muse-wonder-1.0',
+      'mistral/mistral-large-4',
+    ],
+    retired: [
+      'xiaomi/mimo-v2.5-pro',
+      'xiaomi/mimo-v2.5',
+      'stealth/space-bunny-alpha',
+      'inclusionai/ling-3.0-flash-sante:free',
+      'inclusionai/ling-3.1-flash:free',
+    ],
+  },
 ]

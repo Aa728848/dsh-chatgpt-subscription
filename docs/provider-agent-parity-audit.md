@@ -19,7 +19,7 @@
 | Claude | Claude Code | [Claude Code 网关协议](https://code.claude.com/docs/en/llm-gateway-protocol.md)、[Mid-conversation system messages](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages)、[Effort](https://platform.claude.com/docs/en/build-with-claude/effort)、[Vision](https://platform.claude.com/docs/en/build-with-claude/vision) | 有官方文档化行为；CLI 当前以原生二进制分发，未声称逐行读取其源码 |
 | Antigravity | Google Antigravity | [官方文档](https://antigravity.google/docs/agent.md)、官方 SDK | 官方 Agent 走 GAOS Interactions API；本线路走 Code Assist `streamGenerateContent`，两者不能直接逐项等同 |
 | GLM Coding Plan | ZCode | [zai-org/ZCode](https://github.com/zai-org/ZCode)、`zcode-builtin.json` revision 43、业务码表 | 有同端点的官方源码级基线 |
-| Command Code | Command Code CLI | 官方 `command-code@1.88.2` bundle 内嵌注册表与 `toWireSystem`；公开 `/provider/v1/models` | 有官方随包数据；公开实时目录只决定当前可用模型，不含完整能力字段 |
+| Command Code | Command Code CLI | 官方 `command-code@1.88.4` bundle 内嵌注册表与 `toWireSystem`；公开 `/provider/v1/models` | 有官方随包数据；公开实时目录只决定当前可用模型，不含完整能力字段 |
 | Step Code | Step Code | [stepfun-ai/Step-Code](https://github.com/stepfun-ai/Step-Code)、StepFun API 文档 | 有官方源码；真实对话请求仍未做账号联调 |
 | Cline Pass | Cline | [cline/cline @ ca7402c](https://github.com/cline/cline/tree/ca7402c5abced42da9c7c50500b7a9bae82cb6fa)、官方 recommended-models | 有官方源码级请求与空回复处理基线 |
 | Qoder | Qoder CLI / Agent SDK | [官方 CLI 文档](https://docs.qoder.com/cli/installation)、本仓 frozen fixtures | 官方协议资料不完整；账号亲和另由本代码自身设计约束证明 |
@@ -54,7 +54,7 @@
 
 ### 4. Command Code
 
-- 以 `command-code@1.88.2` 官方内嵌注册表完整刷新 106 条能力记录，并用随包脱敏 fixture 做逐字段 parity。
+- 以 `command-code@1.88.4` 官方内嵌注册表完整刷新 109 条能力记录，并用随包脱敏 fixture 做逐字段 parity；新增 crouton-alpha 与 Ling 3.1 Flash 1019 系列，crouton-alpha 的图像输入来自官方明确声明。
 - OpenAI / Responses 面在调用方与官方注册表都没有输出 cap 时省略对应字段；Anthropic Messages 必须携带 `max_tokens`，无声明时使用官方 CLI 的 64000 兜底。
 - 不再用手写跨供应商观测表冒充官方输出上限；host 默认输出元数据只从官方声明的 cap 产生。
 - Anthropic system 按官方 `toWireSystem` 使用 block 数组与 ephemeral 断点；OpenAI 面未添加无证据的缓存字段。

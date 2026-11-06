@@ -37,7 +37,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PresetHost, PresetInstall } from './agent-preset.ts'
 
@@ -79,6 +79,9 @@ const OPTIONALLY_ABSENT_PACKAGES: readonly string[] = [
   // Published from harness 0.1.5-alpha.2; the shipped `ptc` preset gained this
   // row in 0.1.5-rc.1, the shape this preset was written against.
   '@deepseek-ai/dsh-tool-present',
+  // Harness 0.2.1-rc.3 folded this tool into the main subagent-control entry
+  // and removed the standalone export. Older generations still need the row.
+  '@deepseek-ai/dsh-tool-subagent-control/list-agents',
   // This plugin's own subpath export, and the only entry here that is not a
   // harness package. It is absent whenever the *plugin* on disk predates it: a
   // synced preset tree outlives the version that wrote it, and a downgrade or an
@@ -158,15 +161,24 @@ export function candidatePackageRoots(entryScript: string | undefined = process.
   return [...roots]
 }
 
+/** The package-name portion of a bare package or package-subpath specifier. */
+function packageNameOf(specifier: string): string {
+  return specifier.split('/').slice(0, specifier.startsWith('@') ? 2 : 1).join('/')
+}
+
 /**
  * Whether a package or exported subpath is installed in any candidate node_modules tree.
  * A subpath needs its own exact `exports` key; the package root alone is not enough.
+ *
+ * The nearest manifest on each Node resolution chain is authoritative. Looking
+ * farther out after that manifest rejects a subpath would let an unrelated old
+ * installation resurrect an export the running package deliberately removed.
  */
 export function packageInstalled(
   specifier: string,
   roots: readonly string[] = candidatePackageRoots(),
 ): boolean {
-  const pkg = specifier.split('/').slice(0, specifier.startsWith('@') ? 2 : 1).join('/')
+  const pkg = packageNameOf(specifier)
   const subpath = specifier.slice(pkg.length)
   for (const root of roots) {
     let dir = root
@@ -176,9 +188,9 @@ export function packageInstalled(
         if (subpath === '') return true
         try {
           const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { exports?: Record<string, unknown> }
-          if (manifest.exports !== undefined && Object.prototype.hasOwnProperty.call(manifest.exports, `.${subpath}`)) return true
+          return manifest.exports !== undefined && Object.prototype.hasOwnProperty.call(manifest.exports, `.${subpath}`)
         } catch {
-          continue
+          return false
         }
       }
       const parent = dirname(dir)
@@ -190,24 +202,94 @@ export function packageInstalled(
 }
 
 /**
- * Whether a bare specifier resolves from this module in the running
- * installation. A harness whose Node build exposes no `import.meta.resolve`
- * or whose plugin is executed from outside the profile tree falls through to
- * checking candidate `node_modules` trees across the running harness home.
+ * Packages the preset intentionally loads from the plugin's own dependency
+ * closure rather than the harness installation. Every other harness row must
+ * resolve where the registry mounts it, not merely beside this plugin.
+ */
+const PLUGIN_RESOLVED_PACKAGES: readonly string[] = [
+  '@eddyskywalker/dsh-chatgpt-subscription',
+  // A real dependency of this plugin: profile plugins cannot resolve the
+  // host's kernel packages, so Code Mode carries its native executor itself.
+  '@deepseek-ai/dsh-tool-executor-native',
+]
+
+/** Whether `candidate` is `root` itself or one of its descendants. */
+function pathInside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+}
+
+/**
+ * Whether a plugin-side resolution points into the package the harness's own
+ * entry script reaches. Walking ancestors mirrors Node's node_modules lookup;
+ * the CLI commonly sits in `bin/`, beside rather than inside node_modules.
+ */
+function resolvedFromHarness(resolved: unknown, entryDir: string, specifier: string): boolean {
+  if (typeof resolved !== 'string') return false
+  let path: string
+  try {
+    path = fileURLToPath(resolved)
+  } catch {
+    return false
+  }
+  const pkg = packageNameOf(specifier)
+  let dir = entryDir
+  for (;;) {
+    if (pathInside(join(dir, 'node_modules', pkg), path)) return true
+    const parent = dirname(dir)
+    if (parent === dir) return false
+    dir = parent
+  }
+}
+
+/** One module-resolution attempt, injectable so stale-tree cases are testable. */
+type ModuleResolver = (specifier: string) => unknown
+
+/**
+ * Resolve against the installation that will actually mount the preset.
+ *
+ * `import.meta.resolve` is based at this plugin, while the harness mounts
+ * runtime-declared preset rows from its own context. A successful plugin-side
+ * resolution is therefore not sufficient for a harness package: an old copy in
+ * the profile tree must not override the running harness's missing export.
+ * Plugin-owned rows and the plugin-borne native executor are the deliberate
+ * exceptions. With no harness entry, retain the legacy local probe behavior.
+ */
+export function resolvesFromInstallation(
+  specifier: string,
+  entryScript: string | undefined,
+  resolveFromPlugin: ModuleResolver | undefined,
+): boolean {
+  const entryDir = harnessEntryDir(entryScript)
+  if (entryDir !== undefined && packageInstalled(specifier, [entryDir])) return true
+
+  let resolved: unknown
+  let didResolve = false
+  if (resolveFromPlugin !== undefined) {
+    try {
+      resolved = resolveFromPlugin(specifier)
+      didResolve = true
+    } catch {
+      // Fall through to the installation-tree result below.
+    }
+  }
+
+  if (entryDir === undefined) {
+    if (didResolve) return true
+    return packageInstalled(specifier, candidatePackageRoots(entryScript))
+  }
+  if (didResolve && PLUGIN_RESOLVED_PACKAGES.includes(packageNameOf(specifier))) return true
+  return didResolve && resolvedFromHarness(resolved, entryDir, specifier)
+}
+
+/**
+ * Whether a bare specifier resolves in the installation that mounts presets.
  * @param specifier - bare package specifier.
  * @returns whether the specifier resolves.
  */
 export function resolvesFromHere(specifier: string): boolean {
-  const resolve = (import.meta as { resolve?: (specifier: string) => unknown }).resolve
-  if (resolve !== undefined) {
-    try {
-      resolve(specifier)
-      return true
-    } catch {
-      // Fall through to checking installed packages across the running harness home
-    }
-  }
-  return packageInstalled(specifier)
+  const resolveFromPlugin = (import.meta as { resolve?: ModuleResolver }).resolve
+  return resolvesFromInstallation(specifier, process.argv[1], resolveFromPlugin)
 }
 
 /**

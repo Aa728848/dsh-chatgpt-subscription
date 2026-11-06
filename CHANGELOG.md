@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[preset] 调度模式探测只信实际挂载它的 harness 安装（#88）**
+  - `packageInstalled` 在最近 manifest 缺少子路径时立即判定缺失，不再向外层或 profile 的旧版残留继续搜索；`import.meta.resolve` 的插件侧结果也只有落在 harness 自身包树内才用于 harness 行。
+  - 插件自有子入口与随包 native executor 仍从插件依赖闭包解析；旧代 harness 的真实 `list-agents` 导出继续保留，新代或旧副本文件同步路径只禁用该可选行，不再让整份调度预设不可选。
+  - 回归覆盖当前 harness + 旧 profile 的跨根污染、旧代导出保留、插件 native executor 与无 harness 入口 fallback。
+
+- **[command-code] 同步官方 1.88.4 注册表，crouton-alpha 正确支持图像（#87）**
+  - 随包能力表与脱敏夹具完整更新为 109 条；`stealth/crouton-alpha` 按官方声明提供 `text/image`、`low/medium/high/xhigh/max`、1048576 上下文与 943718 输出上限，同时加入 Ling 3.1 Flash 1019 及其隐藏 free 别名。
+  - 默认选择迁移改为逐代回放 1.88.4 / 1.88.2 差异：未手改列表的旧用户升级后仍获得当前目录，显式选择与空选择语义不变；未知模型继续保守回落为纯文本。
+
 ## 0.59.0 - 2026-11-06
 
 - **[codemode] 程序内的每条子调用重新写回会话：界面能看见「启动了哪个工具」**
