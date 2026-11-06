@@ -17,7 +17,8 @@ import { codexModelUsesResponsesLite, resolveCodexFallbackModel, type CodexWireC
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from './common/idle-watchdog.ts'
 import { chatGPTConcurrency, type CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
-import { buildResponsesPayload, type LocalRawImageOptions } from './responses-mapper.ts'
+import { buildResponsesPayload, withoutCodexToolChanges, type LocalRawImageOptions } from './responses-mapper.ts'
+import { disableCodexToolUpdate } from './model-catalog.ts'
 import { normalizeGenerateOptions } from './common/llm-compat.ts'
 import { CODEX_RESPONSES_LITE_HEADER, CODEX_ROUTING_HINT_HEADER, CODEX_TURN_STATE_HEADER, authOwnerKey, codexHeaders, codexRoutingHint, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
@@ -135,6 +136,14 @@ export class ResponsesClient {
     const turnKey = turnKeyFor(sessionId)
     let currentModel = options.model
     let attemptOptions = options
+    // One retry without the tool-update channel; the latch keeps every later
+    // request in that shape, so a refused backend costs one turn and not each.
+    let strippedToolChanges = false
+    const statesToolChange = (candidate: { readonly messages: readonly { readonly role: string; readonly content?: unknown }[] }): boolean =>
+      candidate.messages.some((message) => message.role === 'developer'
+        && Array.isArray(message.content)
+        && (message.content as readonly Record<string, unknown>[]).some((block) =>
+          block['type'] === 'tool-addition' || block['type'] === 'tool-removal'))
     let response: Response | undefined
     let release: (() => void) | undefined
 
@@ -169,6 +178,20 @@ export class ResponsesClient {
             attemptOptions = { ...attemptOptions, model: fallback.id }
             continue
           }
+        }
+        // A backend may refuse the tool-update channel — the `additional_tools`
+        // item or a deferred declaration — with a 400 while the rest of the
+        // request is fine. Retry once in the shape this line sent before the
+        // capability existed, and latch the refusal so no later turn repeats the
+        // rejection. The cost of a stale latch is a lost cache optimisation; the
+        // cost of not latching is the same 400 on every turn.
+        if (!strippedToolChanges
+          && statesToolChange(attemptOptions)
+          && (error as unknown as { status?: number }).status === 400) {
+          disableCodexToolUpdate()
+          attemptOptions = withoutCodexToolChanges(attemptOptions)
+          strippedToolChanges = true
+          continue
         }
         throw error
       }

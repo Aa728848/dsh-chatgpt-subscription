@@ -267,6 +267,24 @@ export async function buildResponsesPayload(
       }
       continue
     }
+    if (message.role === 'developer') {
+      input.push(...toolChangeItems(message, options.tools, wire.idNamespace))
+      const rest = message.content.filter(
+        (block) => block.type !== 'tool-addition' && block.type !== 'tool-removal',
+      )
+      if (rest.length > 0) {
+        const content = await mapContent(
+          { ...message, content: rest } as typeof message,
+          attachments,
+          options.signal,
+          localRawImages,
+          localImageStats,
+          resolveLocalRawImages,
+        )
+        if (content.length > 0) input.push({ role: 'developer', content })
+      }
+      continue
+    }
     const content = await mapContent(message, attachments, options.signal, localRawImages, localImageStats, resolveLocalRawImages)
     if (content.length > 0) input.push({ role: message.role, content })
     if (message.role === 'assistant') {
@@ -294,9 +312,19 @@ export async function buildResponsesPayload(
   // the base instructions are an ordinary input item, so the backend attributes
   // them like any other part of the conversation.
   const prefix: Array<Record<string, unknown>> = []
-  const tools = options.tools ?? []
-  if (useResponsesLite && tools.length > 0) {
-    prefix.push(additionalToolsItem(tools, wire.idNamespace))
+  const allTools = options.tools ?? []
+  // A deferred declaration is deliberately NOT in the standard head. It rides an
+  // `additional_tools` item at the position where the change happened, so the
+  // declaration set at the head stays byte-identical for the life of the
+  // conversation and the cached prefix survives. This is the shape
+  // `toolUpdate: 'in-history'` requires on this line: without it, every mid
+  // conversation addition would rewrite the head and miss the whole prefix.
+  //
+  // Lite keeps every declaration in its single head namespace: it states no
+  // top-level list at all, so the filter below has nothing to act on there.
+  const tools = allTools.filter((tool) => tool.deferLoading !== true)
+  if (useResponsesLite && allTools.length > 0) {
+    prefix.push(additionalToolsItem(allTools, wire.idNamespace))
   }
   // No instructions means no message: an empty developer item would be a
   // conversation turn that says nothing.
@@ -423,6 +451,100 @@ function additionalToolsItem(
     role: 'developer',
     tools: declarations,
   }
+}
+
+/**
+ * The input items one mid-conversation tool change becomes.
+ *
+ * An addition travels as an `additional_tools` item at the point in the history
+ * where it happened. The item carries the full definition, so the head never has
+ * to grow it: everything before this position keeps its cached prefix and the
+ * backend reads the new tool from here onward.
+ *
+ * A removal has no wire form of its own — there is no `tool_removal` item — so
+ * the declaration stays exactly where it is and this note tells the model the
+ * tool is gone. Dropping the declaration instead would shorten the head and
+ * throw the prefix away, which is the cost `in-history` exists to avoid.
+ *
+ * Measured on the subscription backend by
+ * `scripts/probe-codex-tool-updates.probe.ts`: the item is accepted, the model
+ * calls a tool that only ever appeared in it, and a padded prefix stays cached
+ * across the addition.
+ *
+ * @param message - the developer message carrying the change.
+ * @param tools - the active declaration set the change resolves against.
+ * @param idNamespace - the conversation identity, for stable item ids.
+ * @returns the items to append at this position, in order.
+ */
+function toolChangeItems(
+  message: { readonly content: readonly { readonly type?: string }[] },
+  tools: GenerateOptions['tools'],
+  idNamespace: string | undefined,
+): Record<string, unknown>[] {
+  const byName = new Map((tools ?? []).map((tool) => [tool.name, tool]))
+  const added: Record<string, unknown>[] = []
+  const removed: string[] = []
+  for (const block of message.content as readonly Record<string, unknown>[]) {
+    const name = typeof block['toolName'] === 'string' ? block['toolName'] : ''
+    if (name === '') continue
+    if (block['type'] === 'tool-addition') {
+      const tool = byName.get(name)
+      // An addition names a declaration; the definition itself travels here.
+      if (tool !== undefined) added.push(toolDeclaration(tool))
+    } else if (block['type'] === 'tool-removal') {
+      removed.push(name)
+    }
+  }
+  const items: Record<string, unknown>[] = []
+  if (added.length > 0) {
+    items.push({
+      type: 'additional_tools',
+      id: stableItemId('at', idNamespace, JSON.stringify(added)),
+      role: 'developer',
+      tools: added,
+    })
+  }
+  if (removed.length > 0) {
+    const text = toolRemovalNotice(removed)
+    items.push({
+      type: 'message',
+      id: stableItemId('msg', idNamespace, text),
+      role: 'developer',
+      content: [{ type: 'input_text', text }],
+    })
+  }
+  return items
+}
+
+/**
+ * The same request with every tool change taken back out.
+ *
+ * This is the shape a backend that refuses the update channel gets: the complete
+ * current declaration list at the head, no change messages, no deferred markers.
+ * It is exactly what the line sent before the capability existed, so the fallback
+ * costs a cache miss and nothing else.
+ *
+ * @param options - the request that was refused.
+ * @returns a request the line can always send.
+ */
+export function withoutCodexToolChanges<T extends GenerateOptions>(options: T): T {
+  const messages = options.messages.filter((message) => !(message.role === 'developer'
+    && Array.isArray(message.content)
+    && message.content.some((block) => block.type === 'tool-addition' || block.type === 'tool-removal')))
+  const tools = options.tools?.map(({ deferLoading: _deferred, ...tool }) => tool)
+  return {
+    ...options,
+    messages,
+    ...(tools === undefined ? {} : { tools }),
+  }
+}
+
+/** How a withdrawn tool is stated to the model, imperatively. */
+function toolRemovalNotice(names: readonly string[]): string {
+  const list = names.map((name) => `"${name}"`).join(', ')
+  return names.length === 1
+    ? `[The tool ${list} is no longer available. Do not call it again: any call will fail.]`
+    : `[The tools ${list} are no longer available. Do not call them again: any call will fail.]`
 }
 
 /**
