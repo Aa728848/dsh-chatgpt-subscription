@@ -234,6 +234,17 @@ export const zh = {
   'cardName.opendesign': 'OpenDesign',
   'cardName.workbuddy': 'WorkBuddy',
   modelChecklistCount: '已启用 {count}/{total}',
+  codeRunTitle: '代码',
+  codeRunOutput: '输出',
+  codeRunCopy: '复制',
+  codeRunCopied: '已复制',
+  codeRunWrap: '自动换行',
+  codeRunUnwrap: '取消自动换行',
+  codeRunInspect: '查看轨迹',
+  codeRunPreparing: '准备中',
+  codeRunRunning: '运行中',
+  codeRunFailed: '失败',
+  codeRunStopped: '已停止',
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
@@ -462,6 +473,17 @@ export const en: Record<keyof typeof zh, string> = {
   'cardName.opendesign': 'OpenDesign',
   'cardName.workbuddy': 'WorkBuddy',
   modelChecklistCount: '{count}/{total} enabled',
+  codeRunTitle: 'Code',
+  codeRunOutput: 'Output',
+  codeRunCopy: 'Copy',
+  codeRunCopied: 'Copied',
+  codeRunWrap: 'Wrap lines',
+  codeRunUnwrap: 'Do not wrap lines',
+  codeRunInspect: 'Inspect',
+  codeRunPreparing: 'Preparing',
+  codeRunRunning: 'Running',
+  codeRunFailed: 'Failed',
+  codeRunStopped: 'Stopped',
 }
 
 export type LocaleKey = keyof typeof zh

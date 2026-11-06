@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **[codemode] 对齐内核 PTC `run_code` 使用配置、补齐前端语法高亮卡片并消除 Kimi 缓存边际损耗**
+  - **前端语法高亮视图**：新增 `src/client/codemode/` 并在 `tool.call.toolview` 注册 `code_run` 专属卡片（中/英/俄三语），剥离外层参数 JSON 包装，复用宿主 `--shiki-*` 与 `--dsw-*` 主题变量渲染 TypeScript / Python 语法高亮、自动换行切换、一键复制纯源码、独立输出区与轨迹检查跳转。
+  - **传输层与 PTC `run_code` 配置同步**：`code_run` 动态投影运行时语言、REPL/函数体风味、超时默认/上限说明以及单次沙箱提权参数（`sandbox_permissions` + `justification`，接入宿主 `approval` 审批且提权执行不污染常驻 `stateOwner`）；子调用支持 `maxParallelSubCalls` 读写屏障、`maxSubCallsPerMinute` 超时折算配额、图片块/`additionalContexts`/`concluded` 转发，并在报错时保留已捕获日志与沙箱诊断。
+  - **Kimi Code 缓存与调度双轨优化**：将提示词点名直呼的 `progress_update`、`structured_output` 与 Windows 下的 `win_bash` 纳入默认原生工具白名单，避免整批 `UNKNOWN_TOOL` 连坐拒绝与废步重跑；将 `code_tools_*` 发现工具收拢至 `code_run` 内部调用以缩减固定前缀，并同步清理 `dispatch` 预设双副本中的旧纯 PTC 括号限定。
+
 - **[preset] 调度模式探测只信实际挂载它的 harness 安装（#88）**
   - `packageInstalled` 在最近 manifest 缺少子路径时立即判定缺失，不再向外层或 profile 的旧版残留继续搜索；`import.meta.resolve` 的插件侧结果也只有落在 harness 自身包树内才用于 harness 行。
   - 插件自有子入口与随包 native executor 仍从插件依赖闭包解析；旧代 harness 的真实 `list-agents` 导出继续保留，新代或旧副本文件同步路径只禁用该可选行，不再让整份调度预设不可选。

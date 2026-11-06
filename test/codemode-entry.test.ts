@@ -41,11 +41,13 @@ function mount(options: {
   runtime: unknown
   sandboxPolicy?: unknown
   workingDirectory?: unknown
+  approval?: unknown
 }) {
   const registered: { name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }[] = []
   const services: Record<string, unknown> = { ptcRuntime: options.runtime }
   if (options.sandboxPolicy !== undefined) services['sandboxPolicy'] = options.sandboxPolicy
   if (options.workingDirectory !== undefined) services['workingDirectory'] = options.workingDirectory
+  if (options.approval !== undefined) services['approval'] = options.approval
   const ctx = {
     tools: {
       register(definition: { name: string }) {
@@ -99,5 +101,45 @@ describe('Code Mode 入口的会话授权', () => {
     expect(output).toMatchObject({ result: 'ok' })
     // 旧部署的兜底仍是部署默认值，但程序跑得起来。
     expect(seen[0]!.spec!['sandboxPolicy']).toMatchObject({ mode: 'read-only' })
+  })
+
+  it('单次沙箱提权经过宿主 approval 审批，拒绝时阻止程序运行', async () => {
+    const seen: { spec?: Record<string, unknown> }[] = []
+    const asked: Record<string, unknown>[] = []
+    let decision: 'allowed-once' | 'rejected' = 'allowed-once'
+    const definition = mount({
+      runtime: kernelRuntime(seen),
+      sandboxPolicy: {
+        resolve: () => ({ mode: 'read-only', workspaceRoot: 'C:/work', sessionId: 'session-1' }),
+      },
+      approval: {
+        async request(req: Record<string, unknown>) {
+          asked.push(req)
+          return decision
+        },
+      },
+    })
+
+    const output = await definition.execute({
+      code: 'return 1',
+      description: 'escalate check',
+      sandbox_permissions: 'workspace-write',
+      justification: 'write generated artifact',
+    }, exec())
+    expect(output).toMatchObject({ result: 'ok' })
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toMatchObject({
+      toolName: 'code_run',
+      reason: 'escalate sandbox to workspace-write: write generated artifact',
+    })
+    expect(seen[0]!.spec!['sandboxPolicy']).toMatchObject({ mode: 'workspace-write', sessionId: 'session-1' })
+
+    decision = 'rejected'
+    await expect(definition.execute({
+      code: 'return 1',
+      description: 'escalate denied',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'inspect host root',
+    }, exec())).rejects.toThrow(/rejected escalating this program/)
   })
 })

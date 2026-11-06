@@ -8,6 +8,7 @@ import { CodexSubscriptionSection, parseCapacity } from '../src/client/CodexSubs
 import { ProviderHubSection } from '../src/client/ProviderHubSection.tsx'
 import { apply, inject } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
+import { CODE_RUN_TOOL_NAME } from '../src/client/codemode/tool-name.ts'
 
 declare global {
   // eslint-disable-next-line no-var
@@ -313,6 +314,8 @@ describe('client registration', () => {
       'tool.call.toolview',
       // MiniMax 生成视频：第三张工具卡片，同一个 keyed 槽，按工具名再注册一次。
       'tool.call.toolview',
+      // Code Mode 的 code_run 源码卡片，接在 MiniMax 视频卡片之后。
+      'tool.call.toolview',
       // MiniMax 视频的侧边栏渲染器：正文注册在宿主的文档页签槽上。
       'sidebar.right.tab.document',
       // 进展更新子模块（./progress-updates/）：对话流进展行、侧栏页签的正文与
@@ -358,6 +361,7 @@ describe('client registration', () => {
       expect.objectContaining({ key: CODEX_IMAGE_TOOL_NAME }),
       expect.objectContaining({ key: ANTIGRAVITY_IMAGE_TOOL_NAME }),
       expect.objectContaining({ key: 'minimax_generate_video' }),
+      expect.objectContaining({ key: CODE_RUN_TOOL_NAME }),
       expect.objectContaining({ key: 'progress_update' }),
     ])
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()

@@ -241,6 +241,10 @@ export function denialFor(
   // 传输工具永远可调：它是模型够到其它工具的唯一途径。
   if (name === rules.options.runToolName) return undefined
   if (!isMaskedName(name, rules, hooks.viewForName(name))) return undefined
+  if (rules.options.metaTools.includes(name)) {
+    return 'The discovery tool "' + name + '" is callable only from inside ' + rules.options.runToolName
+      + ': run a program and call await tools.' + name + '(...) there.'
+  }
   const searchTool = rules.options.metaTools[1] ?? rules.options.metaTools[0] ?? 'code_tools_search'
   return 'The tool "' + name + '" is not part of this session tool list. In Code Mode, tools this preset does not own '
     + '(MCP servers, plugins outside the preset) are reachable only from inside ' + rules.options.runToolName + ': call '

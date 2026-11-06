@@ -5,17 +5,17 @@
  * 用自己的名字注册同一件事——把模型写的一段程序交给 `ctx.ptcRuntime` 执行，程序里的每次
  * `tools.<name>(args)` 都是一次真实的工具调用。
  *
- * ## 为什么执行委托给注册表而不是自己跑管线
+ * ## 与内核 PTC `run_code` 对齐的使用配置
  *
- * 子调用走公开的 `ctx.tools.execute()`，因此落到**注册表选中的执行器**上：在本预设里就是
- * 原生 executor 的完整管线（pre-policy、审批、around-dispatch、post-execute 一个不少）。
- * 手写这条管线是插件静默丢策略的典型方式，所以这里一行都不抄。
- *
- * ## 子调度的取舍
- *
- * 程序自己用 `Promise.all` 决定并发。本模块只做一件额外的事：把 `isConcurrencySafe` 不为
- * `true` 的调用串行化成互斥段，只读调用放行到 `maxParallelSubCalls` 个并发。与内核的
- * 差别是「只排序同一程序内的子调用」，不与同一模型步的其它调用互相排序。
+ * 1. **运行时感知 Schema**：按 `ptcRuntime` 的语言（TypeScript / Python）、程序形态
+ *    （`function-body` / 常驻 REPL）、超时预算（`defaultMs` / `maxMs`）与沙箱支持动态投影
+ *    描述和参数（含单次提权的 `sandbox_permissions` + `justification`）；同一部署下静态恒定，
+ *    不会扰动前缀缓存。
+ * 2. **完整子调用调度与上下文转发**：只读并发上限受 `maxParallelSubCalls` 约束，写类调用等待
+ *    在飞调用排空后独占执行；程序结算时中止悬空请求并等待已启动子调用落盘；子调用产生的图片块、
+ *    `additionalContexts` 与 `concludesTurn` 原样转交给外层步骤。
+ * 3. **展示元数据与输出格式化**：声明 `presentCall` 与 `output.presentationMeta`（记录语言），
+ *    深层 JSON 结果控制缩进上限，失败时保留已捕获输出与沙箱诊断信息。
  *
  * @module @eddyskywalker/dsh-chatgpt-subscription/host/codemode/transport
  */
@@ -49,6 +49,17 @@ export function currentCatalogSnapshot(): readonly CatalogEntry[] | undefined {
 /** 传输工具名（与 {@link DEFAULT_RUN_TOOL_NAME} 一致，导出方便测试引用）。 */
 export const TRANSPORT_TOOL_NAME = 'code_run'
 
+/** 允许单次提权的目标沙箱模式（对齐 `@deepseek-ai/dsh-sandbox` 的 `ESCALATION_TARGETS`）。 */
+export const ESCALATION_TARGETS = Object.freeze(['workspace-write', 'danger-full-access'] as const)
+export type EscalationTargetMode = (typeof ESCALATION_TARGETS)[number]
+
+/** 与内核 `run_code` 一致的 `description` 参数说明。 */
+const DESCRIPTION_PARAM_DESCRIPTION =
+  'Clear, concise description of what this program does in active voice, '
+  + '5-10 words (shown in the UI). '
+  + 'Examples: "Count TODO markers across packages"; '
+  + '"Read failing test and its fixture"; "Rename config key in every cordis.yml".'
+
 /** 程序里可调用的一个工具（结构描述，只读需要的字段）。 */
 export interface CatalogEntry {
   /** 工具名。 */
@@ -74,6 +85,24 @@ export interface RunAuthority {
   readonly sandboxPolicy?: unknown
 }
 
+/** 单次程序沙箱提权的请求入参。 */
+export interface SandboxEscalationInput {
+  /** 目标沙箱模式。 */
+  readonly requestedMode: EscalationTargetMode
+  /** 模型给出的单句理由。 */
+  readonly justification: string
+  /** 会话当前的生效策略对象。 */
+  readonly standingPolicy: unknown
+  /** 调用方 agent。 */
+  readonly agent: unknown
+  /** 本次外层调用 id。 */
+  readonly callId: string
+  /** 传输工具名。 */
+  readonly toolName: string
+  /** 取消信号。 */
+  readonly signal: AbortSignal
+}
+
 /** 程序的运行环境句柄：由入口提供，传输层只调用。 */
 export interface CodemodeHost {
   /** 当前可调用的工具清单（含被遮蔽的）。 */
@@ -93,6 +122,14 @@ export interface CodemodeHost {
    * 由 `runtime.resolve()` 或运行时自身兜底即可。
    */
   runAuthority?(agent: unknown, signal: AbortSignal): Promise<RunAuthority | undefined> | RunAuthority | undefined
+  /**
+   * 审批并应用单次沙箱提权（返回替换了 `mode` 的新策略对象）。
+   */
+  escalateSandbox?(input: SandboxEscalationInput): Promise<unknown>
+  /**
+   * 将携带图片块的子调用内容包装成可投递给 `exec.deferContext` 的合法用户消息。
+   */
+  createImageContext?(content: readonly unknown[]): unknown
 }
 
 /** 一次子调用请求。 */
@@ -122,14 +159,17 @@ export interface CallToolOutcome {
   /**
    * 面向前模型的内容块，原样进回放事件。
    *
-   * 程序拿的是 `value` / `text`，这两条是给**界面**的：没有它，回放里那条子调用
-   * 只有名字没有结果，展开是个空壳。
+   * 程序拿的是 `value` / `text`，这两条是给**界面**与**图片附件传递**的。
    */
   readonly content?: readonly unknown[]
   /** 工具自带的展示元数据，原样进回放事件。 */
   readonly meta?: unknown
   /** 失败身份（名称 / 业务码 / 原始细节），原样进回放事件。 */
   readonly errorInfo?: { readonly name: string; readonly code: string; readonly reason?: string }
+  /** 子调用产生的延迟上下文（如催促消息），转交给外层步骤。 */
+  readonly additionalContexts?: readonly unknown[]
+  /** 子调用是否要求结束当前回合（如用户撤回审批）。 */
+  readonly concluded?: boolean
 }
 
 /** 一次运行请求（也覆盖 {@link PtcRuntimeLike.resolve} 的产物）。 */
@@ -152,10 +192,16 @@ export interface PtcRunRequestLike {
 
 /** PTC 运行时里本模块会读到的那部分（结构契约）。 */
 export interface PtcRuntimeLike {
-  /** 源码语言。 */
+  /** 源码语言（`typescript` / `python`）。 */
   readonly language?: string
-  /** 程序形态。 */
+  /** 程序形态（`function-body` / `repl`）。 */
   readonly programFormat?: string
+  /** 运行时附加的执行说明文本。 */
+  readonly executionInstructions?: string
+  /** 运行时是否执行沙箱隔离（非 `undefined` 表示启用）。 */
+  readonly sandboxMode?: unknown
+  /** 运行时是否保留跨次执行状态。 */
+  readonly retainsState?: boolean
   /** 超时预算。 */
   readonly timeout?: { readonly defaultMs: number; readonly maxMs: number }
   /** 常驻状态释放。 */
@@ -172,6 +218,13 @@ export interface PtcRuntimeLike {
   run(request: PtcRunRequestLike): Promise<PtcRunResultLike>
 }
 
+/** 沙箱执行状态摘要。 */
+export interface PtcSandboxSummary {
+  readonly mode: string
+  readonly denied: boolean
+  readonly enforcement?: 'full' | 'partial'
+}
+
 /** 一次程序运行的结果。 */
 export interface PtcRunResultLike {
   /** 程序返回值。 */
@@ -181,7 +234,7 @@ export interface PtcRunResultLike {
   /** 失败信息。 */
   readonly error?: { readonly kind: string; readonly message: string }
   /** 文件策略与观察到的拒绝。 */
-  readonly sandbox?: { readonly mode: string; readonly denied: boolean }
+  readonly sandbox?: PtcSandboxSummary
 }
 
 /** 一次传输调用的规范化结果。 */
@@ -191,7 +244,100 @@ export interface TransportOutput {
   /** 程序返回值。 */
   readonly result?: unknown
   /** 文件沙箱观察。 */
-  readonly sandbox?: { readonly mode: string; readonly denied: boolean }
+  readonly sandbox?: PtcSandboxSummary
+}
+
+/** 语言相关的工具描述与 `code` 参数描述（对齐内核 `ptc.ts`）。 */
+interface TransportFlavor {
+  readonly description: string
+  readonly codeDescription: string
+}
+
+function buildFlavor(
+  languageName: string,
+  execution: {
+    programDescription: string
+    outputInstruction: string
+    codeDescription: string
+  },
+): TransportFlavor {
+  return {
+    description: `Execute a ${languageName} program against the available tools. Takes two required arguments: `
+      + `\`code\`, ${execution.programDescription}, and \`description\`, a short summary of what the program does. `
+      + 'Call tools as `await tools.name(args)`. '
+      + `${execution.outputInstruction} Image-bearing subtool results are attached after the run.`,
+    codeDescription: execution.codeDescription,
+  }
+}
+
+const TYPESCRIPT_REPL_FLAVOR = buildFlavor('TypeScript', {
+  programDescription: 'the program to execute',
+  outputInstruction: 'Curate the program output.',
+  codeDescription: "The TypeScript program to execute, following this tool's execution instructions.",
+})
+
+const TYPESCRIPT_FUNCTION_FLAVOR = buildFlavor('TypeScript', {
+  programDescription: 'the BODY of an async function (erasable syntax only; top-level `await` and `return` work)',
+  outputInstruction: 'Only what you print or return is program output — curate it.',
+  codeDescription: 'The program: the body of an async TypeScript function.',
+})
+
+const PYTHON_FLAVOR = buildFlavor('Python', {
+  programDescription: 'the program to execute',
+  outputInstruction: 'Curate the program output.',
+  codeDescription: "The Python program to execute, following this tool's execution instructions.",
+})
+
+function resolveFlavor(runtime: PtcRuntimeLike | undefined): TransportFlavor {
+  if (runtime?.language === 'python') return PYTHON_FLAVOR
+  if (runtime?.language === 'typescript' && runtime.programFormat === 'repl') return TYPESCRIPT_REPL_FLAVOR
+  return TYPESCRIPT_FUNCTION_FLAVOR
+}
+
+function escalationGuidance(sandboxMode: unknown): string {
+  return sandboxMode === undefined
+    ? ''
+    : ' A sandbox escalation approves this complete program for one execution only. Nested tools retain their own policies and approvals. Request wider access only after evidence of a denial. Earlier effects may already have completed: inspect them before explicitly retrying. Programs are never replayed automatically.'
+}
+
+function buildTransportDescription(runtime: PtcRuntimeLike | undefined): string {
+  const flavor = resolveFlavor(runtime)
+  const instructions = typeof runtime?.executionInstructions === 'string' && runtime.executionInstructions.length > 0
+    ? ` ${runtime.executionInstructions}`
+    : ''
+  return flavor.description
+    + instructions
+    + " Each program starts in the Session's current directory. Running programs keep their initial directory."
+    + escalationGuidance(runtime?.sandboxMode)
+}
+
+function buildTransportParameters(runtime: PtcRuntimeLike | undefined): Record<string, unknown> {
+  const flavor = resolveFlavor(runtime)
+  const timeoutDescription = runtime?.timeout !== undefined
+    ? `Positive elapsed-time budget in milliseconds, including nested tool and approval waits. Default ${String(runtime.timeout.defaultMs)}; capped at ${String(runtime.timeout.maxMs)}. Zero does not disable the deadline.`
+    : 'Positive elapsed-time budget in milliseconds, capped by the runtime maximum.'
+  const properties: Record<string, unknown> = {
+    code: { type: 'string', description: flavor.codeDescription },
+    description: { type: 'string', description: DESCRIPTION_PARAM_DESCRIPTION },
+    timeoutMs: { type: 'number', description: timeoutDescription },
+  }
+  if (runtime?.sandboxMode !== undefined) {
+    properties['sandbox_permissions'] = {
+      type: 'string',
+      enum: [...ESCALATION_TARGETS],
+      description: 'Wider sandbox mode for this complete program execution; requires justification and approval.',
+    }
+    properties['justification'] = {
+      type: 'string',
+      description: 'Reason this complete program needs wider access, shown to the user for approval. Use the language of the user’s current request.',
+    }
+  }
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['code', 'description'],
+    properties,
+  }
 }
 
 /**
@@ -203,21 +349,10 @@ export interface TransportOutput {
  */
 export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRules) {
   const runToolName = rules.options.runToolName
-  return {
+  const definition = {
     name: runToolName,
-    description: 'Execute a TypeScript program against the available tools. Takes two required arguments: '
-      + '`code`, the body of an async function (erasable syntax only; top-level await and return work), and '
-      + '`description`, a short summary of what the program does. Call tools as `await tools.name(args)`. Only what you print or return is program output.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['code', 'description'],
-      properties: {
-        code: { type: 'string', description: 'The program: the body of an async TypeScript function.' },
-        description: { type: 'string', description: 'Clear, concise description of what this program does in active voice, 5-10 words.' },
-        timeoutMs: { type: 'number', description: 'Positive elapsed-time budget in milliseconds, capped by the runtime maximum.' },
-      },
-    },
+    description: buildTransportDescription(undefined),
+    parameters: buildTransportParameters(undefined),
     output: {
       schema: {
         type: 'object',
@@ -230,25 +365,46 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             type: 'object',
             additionalProperties: false,
             required: ['mode', 'denied'],
-            properties: { mode: { type: 'string' }, denied: { type: 'boolean' } },
+            properties: {
+              mode: { type: 'string' },
+              denied: { type: 'boolean' },
+              enforcement: { type: 'string', enum: ['full', 'partial'] },
+            },
           },
         },
       },
       render: (_args: unknown, value: TransportOutput) => {
-        const parts: string[] = []
-        for (const line of value.logs ?? []) if (line.length > 0) parts.push(line)
-        if (value.result !== undefined) {
-          try {
-            parts.push(typeof value.result === 'string' ? value.result : JSON.stringify(value.result, null, 2))
-          } catch {
-            parts.push(String(value.result))
-          }
+        const logs = (value.logs ?? []).join('\n')
+        const rendered = value.result === undefined ? '' : renderProgramValue(value.result)
+        const parts = [logs, rendered].filter((part) => part.length > 0)
+        if (value.sandbox?.enforcement === 'partial') {
+          parts.push('File sandbox enforcement is partial on this host.')
         }
         if (value.sandbox?.denied === true) {
-          parts.push('The ' + value.sandbox.mode + ' file sandbox denied an operation.')
+          parts.push('The ' + value.sandbox.mode + ' file sandbox denied an operation.'
+            + escalationGuidance(host.runtime()?.sandboxMode))
         }
         return [{ type: 'text', text: parts.length > 0 ? parts.join('\n') : '(' + runToolName + ' completed with no output)' }]
       },
+      presentationMeta: () => {
+        const language = host.runtime()?.language === 'python' ? 'python' : 'typescript'
+        return { language }
+      },
+    },
+    presentCall(args: unknown) {
+      if (typeof args !== 'object' || args === null) return undefined
+      const record = args as Record<string, unknown>
+      const code = record['code']
+      const description = record['description']
+      if (typeof code !== 'string' || typeof description !== 'string' || description.trim().length === 0) {
+        return undefined
+      }
+      return {
+        card: 'generic' as const,
+        title: description,
+        kind: 'execute' as const,
+        rawInput: code,
+      }
     },
     async execute(args: unknown, exec: TransportExecution): Promise<TransportOutput> {
       const input = readArguments(args)
@@ -256,29 +412,43 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
       if (runtime === undefined) {
         throw new Error('codemode: no PTC runtime is mounted (ctx.ptcRuntime); the program transport is unavailable')
       }
+      if (input.timeoutMs !== undefined && runtime.timeout !== undefined === false && isStrictTimeoutUnsupported(runtime)) {
+        throw new Error('timeoutMs is not available for this PTC runtime')
+      }
       const catalog = host.catalog()
-      const runSignal = AbortSignal.any([exec.signal, new AbortController().signal])
-      const nestedSignal = markNested(runSignal) ?? runSignal
+      const runController = new AbortController()
+      const onOuterAbort = (): void => { runController.abort(exec.signal.reason) }
+      if (exec.signal.aborted) runController.abort(exec.signal.reason)
+      else exec.signal.addEventListener('abort', onOuterAbort, { once: true })
+      const nestedSignal = markNested(runController.signal) ?? runController.signal
       const owner = host.stateOwner(exec.agent)
-      const limit = rules.options.maxSubCalls
+      let maxSubCalls: number = rules.options.maxSubCalls
       let attempts = 0
-      const exclusive = createMutex()
+      const scheduler = createSubCallScheduler(rules.options.maxParallelSubCalls, () => runController.signal.aborted)
       const definitions = new Map<string, CatalogEntry>()
       for (const entry of catalog) definitions.set(entry.name, entry)
-      const functions: Record<string, (rawArgs: unknown) => Promise<unknown>> = {}
+      const functions = Object.create(null) as Record<string, (rawArgs: unknown) => Promise<unknown>>
       for (const entry of catalog) {
         if (entry.name === runToolName) continue
-        functions[entry.name] = async (rawArgs: unknown): Promise<unknown> => {
+        const invoke = async (rawArgs: unknown): Promise<unknown> => {
+          if (runController.signal.aborted) {
+            throw new Error(runToolName + ' run is over; ' + entry.name + ' not dispatched')
+          }
           const n = ++attempts
-          if (n > limit) throw new Error('program sub-call limit exceeded: ' + String(limit) + ' calls')
+          if (n > maxSubCalls) {
+            const limitErr = new Error('program sub-call limit exceeded: ' + String(maxSubCalls) + ' calls')
+            runController.abort(limitErr)
+            throw limitErr
+          }
           const parsed = losslessArgs(rawArgs)
+          const loggedArgs = losslessArgs(parsed)
           const callId = String(exec.callId) + NESTED_CALL_ID_MARKER + String(n)
           const dispatchLog = createDispatchLog(exec.agent, {
             rootCallId: rootCallIdOf(String(exec.callId)),
             parentCallId: String(exec.callId),
             subCallId: callId,
             name: entry.name,
-            arguments: parsed,
+            arguments: loggedArgs,
           })
           const run = async (): Promise<unknown> => {
             // start 记在 lane 里而不是提交时：排队中被放弃的调用一条都不写（内核同此）。
@@ -299,55 +469,183 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
               throw error
             }
             dispatchLog.settle(outcome)
+            if (outcome.error === undefined && Array.isArray(outcome.content) && hasImageBlock(outcome.content)) {
+              const imageMsg = host.createImageContext?.(outcome.content)
+              if (imageMsg !== undefined) exec.deferContext?.(imageMsg)
+            }
+            if (Array.isArray(outcome.additionalContexts)) {
+              for (const contextMsg of outcome.additionalContexts) {
+                exec.deferContext?.(contextMsg)
+              }
+            }
+            if (outcome.error === undefined && outcome.concluded === true) {
+              exec.concludeTurn?.()
+            }
+            if (runController.signal.aborted) {
+              throw new Error(runToolName + ' run is over; ' + entry.name + ' result discarded')
+            }
             if (outcome.error !== undefined) throw new Error(outcome.error)
             return outcome.value !== undefined ? outcome.value : outcome.text ?? null
           }
-          return isConcurrencySafe(definitions.get(entry.name), parsed) ? run() : exclusive.run(run)
+          const mode = isConcurrencySafe(definitions.get(entry.name), parsed) ? 'parallel' : 'exclusive'
+          return scheduler.schedule(mode, run, () => {
+            throw new Error(runToolName + ' run is over; ' + entry.name + ' tool call abandoned')
+          })
         }
+        Object.defineProperty(functions, entry.name, {
+          enumerable: true,
+          configurable: true,
+          writable: true,
+          value: invoke,
+        })
       }
-      /**
-       * 跑一次程序：每次重取会话授权，因为重试发生在策略变更之后。
-       *
-       * `resolve()` 是新代内核的前置步骤（目录 / 超时 / 文件策略）。老代运行时没有它，
-       * 那时把原始请求直接交给 `run()` 才是当时的契约。
-       */
-      const attempt = async (): Promise<PtcRunResultLike> => {
-        const authority = await host.runAuthority?.(exec.agent, nestedSignal)
-        const request: PtcRunRequestLike = {
-          program: input.code,
-          bindings: [{ global: 'tools', functions }],
-          stateOwner: owner,
-          ...authority?.cwd === undefined ? {} : { cwd: authority.cwd },
-          ...authority?.sandboxPolicy === undefined ? {} : { sandboxPolicy: authority.sandboxPolicy },
-          ...input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs },
-          signal: nestedSignal,
-        }
-        const spec = typeof runtime.resolve === 'function' ? runtime.resolve(request) : request
-        // 快照只在这一段里可见：程序内的检索与绑定读同一份清单。
-        return await catalogScope.run(catalog, () => runtime.run(spec))
-      }
-      let result: PtcRunResultLike
+
       try {
-        result = await attempt()
-      } catch (error: unknown) {
-        // 常驻环境拒绝换策略时（会话切了沙盒模式），释放后按新策略重跑一次。
-        if (!isRetainedPolicyChange(error)) throw error
-        await host.releaseOwner(owner)
-        // 重跑会重建常驻环境，owner 必须重新登记，否则新环境没人释放。
-        host.stateOwner(exec.agent)
-        result = await attempt()
+        /**
+         * 跑一次程序：每次重取会话授权，因为重试发生在策略变更之后。
+         *
+         * 单次沙箱提权（`sandbox_permissions`）只在第一次进入前审批一次，且提权后的单次执行不传
+         * `stateOwner`，避免把单次授权固化到常驻环境中（对齐内核 `ptc.ts`）。
+         */
+        let approvedEscalatedMode: EscalationTargetMode | undefined
+        const attempt = async (): Promise<PtcRunResultLike> => {
+          const authority = await host.runAuthority?.(exec.agent, nestedSignal)
+          const standingPolicy = authority?.sandboxPolicy
+          let effectivePolicy = standingPolicy
+          let escalated = false
+          if (input.sandboxPermissions !== undefined && input.justification !== undefined) {
+            if (standingPolicy === undefined || typeof host.escalateSandbox !== 'function') {
+              throw new Error('sandbox_permissions is not available for this PTC runtime')
+            }
+            if (approvedEscalatedMode === undefined) {
+              const nextPolicy = await host.escalateSandbox({
+                requestedMode: input.sandboxPermissions,
+                justification: input.justification,
+                standingPolicy,
+                agent: exec.agent,
+                callId: String(exec.callId),
+                toolName: runToolName,
+                signal: exec.signal,
+              })
+              effectivePolicy = nextPolicy
+              approvedEscalatedMode = modeOfPolicy(nextPolicy) as EscalationTargetMode | undefined
+            } else if (typeof standingPolicy === 'object' && standingPolicy !== null) {
+              effectivePolicy = { ...(standingPolicy as Record<string, unknown>), mode: approvedEscalatedMode }
+            }
+            escalated = modeOfPolicy(effectivePolicy) !== modeOfPolicy(standingPolicy)
+          }
+          const request: PtcRunRequestLike = {
+            program: input.code,
+            bindings: [{
+              global: 'tools',
+              functions,
+              errorClass: { name: 'ToolCallError', memberNameProperty: 'toolName' },
+            }],
+            ...(escalated ? {} : { stateOwner: owner }),
+            ...(authority?.cwd === undefined ? {} : { cwd: authority.cwd }),
+            ...(effectivePolicy === undefined ? {} : { sandboxPolicy: effectivePolicy }),
+            ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+            signal: nestedSignal,
+          }
+          const spec = typeof runtime.resolve === 'function' ? runtime.resolve(request) : request
+          maxSubCalls = resolveSubCallBudget(spec, rules)
+          // 快照只在这一段里可见：程序内的检索与绑定读同一份清单。
+          return await catalogScope.run(catalog, () => runtime.run(spec))
+        }
+
+        let result: PtcRunResultLike
+        try {
+          try {
+            result = await attempt()
+          } catch (error: unknown) {
+            // 常驻环境拒绝换策略时（会话切了沙盒模式），释放后按新策略重跑一次。
+            if (!isRetainedPolicyChange(error)) throw error
+            await host.releaseOwner(owner)
+            // 重跑会重建常驻环境，owner 必须重新登记，否则新环境没人释放。
+            host.stateOwner(exec.agent)
+            result = await attempt()
+          }
+        } finally {
+          runController.abort(runToolName + ' settled')
+          await scheduler.drain()
+        }
+
+        if (result.error !== undefined) {
+          const logsText = Array.isArray(result.logs) && result.logs.length > 0
+            ? '\nCaptured output:\n' + result.logs.join('\n')
+            : ''
+          const sandboxText = result.sandbox === undefined
+            ? ''
+            : '\nFile sandbox: ' + result.sandbox.mode
+              + (result.sandbox.enforcement === undefined ? '' : '; enforcement: ' + result.sandbox.enforcement)
+              + (result.sandbox.denied ? '; operation denied' : '') + '.'
+          const hint = result.sandbox?.denied ? escalationGuidance(runtime.sandboxMode) : ''
+          throw new Error('program failed (' + result.error.kind + '): ' + result.error.message + logsText + sandboxText + hint)
+        }
+        const output: TransportOutput = {
+          logs: [...(result.logs ?? [])],
+          ...(result.value === undefined ? {} : { result: result.value }),
+          ...(result.sandbox === undefined
+            ? {}
+            : {
+                sandbox: {
+                  mode: result.sandbox.mode,
+                  denied: result.sandbox.denied,
+                  ...(result.sandbox.enforcement === undefined ? {} : { enforcement: result.sandbox.enforcement }),
+                },
+              }),
+        }
+        return output
+      } finally {
+        exec.signal.removeEventListener('abort', onOuterAbort)
       }
-      if (result.error !== undefined) {
-        throw new Error('program failed (' + result.error.kind + '): ' + result.error.message)
-      }
-      const output: TransportOutput = {
-        logs: [...(result.logs ?? [])],
-        ...result.value === undefined ? {} : { result: result.value },
-        ...result.sandbox === undefined ? {} : { sandbox: { mode: result.sandbox.mode, denied: result.sandbox.denied } },
-      }
-      return output
     },
   }
+
+  Object.defineProperty(definition, 'description', {
+    enumerable: true,
+    configurable: true,
+    get: () => buildTransportDescription(safeRuntime(host)),
+  })
+  Object.defineProperty(definition, 'parameters', {
+    enumerable: true,
+    configurable: true,
+    get: () => buildTransportParameters(safeRuntime(host)),
+  })
+
+  return definition
+}
+
+function safeRuntime(host: CodemodeHost): PtcRuntimeLike | undefined {
+  try {
+    return host.runtime()
+  } catch {
+    return undefined
+  }
+}
+
+/** 只有明确声明了 `timeout: undefined` 自身属性（而非测试假对象省略字段）才视作不支持 `timeoutMs`。 */
+function isStrictTimeoutUnsupported(runtime: PtcRuntimeLike): boolean {
+  return Object.prototype.hasOwnProperty.call(runtime, 'timeout') && runtime.timeout === undefined
+}
+
+function modeOfPolicy(policy: unknown): string | undefined {
+  if (typeof policy !== 'object' || policy === null) return undefined
+  const mode = (policy as { mode?: unknown }).mode
+  return typeof mode === 'string' ? mode : undefined
+}
+
+function hasImageBlock(content: readonly unknown[]): boolean {
+  return content.some((block) => typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'image')
+}
+
+function resolveSubCallBudget(spec: PtcRunRequestLike, rules: CodemodeRules): number {
+  if (rules.options.explicitMaxSubCalls) return rules.options.maxSubCalls
+  if (spec.timeoutMs === null) return Infinity
+  if (typeof spec.timeoutMs === 'number' && Number.isFinite(spec.timeoutMs) && spec.timeoutMs > 0) {
+    return Math.max(1, Math.floor((spec.timeoutMs / 60_000) * rules.options.maxSubCallsPerMinute))
+  }
+  return rules.options.maxSubCalls
 }
 
 /** 一次传输调用的执行上下文（结构描述）。 */
@@ -360,6 +658,10 @@ export interface TransportExecution {
   readonly agent?: unknown
   /** 步骤准入集合。 */
   readonly toolSet?: unknown
+  /** 附加延迟上下文（图片块、催促通知等）。 */
+  deferContext?(message: unknown): void
+  /** 请求在当前批结算后结束回合。 */
+  concludeTurn?(): void
 }
 
 /** 一条子调用在会话里的回放记录。 */
@@ -397,21 +699,6 @@ const DISPATCH_LOG_TEXT_LIMIT = 8000
 
 /**
  * 造一条子调用的回放记录。
- *
- * 内核自己的 PTC 传输会为每条子调用 append `tool/ptc-dispatch-start` /
- * `tool/ptc-dispatch`，界面（`tool-call-tree`）靠这一对事件把子调用画到父调用下面。
- * 本行的程序交给内核运行时执行，而那两条事件不在运行时的对外契约里，只能在这里补。
- *
- * 三条约束：
- *
- * 1. **时序诚实**：`-start` 只在真正进入执行 lane 之后写，排队中的调用不写；
- * 2. **必须成对**：只写 start 会留下永远不收尾的行，比不显示更糟；
- * 3. **绝不带崩程序**：append 只是日志侧工作，异常一律吞掉——老代 harness 没有这两
- *    种事件类型，那里应当表现为「没有回放」，而不是 `code_run` 失败。
- *
- * @param agent - 调用方 agent（`agent.session.append` 的宿主）。
- * @param entry - 这次子调用的身份与参数。
- * @returns 回放记录；没有会话可写时是空实现。
  */
 function createDispatchLog(agent: unknown, entry: DispatchLogEntry): DispatchLog {
   const session = typeof agent === 'object' && agent !== null
@@ -442,8 +729,8 @@ function createDispatchLog(agent: unknown, entry: DispatchLogEntry): DispatchLog
         ...base,
         isError: outcome.error !== undefined,
         content: clipContent(outcome.content),
-        ...outcome.meta === undefined ? {} : { meta: outcome.meta },
-        ...outcome.errorInfo === undefined ? {} : { error: outcome.errorInfo },
+        ...(outcome.meta === undefined ? {} : { meta: outcome.meta }),
+        ...(outcome.errorInfo === undefined ? {} : { error: outcome.errorInfo }),
       })
     },
   }
@@ -451,12 +738,6 @@ function createDispatchLog(agent: unknown, entry: DispatchLogEntry): DispatchLog
 
 /**
  * 把内容块裁到日志能承受的长度。
- *
- * 程序本身拿到的值不受影响；这里只是回放副本，所以宁可截断也不让一条子调用把整份
- * 大文件写进会话记录。
- *
- * @param content - 原始内容块。
- * @returns 可写进事件的副本。
  */
 function clipContent(content: readonly unknown[] | undefined): readonly unknown[] {
   if (content === undefined) return []
@@ -471,12 +752,6 @@ function clipContent(content: readonly unknown[] | undefined): readonly unknown[
 
 /**
  * 一条调用所属调用树的根 id。
- *
- * `code_run` 不会被本行自己的程序嵌套调用，所以顶层工作量下就是它自己；这里仍按
- * `:ptc:` 前缀剥一层，避免将来出现嵌套时把根写错。
- *
- * @param callId - 本次调用的 id。
- * @returns 根 id。
  */
 function rootCallIdOf(callId: string): string {
   const at = callId.indexOf(NESTED_CALL_ID_MARKER)
@@ -489,8 +764,40 @@ function isRetainedPolicyChange(error: unknown): boolean {
   return message.includes('release the retained environment before changing its sandbox policy')
 }
 
+/** 校验单次沙箱提权参数配对（对齐 `@deepseek-ai/dsh-sandbox` 的 `validateEscalationArgs`）。 */
+export function validateEscalationArgs(
+  sandboxPermissions: unknown,
+  justification: unknown,
+): { sandboxPermissions?: EscalationTargetMode; justification?: string } {
+  if (sandboxPermissions !== undefined && justification === undefined) {
+    throw new Error('invalid escalation: sandbox_permissions requires a justification')
+  }
+  if (justification !== undefined && sandboxPermissions === undefined) {
+    throw new Error('invalid escalation: justification is only valid together with sandbox_permissions')
+  }
+  if (sandboxPermissions === undefined && justification === undefined) {
+    return {}
+  }
+  if (typeof sandboxPermissions !== 'string' || !(ESCALATION_TARGETS as readonly string[]).includes(sandboxPermissions)) {
+    throw new Error('invalid sandbox_permissions: expected "workspace-write" or "danger-full-access"')
+  }
+  if (typeof justification !== 'string' || justification.trim().length === 0) {
+    throw new Error('invalid justification: expected a non-empty sentence')
+  }
+  return {
+    sandboxPermissions: sandboxPermissions as EscalationTargetMode,
+    justification,
+  }
+}
+
 /** 校验并读出工具参数。 */
-function readArguments(args: unknown): { code: string; description: string; timeoutMs?: number } {
+function readArguments(args: unknown): {
+  code: string
+  description: string
+  timeoutMs?: number
+  sandboxPermissions?: EscalationTargetMode
+  justification?: string
+} {
   if (typeof args !== 'object' || args === null) throw new Error('codemode: expected an arguments object')
   const record = args as Record<string, unknown>
   const code = record['code']
@@ -499,12 +806,13 @@ function readArguments(args: unknown): { code: string; description: string; time
   if (typeof description !== 'string' || description.trim().length === 0) {
     throw new Error('codemode: invalid description: expected a non-empty string')
   }
+  const escalation = validateEscalationArgs(record['sandbox_permissions'], record['justification'])
   const timeoutMs = record['timeoutMs']
-  if (timeoutMs === undefined) return { code, description }
+  if (timeoutMs === undefined) return { code, description, ...escalation }
   if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error('codemode: invalid timeoutMs: expected a positive finite number')
   }
-  return { code, description, timeoutMs }
+  return { code, description, timeoutMs, ...escalation }
 }
 
 /** 子调用参数必须是可无损 JSON 化的值。 */
@@ -527,14 +835,157 @@ function isConcurrencySafe(entry: CatalogEntry | undefined, args: unknown): bool
   }
 }
 
-/** 一个 FIFO 互斥段：写类调用串行执行。 */
-function createMutex(): { run<T>(task: () => Promise<T>): Promise<T> } {
-  let tail: Promise<unknown> = Promise.resolve()
+/**
+ * 子调用并发与互斥调度器（对齐内核 `ptc.ts` 的读写屏障）：
+ *
+ * - `parallel` 调用可并发重叠，最多 `maxParallel` 个同时在飞；
+ * - `exclusive` 调用必须等待所有已在飞调用结算后独占运行，并在自身结算后才放行后续调用；
+ * - 排队期间若外层运行已中止，直接放弃且不启动任务（保证未启动调用零 `start` 事件）；
+ * - `drain()` 等待全部已启动任务结算。
+ */
+function createSubCallScheduler(maxParallel: number, isAborted: () => boolean) {
+  interface QueuedTask {
+    readonly mode: 'parallel' | 'exclusive'
+    start(): void
+    abandon(): void
+  }
+  const cap = Math.max(1, maxParallel)
+  const queue: QueuedTask[] = []
+  const inFlight = new Set<Promise<void>>()
+  let exclusiveActive = false
+
+  const pump = (): void => {
+    while (queue.length > 0) {
+      const head = queue[0]!
+      if (isAborted()) {
+        queue.shift()
+        head.abandon()
+        continue
+      }
+      if (exclusiveActive) return
+      if (head.mode === 'exclusive') {
+        if (inFlight.size > 0) return
+        exclusiveActive = true
+        queue.shift()
+        head.start()
+        return
+      }
+      if (inFlight.size >= cap) return
+      queue.shift()
+      head.start()
+    }
+  }
+
   return {
-    run<T>(task: () => Promise<T>): Promise<T> {
-      const next = tail.then(task, task)
-      tail = next.catch(() => undefined)
-      return next
+    schedule<T>(mode: 'parallel' | 'exclusive', task: () => Promise<T>, onAbandon: () => never): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        queue.push({
+          mode,
+          abandon() {
+            try {
+              onAbandon()
+            } catch (error) {
+              reject(error)
+            }
+          },
+          start() {
+            const p = task().then(resolve, reject).finally(() => {
+              inFlight.delete(tracked)
+              if (mode === 'exclusive') exclusiveActive = false
+              pump()
+            })
+            const tracked = p.then(() => undefined, () => undefined)
+            inFlight.add(tracked)
+          },
+        })
+        pump()
+      })
+    },
+    async drain(): Promise<void> {
+      pump()
+      while (inFlight.size > 0) {
+        await Promise.allSettled([...inFlight])
+        pump()
+      }
     },
   }
+}
+
+const JSON_INDENT = '  '
+const MAX_JSON_INDENT_CHARS = 10
+
+/** 迭代式 JSON 渲染：与内核 `ptc.ts` 一致，深于 5 层后自动紧凑化，防止深层缩进膨胀。 */
+function renderProgramValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  let normalized: unknown
+  try {
+    normalized = JSON.parse(JSON.stringify(value))
+  } catch {
+    return String(value)
+  }
+  if (typeof normalized === 'string') return normalized
+  if (normalized === undefined) return ''
+
+  type Task =
+    | { kind: 'text'; text: string }
+    | { kind: 'value'; value: unknown; depth: number; compact: boolean }
+
+  const chunks: string[] = []
+  const tasks: Task[] = [{ kind: 'value', value: normalized, depth: 0, compact: false }]
+  for (let task = tasks.pop(); task !== undefined; task = tasks.pop()) {
+    if (task.kind === 'text') {
+      chunks.push(task.text)
+      continue
+    }
+    const current = task.value
+    if (current === null || typeof current === 'boolean' || typeof current === 'number') {
+      chunks.push(String(current))
+      continue
+    }
+    if (typeof current === 'string') {
+      chunks.push(JSON.stringify(current))
+      continue
+    }
+    const compact = task.compact || (task.depth + 1) * JSON_INDENT.length > MAX_JSON_INDENT_CHARS
+    const childDepth = task.depth + 1
+    if (Array.isArray(current)) {
+      chunks.push('[')
+      if (current.length === 0) {
+        chunks.push(']')
+        continue
+      }
+      tasks.push({ kind: 'text', text: compact ? ']' : `\n${JSON_INDENT.repeat(task.depth)}]` })
+      for (let index = current.length - 1; index >= 0; index -= 1) {
+        tasks.push({ kind: 'value', value: current[index], depth: childDepth, compact })
+        tasks.push({
+          kind: 'text',
+          text: compact
+            ? (index === 0 ? '' : ',')
+            : `${index === 0 ? '\n' : ',\n'}${JSON_INDENT.repeat(childDepth)}`,
+        })
+      }
+      continue
+    }
+    if (typeof current === 'object') {
+      const record = current as Record<string, unknown>
+      const keys = Object.keys(record)
+      chunks.push('{')
+      if (keys.length === 0) {
+        chunks.push('}')
+        continue
+      }
+      tasks.push({ kind: 'text', text: compact ? '}' : `\n${JSON_INDENT.repeat(task.depth)}}` })
+      for (let index = keys.length - 1; index >= 0; index -= 1) {
+        const key = keys[index]!
+        tasks.push({ kind: 'value', value: record[key], depth: childDepth, compact })
+        tasks.push({
+          kind: 'text',
+          text: compact
+            ? `${index === 0 ? '' : ','}${JSON.stringify(key)}:`
+            : `${index === 0 ? '\n' : ',\n'}${JSON_INDENT.repeat(childDepth)}${JSON.stringify(key)}: `,
+        })
+      }
+    }
+  }
+  return chunks.join('')
 }

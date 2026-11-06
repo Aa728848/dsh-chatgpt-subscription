@@ -97,9 +97,7 @@ R6 验收与 R-W 等待；R0.5 只靠 `spawn_teammate` 判代，**不能**用 `w
 claim/complete。任务 ready 不等于开工，也不许用 `reassign` 把任务挪走以绕开 R6 验收。R0.5 在缺席判据
 下会先写一行 `Orchestration ready: subagent`，把当前模式打在第一行。
 
-**缓存侧的两个注意点**：Kimi / MiniMax 的 PTC `tools:sdk` 是冻结的**未过滤**声明
-（`ptc-sdk-cache-guard`），所以 `team_task_*` 在 SDK 里**常驻可见**、与开关无关——可见不等于可调用，
-要以 `team_task_list` 能否调通为准。反过来，开关本身会让 `team:policy` 段从空串变成整段文本，
+**缓存侧的两个注意点**：Code Mode 下 `team_task_*` 属于全局层工具，只存在于 `code_run` 程序清单里（旧代回退 PTC 时则在冻结的 `tools:sdk` 里常驻可见）——无论哪种呈现，在清单里存在都不等于开关已打开，要以在 `code_run` 内调用 `team_task_list` 能否调通为准。反过来，开关本身会让 `team:policy` 段从空串变成整段文本，
 system prompt 因此改写一次；这与计划模式当初刻意用"尾部用户消息"规避的是同一类重建，只是这段文本
 由 harness 拥有。建议在**首个回合之前**决定 team 开关：开会话时就是目标状态则零成本，中途切换付一次前缀重建。
 插件默认开启的 `teamPolicyCacheGuard` 让这唯一一次重建也消失：守卫把 `team:policy` 段从装配里

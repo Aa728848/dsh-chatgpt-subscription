@@ -67,6 +67,9 @@ import { installWorkBuddyStyles } from './workbuddy/styles.ts'
 import { installSubagentSettingsCard } from './subagent/index.ts'
 import { installSubagentStyles } from './subagent/styles.ts'
 import { dictionaries as subagentDicts, NS_SUBAGENT, type SubagentLocaleKey } from './subagent/locales.ts'
+import { CodeRunToolView } from './codemode/CodeRunToolView.tsx'
+import { installCodemodeStyles } from './codemode/styles.ts'
+import { CODE_RUN_TOOL_NAME } from './codemode/tool-name.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   /**
@@ -192,6 +195,7 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
   // own stylesheet; additive, so it never restyles an existing tab.
   ctx.effect(() => {
     installPoolStyles()
+    installCodemodeStyles()
     return () => {}
   }, 'dsh-chatgpt-subscription: pool styles')
   ctx.effect(() => setupMermaidObserver(), 'dsh-mermaid: observer')
@@ -313,6 +317,12 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
       readVideo: videoBytesLoader(ctx),
     }),
   }, MinimaxVideoToolView))
+  // Code Mode `code_run`：与宿主内置 `run_code` 对齐的折叠行 + 语法高亮源码卡片 + 独立输出区。
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+    name: 'tool.call.toolview',
+    key: CODE_RUN_TOOL_NAME,
+    locale: NS,
+  }, CodeRunToolView))
 
   // MiniMax 视频的侧边栏渲染器：两段注册（定义 + keyed 正文），id 是同一个字符串。
   // 形状照抄宿主 ui-sidebar-documentpreview 的 image/index.ts。

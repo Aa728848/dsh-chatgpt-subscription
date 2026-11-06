@@ -38,12 +38,17 @@ export const DEFAULT_HIDDEN_PREFIXES: readonly string[] = Object.freeze(['mcp__'
 /**
  * 默认始终原生呈现的名字。
  *
- * 恒定系统提示词里点名了这两个工具（大输出预览的补读工具、调度账本的查询工具），
- * 遮蔽它们会让提示词指向一个模型看不见的名字，所以默认留在原生清单里。
+ * 恒定系统提示词或子代理运行时契约里点名要求直接调用这些工具（大输出预览补读、调度账本查询、
+ * 进展更新汇报、结构化子代理输出提交，以及 Windows 下替代被撤回 `pwsh` 的 `win_bash`）：
+ * 遮蔽它们要么让提示词指向模型看不见的名字并触发整批 `UNKNOWN_TOOL` 重跑，要么让会话顶层
+ * 失去唯一可用的 Shell。若某个工具当前未在宿主/子会话注册，保留在此集合中不会凭空暴露它。
  */
 export const DEFAULT_NATIVE_TOOLS: readonly string[] = Object.freeze([
   'cache_warmup_result',
   'dispatch_ledger',
+  'progress_update',
+  'structured_output',
+  'win_bash',
 ])
 
 /** 校验后、脱离原对象并冻结的配置。 */
@@ -62,8 +67,12 @@ export interface CodemodeOptions {
   readonly runToolName: string
   /** 一个程序内可并发的只读子调用上限。 */
   readonly maxParallelSubCalls: number
-  /** 一次程序最多允许的子调用次数。 */
+  /** 一次程序最多允许的子调用次数（固定兜底下限）。 */
   readonly maxSubCalls: number
+  /** 调用方是否显式指定了 `maxSubCalls`（显式指定时优先于按分钟折算）。 */
+  readonly explicitMaxSubCalls: boolean
+  /** 按解析后超时折算的每分钟子调用配额（对齐内核 PTC `maxSubCallsPerMinute`）。 */
+  readonly maxSubCallsPerMinute: number
   /** 是否拒绝模型对被遮蔽工具的直接调用。 */
   readonly guard: boolean
   /** 是否注入 / 替换 Code Mode 说明段。 */
@@ -90,6 +99,8 @@ export interface CodemodeConfig {
   maxParallelSubCalls?: number
   /** 见 {@link CodemodeOptions.maxSubCalls}。 */
   maxSubCalls?: number
+  /** 见 {@link CodemodeOptions.maxSubCallsPerMinute}。 */
+  maxSubCallsPerMinute?: number
   /** 见 {@link CodemodeOptions.guard}。 */
   guard?: boolean
   /** 见 {@link CodemodeOptions.sdkSection}。 */
@@ -102,9 +113,9 @@ export interface CodemodeConfig {
 export interface CodemodeRules {
   /** 归一化后的配置。 */
   readonly options: CodemodeOptions
-  /** `hiddenTools` 的集合形态。 */
+  /** `hiddenTools` + 发现工具的集合形态（只留给程序内部调用）。 */
   readonly hidden: ReadonlySet<string>
-  /** `nativeTools` + 传输工具 + 发现工具的集合形态。 */
+  /** `nativeTools` + 传输工具的集合形态。 */
   readonly native: ReadonlySet<string>
 }
 
@@ -118,8 +129,8 @@ export function createRules(config?: CodemodeConfig | null): CodemodeRules {
   const options = normalizeConfig(config)
   return {
     options,
-    hidden: new Set(options.hiddenTools),
-    native: new Set([...options.nativeTools, options.runToolName, ...options.metaTools]),
+    hidden: new Set([...options.hiddenTools, ...options.metaTools]),
+    native: new Set([...options.nativeTools, options.runToolName]),
   }
 }
 
@@ -146,6 +157,8 @@ export function normalizeConfig(config?: CodemodeConfig | null): CodemodeOptions
     runToolName,
     maxParallelSubCalls: positiveInteger(source.maxParallelSubCalls, 10),
     maxSubCalls: positiveInteger(source.maxSubCalls, 512),
+    explicitMaxSubCalls: typeof source.maxSubCalls === 'number' && Number.isInteger(source.maxSubCalls) && source.maxSubCalls > 0,
+    maxSubCallsPerMinute: positiveInteger(source.maxSubCallsPerMinute, 1024),
     guard: source.guard !== false,
     sdkSection: source.sdkSection !== false,
     debug: source.debug !== false,
@@ -240,6 +253,8 @@ export interface SectionInput {
   readonly runToolName: string
   /** 发现工具名。 */
   readonly metaTools: readonly string[]
+  /** 运行时的源码语言（默认 `typescript`）。 */
+  readonly language?: string
   /** 运行时的程序形态；`repl` 表示常驻 REPL。 */
   readonly programFormat?: string
 }
@@ -249,7 +264,7 @@ export interface SectionInput {
  *
  * ## 恒定契约
  *
- * 这段正文**只**依赖入参里的两个工具名与部署级的 `programFormat`。它刻意不含遮蔽
+ * 这段正文**只**依赖入参里的两个工具名与部署级的 `language` / `programFormat`。它刻意不含遮蔽
  * 工具的数量、namespace 分布、会话 id 或时间，因此同一部署下逐字节恒定：挂载或卸载
  * MCP 服务端不会改写它，前缀缓存不会因为它失效。
  *
@@ -257,11 +272,32 @@ export interface SectionInput {
  * @returns 说明段正文。
  */
 export function buildCodemodeSectionText(input: SectionInput): string {
+  const python = input.language === 'python'
   const retained = input.programFormat === 'repl'
   const listTool = input.metaTools[0] ?? 'code_tools_list'
   const searchTool = input.metaTools[1] ?? 'code_tools_search'
   const describeTool = input.metaTools[2] ?? 'code_tools_describe'
   const run = input.runToolName
+  const example = python
+    ? [
+        '```py',
+        '# standard tools and hidden tools alike',
+        'import asyncio',
+        'files = await tools.glob({"pattern": "src/**/*.ts"})',
+        'rows = await asyncio.gather(*(tools.read({"file_path": f}) for f in files))',
+        '[r.splitlines()[0] for r in rows if "TODO" in r]',
+        '```',
+      ]
+    : [
+        '```js',
+        '// standard tools and hidden tools alike',
+        'const files = await tools.glob({ pattern: "src/**/*.ts" })',
+        'const rows = await Promise.all(files.map((f) => tools.read({ file_path: f })))',
+        retained
+          ? 'rows.filter((r) => r.includes("TODO")).map((r) => r.split("\\n")[0])'
+          : 'return rows.filter((r) => r.includes("TODO")).map((r) => r.split("\\n")[0])',
+        '```',
+      ]
   const lines = [
     '## Code Mode',
     '',
@@ -269,19 +305,17 @@ export function buildCodemodeSectionText(input: SectionInput): string {
     '',
     '### Calling tools from a program',
     '',
-    '```js',
-    '// standard tools and hidden tools alike',
-    'const files = await tools.glob({ pattern: "src/**/*.ts" })',
-    'const rows = await Promise.all(files.map((f) => tools.read({ file_path: f })))',
-    retained
-      ? 'rows.filter((r) => r.includes("TODO")).map((r) => r.split("\\n")[0])'
-      : 'return rows.filter((r) => r.includes("TODO")).map((r) => r.split("\\n")[0])',
-    '```',
+    ...example,
     '',
-    retained
-      ? '- A retained TypeScript REPL: top-level declarations, await, and a final expression. Its variables and imported modules survive into your later programs in this session.'
-      : '- Erasable TypeScript, run as the body of an async function: top-level await and return work.',
+    python
+      ? (retained
+        ? '- A retained Python REPL: top-level await and a final expression. Its variables and imported modules survive into your later programs in this session.'
+        : '- Async Python program: top-level await works; print or evaluate a final expression to produce output.')
+      : (retained
+        ? '- A retained TypeScript REPL: top-level declarations, await, and a final expression. Its variables and imported modules survive into your later programs in this session.'
+        : '- Erasable TypeScript, run as the body of an async function: top-level await and return work.'),
     '- Only what you return or console.log reaches the conversation; every intermediate result stays in the program, so filter and aggregate there instead of returning raw payloads.',
+    '- Prefer batching multi-step read/search chains inside one ' + run + ' program instead of issuing many sequential single-tool turns.',
     '- Independent read-only calls may overlap under Promise.all; mutating calls run alone, in submission order.',
     '- A failed sub-call rejects; try/catch or Promise.allSettled it to keep the calls that succeeded. Completed calls are real side effects and are not rolled back.',
     '',

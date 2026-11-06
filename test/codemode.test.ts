@@ -59,16 +59,23 @@ describe('遮蔽规则', () => {
     expect(isMaskedName('todo_write', rules, view)).toBe(false)
   })
 
-  it('作用域规则：全局层遮蔽、预设层保留、两层都没有（agent 层）遮蔽', () => {
+  it('作用域规则：全局层遮蔽（系统点名白名单除外）、预设层保留、发现工具默认遮蔽', () => {
     const rules = createRules({})
     const view = {
       enabled: true,
-      globalNames: new Set(['mcp__okx__ticker']),
-      presetNames: new Set(['mcp__okx__ticker', 'todo_write']),
+      globalNames: new Set(['mcp__okx__ticker', 'progress_update', 'win_bash']),
+      presetNames: new Set(['mcp__okx__ticker', 'progress_update', 'win_bash', 'todo_write', 'code_tools_search']),
     }
     expect(isMaskedName('mcp__okx__ticker', rules, view)).toBe(true)
     expect(isMaskedName('todo_write', rules, view)).toBe(false)
     expect(isMaskedName('team_comment', rules, view)).toBe(true)
+    // 系统提示或子代理契约强制直呼的工具默认保留在原生列表，避免触发整批 UNKNOWN_TOOL 重跑。
+    expect(isMaskedName('progress_update', rules, view)).toBe(false)
+    expect(isMaskedName('structured_output', rules, view)).toBe(false)
+    expect(isMaskedName('win_bash', rules, view)).toBe(false)
+    // 发现工具仅在 code_run 程序内部调用，不在顶层列表额外占用固定前缀。
+    expect(isMaskedName('code_tools_search', rules, view)).toBe(true)
+    expect(isMaskedName('code_tools_list', rules, view)).toBe(true)
   })
 
   it('读不到归属时不误遮蔽任何工具', () => {
@@ -422,9 +429,150 @@ it('程序内的清单快照与绑定一致：运行中改执行器级清单不�
   it('配置校验：发现工具不得与传输工具同名，非法值退回缺省', () => {
     expect(normalizeConfig({ runToolName: 'code_run' }).runToolName).toBe('code_run')
     expect(() => normalizeConfig({ runToolName: 'same', metaTools: ['same'] })).toThrow(/must not repeat/)
-    const fallback = normalizeConfig({ maxSubCalls: -3, maxParallelSubCalls: 0 })
+    const fallback = normalizeConfig({ maxSubCalls: -3, maxParallelSubCalls: 0, maxSubCallsPerMinute: -1 })
     expect(fallback.maxSubCalls).toBe(512)
+    expect(fallback.explicitMaxSubCalls).toBe(false)
     expect(fallback.maxParallelSubCalls).toBe(10)
+    expect(fallback.maxSubCallsPerMinute).toBe(1024)
+    expect(normalizeConfig({ maxSubCalls: 64 }).explicitMaxSubCalls).toBe(true)
+  })
+
+  it('与内核 PTC run_code 对齐：动态投影运行时语言、超时说明与单次沙箱提权参数', () => {
+    let currentRuntime: Record<string, unknown> | undefined = {
+      language: 'typescript',
+      programFormat: 'function-body',
+      timeout: { defaultMs: 120_000, maxMs: 600_000 },
+      sandboxMode: 'workspace-write',
+    }
+    const host = {
+      catalog: () => catalog,
+      runtime: () => currentRuntime,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    expect(definition.description).toContain('Execute a TypeScript program')
+    expect(definition.description).toContain('sandbox escalation approves this complete program')
+    const tsProps = (definition.parameters as { properties: Record<string, { description?: string; enum?: string[] }> }).properties
+    expect(tsProps['timeoutMs']?.description).toContain('Default 120000; capped at 600000.')
+    expect(tsProps['sandbox_permissions']?.enum).toEqual(['workspace-write', 'danger-full-access'])
+    expect(tsProps['justification']).toBeDefined()
+    expect(definition.presentCall({ code: 'return 1', description: 'Check status' })).toEqual({
+      card: 'generic',
+      title: 'Check status',
+      kind: 'execute',
+      rawInput: 'return 1',
+    })
+    expect(definition.output.presentationMeta()).toEqual({ language: 'typescript' })
+
+    currentRuntime = { language: 'python', programFormat: 'repl' }
+    expect(definition.description).toContain('Execute a Python program')
+    const pyProps = (definition.parameters as { properties: Record<string, unknown> }).properties
+    expect(pyProps['sandbox_permissions']).toBeUndefined()
+    expect(definition.output.presentationMeta()).toEqual({ language: 'python' })
+  })
+
+  it('单次沙箱提权：校验参数配对、提权执行时不传 stateOwner，且失败保留已捕获输出', async () => {
+    const standing = { mode: 'workspace-write', workspaceRoot: 'C:/work' }
+    const seenRequests: Record<string, unknown>[] = []
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({ id: 'owner-1' }),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+      runAuthority: async () => ({ cwd: 'C:/work', sandboxPolicy: standing }),
+      escalateSandbox: async (req: { requestedMode: string }) => ({ ...standing, mode: req.requestedMode }),
+      runtime: () => ({
+        sandboxMode: 'workspace-write',
+        resolve: (request: Record<string, unknown>) => {
+          seenRequests.push(request)
+          return request
+        },
+        async run() {
+          return {
+            logs: ['step 1 done'],
+            error: { kind: 'runtime', message: 'permission check failed' },
+            sandbox: { mode: 'danger-full-access', denied: true, enforcement: 'partial' as const },
+          }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const run = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
+    const exec = { callId: 'outer', signal: new AbortController().signal, agent: {} }
+
+    await expect(run({ code: 'return 1', description: 'd', sandbox_permissions: 'danger-full-access' }, exec))
+      .rejects.toThrow(/requires a justification/)
+    await expect(run({ code: 'return 1', description: 'd', justification: 'need write' }, exec))
+      .rejects.toThrow(/only valid together with sandbox_permissions/)
+
+    await expect(run({
+      code: 'return 1',
+      description: 'escalated run',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'write outside workspace',
+    }, exec)).rejects.toThrow(/Captured output:\nstep 1 done[\s\S]*File sandbox: danger-full-access; enforcement: partial; operation denied\./)
+
+    // 临时提权不得附带 stateOwner，避免把高权限固化进常驻 REPL。
+    expect(seenRequests[0]?.['stateOwner']).toBeUndefined()
+    expect(seenRequests[0]?.['sandboxPolicy']).toEqual({ mode: 'danger-full-access', workspaceRoot: 'C:/work' })
+  })
+
+  it('转发子调用产生的图片内容块、additionalContexts 与 concluded 标记，并遵守 maxParallelSubCalls 上限', async () => {
+    const parallelRules = createRules({ maxParallelSubCalls: 2 })
+    const parallelCatalog = [
+      { name: 'read', description: 'read', parameters: {}, isConcurrencySafe: () => true },
+      { name: 'shot', description: 'screenshot', parameters: {}, isConcurrencySafe: () => false },
+    ]
+    let active = 0
+    let peak = 0
+    const deferred: unknown[] = []
+    let concluded = false
+    const host = {
+      catalog: () => parallelCatalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      createImageContext: (content: readonly unknown[]) => ({ kind: 'image-msg', content }),
+      async callTool(req: { name: string }) {
+        active += 1
+        peak = Math.max(peak, active)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        active -= 1
+        if (req.name === 'shot') {
+          return {
+            value: 'ok',
+            content: [{ type: 'image', source: 'img' }],
+            additionalContexts: [{ kind: 'nudge' }],
+            concluded: true,
+          }
+        }
+        return { value: 'txt' }
+      },
+      runtime: () => ({
+        async run(request: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          const fn = request.bindings[0]!.functions
+          await Promise.all([fn['read']!({}), fn['read']!({}), fn['read']!({}), fn['shot']!({})])
+          return { value: 'done', logs: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, parallelRules)
+    await (definition.execute as (args: unknown, exec: unknown) => Promise<unknown>)(
+      { code: 'return 1', description: 'parallel and context' },
+      {
+        callId: 'outer',
+        signal: new AbortController().signal,
+        deferContext: (msg: unknown) => { deferred.push(msg) },
+        concludeTurn: () => { concluded = true },
+      },
+    )
+    expect(peak).toBeLessThanOrEqual(2)
+    expect(deferred).toEqual([
+      { kind: 'image-msg', content: [{ type: 'image', source: 'img' }] },
+      { kind: 'nudge' },
+    ])
+    expect(concluded).toBe(true)
   })
 })
 

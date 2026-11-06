@@ -996,6 +996,14 @@ describe('the persona block the declaration transcribes', () => {
     // The compact brief form and the three new anti-patterns.
     expect(prefix).toContain('Compact Delta Brief')
     expect(prefix).toContain('use a Compact Delta Brief by default')
+    // Dual-track Code Mode wording: no stale PTC-only parentheticals remain.
+    expect(prefix).toContain('Criterion: whether spawn_teammate exists (check via code_run).')
+    expect(prefix).toContain('The board tools stay declared whether or not the board is on')
+    expect(prefix).toContain('(native calls; use code_run Promise.all for batch filter/MCP)')
+    expect(prefix).not.toContain('(PTC: tools.spawn_teammate)')
+    expect(prefix).not.toContain('stay visible in the PTC SDK')
+    expect(prefix).not.toContain('(in PTC mode: tools.list_subagent_models)')
+    expect(prefix).not.toContain('(via Promise.all in PTC mode)')
     // Raised from 18500 when R0.5 gained the team-board contract: the ceiling
     // still catches unbounded growth, it just budgets the coexistence rule the
     // current harness needs.

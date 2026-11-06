@@ -23,8 +23,10 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/codemode
  */
 
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 
+import { PLUGIN_MESSAGE_SOURCE_KIND } from './host/common/llm-compat.ts'
 import { createDiscoveryDefinitions } from './host/codemode/discovery.ts'
 import { createCodemodeExecutor } from './host/codemode/executor.ts'
 import { createRetention } from './host/codemode/retention.ts'
@@ -43,8 +45,10 @@ import {
   type CallToolRequest,
   type CatalogEntry,
   type CodemodeHost,
+  type EscalationTargetMode,
   type PtcRuntimeLike,
   type RunAuthority,
+  type SandboxEscalationInput,
 } from './host/codemode/transport.ts'
 
 /** Cordis 插件名。 */
@@ -72,6 +76,28 @@ interface ToolsServiceLike {
 interface ToolBatchResultLike {
   /** 与入参一一对应的结果。 */
   readonly results: readonly { readonly callId: string; readonly result: ToolResultLike }[]
+  /** 需要转发给下一步的附加上下文。 */
+  readonly additionalContexts?: readonly unknown[]
+  /** 是否有子调用要求结束回合。 */
+  readonly concluded?: boolean
+}
+
+/** 严格加宽阶梯（对齐 `@deepseek-ai/dsh-sandbox` 的 `WIDER_MODES`）。 */
+const WIDER_SANDBOX_MODES: Record<string, readonly EscalationTargetMode[]> = {
+  'read-only': ['workspace-write', 'danger-full-access'],
+  'workspace-write': ['danger-full-access'],
+}
+
+/** 宿主审批服务的结构契约。 */
+interface ApprovalServiceLike {
+  request(req: {
+    agent: unknown
+    toolName: string
+    callId: string
+    reason: string
+    displayReason?: { readonly en: string; readonly zh?: string }
+    signal?: AbortSignal
+  }): Promise<'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'>
 }
 
 /** 一条执行结果（只读需要的字段）。 */
@@ -183,12 +209,63 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
   const debugRing: unknown[] = []
   let firstDescribeLogged = false
 
+  const escalateSandbox = async (input: SandboxEscalationInput): Promise<unknown> => {
+    const record = typeof input.standingPolicy === 'object' && input.standingPolicy !== null
+      ? (input.standingPolicy as Record<string, unknown>)
+      : undefined
+    const effectiveMode = typeof record?.['mode'] === 'string' ? record['mode'] : undefined
+    if (record === undefined || effectiveMode === undefined) {
+      throw new Error('sandbox_permissions is not available for this PTC runtime')
+    }
+    if (input.requestedMode === effectiveMode) return input.standingPolicy
+    if (!(WIDER_SANDBOX_MODES[effectiveMode] ?? []).includes(input.requestedMode)) {
+      throw new Error(`sandbox escalation to "${input.requestedMode}" is not strictly wider than this call's current "${effectiveMode}" mode`)
+    }
+    const approver = serviceOf('approval') as ApprovalServiceLike | undefined
+    if (typeof approver?.request !== 'function') {
+      throw new Error(`sandbox escalation to "${input.requestedMode}" requires approval, but no approval service is composed`)
+    }
+    if (input.agent === undefined) {
+      throw new Error(`sandbox escalation to "${input.requestedMode}" requires approval, but the call has no agent to route it through`)
+    }
+    const outcome = await approver.request({
+      agent: input.agent,
+      toolName: input.toolName,
+      callId: input.callId,
+      reason: `escalate sandbox to ${input.requestedMode}: ${input.justification}`,
+      displayReason: {
+        en: `Allow this program to run once with ${input.requestedMode} access: ${input.justification}`,
+        zh: `允许本次程序以 ${input.requestedMode} 权限单次运行：${input.justification}`,
+      },
+      signal: input.signal,
+    })
+    switch (outcome) {
+      case 'allowed-once':
+        return { ...record, mode: input.requestedMode }
+      case 'rejected':
+        throw new Error(`the user rejected escalating this program to "${input.requestedMode}"; it stays denied, so stop and explain instead of working around it`)
+      case 'cancelled':
+        throw new Error(`approval for escalating to "${input.requestedMode}" was cancelled`)
+      case 'unavailable':
+        throw new Error(`sandbox escalation to "${input.requestedMode}" requires approval, but no approval channel is available`)
+      default:
+        throw new Error(`unexpected approval outcome: ${String(outcome)}`)
+    }
+  }
+
   const host: CodemodeHost = {
     catalog: () => catalog,
     runtime: runtimeOf,
     stateOwner: (agent) => retention.owner(agent),
     releaseOwner: (owner) => retention.release(owner),
     runAuthority,
+    escalateSandbox,
+    createImageContext(content: readonly unknown[]): unknown {
+      return createUserMessage({
+        content: content as ContentBlock[],
+        source: { kind: PLUGIN_MESSAGE_SOURCE_KIND },
+      })
+    },
     async callTool(request: CallToolRequest): Promise<CallToolOutcome> {
       const call = {
         type: 'tool-call',
@@ -211,14 +288,24 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       if (result === undefined) return { error: 'sub-call produced no result' }
       // 内容块与展示元数据只给回放事件用；程序拿的仍是 value / text。
       const content = result.content ?? []
+      const additionalContexts = Array.isArray(batch.additionalContexts) && batch.additionalContexts.length > 0
+        ? batch.additionalContexts
+        : undefined
       if (result.isError === true) {
-        return { error: errorTextOf(result), content, ...errorInfoOf(result) }
+        return {
+          error: errorTextOf(result),
+          content,
+          ...errorInfoOf(result),
+          ...(additionalContexts === undefined ? {} : { additionalContexts }),
+        }
       }
       const meta = result.meta
       return {
         ...result.value !== undefined ? { value: result.value } : { text: textOf(result.content) },
         content,
-        ...meta === undefined ? {} : { meta },
+        ...(meta === undefined ? {} : { meta }),
+        ...(additionalContexts === undefined ? {} : { additionalContexts }),
+        ...(batch.concluded === true ? { concluded: true } : {}),
       }
     },
   }
@@ -247,11 +334,15 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
     delegate: delegate as never,
     view,
     viewForName: (toolName) => resolveNameView(tools, scopeKey, toolName),
-    sectionText: () => buildCodemodeSectionText({
-      runToolName: rules.options.runToolName,
-      metaTools: rules.options.metaTools,
-      programFormat: runtimeOf()?.programFormat,
-    }),
+    sectionText: () => {
+      const runtime = runtimeOf()
+      return buildCodemodeSectionText({
+        runToolName: rules.options.runToolName,
+        metaTools: rules.options.metaTools,
+        language: runtime?.language,
+        programFormat: runtime?.programFormat,
+      })
+    },
     onCatalog: (definitions) => {
       catalog = definitions.map(toCatalogEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
     },
