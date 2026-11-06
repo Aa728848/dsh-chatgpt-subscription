@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.60.0 - 2026-11-06
+
 - **[codemode] 对齐内核 PTC `run_code` 使用配置、补齐前端语法高亮卡片并消除 Kimi 缓存边际损耗**
   - **前端语法高亮视图**：新增 `src/client/codemode/` 并在 `tool.call.toolview` 注册 `code_run` 专属卡片（中/英/俄三语），剥离外层参数 JSON 包装，复用宿主 `--shiki-*` 与 `--dsw-*` 主题变量渲染 TypeScript / Python 语法高亮、自动换行切换、一键复制纯源码、独立输出区与轨迹检查跳转。
   - **传输层与 PTC `run_code` 配置同步**：`code_run` 动态投影运行时语言、REPL/函数体风味、超时默认/上限说明以及单次沙箱提权参数（`sandbox_permissions` + `justification`，接入宿主 `approval` 审批且提权执行不污染常驻 `stateOwner`）；子调用支持 `maxParallelSubCalls` 读写屏障、`maxSubCallsPerMinute` 超时折算配额、图片块/`additionalContexts`/`concluded` 转发，并在报错时保留已捕获日志与沙箱诊断。
