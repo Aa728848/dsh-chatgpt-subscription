@@ -7,6 +7,7 @@ import {
   isDelegatedCaller,
   isPureSleepCommand,
   resolveDispatchExecutionGuardEnabled,
+  validateAskUserQuestionArgs,
 } from '../src/host/dispatch-execution-guard.ts'
 import { Config } from '../src/index.ts'
 
@@ -340,5 +341,299 @@ describe('调度执行守卫：volatile 开关与零缓存漂移', () => {
   it('Config 的开关默认开，显式 false 才关', () => {
     expect(Config({}).dispatchExecutionGuard?.get()).toBe(true)
     expect(Config({ dispatchExecutionGuard: false }).dispatchExecutionGuard?.get()).toBe(false)
+  })
+})
+
+/** 一道结构规整的候选方案题。 */
+function canonicalArgs(): Record<string, unknown> {
+  return {
+    questions: [
+      {
+        id: 'palette-choice',
+        header: '配色',
+        question: '桌宠配色要不要换成暖色？',
+        options: [
+          { label: '暖色 (Recommended)', description: '主色换成暖橙' },
+          { label: '保持冷色', description: '不改配色' },
+        ],
+      },
+    ],
+  }
+}
+
+/**
+ * 生产里真实出现过的畸形载荷（会话 session-ab0f77e6 的 seq 350 / 355）。
+ *
+ * 三个问题问的是**同一件事**，选项字段全摊在问题对象上，还带着被截断的键名
+ * `"options [{"` 与全角冒号键名 `"options："`；`id` 分别是 `":"` 与空串。
+ *
+ * @returns 那份载荷的结构副本。
+ */
+function productionMalformedArgs(): Record<string, unknown> {
+  const question = '#2021 推荐重绘左右跑动帧……你希望采用哪种方案？'
+  return {
+    questions: [
+      {
+        header: '桌宠修复方案',
+        id: 'issue-2021-art-direction',
+        question,
+        'options [{': '',
+        label: '重绘左右跑动帧 (Recommended)',
+        description: '仅调整左右跑动帧',
+      },
+      {
+        id: ':',
+        question,
+        'options：': '',
+        label: '工具时改播正面站姿',
+        description: '不重绘',
+      },
+      {
+        id: '',
+        question,
+        'options：': '',
+        label: '先等待报告人标注',
+        description: '暂缓',
+      },
+    ],
+  }
+}
+
+describe('validateAskUserQuestionArgs：主控提问载荷的结构校验', () => {
+  it('结构规整的候选方案题通过', () => {
+    expect(validateAskUserQuestionArgs(canonicalArgs())).toBeUndefined()
+  })
+
+  it('多题、多选与既有键（header/detail/intent/timeout/multiSelect）都放行', () => {
+    expect(validateAskUserQuestionArgs({
+      questions: [
+        {
+          id: 'q1',
+          question: '第一题',
+          header: 'H',
+          multi_select: true,
+          options: [{ label: 'A' }, { label: 'B' }],
+        },
+        {
+          id: 'q2',
+          question: '第二题',
+          detail: '补充说明',
+          intent: 'confirm',
+          timeout: 30,
+          multiSelect: false,
+        },
+      ],
+    })).toBeUndefined()
+  })
+
+  it('开放题必须继续放行：options 缺省与 options: [] 都算开放题', () => {
+    expect(validateAskUserQuestionArgs({
+      questions: [{ id: 'free-form', question: '还有别的想补充的吗？' }],
+    })).toBeUndefined()
+    expect(validateAskUserQuestionArgs({
+      questions: [{ id: 'free-form', question: '还有别的想补充的吗？', options: [] }],
+    })).toBeUndefined()
+  })
+
+  it('非对象载荷、缺 questions、非数组、空数组都交给底层工具自己判', () => {
+    expect(validateAskUserQuestionArgs(undefined)).toBeUndefined()
+    expect(validateAskUserQuestionArgs(null)).toBeUndefined()
+    expect(validateAskUserQuestionArgs('questions')).toBeUndefined()
+    expect(validateAskUserQuestionArgs({})).toBeUndefined()
+    expect(validateAskUserQuestionArgs({ questions: 'nope' })).toBeUndefined()
+    expect(validateAskUserQuestionArgs({ questions: [] })).toBeUndefined()
+  })
+
+  it('生产里那份畸形载荷被拒，且指引它写成一道题多个选项', () => {
+    const reason = validateAskUserQuestionArgs(productionMalformedArgs())
+    expect(reason).toBeDefined()
+    expect(reason).toContain('INVALID_USER_QUESTION')
+    // 摊平的选项字段要点名：错位键名是模型改对它的唯一线索。
+    expect(reason).toContain('collapsed into the question object')
+    expect(reason).toContain('"options": [{"label"')
+  })
+
+  it('选项整段 JSON 糊进键名的三种形态都被拒', () => {
+    const question = { id: 'id-1', question: '问题正文', header: 'H' }
+    for (const key of ['options [{', 'options：', 'options:']) {
+      const reason = validateAskUserQuestionArgs({
+        questions: [{ ...question, [key]: '' }],
+      })
+      expect(reason, key).toBeDefined()
+      expect(reason, key).toContain('INVALID_USER_QUESTION')
+      expect(reason, key).toContain(JSON.stringify(key))
+    }
+  })
+
+  it('选项字段摊在问题对象上（label / description）被拒', () => {
+    for (const key of ['label', 'description']) {
+      const reason = validateAskUserQuestionArgs({
+        questions: [{ id: 'id-1', question: '问题正文', [key]: '重绘左右跑动帧' }],
+      })
+      expect(reason, key).toBeDefined()
+      expect(reason, key).toContain('INVALID_USER_QUESTION')
+      expect(reason, key).toContain(key)
+    }
+  })
+
+  it('退化 id（空串、冒号、破折号、空白、缺省、非字符串）被拒', () => {
+    for (const bad of ['', '   ', ':', '---', '？！']) {
+      const reason = validateAskUserQuestionArgs({
+        questions: [{ id: bad, question: '问题正文', options: [{ label: 'A' }] }],
+      })
+      expect(reason, JSON.stringify(bad)).toBeDefined()
+      expect(reason, JSON.stringify(bad)).toContain('INVALID_USER_QUESTION')
+      expect(reason, JSON.stringify(bad)).toContain('"id"')
+    }
+    for (const bad of [undefined, 42, null, {}]) {
+      const reason = validateAskUserQuestionArgs({
+        questions: [{ id: bad, question: '问题正文', options: [{ label: 'A' }] }],
+      })
+      expect(reason, String(bad)).toContain('INVALID_USER_QUESTION')
+    }
+  })
+
+  it('同一批里 id 重复（含首尾空白差异）被拒', () => {
+    const reason = validateAskUserQuestionArgs({
+      questions: [
+        { id: 'scheme', question: '第一题', options: [{ label: 'A' }] },
+        { id: '  scheme  ', question: '第二题', options: [{ label: 'B' }] },
+      ],
+    })
+    expect(reason).toBeDefined()
+    expect(reason).toContain('INVALID_USER_QUESTION')
+    expect(reason).toContain('"scheme"')
+    expect(reason).toContain('distinct stable id')
+  })
+
+  it('同一批里问题正文重复（含空白差异）被拒，并指向 options', () => {
+    const text = '#2021 推荐重绘左右跑动帧……你希望采用哪种方案？'
+    // 只换了空白（换行 / 尾部空格），归一化后仍是同一道题。
+    const variant = '#2021\n推荐重绘左右跑动帧……你希望采用哪种方案？  '
+    const reason = validateAskUserQuestionArgs({
+      questions: [
+        { id: 'a', question: text, options: [{ label: 'A' }] },
+        { id: 'b', question: variant, options: [{ label: 'B' }] },
+      ],
+    })
+    expect(reason).toBeDefined()
+    expect(reason).toContain('INVALID_USER_QUESTION')
+    expect(reason).toContain('repeats the question text')
+    expect(reason).toContain('"options" array')
+  })
+
+  it('question 不是非空字符串时被拒', () => {
+    for (const bad of ['', '   ', undefined, 42]) {
+      const reason = validateAskUserQuestionArgs({
+        questions: [{ id: 'id-1', question: bad, options: [{ label: 'A' }] }],
+      })
+      expect(reason, String(bad)).toContain('INVALID_USER_QUESTION')
+      expect(reason, String(bad)).toContain('"question"')
+    }
+  })
+
+  it('questions 里混进非对象条目时被拒', () => {
+    const reason = validateAskUserQuestionArgs({ questions: ['把选项写成字符串'] })
+    expect(reason).toBeDefined()
+    expect(reason).toContain('INVALID_USER_QUESTION')
+    expect(reason).toContain('questions[0]')
+    expect(reason).toContain('must be a question object')
+  })
+
+  it('options 不是数组时被拒，并说明开放题该怎么办', () => {
+    const reason = validateAskUserQuestionArgs({
+      questions: [{ id: 'id-1', question: '问题正文', options: { label: 'A' } }],
+    })
+    expect(reason).toBeDefined()
+    expect(reason).toContain('INVALID_USER_QUESTION')
+    expect(reason).toContain('must be an array')
+    expect(reason).toContain('Omit "options"')
+  })
+
+  it('选项条目坏掉的各种形态都被拒', () => {
+    const question = (options: unknown): Record<string, unknown> => ({
+      questions: [{ id: 'id-1', question: '问题正文', options }],
+    })
+
+    const notRecord = validateAskUserQuestionArgs(question(['重绘左右跑动帧']))
+    expect(notRecord).toContain('INVALID_USER_QUESTION')
+    expect(notRecord).toContain('options[0]')
+    expect(notRecord).toContain('must be an object')
+
+    const emptyLabel = validateAskUserQuestionArgs(question([{ label: '   ', description: 'x' }]))
+    expect(emptyLabel).toContain('INVALID_USER_QUESTION')
+    expect(emptyLabel).toContain('non-empty "label"')
+
+    const missingLabel = validateAskUserQuestionArgs(question([{ description: 'x' }]))
+    expect(missingLabel).toContain('INVALID_USER_QUESTION')
+    expect(missingLabel).toContain('non-empty "label"')
+
+    const duplicateLabel = validateAskUserQuestionArgs(question([
+      { label: '重绘左右跑动帧' },
+      { label: '  重绘左右跑动帧  ' },
+    ]))
+    expect(duplicateLabel).toContain('INVALID_USER_QUESTION')
+    expect(duplicateLabel).toContain('repeats inside')
+    expect(duplicateLabel).toContain('distinct label')
+
+    const nestedQuestion = validateAskUserQuestionArgs(question([{ label: 'A', question: '问题正文' }]))
+    expect(nestedQuestion).toContain('INVALID_USER_QUESTION')
+    expect(nestedQuestion).toContain('misplaced key "question"')
+
+    const nestedOptions = validateAskUserQuestionArgs(question([{ label: 'A', 'options：': '' }]))
+    expect(nestedOptions).toContain('INVALID_USER_QUESTION')
+    expect(nestedOptions).toContain('misplaced key')
+  })
+})
+
+describe('调度执行守卫：主控提问载荷在执行期被拦下', () => {
+  it('主控自己带着畸形载荷提问时，拒绝理由带 INVALID_USER_QUESTION', () => {
+    const { guard } = host()
+    const reason = guard()({
+      name: 'ask_user_question',
+      arguments: productionMalformedArgs(),
+      agent: rootAgent(),
+    })
+    expect(reason).toContain('INVALID_USER_QUESTION')
+    expect(reason).not.toContain('DELEGATED_CALLER')
+  })
+
+  it('主控的合法提问与开放题都放行', () => {
+    const { guard } = host()
+    expect(guard()({ name: 'ask_user_question', arguments: canonicalArgs(), agent: rootAgent() }))
+      .toBeUndefined()
+    expect(guard()({
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'free-form', question: '还有别的想补充的吗？' }] },
+      agent: rootAgent(),
+    })).toBeUndefined()
+  })
+
+  it('越权判定排在载荷校验之前：子代理拿到的仍是原样的 DELEGATED_CALLER', () => {
+    const { guard } = host()
+    const reason = guard()({
+      name: 'ask_user_question',
+      arguments: productionMalformedArgs(),
+      agent: subagentAgent(),
+    })
+    expect(reason).toContain('DELEGATED_CALLER')
+    expect(reason).not.toContain('INVALID_USER_QUESTION')
+    expect(reason).toContain('status: "hand_back"')
+  })
+
+  it('载荷校验不碰工具声明面：definitions 与 register 都没被调用', () => {
+    const { guard, definitionsCalls, registerCalls } = host()
+    guard()({ name: 'ask_user_question', arguments: productionMalformedArgs(), agent: rootAgent() })
+    expect(definitionsCalls()).toBe(0)
+    expect(registerCalls()).toBe(0)
+  })
+
+  it('开关读成 false 时载荷校验也停手', () => {
+    const { guard } = host({ enabled: () => false })
+    expect(guard()({
+      name: 'ask_user_question',
+      arguments: productionMalformedArgs(),
+      agent: rootAgent(),
+    })).toBeUndefined()
   })
 })

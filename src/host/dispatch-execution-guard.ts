@@ -1,10 +1,11 @@
 /**
- * 「调度执行守卫」——在**执行期**拦住两类越界调用。
+ * 「调度执行守卫」——在**执行期**拦住两类越界调用，并把主控自己提问时的畸形
+ * 载荷挡在弹窗之前。
  *
  * ## 为什么需要它
  *
  * 调度模式（dispatch preset）里主控与子代理跑在同一进程、同一套工具注册面上，
- * 于是有两件事会悄悄坏掉：
+ * 于是有三件事会悄悄坏掉：
  *
  * 1. **子代理越权调用主控专用工具**。`ask_user_question`、`exit_plan_mode`、
  *    `create_goal` 这些是**主控的**决定口：让子代理自己问用户、自己进/出计划模式、
@@ -13,6 +14,10 @@
  * 2. **等待子代理期间空等**。子代理还在跑的时候，主控用 `sleep` 空转，既烧 token
  *    又错过通知到达的那一刻。正确做法是**结束这一轮**，让内置的子代理完成通知把
  *    它叫醒（R-W）。
+ * 3. **主控自己的提问载荷畸形**。模型会把一次「给候选方案」写成同一道题问三遍、
+ *    把选项整段 JSON 糊进键名（`"options [{"`）、把 `id` 写成 `":"` 或空串——
+ *    用户在弹窗里点完，回答却对不回任何问题。这种载荷必须在**弹窗之前**就退回给
+ *    模型，让它下一轮自己改对（见 {@link validateAskUserQuestionArgs}）。
  *
  * ## 零 Kimi Code 缓存漂移
  *
@@ -483,6 +488,240 @@ function activeChildSleepDenial(): string {
 }
 
 /**
+ * 主控可以向用户提问的那一个工具名。
+ */
+const ASK_USER_QUESTION_TOOL = 'ask_user_question'
+
+/**
+ * 一个问题条目上可以出现的键。
+ *
+ * 这份清单只用在**修正指引**里：错位键被拦下时把它抄给模型，模型才知道该
+ * 把字段放回哪里。清单本身不做白名单校验——宿主往后加字段不该被守卫拦掉。
+ */
+const ASK_QUESTION_KEYS = Object.freeze([
+  'id',
+  'question',
+  'header',
+  'options',
+  'multi_select',
+  'multiSelect',
+  'detail',
+  'intent',
+  'timeout',
+] as const)
+
+/**
+ * 合法 `id` 至少要含一个字母或数字（含 CJK）。
+ *
+ * 光有标点或空白的 id 不是 id：生产里见过 `""`、`":"`、`"---"`，用户看到的
+ * 回答回执全变成同一个无名标签，主控也没法把回答对回问题。
+ */
+const READABLE_ID_PATTERN = /[\p{L}\p{N}]/u
+
+/**
+ * 判断一个键名是不是 `options` 系列。
+ *
+ * 生产里的畸形载荷把 options 整段 JSON 糊进了键名：`"options [{"`、`"options："`
+ * 、`"options:"`。它们的共同特征是**去掉首尾空白、转小写后以 `options` 开头**，
+ * 所以判据就取这个前缀——`options` 本身也落在其中，调用方另行放过。
+ *
+ * @param key - 候选键名。
+ * @returns 是 options 系列键时为 true。
+ */
+function isOptionsKey(key: string): boolean {
+  return key.trim().toLowerCase().startsWith('options')
+}
+
+/**
+ * 找出问题条目上**本该嵌在 `options` 里**的错位键。
+ *
+ * 两类错位都见过：
+ *
+ * - `label` / `description` 直接摊在问题对象上（选项字段漏了一层嵌套）；
+ * - 键名本身是 options 的碎片（`"options [{"`、`"options："`），值往往是空串。
+ *
+ * @param question - 候选问题条目。
+ * @returns 第一个错位键名；没有时为 undefined。
+ */
+function misplacedQuestionKey(question: Record<string, unknown>): string | undefined {
+  for (const key of Object.keys(question)) {
+    if (key === 'options') continue
+    if (key === 'label' || key === 'description') return key
+    if (isOptionsKey(key)) return key
+  }
+  return undefined
+}
+
+/**
+ * 找出选项条目上的错位键。
+ *
+ * 一个选项只该有 `label` / `description`；出现 `question` 说明调用方把整道题
+ * 又抄进了选项里，出现 `options*` 说明嵌套被摊平过了。
+ *
+ * @param option - 候选选项条目。
+ * @returns 第一个错位键名；没有时为 undefined。
+ */
+function misplacedOptionKey(option: Record<string, unknown>): string | undefined {
+  for (const key of Object.keys(option)) {
+    if (key === 'question' || isOptionsKey(key)) return key
+  }
+  return undefined
+}
+
+/**
+ * 一段供拒绝文案引用的短摘录。
+ *
+ * @param value - 原始文本。
+ * @param limit - 最多保留多少个字符。
+ * @returns 单行摘录。
+ */
+function excerpt(value: string, limit = 60): string {
+  const collapsed = value.trim().replace(/\s+/g, ' ')
+  return JSON.stringify(collapsed.length > limit ? `${collapsed.slice(0, limit)}…` : collapsed)
+}
+
+/**
+ * 生成一条「提问载荷畸形」的拒绝文案。
+ *
+ * @param detail - 具体坏在哪里、该怎么改。
+ * @returns 带 `INVALID_USER_QUESTION:` 前缀的拒绝理由。
+ */
+function invalidAskUserQuestion(detail: string): string {
+  return `INVALID_USER_QUESTION: ${detail}`
+}
+
+/**
+ * 校验主控 `ask_user_question` 的调用载荷。
+ *
+ * 这是**执行期**的结构校验：工具声明面一个字节不动（前缀缓存零漂移），但畸形
+ * 的载荷在真正弹给用户之前就被挡回给模型，让模型下一步就能自己改对。
+ *
+ * 三类畸形各自能被模型自助修好：
+ *
+ * 1. **选项嵌套被摊平**——`"options [{"`、`"options："` 这类键名，或者把
+ *    `label` / `description` 摊在问题对象上。指引它写成
+ *    `{"id": …, "question": …, "options": [{"label": …, "description": …}]}`。
+ * 2. **`id` / `question` 退化**——空串、`":"`、`"---"`、纯空白，或者在同一个
+ *    批次里重复。重复的问题文本要并成**一道题多个选项**，而不是问两遍。
+ * 3. **选项内部坏掉**——不是对象、缺 `label`、同一题里 `label` 重复。
+ *
+ * **开放题必须继续放行**：`options` 缺省就是一道开放题，`options: []`（适配层
+ * 的空数组兜底）同样放行；只有数组里真有条目时才逐条校验。
+ *
+ * 非对象载荷、缺 `questions`、`questions` 不是数组或为空时一律返回 undefined：
+ * 那几种形态归底层工具自己的 schema 与空检查管，守卫不重复判、也不抢它的文案。
+ *
+ * @param args - 已解析的工具参数。
+ * @returns 合法时为 undefined；畸形时是 `INVALID_USER_QUESTION: …` 文案。
+ */
+export function validateAskUserQuestionArgs(args: unknown): string | undefined {
+  if (!isRecord(args)) return undefined
+  const questions = args['questions']
+  if (!Array.isArray(questions) || questions.length === 0) return undefined
+
+  const seenIds = new Set<string>()
+  const seenQuestions = new Set<string>()
+
+  for (let index = 0; index < questions.length; index += 1) {
+    const question: unknown = questions[index]
+    const at = `questions[${index}]`
+    if (!isRecord(question)) {
+      return invalidAskUserQuestion(
+        `${at} must be a question object. Known question keys: ${ASK_QUESTION_KEYS.join(', ')}.`,
+      )
+    }
+
+    const misplaced = misplacedQuestionKey(question)
+    if (misplaced !== undefined) {
+      return invalidAskUserQuestion(
+        `${at} carries the misplaced key ${JSON.stringify(misplaced)}: option fields collapsed into the `
+        + 'question object. Build ONE question object and nest its choices inside it: '
+        + '{"id": "palette", "question": "Which palette?", "options": [{"label": "Warm", "description": "…"}]}. '
+        + `Known question keys: ${ASK_QUESTION_KEYS.join(', ')}.`,
+      )
+    }
+
+    const id: unknown = question['id']
+    if (typeof id !== 'string' || id.trim().length === 0 || !READABLE_ID_PATTERN.test(id)) {
+      return invalidAskUserQuestion(
+        `${at} needs "id" to be a non-empty string with at least one letter or digit. `
+        + 'A blank string, whitespace, ":" or "---" is not a usable id: the answer is echoed back '
+        + 'against that id, so use a stable slug such as "palette-choice".',
+      )
+    }
+    const trimmedId = id.trim()
+    if (seenIds.has(trimmedId)) {
+      return invalidAskUserQuestion(
+        `${at}.id ${JSON.stringify(trimmedId)} is already used by an earlier question in this batch. `
+        + 'Every question needs a distinct stable id so each answer maps back to one question.',
+      )
+    }
+    seenIds.add(trimmedId)
+
+    const text: unknown = question['question']
+    if (typeof text !== 'string' || text.trim().length === 0) {
+      return invalidAskUserQuestion(
+        `${at} needs "question" to be a non-empty string with the text the user reads.`,
+      )
+    }
+    const normalizedText = text.trim().replace(/\s+/g, ' ')
+    if (seenQuestions.has(normalizedText)) {
+      return invalidAskUserQuestion(
+        `${at} repeats the question text ${excerpt(text)} already asked earlier in this batch. `
+        + 'To offer several candidate choices, put them into ONE question\'s "options" array '
+        + 'instead of asking the same question again.',
+      )
+    }
+    seenQuestions.add(normalizedText)
+
+    const options: unknown = question['options']
+    // 开放题：缺省 options 与空数组兜底都必须继续放行。
+    if (options === undefined) continue
+    if (!Array.isArray(options)) {
+      return invalidAskUserQuestion(
+        `${at}.options must be an array of {"label": "…", "description": "…"} objects. `
+        + 'Omit "options" entirely when the question is open-ended.',
+      )
+    }
+    if (options.length === 0) continue
+
+    const seenLabels = new Set<string>()
+    for (let optionIndex = 0; optionIndex < options.length; optionIndex += 1) {
+      const option: unknown = options[optionIndex]
+      const optionAt = `${at}.options[${optionIndex}]`
+      if (!isRecord(option)) {
+        return invalidAskUserQuestion(
+          `${optionAt} must be an object like {"label": "…", "description": "…"}.`,
+        )
+      }
+      const optionMisplaced = misplacedOptionKey(option)
+      if (optionMisplaced !== undefined) {
+        return invalidAskUserQuestion(
+          `${optionAt} carries the misplaced key ${JSON.stringify(optionMisplaced)}: an option object holds only `
+          + `"label" and "description", while "question" and "options" belong to the question object.`,
+        )
+      }
+      const label: unknown = option['label']
+      if (typeof label !== 'string' || label.trim().length === 0) {
+        return invalidAskUserQuestion(
+          `${optionAt} needs a non-empty "label" string: the label is what the user clicks.`,
+        )
+      }
+      const trimmedLabel = label.trim()
+      if (seenLabels.has(trimmedLabel)) {
+        return invalidAskUserQuestion(
+          `${optionAt}.label ${JSON.stringify(trimmedLabel)} repeats inside ${at}. `
+          + 'Every option of one question needs a distinct label.',
+        )
+      }
+      seenLabels.add(trimmedLabel)
+    }
+  }
+
+  return undefined
+}
+
+/**
  * 装一台「调度执行守卫」。
  *
  * 只用 `ctx.tools.guard()` 这一条执行期接缝：工具声明面（`tools:sdk` 段与顶层
@@ -513,6 +752,12 @@ export function installDispatchExecutionGuard(
 
     if (delegatedBlocked.has(toolName) && isDelegatedCaller(agent, ctx)) {
       return delegatedDenial(toolName)
+    }
+
+    // 主控自己的提问载荷：越权判定之后才校验，子代理始终先拿到 DELEGATED_CALLER。
+    if (toolName === ASK_USER_QUESTION_TOOL) {
+      const malformed = validateAskUserQuestionArgs(execution?.arguments)
+      if (malformed !== undefined) return malformed
     }
 
     if (shellTools.has(toolName)) {

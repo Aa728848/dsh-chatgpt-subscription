@@ -22,6 +22,15 @@
  *    无回合时走 agent.inject），一次进入只投一次。手册性指引留在 enter_plan_mode
  *    的工具返回里（见 entry-plan-mode-pipeline.ts）。
  *
+ * ## 第四件事：回合结束时的提醒（也不进前缀缓存）
+ *
+ * 计划模式里模型讲完一段话就收尾（`finish: stop`、零工具调用）时，宿主不会替它做任何
+ * 事：那一回合就停在那里，直到人去催「确认呢」。`installPlanModeExitReminder` 在
+ * `llm/stream` 上认一次**已完成、只有可见文本、零工具调用**的对话请求，在 agent 空闲
+ * 之后补一条尾部消息（`createPlanNotice`），让模型自己选 `exit_plan_mode` /
+ * `ask_user_question` / `leave_plan_mode`。它同样不注册 system 段、不动工具表，所以和
+ * 上面三个决定一样零缓存漂移；cap 是每条连续收尾一条。
+ *
  * ## 与官方实现的其余差别一律是「代次协商」，不是功能裁剪
  *
  * - plan 投影的 stateVersion 在 0.2.1-rc.5 及更早是 3（无 entered），0.2.2-alpha
@@ -49,6 +58,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { z as zod } from 'zod'
+import { hasRunningChildSubagent, isDelegatedCaller } from './host/dispatch-execution-guard.ts'
 
 /** 组件行名；preset 里的行 id 与模块说明符另由 preset 文件决定。 */
 export const name = 'dsh-chatgpt-subscription-plan-mode'
@@ -313,8 +323,18 @@ interface AgentLike {
 
 /** 事件订阅面（老代 cordis 上可能没有 on）。 */
 interface EventHostLike {
-  /** 订阅一个事件，返回解绑函数。 */
-  on?(name: string, listener: (...args: never[]) => unknown): (() => void) | undefined
+  /**
+   * 订阅一个事件，返回解绑函数。
+   *
+   * 第三参数是 cordis 的订阅选项（`{ global: true }` 让宿主级监听器看到每个会话的
+   * 事件）。单测里的假宿主只认两个参数，所以它是可选的，而且调用方必须准备好
+   * 「宿主对着第三个参数抛错」的退路。
+   */
+  on?(
+    name: string,
+    listener: (...args: never[]) => unknown,
+    options?: { global?: boolean },
+  ): (() => void) | undefined
 }
 
 /** 注入面（老代 cordis 上可能没有 inject）。 */
@@ -475,15 +495,24 @@ function legacyHandle(projections: SessionProjectionsLike): PlanProjectionHandle
  * @param ctx - 宿主上下文。
  * @param event - 事件名。
  * @param listener - 监听器。
+ * @param options - cordis 订阅选项（`{ global: true }` 只看全局事件）。省略时按两参数订阅。
  * @returns 解绑函数；订不上时 undefined。
  */
 function subscribe(
   ctx: unknown,
   event: string,
   listener: (...args: never[]) => unknown,
+  options?: { global?: boolean },
 ): (() => void) | undefined {
   const on = (ctx as EventHostLike | undefined)?.on
   if (typeof on !== 'function') return undefined
+  if (options !== undefined) {
+    try {
+      return on.call(ctx, event, listener, options)
+    } catch {
+      // 只认两个参数的宿主：退回去按两参数订阅，而不是整条订阅失败。
+    }
+  }
   try {
     return on.call(ctx, event, listener)
   } catch {
@@ -560,8 +589,33 @@ export class PlanModeController extends Service {
       }
     }
     this.subscribePreStep()
+    this.subscribeExitReminder()
     this.registerExitTool()
     this.registerPlanCommand()
+  }
+
+  /**
+   * 订阅「回合以纯文本收尾」的提醒。
+   *
+   * 读法是 {@link PlanModeController.selectedActive}：它含未决选择，所以
+   * `exit_plan_mode` 刚排进 `{ active: false }`、日志还没落的那一刻不会误提醒。
+   * 宿主里同时装着 `installPlanModeCacheGuard` 时，进程级登记册保证一条
+   * `llm/stream` 只被一条监听器接手，两处不会各提醒一次。
+   */
+  private subscribeExitReminder(): void {
+    const controller = this
+    const dispose = installPlanModeExitReminder(this.ctx, {
+      isActive: (agent) => controller.selectedActive((agent as AgentLike | undefined)?.session),
+    })
+    if (dispose === undefined) return
+    const effect = (this.ctx as unknown as EffectHostLike | undefined)?.effect
+    if (typeof effect !== 'function') return
+    try {
+      effect.call(this.ctx, () => dispose, 'dsh-chatgpt-subscription: close the plan-mode exit reminder')
+    } catch {
+      // effect 面装不上就没有卸载钩子：就地摘掉，别留一条活过本服务的监听器。
+      dispose()
+    }
   }
 
   // ── 投影注册（版本协商） ──────────────────────────────────────────────────
@@ -602,11 +656,39 @@ export class PlanModeController extends Service {
   // ── 状态读取 ──────────────────────────────────────────────────────────────
 
   /**
+   * 服务是否已在自己脚下被卸载。
+   *
+   * 登记册（{@link registeredPlanControllerActive}）用它把「已经不算数的控制器」
+   * 摘出判定：卸载之后残留的登记不能让宿主继续按老状态提醒。
+   * @returns true 表示已卸载。
+   */
+  isDisposed(): boolean {
+    return this.disposed
+  }
+
+  /**
+   * 把会话对象绑进进程级登记册，让**宿主根作用域**也能读到本控制器的判定。
+   *
+   * 挂载点不止一个（`installPlanModeCacheGuard` 在根作用域、本控制器可能在
+   * `isolate: { planMode: true }` 的子 realm），而 `ctx.get()` 看不见子 realm。
+   * 控制器每观察到一个会话就登记一次，登记册跨 realm 共享，于是两边读到同一份
+   * 判定。已卸载就不再登记。
+   * @param session - 会话对象。
+   */
+  private bindSession(session: unknown): void {
+    if (this.disposed) return
+    const key = objectKey(session)
+    if (key === undefined) return
+    exitReminderRegistry().controllers.set(key, this)
+  }
+
+  /**
    * 已记录的计划状态。
    * @param session - 会话。
    * @returns 状态；读不到时是空状态（绝不抛错 —— 一个读失败不该打断整步）。
    */
   private planState(session: unknown): PlanUnitState {
+    this.bindSession(session)
     const handle = this.planProjectionHandle
     if (handle !== undefined) {
       try {
@@ -711,6 +793,7 @@ export class PlanModeController extends Service {
     const session = agent?.session
     const key = objectKey(session)
     if (key === undefined) return 'noop'
+    this.bindSession(session)
     const narrate = options.narrate !== false
     const pending = this.pendingIntents.get(key)
     const target = pending?.active ?? this.loggedActive(session)
@@ -823,6 +906,9 @@ export class PlanModeController extends Service {
       const key = objectKey(session)
       if (decision === undefined || decision.kind === 'reject' || key === undefined) return decision
       if (payload?.signal?.aborted === true) return decision
+      // 宿主守卫可能挂在根作用域、本控制器挂在隔离的子 realm：会话一到手就登记，
+      // 免得「先 claim 再判定」的守卫读不到本控制器的未决选择。
+      if (!this.disposed) this.bindSession(session)
       const pending = this.pendingIntents.get(key)
       if (pending === undefined) return decision
       const narration = this.narration(session, pending.active)
@@ -1048,6 +1134,496 @@ export class PlanModeController extends Service {
     } catch {
       // 没有命令注册面。
     }
+  }
+}
+
+// ── 回合结束提醒（零缓存漂移） ──────────────────────────────────────────────
+
+/**
+ * 计划模式下「只用纯文本收尾」时投给模型的提醒正文。
+ *
+ * 冻结契约的一部分：只经 {@link createPlanNotice} 的尾部用户消息投递，**不进 system
+ * 段、不动工具表**，所以它不会让任何前端前缀缓存重建。
+ */
+export const PLAN_EXIT_REMINDER_TEXT = 'Plan mode is still active, and the previous response ended in plain text '
+  + 'without calling a tool. If the plan is ready, call exit_plan_mode now with the complete markdown plan '
+  + '(starting with a # heading) as the sole tool call. If an unsettled user decision blocks planning, call '
+  + 'ask_user_question instead. If the user explicitly asked to abandon planning, call leave_plan_mode.'
+
+/** 一条「纯文本收尾」之后的提醒状态，按会话分桶。 */
+interface ExitReminderState {
+  /** 连续「纯文本收尾」的次数；工具调用、离开计划模式都会清零。 */
+  consecutive: number
+  /** 本回合已经排进 whenIdle 队列的提醒（同一回合只排一次）。 */
+  pending: boolean
+}
+
+/**
+ * 提醒的进程级登记册。
+ *
+ * 两个挂载点（`PlanModeController` 与 `installPlanModeCacheGuard`）可能同时活在一个
+ * 进程里，`llm/stream` 又是**全局瀑布**：同一个 `request` 对象会被一路传下去，每个
+ * 监听器都能看到它。这里用登记册把两件事统一起来：
+ *
+ * - `claimed`：一个 `request` 只允许一条监听器接手，另一条原样 `next()` 透传；
+ * - `states`：按会话分桶的计数，两处读的是同一份，cap 才是真的 1（而不是各 1）。
+ */
+export interface PlanModeExitReminderRegistry {
+  /** 已被某条提醒监听器接手过的 `llm/stream` 请求对象。 */
+  claimed: WeakSet<object>
+  /** 按会话（`agent.session ?? agent`）分桶的提醒状态。 */
+  states: WeakMap<object, ExitReminderState>
+  /**
+   * 按会话对象登记的 {@link PlanModeController}。
+   *
+   * 宿主守卫装在**根作用域**，控制器却可能挂在 dispatch preset 的
+   * `isolate: { planMode: true }` 子 realm 里：那种情况下根作用域的
+   * `ctx.get('planMode')` 恒为 undefined，读不到 `selectedActive`（含未决选择），
+   * 提醒要么完全不来（内存兜底宿主没有 plan 投影），要么按投影读到过期的
+   * `active: true` 而误提醒。控制器每见到一个会话对象就在这里登记一次，宿主
+   * 守卫改成先读这里，隔离与否都读得到同一份判定。
+   */
+  controllers: WeakMap<object, RegisteredPlanController>
+}
+
+/** 登记册里记录的控制器读面（结构化，避免与 cordis 实例形状耦合）。 */
+export interface RegisteredPlanController {
+  /** 本步会呈现给模型的状态：未决选择优先，否则是已记录状态。 */
+  selectedActive(session: unknown): boolean
+  /** 控制器是否已经卸载；卸载后它的判定不再作数。 */
+  isDisposed(): boolean
+}
+
+/** 登记册在 `globalThis` 上的键。跨模块实例共享，值本身只由本模块写入。 */
+const EXIT_REMINDER_KEY = Symbol.for('dsh-chatgpt-subscription.plan-mode.exit-reminder.claimed')
+
+/**
+ * 取（或建）进程级登记册。
+ *
+ * 用 `Symbol.for` 而不是模块级常量：同一个进程里可能有两份本包实例（宿主插件与
+ * preset 行分别加载），它们必须看到同一份 `claimed` / `states`。
+ * @returns 登记册。
+ */
+function exitReminderRegistry(): PlanModeExitReminderRegistry {
+  const holder = globalThis as unknown as Record<symbol, PlanModeExitReminderRegistry | undefined>
+  const existing = holder[EXIT_REMINDER_KEY]
+  if (
+    existing !== undefined
+    && existing.claimed instanceof WeakSet
+    && existing.states instanceof WeakMap
+    && existing.controllers instanceof WeakMap
+  ) {
+    return existing
+  }
+  const created: PlanModeExitReminderRegistry = {
+    claimed: new WeakSet<object>(),
+    states: new WeakMap<object, ExitReminderState>(),
+    controllers: new WeakMap<object, RegisteredPlanController>(),
+  }
+  holder[EXIT_REMINDER_KEY] = created
+  return created
+}
+
+/**
+ * 用会话对象问本包的 {@link PlanModeController}：此刻算不算在计划模式。
+ *
+ * 与 `ctx.get('planMode')` 的区别是**看不见 realm 边界**：登记册挂在
+ * `globalThis` 上，控制器往里面登记的是「这个会话由我负责」，所以宿主根作用域
+ * 也能读到 preset 里 `isolate: { planMode: true }` 那个子 realm 的判定 —— 含未决
+ * 选择（`exit_plan_mode` 刚排进 `{ active: false }`、日志还没落的那一刻）。
+ *
+ * 未登记（不是本包的控制器，比如内置 preset 挂的官方服务）、已卸载、或读法抛错
+ * 时返回 undefined，由调用方自己退回投影。
+ * @param session - 会话对象。
+ * @returns true / false / undefined。
+ */
+export function registeredPlanControllerActive(session: unknown): boolean | undefined {
+  const key = objectKey(session)
+  if (key === undefined) return undefined
+  const controller = exitReminderRegistry().controllers.get(key)
+  if (controller === undefined || controller.isDisposed()) return undefined
+  try {
+    const active = controller.selectedActive(session)
+    return typeof active === 'boolean' ? active : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 一个 agent 的提醒桶键：优先会话对象（同一会话换一个 agent 也还是同一桶），
+ * 否则退回 agent 自己。
+ * @param agent - 任意值。
+ * @returns 桶键；两者都不是对象时 undefined。
+ */
+function reminderBucket(agent: unknown): object | undefined {
+  const session = (agent as { session?: unknown } | undefined)?.session
+  return objectKey(session) ?? objectKey(agent)
+}
+
+/**
+ * 取（或建）一个桶的提醒状态。
+ * @param registry - 登记册。
+ * @param bucket - 桶键。
+ * @returns 状态（就地可变）。
+ */
+function reminderStateOf(registry: PlanModeExitReminderRegistry, bucket: object): ExitReminderState {
+  let state = registry.states.get(bucket)
+  if (state === undefined) {
+    state = { consecutive: 0, pending: false }
+    registry.states.set(bucket, state)
+  }
+  return state
+}
+
+/**
+ * 读宿主的 Agent 登记表，两条路线都试（`ctx.get('agents')` 与结构化属性）。
+ * @param ctx - 宿主上下文。
+ * @returns 登记表；读不到时 undefined。
+ */
+function agentRegistryOf(ctx: unknown): { get(id: unknown): unknown } | undefined {
+  const viaGetter = serviceOf<{ get?: unknown }>(ctx, 'agents')
+  if (typeof viaGetter?.get === 'function') return viaGetter as { get(id: unknown): unknown }
+  let direct: unknown
+  try {
+    direct = (ctx as { agents?: unknown } | undefined)?.agents
+  } catch {
+    return undefined
+  }
+  return typeof (direct as { get?: unknown } | undefined)?.get === 'function'
+    ? direct as { get(id: unknown): unknown }
+    : undefined
+}
+
+/** `llm/stream` 请求里本模块会读的部分。 */
+interface ReminderStreamRequestLike {
+  /** 会话 id（用它反查 agent）。 */
+  readonly sessionId?: unknown
+  /** 调用目的；对话请求是 undefined，标题/压缩等一次性请求带值。 */
+  readonly purpose?: unknown
+}
+
+/** `llm/stream` 的一个块里本模块会读的部分。 */
+interface ReminderChunkLike {
+  /** 块类型。 */
+  readonly type?: unknown
+  /** 文本增量。 */
+  readonly text?: unknown
+  /** `block-start` 的块种类。 */
+  readonly blockType?: unknown
+  /** 终结块的原因。 */
+  readonly reason?: { readonly kind?: unknown } | null
+}
+
+/** agent 上本模块会读的部分。 */
+interface ReminderAgentLike {
+  /** 会话对象。 */
+  readonly session?: unknown
+  /** 等这个 agent 空闲。 */
+  readonly whenIdle?: () => unknown
+  /** 把一条用户消息推进回合。 */
+  readonly steer?: (message: unknown) => void
+  /** 把一个尾部消息塞进本轮（`steer` 缺席时的退路）。 */
+  readonly inject?: (message: unknown) => void
+}
+
+/** 提醒的安装选项。 */
+export interface PlanModeExitReminderOptions {
+  /**
+   * 「此刻还在计划模式吗」。
+   *
+   * 两个挂载点各给各的读法：控制器给 `selectedActive`（含未决选择），宿主守卫给
+   * plan 投影。返回 `undefined` 表示这一代读不出来 —— 那就不提醒：一条读不准的
+   * 提醒会把模型从正当的收尾里拽回来，代价比漏一次大。
+   * @param agent - 调用方 agent。
+   * @returns true / false / undefined。
+   */
+  isActive?(agent: unknown): boolean | undefined
+}
+
+/**
+ * 这个块是不是一段可见文本。
+ *
+ * 空白一律 trim：只有空白的文本等于没说话，那种回合归 `no-answer-resume` 管，不该
+ * 在这里被当成「讲完了话」。
+ * @param chunk - 候选块。
+ * @returns 是可见文本时为 true。
+ */
+function isVisibleTextChunk(chunk: ReminderChunkLike | undefined): boolean {
+  return chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.trim() !== ''
+}
+
+/**
+ * 这个块是不是工具调用的开始。
+ * @param chunk - 候选块。
+ * @returns 是工具调用时为 true。
+ */
+function isToolCallChunk(chunk: ReminderChunkLike | undefined): boolean {
+  if (chunk?.type === 'tool-call-delta') return true
+  return chunk?.type === 'block-start' && chunk.blockType === 'tool-call'
+}
+
+/**
+ * 这个块是不是「模型自己讲完了」的终结块。
+ * @param chunk - 候选块。
+ * @returns `finish` 且原因为 `stop` 时为 true。
+ */
+function isStopFinish(chunk: ReminderChunkLike | undefined): boolean {
+  return chunk?.type === 'finish' && chunk.reason?.kind === 'stop'
+}
+
+/**
+ * 把一条订阅句柄解掉（cordis 两代形状：函数或带 dispose 的对象）。
+ * @param handle - `subscribe` 的返回值。
+ */
+function releaseSubscription(handle: unknown): void {
+  if (typeof handle === 'function') {
+    handle()
+    return
+  }
+  const disposable = handle as { dispose?: () => void } | null | undefined
+  try {
+    disposable?.dispose?.()
+  } catch {
+    // 卸载期的单点失败不影响其余卸载。
+  }
+}
+
+/**
+ * 装一台「计划模式回合结束提醒」。
+ *
+ * ## 它解决什么
+ *
+ * 计划模式里模型讲完一段话就收尾（`finish: stop`、零工具调用）时，宿主不会替它做
+ * 任何事：那一回合就停在那里，直到人去催「确认呢」。这里在 `llm/stream` 上观察一
+ * 次已完成、只有文本、没有工具调用的对话请求，然后在 agent 空闲之后补一条尾部通知，
+ * 让模型自己选三条出路（`exit_plan_mode` / `ask_user_question` / `leave_plan_mode`）。
+ *
+ * ## 为什么零缓存漂移
+ *
+ * 一条 `agent.steer(createPlanNotice(...))` 的尾部用户消息：不注册 system 段、不动
+ * `tools.definitions`、不改任何工具 schema。末尾追加不破坏已发前缀。
+ *
+ * ## 为什么不会重复提醒
+ *
+ * 同一进程里两个挂载点共享 {@link PlanModeExitReminderRegistry}：`claimed` 让一条
+ * `llm/stream` 只被一条监听器接手（另一条原样透传），`states` 让两处读同一个计数。
+ *
+ * @param ctx - 宿主上下文（结构化：老代 ctx 也认）。
+ * @param options - 见 {@link PlanModeExitReminderOptions}。
+ * @returns 摘掉全部订阅的 disposer；这一代没有事件总线、或一条都没订上时 undefined。
+ */
+export function installPlanModeExitReminder(
+  ctx: unknown,
+  options: PlanModeExitReminderOptions = {},
+): (() => void) | undefined {
+  const on = (ctx as EventHostLike | undefined)?.on
+  if (typeof on !== 'function') return undefined
+  const registry = exitReminderRegistry()
+  let closed = false
+
+  /**
+   * 读「此刻还在计划模式吗」。读法抛错等于读不出来。
+   * @param agent - 调用方 agent。
+   * @returns true / false / undefined。
+   */
+  const activeOf = (agent: unknown): boolean | undefined => {
+    if (typeof options.isActive !== 'function') return undefined
+    try {
+      return options.isActive(agent)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 用会话 id 反查活着的 agent。每次现读：这个插件可能比 agents 服务先加载。
+   * @param sessionId - 请求上的会话 id。
+   * @returns agent；读不到时 undefined。
+   */
+  const resolveAgent = (sessionId: unknown): ReminderAgentLike | undefined => {
+    if (typeof sessionId !== 'string') return undefined
+    let resolved: unknown
+    try {
+      resolved = agentRegistryOf(ctx)?.get(sessionId)
+    } catch {
+      return undefined
+    }
+    return objectKey(resolved) === undefined ? undefined : resolved as ReminderAgentLike
+  }
+
+  /**
+   * 空闲之后真正投递。排队期间插件可能已经卸载、会话可能已经关掉、计划模式可能
+   * 已经退出、子代理可能还在跑 —— 这些都要在**投递那一刻**重新判断。
+   * @param state - 本会话的提醒状态。
+   * @param agent - 调用方 agent。
+   */
+  const fire = (state: ExitReminderState, agent: ReminderAgentLike): void => {
+    state.pending = false
+    if (closed) return
+    // 子代理不该收到主控的提醒：它在自己的会话里干活，计划是主控的事。
+    if (isDelegatedCaller(agent, ctx)) return
+    const active = activeOf(agent)
+    if (active !== true) {
+      // 已经离开计划模式：这一次连续收尾到此为止，下次进入重新开始。
+      // 读不出来（undefined —— 这一步的宿主还没给判定）时**既不清零也不计数**：
+      // 它既不是一次计划模式的收尾，也不该把这次名额用掉。
+      if (active === false) state.consecutive = 0
+      return
+    }
+    if (hasRunningChildSubagent(agent, ctx)) {
+      // 有子代理在跑：主控按 R-W 是**合法地**结束回合去等完成，不能打扰它。
+      // 但这一次提醒不能算用掉：子代理完成后主控大概率还要再讲一次话。
+      state.consecutive = 0
+      return
+    }
+    // 到这里才真的用掉这一次名额：上面每一条退出路径都没有投递，不能占 cap。
+    if (state.consecutive >= 1) return
+    state.consecutive += 1
+    const message = createPlanNotice(PLAN_EXIT_REMINDER_TEXT, undefined, 'Plan mode exit reminder')
+    try {
+      if (typeof agent.steer === 'function') agent.steer(message)
+      else if (typeof agent.inject === 'function') agent.inject(message)
+    } catch (error: unknown) {
+      log(ctx, 'warn', '[dsh-chatgpt-subscription] could not queue the plan-mode exit reminder: '
+        + (error instanceof Error ? error.message : String(error)))
+    }
+  }
+
+  /**
+   * 等 agent 空闲，再投递。
+   *
+   * `whenIdle` 是整件事的前提：回合还在跑的时候 `steer` 只会被塞进收件箱而没有
+   * 唤醒跟着，那条消息永远不会被读到。这一代没有 `whenIdle` 时退成微任务，投递
+   * 仍会发生，只是取件时机由宿主决定。
+   * @param state - 本会话的提醒状态。
+   * @param agent - 调用方 agent。
+   */
+  const queue = (state: ExitReminderState, agent: ReminderAgentLike): void => {
+    const whenIdle = agent.whenIdle
+    let idle: unknown
+    if (typeof whenIdle === 'function') {
+      try {
+        idle = whenIdle.call(agent)
+      } catch {
+        idle = undefined
+      }
+    }
+    if (idle === undefined || idle === null) {
+      queueMicrotask(() => fire(state, agent))
+      return
+    }
+    Promise.resolve(idle).then(
+      () => fire(state, agent),
+      () => fire(state, agent),
+    )
+  }
+
+  /**
+   * 一次已完成的对话流落定之后做什么。
+   * @param request - `llm/stream` 的请求对象。
+   * @param observed - 这次流里观察到的事实。
+   */
+  const settleTurn = (
+    request: unknown,
+    observed: { visibleText: boolean; toolCall: boolean; stopped: boolean },
+  ): void => {
+    const call = request as ReminderStreamRequestLike | undefined
+    const agent = resolveAgent(call?.sessionId)
+    const bucket = reminderBucket(agent)
+    // 有工具调用的回合不进「连续纯文本」的账：它就是这一轮干了实事。
+    if (observed.toolCall) {
+      if (bucket !== undefined) reminderStateOf(registry, bucket).consecutive = 0
+      return
+    }
+    // 标题、压缩之类的一次性请求没有「回合」可言。
+    if (call?.purpose !== undefined) return
+    // 一段可见文字都没有：那是 no-answer-resume 的地盘。
+    if (!observed.visibleText || !observed.stopped) return
+    if (agent === undefined || bucket === undefined) return
+    if (typeof agent.steer !== 'function' && typeof agent.inject !== 'function') return
+    if (closed) return
+    const state = reminderStateOf(registry, bucket)
+    // 一个回合只排一条；连续收尾封顶一条（cap = 1）。
+    if (state.pending || state.consecutive >= 1) return
+    // 明摆着不在计划模式的回合不进账，也不排 whenIdle：普通聊天会话不该每个回合都
+    // 排一条注定什么都不做的任务。计数只在 fire() 真正投递时发生，所以 undefined
+    // （判定还没准备好）既不清零也不占名额。
+    if (activeOf(agent) === false) {
+      state.consecutive = 0
+      return
+    }
+    state.pending = true
+    queue(state, agent)
+  }
+
+  /**
+   * 包住下游流：原样透传每个块，只记下判定需要的三件事。
+   *
+   * `finally` 在每条退出路径上都会跑，而其中两条什么都没证明：消费者中途放弃
+   * （用户按了停止），或下游抛错。两者都没有交付终结块，所以都不落定。
+   * @param request - `llm/stream` 的请求对象。
+   * @param next - 下一棒。
+   * @returns 透传流。
+   */
+  const watch = (request: unknown, next: () => AsyncIterable<unknown>): AsyncIterable<unknown> => {
+    return (async function* () {
+      let visibleText = false
+      let toolCall = false
+      let stopped = false
+      let completed = false
+      try {
+        for await (const chunk of next()) {
+          const seen = chunk as ReminderChunkLike | undefined
+          if (isVisibleTextChunk(seen)) visibleText = true
+          else if (isToolCallChunk(seen)) toolCall = true
+          else if (isStopFinish(seen)) stopped = true
+          yield chunk
+        }
+        completed = true
+      } finally {
+        if (completed) settleTurn(request, { visibleText, toolCall, stopped })
+      }
+    })()
+  }
+
+  /**
+   * `llm/stream` 的监听器：接手一条流，或原样透传。
+   * @param request - 请求对象。
+   * @param next - 下一棒。
+   * @returns 流。
+   */
+  const onStream = (request: unknown, next: () => AsyncIterable<unknown>): AsyncIterable<unknown> => {
+    const claim = objectKey(request)
+    if (claim !== undefined) {
+      if (registry.claimed.has(claim)) return next()
+      registry.claimed.add(claim)
+    }
+    return watch(request, next)
+  }
+
+  /**
+   * 会话关掉时丢掉它的计数：连续收尾的账属于那个会话，不该活过它。
+   * @param payload - `agent/disposed` 的载荷。
+   */
+  const onAgentDisposed = (payload: { agent?: unknown }): void => {
+    const bucket = reminderBucket(payload?.agent)
+    if (bucket === undefined) return
+    registry.states.delete(bucket)
+  }
+
+  const offStream = subscribe(
+    ctx,
+    'llm/stream',
+    onStream as unknown as (...args: never[]) => unknown,
+    { global: true },
+  )
+  const offDisposed = subscribe(ctx, 'agent/disposed', onAgentDisposed as unknown as (...args: never[]) => unknown)
+  if (offStream === undefined && offDisposed === undefined) return undefined
+  return () => {
+    closed = true
+    releaseSubscription(offStream)
+    releaseSubscription(offDisposed)
   }
 }
 

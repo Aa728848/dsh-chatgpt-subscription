@@ -5,10 +5,13 @@ import PlanModeController, {
   EXIT_PLAN_MODE,
   KEEP_PLANNING_LABEL,
   LEGACY_PLAN_STATE_VERSION,
+  PLAN_EXIT_REMINDER_TEXT,
+  PLAN_NOTICE_SOURCE_KIND,
   PLAN_POLICY_SECTION,
   PLAN_STATE_VERSION,
   REVIEW_ID,
   createPlanProjectionDefinition,
+  installPlanModeExitReminder,
   planProjectionDefinition,
   resolveConfig,
 } from '../src/entry-plan-mode.ts'
@@ -995,5 +998,683 @@ describe('the cache guards on a real Cordis service', () => {
     expect(ScopedToolsService.prototype.register).toBe(originalRegister)
     expect(ScopedToolsService.prototype.definitions).toBe(originalDefinitions)
     expect(tools.registrations).toHaveLength(0)
+  })
+})
+
+/**
+ * 计划模式的「回合结束提醒」。
+ *
+ * 这一组钉住四件事：
+ *
+ * 1. 触发条件：`finish: stop` + 有可见文本 + 零工具调用 + 对话请求 + 计划模式仍生效 +
+ *    没有子代理在跑 + 调用方不是子代理；
+ * 2. cap = 1：连续纯文本收尾只提醒一次，一次工具调用或离开计划模式就清零；
+ * 3. 零缓存漂移：提醒只是一条尾部用户消息，不注册 system 段、不加工具声明；
+ * 4. 两个挂载点（控制器 + 宿主守卫）同在一个进程里时，一条流只会被一条监听器接手。
+ */
+
+/** 提醒用例里的会话 id（请求上的 `sessionId`）。 */
+const REMINDER_SESSION = 'reminder-session'
+
+/** 一段讲完话就收尾的对话流（`finish: stop`、零工具调用）。 */
+const PROSE_STOP: { type: string, text?: string, blockType?: string, reason?: { kind: string } }[] = [
+  { type: 'block-start', blockType: 'text' },
+  { type: 'text-delta', text: 'Here is what I found so far.' },
+  { type: 'block-end' },
+  { type: 'finish', reason: { kind: 'stop' } },
+]
+
+/** 一次带工具调用的回合（`finish` 也是 stop，但这一轮有实际行动）。 */
+const TOOL_TURN: { type: string, text?: string, blockType?: string, reason?: { kind: string } }[] = [
+  { type: 'block-start', blockType: 'text' },
+  { type: 'text-delta', text: 'Reading the file.' },
+  { type: 'tool-call-delta' },
+  { type: 'finish', reason: { kind: 'stop' } },
+]
+
+/** 只有空白文本的回合：那是 `no-answer-resume` 的地盘，不是这里。 */
+const BLANK_STOP: { type: string, text?: string, reason?: { kind: string } }[] = [
+  { type: 'text-delta', text: '   \n' },
+  { type: 'finish', reason: { kind: 'stop' } },
+]
+
+/** 被 max-tokens 截断的回合：不是「模型自己讲完了话」。 */
+const CUT_STOP: { type: string, text?: string, reason?: { kind: string } }[] = [
+  { type: 'text-delta', text: 'and then' },
+  { type: 'finish', reason: { kind: 'max-tokens' } },
+]
+
+/** 一个可等待空闲的假 agent，外加两个投递探针。 */
+interface IdleAgent {
+  /** 假 agent。 */
+  agent: { session: unknown, whenIdle: FakeFn, steer?: FakeFn, inject: FakeFn }
+  /** 经 `steer` 投出去的消息。 */
+  steered: unknown[]
+  /** 经 `inject` 投出去的消息。 */
+  injected: unknown[]
+  /** 让 `whenIdle()` 结算（并重新武装，模拟一个 agent 跑完一回合）。 */
+  goIdle(): void
+}
+
+/**
+ * 造一个假 agent。
+ * @param session - 它的会话。
+ * @param options - 是否提供 `steer`（省掉它用来覆盖「没有 steer 时退回 inject」）。
+ * @returns 假 agent 与探针。
+ */
+function fakeIdleAgent(session: unknown, options: { steer?: boolean } = {}): IdleAgent {
+  let release: () => void = () => undefined
+  let idle = new Promise<void>((resolve) => { release = resolve })
+  const steered: unknown[] = []
+  const injected: unknown[] = []
+  const agent: IdleAgent['agent'] = {
+    session,
+    whenIdle: fakeFn(() => idle),
+    inject: fakeFn((message: unknown) => { injected.push(message) }),
+  }
+  if (options.steer !== false) {
+    agent.steer = fakeFn((message: unknown) => { steered.push(message) })
+  }
+  return {
+    agent,
+    steered,
+    injected,
+    goIdle: () => {
+      release()
+      idle = new Promise<void>((resolve) => { release = resolve })
+    },
+  }
+}
+
+/**
+ * 跑一次 `llm/stream` 瀑布（每个监听器包住 rest，与真实 cordis 同形）。
+ * @param host - 假宿主。
+ * @param request - 请求对象（同一条流上的监听器看到的是同一个引用）。
+ * @param chunks - 下游产出的块。
+ * @returns 消费到的块。
+ */
+async function runStream(
+  host: FakeHost,
+  request: unknown,
+  chunks: readonly unknown[],
+): Promise<unknown[]> {
+  const listeners = host.listeners.get('llm/stream') ?? []
+  let index = 0
+  const source = async function* (): AsyncGenerator<unknown> {
+    for (const chunk of chunks) yield chunk
+  }
+  const next = (): AsyncIterable<unknown> => {
+    const listener = listeners[index]
+    index += 1
+    if (listener === undefined) return source()
+    const waterfall = listener as unknown as (
+      request: unknown,
+      next: () => AsyncIterable<unknown>,
+    ) => AsyncIterable<unknown>
+    return waterfall(request, next)
+  }
+  const seen: unknown[] = []
+  for await (const chunk of next()) seen.push(chunk)
+  return seen
+}
+
+/**
+ * 读一部分流然后走开（用户按了停止：终结块永远不会到）。
+ * @param host - 假宿主。
+ * @param request - 请求对象。
+ * @param chunks - 下游产出的块。
+ * @param count - 读几个块。
+ */
+async function abandonStream(
+  host: FakeHost,
+  request: unknown,
+  chunks: readonly unknown[],
+  count: number,
+): Promise<void> {
+  const listeners = host.listeners.get('llm/stream') ?? []
+  let index = 0
+  const source = async function* (): AsyncGenerator<unknown> {
+    for (const chunk of chunks) yield chunk
+  }
+  const next = (): AsyncIterable<unknown> => {
+    const listener = listeners[index]
+    index += 1
+    if (listener === undefined) return source()
+    const waterfall = listener as unknown as (
+      request: unknown,
+      next: () => AsyncIterable<unknown>,
+    ) => AsyncIterable<unknown>
+    return waterfall(request, next)
+  }
+  const iterator = next()[Symbol.asyncIterator]()
+  for (let i = 0; i < count; i += 1) {
+    const step = await iterator.next()
+    if (step.done === true) return
+  }
+  await iterator.return?.(undefined)
+}
+
+/**
+ * 让已经排队的微任务与 promise 回调跑完。
+ */
+async function settleMicrotasks(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+}
+
+/** 一个装好提醒的假宿主，外加驱动它跑回合的方法。 */
+interface ReminderCase {
+  /** 假宿主。 */
+  host: FakeHost
+  /** 共享的投影状态（提醒生效与否从这里读）。 */
+  state: typeof STATE_TEMPLATE
+  /** tools 探针（证明提醒没有新增声明）。 */
+  tools: ReturnType<typeof fakeTools>
+  /** 假 agent。 */
+  agent: IdleAgent['agent']
+  /** 经 `steer` 投出去的消息。 */
+  steered: unknown[]
+  /** 经 `inject` 投出去的消息。 */
+  injected: unknown[]
+  /** 跑一次流，不结算空闲。 */
+  stream(chunks?: readonly unknown[], request?: Record<string, unknown>): Promise<unknown[]>
+  /** 跑一次流，再结算空闲并等投递落地。 */
+  turn(chunks?: readonly unknown[], request?: Record<string, unknown>): Promise<void>
+  /** 让 agent 空闲。 */
+  goIdle(): void
+  /** 派发 `agent/disposed`。 */
+  disposeAgent(): void
+  /** 换掉一项服务（模拟服务迟到或状态变化）。 */
+  put(service: string, value: unknown): void
+}
+
+/**
+ * 造一个装了提醒的控制器（走 `PlanModeController` 的真实挂载路径）。
+ * @param options - 初始计划状态、会话形状、附加服务，以及两个降级开关。
+ * @returns 假宿主与驱动方法。
+ */
+async function reminderCase(options: {
+  active?: boolean
+  session?: Record<string, unknown>
+  services?: Record<string, unknown>
+  steer?: boolean
+  registerAgent?: boolean
+} = {}): Promise<ReminderCase> {
+  const session: Record<string, unknown> = { ...fakeSession(), ...options.session }
+  const idle = fakeIdleAgent(session, { steer: options.steer })
+  const agents = new Map<string, unknown>()
+  if (options.registerAgent !== false) agents.set(REMINDER_SESSION, idle.agent)
+  const mounted = await mountedController({
+    services: { agents: { get: (id: string) => agents.get(id) }, ...options.services },
+    state: { active: options.active ?? true },
+  })
+  const stream = async (
+    chunks: readonly unknown[] = PROSE_STOP,
+    request: Record<string, unknown> = {},
+  ): Promise<unknown[]> => await runStream(mounted.host, { sessionId: REMINDER_SESSION, ...request }, chunks)
+  return {
+    host: mounted.host,
+    state: mounted.state,
+    tools: mounted.tools,
+    agent: idle.agent,
+    steered: idle.steered,
+    injected: idle.injected,
+    stream,
+    turn: async (chunks, request) => {
+      await stream(chunks, request)
+      await settleMicrotasks()
+      idle.goIdle()
+      await settleMicrotasks()
+    },
+    goIdle: idle.goIdle,
+    disposeAgent: () => {
+      for (const notify of [...(mounted.host.listeners.get('agent/disposed') ?? [])]) {
+        ;(notify as unknown as (payload: { agent: unknown }) => unknown)({ agent: idle.agent })
+      }
+    },
+    put: (service, value) => { mounted.host.put(service, value) },
+  }
+}
+
+describe('the plan mode exit reminder', () => {
+  it('steers one reminder after the agent goes idle on a prose stop', async () => {
+    const reminder = await reminderCase()
+
+    // 透传：下游看到的块一个不多一个不少。
+    expect(await reminder.stream(PROSE_STOP)).toEqual(PROSE_STOP)
+    // 回合还开着（还没空闲）：不投。
+    await settleMicrotasks()
+    expect(reminder.steered).toHaveLength(0)
+
+    reminder.goIdle()
+    await settleMicrotasks()
+
+    expect(reminder.steered).toHaveLength(1)
+    const text = messageText(reminder.steered[0])
+    expect(text).toBe(PLAN_EXIT_REMINDER_TEXT)
+    for (const tool of [EXIT_PLAN_MODE, 'ask_user_question', 'leave_plan_mode']) {
+      expect(text).toContain(tool)
+    }
+    // 走的是本包自己的 plan-mode-notice 来源，不会伪装成一条新的用户回合。
+    expect((reminder.steered[0] as { source?: unknown }).source).toMatchObject({
+      kind: PLAN_NOTICE_SOURCE_KIND,
+      form: 'notice',
+      summary: 'Plan mode exit reminder',
+    })
+  })
+
+  it('caps the streak at one reminder and re-arms after a tool call', async () => {
+    const reminder = await reminderCase()
+
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(1)
+
+    // 连续第二次纯文本收尾：cap = 1，不再提醒。
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(1)
+
+    // 一次工具调用把连续计数清零。
+    await reminder.turn(TOOL_TURN)
+    expect(reminder.steered).toHaveLength(1)
+
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(2)
+  })
+
+  it('stays quiet when the turn called a tool', async () => {
+    const reminder = await reminderCase()
+    await reminder.turn(TOOL_TURN)
+    expect(reminder.steered).toHaveLength(0)
+    expect(reminder.injected).toHaveLength(0)
+  })
+
+  it('leaves an answerless turn to the resume hook', async () => {
+    const reminder = await reminderCase()
+    await reminder.turn(BLANK_STOP)
+    expect(reminder.steered).toHaveLength(0)
+  })
+
+  it('does not fire for a truncated or an abandoned stream', async () => {
+    const truncated = await reminderCase()
+    await truncated.turn(CUT_STOP)
+    expect(truncated.steered).toHaveLength(0)
+
+    const abandoned = await reminderCase()
+    // 读到一半就走开：终结块没到，这一回合什么都没证明。
+    await abandonStream(abandoned.host, { sessionId: REMINDER_SESSION }, PROSE_STOP, 2)
+    await settleMicrotasks()
+    abandoned.goIdle()
+    await settleMicrotasks()
+    expect(abandoned.steered).toHaveLength(0)
+  })
+
+  it('ignores auxiliary requests', async () => {
+    const reminder = await reminderCase()
+    await reminder.turn(PROSE_STOP, { purpose: 'session-title' })
+    expect(reminder.steered).toHaveLength(0)
+  })
+
+  it('stays quiet when plan mode is off', async () => {
+    const reminder = await reminderCase({ active: false })
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(0)
+  })
+
+  it('stays quiet for a delegated subagent', async () => {
+    const reminder = await reminderCase({ session: { header: { origin: 'subagent' } } })
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(0)
+  })
+
+  it('does not disturb a dispatcher that is waiting on a child subagent', async () => {
+    const reminder = await reminderCase({ services: { subagents: { list: () => [{ status: 'running' }] } } })
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(0)
+
+    // 子代理跑完之后那一次提醒没有被白白用掉：主控再讲一次话就会收到它。
+    reminder.put('subagents', { list: () => [] })
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(1)
+  })
+
+  it('stays quiet when the session has no live agent', async () => {
+    const reminder = await reminderCase({ registerAgent: false })
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(0)
+  })
+
+  it('falls back to inject on a generation without steer', async () => {
+    const reminder = await reminderCase({ steer: false })
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(0)
+    expect(reminder.injected).toHaveLength(1)
+    expect(messageText(reminder.injected[0])).toBe(PLAN_EXIT_REMINDER_TEXT)
+  })
+
+  it('drops the streak when the agent is disposed', async () => {
+    const reminder = await reminderCase()
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(1)
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(1)
+
+    reminder.disposeAgent()
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(2)
+  })
+
+  it('stays quiet once exit_plan_mode has queued leaving plan mode', async () => {
+    const questions = fakeQuestions(async () => ({ answers: [{ id: REVIEW_ID, selected: [APPROVE_LABEL] }] }))
+    const reminder = await reminderCase({ services: { userQuestions: questions } })
+    const definition = reminder.tools.calls()[0].definition as unknown as {
+      execute(args: unknown, exec: unknown): Promise<{ approved: boolean }>
+    }
+
+    // 批准：控制器把 { active: false } 排在 pendingIntents 里，投影还没落日志。
+    await expect(definition.execute({ plan: '# The plan' }, { agent: reminder.agent, callId: 'c1' }))
+      .resolves.toEqual({ approved: true })
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(0)
+
+    // 日志落地之后（投影 active=false）同样不提醒。
+    reminder.state.active = false
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(0)
+  })
+
+  it('adds no system section and no tool declaration (zero cache drift)', async () => {
+    const reminder = await reminderCase()
+    await reminder.turn(PROSE_STOP)
+    expect(reminder.steered).toHaveLength(1)
+
+    // 只投一条尾部消息：工具表还是那一条 exit_plan_mode，system 段一条都没碰。
+    expect(reminder.tools.calls().map(call => call.definition.name)).toEqual([EXIT_PLAN_MODE])
+    expect(reminder.host.listeners.get('system-prompt/assemble') ?? []).toHaveLength(0)
+  })
+
+  it('installs standalone and degrades to a microtask without whenIdle', async () => {
+    const session = fakeSession()
+    const steered: unknown[] = []
+    const agent = { session, steer: (message: unknown): void => { steered.push(message) } }
+    const agents = new Map<string, unknown>([[REMINDER_SESSION, agent]])
+    const host = fakeHost({ agents: { get: (id: string) => agents.get(id) } })
+
+    const dispose = installPlanModeExitReminder(host.ctx, { isActive: () => true })
+    expect(dispose).toBeDefined()
+
+    await runStream(host, { sessionId: REMINDER_SESSION }, PROSE_STOP)
+    await settleMicrotasks()
+    expect(steered).toHaveLength(1)
+
+    dispose?.()
+    expect(host.listeners.get('llm/stream') ?? []).toHaveLength(0)
+    expect(host.listeners.get('agent/disposed') ?? []).toHaveLength(0)
+  })
+
+  it('is inert on a host with no event bus', () => {
+    expect(installPlanModeExitReminder({})).toBeUndefined()
+  })
+})
+
+describe('the exit reminder under both mounts', () => {
+  /**
+   * 造一个同时装着控制器与宿主守卫的宿主。
+   * @param order - 谁先装（真实宿主里守卫先，preset 行后）。
+   * @returns 假宿主、计划投影、agent 探针与两台挂载的 disposer。
+   */
+  async function bothMounts(order: 'guard-first' | 'controller-first'): Promise<{
+    host: FakeHost
+    projection: { active: boolean }
+    idle: IdleAgent
+    close(): void
+  }> {
+    const projection = { active: true }
+    const session = fakeSession()
+    const idle = fakeIdleAgent(session)
+    const agents = new Map<string, unknown>([[REMINDER_SESSION, idle.agent]])
+    const host = fakeHost({
+      tools: fakeTools(),
+      sessionProjections: {
+        register: vi.fn(() => Promise.resolve({ stateOf: () => projection })),
+        stateOf: (_session: unknown, key: string) => (key === 'plan' ? projection : undefined),
+      },
+      agents: { get: (id: string) => agents.get(id) },
+    })
+    const mountController = async (): Promise<PlanModeController> => {
+      const controller = new PlanModeController(host.ctx as never, { section: 'PLAN GUIDANCE' })
+      await mount(controller)
+      return controller
+    }
+    let guard: { dispose(): void } | undefined
+    if (order === 'guard-first') {
+      guard = installPlanModeCacheGuard(host.ctx)
+      await mountController()
+    } else {
+      await mountController()
+      guard = installPlanModeCacheGuard(host.ctx)
+    }
+    return {
+      host,
+      projection,
+      idle,
+      close: () => { guard?.dispose() },
+    }
+  }
+
+  /**
+   * 跑一个纯文本收尾的回合，并把空闲结算掉。
+   * @param host - 假宿主。
+   * @param idle - agent 探针。
+   */
+  async function proseTurn(host: FakeHost, idle: IdleAgent): Promise<void> {
+    await runStream(host, { sessionId: REMINDER_SESSION }, PROSE_STOP)
+    await settleMicrotasks()
+    idle.goIdle()
+    await settleMicrotasks()
+  }
+
+  it('never double-steers when the guard was installed first', async () => {
+    const mounted = await bothMounts('guard-first')
+    try {
+      await proseTurn(mounted.host, mounted.idle)
+      expect(mounted.idle.steered).toHaveLength(1)
+      expect((mounted.host.listeners.get('llm/stream') ?? [])).toHaveLength(2)
+    } finally {
+      mounted.close()
+    }
+  })
+
+  it('never double-steers when the controller was mounted first', async () => {
+    const mounted = await bothMounts('controller-first')
+    try {
+      await proseTurn(mounted.host, mounted.idle)
+      expect(mounted.idle.steered).toHaveLength(1)
+    } finally {
+      mounted.close()
+    }
+  })
+
+  it('lets exactly one listener process each stream, whichever it is', async () => {
+    const session = fakeSession()
+    const idle = fakeIdleAgent(session)
+    const agents = new Map<string, unknown>([[REMINDER_SESSION, idle.agent]])
+    const host = fakeHost({ agents: { get: (id: string) => agents.get(id) } })
+    // 第一条说「不在计划模式」，第二条说「在」：登记册只让第一条接手，所以第二条
+    // 根本不做判定 —— 这就是「一条流只被一条监听器处理」的直接证据。
+    const first = installPlanModeExitReminder(host.ctx, { isActive: () => false })
+    const second = installPlanModeExitReminder(host.ctx, { isActive: () => true })
+    try {
+      await runStream(host, { sessionId: REMINDER_SESSION }, PROSE_STOP)
+      await settleMicrotasks()
+      idle.goIdle()
+      await settleMicrotasks()
+      expect(idle.steered).toHaveLength(0)
+    } finally {
+      first?.()
+      second?.()
+    }
+  })
+
+  it('reminds on a built-in preset through the host guard alone', async () => {
+    const projection = { active: true }
+    const session = fakeSession()
+    const idle = fakeIdleAgent(session)
+    const agents = new Map<string, unknown>([[REMINDER_SESSION, idle.agent]])
+    const host = fakeHost({
+      tools: fakeTools(),
+      sessionProjections: { stateOf: (_session: unknown, key: string) => (key === 'plan' ? projection : undefined) },
+      agents: { get: (id: string) => agents.get(id) },
+    })
+    const guard = installPlanModeCacheGuard(host.ctx)
+    try {
+      await proseTurn(host, idle)
+      expect(idle.steered).toHaveLength(1)
+
+      // 投影说离开计划模式：不再提醒，也不再计数。
+      projection.active = false
+      await proseTurn(host, idle)
+      expect(idle.steered).toHaveLength(1)
+    } finally {
+      guard.dispose()
+      expect(host.listeners.get('llm/stream') ?? []).toHaveLength(0)
+    }
+  })
+
+  /**
+   * 造一个「根作用域 + 隔离子 realm」的部署。
+   *
+   * 真实宿主里守卫装在根 ctx，`PlanModeController` 由 dispatch preset 挂进
+   * `isolate: { planMode: true }` 的子 ctx：根作用域的 `get('planMode')` 恒为
+   * undefined，`llm/stream` 却是全局瀑布 —— 守卫那条监听器先注册、先接手，控制器
+   * 那条看到 claim 就透传。这里照着这个顺序搭出来。
+   * @param options - 根作用域的 plan 投影，以及控制器是否先用内存兜底进入计划模式。
+   * @returns 根宿主、子 realm 里的控制器与 agent 探针。
+   */
+  async function isolatedRealm(options: {
+    projections?: Record<string, unknown>
+    activate?: boolean
+  } = {}): Promise<{
+    host: FakeHost
+    controller: PlanModeController
+    idle: IdleAgent
+    close(): void
+  }> {
+    const session = fakeSession()
+    const idle = fakeIdleAgent(session)
+    const agents = new Map<string, unknown>([[REMINDER_SESSION, idle.agent]])
+    const host = fakeHost({
+      tools: fakeTools(),
+      agents: { get: (id: string) => agents.get(id) },
+      ...options.projections === undefined ? {} : { sessionProjections: options.projections },
+    })
+    // 子 realm：服务表看得见 planMode，事件总线与根作用域共用一条（`llm/stream`
+    // 本就是全局瀑布，两条监听器进的是同一个瀑布）。
+    let planService: unknown
+    const childCtx = {
+      ...host.ctx as Record<string, unknown>,
+      get: (name: string): unknown => (name === 'planMode' ? planService : host.table[name]),
+    }
+
+    // 顺序即生产顺序：守卫先装，控制器后挂。
+    const guard = installPlanModeCacheGuard(host.ctx)
+    const controller = new PlanModeController(childCtx as never, { section: 'PLAN GUIDANCE' })
+    planService = controller
+    await mount(controller)
+    // 内存兜底激活：根 ctx 上没有 sessionProjections，状态只活在控制器自己的表里。
+    if (options.activate === true) controller.set(idle.agent as never, true)
+
+    return {
+      host,
+      controller,
+      idle,
+      close: () => { guard.dispose() },
+    }
+  }
+
+  it('reminds from the isolated controller the root context cannot see', async () => {
+    const mounted = await isolatedRealm({ activate: true })
+    try {
+      // 根作用域读不到 planMode 服务，也没有 plan 投影 —— 正是隔离 realm 的形状。
+      const rootGet = (mounted.host.ctx as { get: (name: string) => unknown }).get
+      expect(rootGet('planMode')).toBeUndefined()
+      expect(mounted.host.table.sessionProjections).toBeUndefined()
+      // 两条监听器都在瀑布里，守卫那条在前。
+      expect(mounted.host.listeners.get('llm/stream') ?? []).toHaveLength(2)
+
+      await proseTurn(mounted.host, mounted.idle)
+
+      // 控制器在隔离 realm 里、状态只在内存里，提醒照样来：登记册跨 realm 可见。
+      expect(mounted.idle.steered).toHaveLength(1)
+      expect(messageText(mounted.idle.steered[0])).toBe(PLAN_EXIT_REMINDER_TEXT)
+    } finally {
+      mounted.close()
+    }
+  })
+
+  it('honours a queued exit the isolated controller holds over a stale projection', async () => {
+    const projection = { active: true }
+    const mounted = await isolatedRealm({
+      projections: {
+        register: (): Promise<unknown> => Promise.resolve({ stateOf: () => projection }),
+        stateOf: (_session: unknown, key: string): unknown => {
+          if (key === 'plan') return projection
+          // 回合开着：`/plan off` 与 exit_plan_mode 在这种回合里只能先排队。
+          if (key === 'turnBoundary') return { openTurnStartSeq: 1 }
+          return undefined
+        },
+      },
+    })
+    try {
+      const rootGet = (mounted.host.ctx as { get: (name: string) => unknown }).get
+      expect(rootGet('planMode')).toBeUndefined()
+
+      // exit_plan_mode 批准后的真实路径：控制器把 { active: false } 排进 pendingIntents，
+      // 日志还没落，所以根作用域读到的投影仍是 stale 的 active: true。
+      expect(mounted.controller.set(mounted.idle.agent as never, false)).toBe('queued')
+      expect(projection.active).toBe(true)
+
+      await proseTurn(mounted.host, mounted.idle)
+
+      // 误提醒就是缺陷 A 的另一半：未决选择必须压过投影。
+      expect(mounted.idle.steered).toHaveLength(0)
+    } finally {
+      mounted.close()
+    }
+  })
+
+  it('does not spend the streak on a turn whose plan state is not true yet', async () => {
+    const session = fakeSession()
+    const idle = fakeIdleAgent(session)
+    const agents = new Map<string, unknown>([[REMINDER_SESSION, idle.agent]])
+    const host = fakeHost({ agents: { get: (id: string) => agents.get(id) } })
+    let state: boolean | undefined
+    const off = installPlanModeExitReminder(host.ctx, { isActive: () => state })
+    /** 跑一个纯文本收尾的回合，并把空闲结算掉。 */
+    const turn = async (): Promise<void> => {
+      await runStream(host, { sessionId: REMINDER_SESSION }, PROSE_STOP)
+      await settleMicrotasks()
+      idle.goIdle()
+      await settleMicrotasks()
+    }
+    try {
+      // 判定还没准备好（投影与控制器都没就位）：不提醒，也不许把名额用掉。
+      await turn()
+      expect(idle.steered).toHaveLength(0)
+
+      // 普通聊天回合：同样不提醒、不占名额。
+      state = false
+      await turn()
+      expect(idle.steered).toHaveLength(0)
+
+      // 判定终于变成 true：第一次真正的纯文本收尾照常提醒。
+      state = true
+      await turn()
+      expect(idle.steered).toHaveLength(1)
+
+      // cap 仍然是 1：连续第二次不再提醒。
+      await turn()
+      expect(idle.steered).toHaveLength(1)
+    } finally {
+      off?.()
+    }
   })
 })

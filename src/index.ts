@@ -167,6 +167,7 @@ import { installCompactionPrompt, type PromptContext as CompactionPromptContext 
 import { installToolResultPrunerGuard } from './host/tool-result-pruner-guard.ts'
 import { installPlanModeCacheGuard } from './host/plan-mode-cache-guard.ts'
 import { installPtcSdkCacheGuard } from './host/ptc-sdk-cache-guard.ts'
+import { installSettledJobGuard } from './host/settled-job-guard.ts'
 import {
   installTeamPolicyCacheGuard,
   resolveTeamPolicyCacheGuardEnabled,
@@ -672,6 +673,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const guard = installPtcSdkCacheGuard(ctx)
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: PTC SDK cache guard')
+
+  ctx.effect(() => {
+    const guard = installSettledJobGuard(ctx)
+    return () => guard.dispose()
+  }, 'dsh-chatgpt-subscription: settled job guard')
 
   // Agent Teams 策略段：内置 team 的 `team:policy` 段在开关翻转时从空串变成整段
   // 指引，会改写 system prompt。守卫默认开启，把这一段摘出呈现、改为尾部投递一次，

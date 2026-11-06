@@ -13,7 +13,7 @@
  * **宿主级**把内置 preset 的那两处也压平，做法与本包 fork 同构，而且完全不改官方
  * 服务：官方服务照常注册自己的段与工具，守卫只在两个可以无条件插手的接缝上动手。
  *
- * ## 三条动作，对应两处重建与一次补偿
+ * ## 四条动作，对应两处重建与两次补偿
  *
  * 1. system-prompt/assemble 瀑布：把 plan:policy 段从呈现里摘掉，并记下它的正文。
  *    system 段从此在进出计划模式时逐字节恒定。
@@ -23,6 +23,9 @@
  *    发生的那一次）。
  * 3. tools.register 包装：遇到 exit_plan_mode 带 { when } 时把它摘掉，让它从会话
  *    第一步就在工具表里，native tools 与 PTC tools:sdk 两侧都不再重建。
+ * 4. llm/stream 观察：计划模式里一回合以纯文本收尾（`finish: stop`、零工具调用、
+ *    没有子代理在跑）时，空闲之后补一条尾部提醒，让模型自己去交计划 / 提问 / 放弃，
+ *    而不是停在那里等人催。它同样只投一条尾部消息，不动 system 段与工具表。
  *
  * ## 顺序前提
  *
@@ -39,6 +42,8 @@ import {
   PLAN_POLICY_SECTION,
   PLAN_PROJECTION_KEY,
   createPlanNotice,
+  installPlanModeExitReminder,
+  registeredPlanControllerActive,
 } from '../entry-plan-mode.ts'
 
 /** 守卫交回的句柄。 */
@@ -59,8 +64,17 @@ interface GuardState {
 
 /** 事件订阅面。 */
 interface EventHostLike {
-  /** 订阅一个事件。 */
-  on?(name: string, listener: (...args: never[]) => unknown): (() => void) | undefined
+  /**
+   * 订阅一个事件。
+   *
+   * 第三参数是 cordis 的订阅选项（`{ global: true }` 让宿主级监听器看到每个会话的
+   * 事件）；单测里的假宿主只认两个参数，所以它是可选的。
+   */
+  on?(
+    name: string,
+    listener: (...args: never[]) => unknown,
+    options?: { global?: boolean },
+  ): (() => void) | undefined
 }
 
 /** 注入面。 */
@@ -162,15 +176,24 @@ function bucketOf(value: unknown): object {
  * @param ctx - 宿主上下文。
  * @param event - 事件名。
  * @param listener - 监听器。
+ * @param options - cordis 订阅选项；省略时按两参数订阅。
  * @returns 解绑函数或 undefined。
  */
 function subscribe(
   ctx: unknown,
   event: string,
   listener: (...args: never[]) => unknown,
+  options?: { global?: boolean },
 ): (() => void) | undefined {
   const on = (ctx as EventHostLike | undefined)?.on
   if (typeof on !== 'function') return undefined
+  if (options !== undefined) {
+    try {
+      return on.call(ctx, event, listener, options)
+    } catch {
+      // 只认两个参数的宿主：退回去按两参数订阅。
+    }
+  }
   try {
     return on.call(ctx, event, listener)
   } catch {
@@ -276,6 +299,15 @@ export function installPlanModeCacheGuard(ctx: unknown): PlanModeCacheGuard {
   if (offAssemble !== undefined) restores.push(() => { offAssemble() })
   if (offPreStep !== undefined) restores.push(() => { offPreStep() })
 
+  // ── 2b. 回合以纯文本收尾时的提醒（跨 preset 都有效） ──────────────────────
+  // 内置 preset 挂的是官方 plan-mode，没有这个 fork 的尾巴消息机制，所以「讲完话
+  // 就停在那里等人催」在那边同样发生。提醒只投一条尾部通知，照样不动 system 段与
+  // 工具表。两个挂载点共用一个进程级登记册，不会各提醒一次。
+  const offReminder = installPlanModeExitReminder(ctx, {
+    isActive: (agent) => planActiveOfAgent(ctx, agent),
+  })
+  if (offReminder !== undefined) restores.push(() => { offReminder() })
+
   // ── 3. 摘掉 exit_plan_mode 的 { when } ────────────────────────────────────
   const wrap = (tools: ToolsRegistryLike | undefined): void => {
     if (tools === undefined) return
@@ -368,6 +400,45 @@ function planActiveOf(ctx: unknown, session: unknown): boolean | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * 读一个 agent 此刻是否在计划模式。
+ *
+ * 三级降级，顺序不可颠倒：
+ *
+ * 1. 进程级登记册（{@link registeredPlanControllerActive}）：本包的 fork 会把每个
+ *    会话登记进去，**跨 realm 可见**。`ctx.get()` 看不见 `isolate: { planMode: true }`
+ *    的子 realm，而隔离正是宿主守卫最常见的部署（守卫在根作用域、控制器在 preset 里），
+ *    所以这一级必须先问。
+ * 2. 同一作用域里的 `planMode` 服务：本包的 fork 有 `selectedActive`（含未决选择），
+ *    所以 `exit_plan_mode` 刚排队 `{ active: false }`、日志还没落进投影的那一刻不会被
+ *    误判成「还在计划模式」。
+ * 3. plan 投影：内置 preset 挂的是官方服务，它的 `/plan` 只写日志，投影是那边唯一的
+ *    事实来源。
+ * @param ctx - 宿主上下文。
+ * @param agent - 调用方 agent。
+ * @returns true / false；读不到时 undefined。
+ */
+function planActiveOfAgent(ctx: unknown, agent: unknown): boolean | undefined {
+  const session = (agent as { session?: unknown } | undefined)?.session
+  // 先读进程级登记册：宿主守卫装在根作用域，而 dispatch preset 可能把
+  // `PlanModeController` 挂在 `isolate: { planMode: true }` 的子 realm 里 —— 那种
+  // 情况下 ctx.get('planMode') 恒为 undefined，只剩投影可读，就会漏提醒（内存兜底
+  // 宿主没有投影）或按过期的 active 误提醒（未决 { active: false }）读不到。
+  // 登记册跨 realm 共享，所以它能读到含未决选择的真实判定。
+  const registered = registeredPlanControllerActive(session)
+  if (registered !== undefined) return registered
+  const controller = serviceOf<{ selectedActive?: (session: unknown) => unknown }>(ctx, 'planMode')
+  if (typeof controller?.selectedActive === 'function') {
+    try {
+      const active = controller.selectedActive(session)
+      if (typeof active === 'boolean') return active
+    } catch {
+      // 落到投影。
+    }
+  }
+  return planActiveOf(ctx, session)
 }
 
 /**
