@@ -121,6 +121,13 @@ describe('minimax thinking replay', () => {
             ],
             source: { kind: 'model', replayState: finish?.replayState },
           },
+          // The call is answered: the wire requires every `tool_use` to have its
+          // result, and an unanswered one is an orphan the mapper now drops.
+          {
+            role: 'user',
+            content: [{ type: 'tool-result', toolCallId: 'toolu_1', content: [{ type: 'text', text: 'result' }] }],
+            source: { kind: 'tool', callId: 'toolu_1' },
+          },
         ],
       } as never,
       undefined,
