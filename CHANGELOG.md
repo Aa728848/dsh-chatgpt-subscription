@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **[preset] 删除 `dispatch` 的 R0.5 兼容性闸门：调度模式以 harness ≥ 0.2.1-rc.2 为下限**
+  - **前提已消失**：旧代 Agent Teams 运行时（注册 `spawn_teammate` 并用 team 作用域顶替 `send_message` / `list_agents` / `interrupt_agent`，导致派出的子代理失联）在 harness **0.2.1-rc.2** 被整体移除，现行 team 只剩共享任务板。闸门的判据在新代恒为"缺席"，代价却是每个新会话先跑一次 `code_run` 枚举工具清单——只为走到唯一那个分支。
+  - **删的是什么**：persona 的 `## R0.5 · Compatibility Gate` 整段（判据、"`Orchestration ready: subagent`"打点、以及"停下并用 `ask_user_question` 把三条出路交给用户"的旧代出口），流水线行里的 `R0.5 Gate ->`，子代理豁免列表里的 `R0.5`，反模式第 2 条的 `(R0.5)` 标记（改为 `(R1, R6)`）。两份副本（`presets/dispatch/agent.cordis.yml` 与 `src/host/agent-preset.ts`）同步删除。
+  - **留下的是什么**：原段落中与代次无关的**任务板契约**抽成独立的 `[Agent Teams Board]` 段——board 工具声明冻结（在册不等于可用，以 `team_task_list` 调通为准）、任务板只是记账而非第二派发器、`dispatch_ledger` 仍是派发权威、R5 任务书仍是任务契约、ready 不等于开工、不得用 `reassign` 绕开 R6。
+  - **支持面**：`peerDependencies` 不动（插件其余部分仍覆盖 0.1.2-alpha.5 → 0.2.2-rc.1），但**调度预设的编排能力以 harness ≥ 0.2.1-rc.2 为下限**，`presets/dispatch/README.md`、`docs/architecture.md`、`docs/troubleshooting.md` 三处同步写明；排障表里"首轮即停下并提示与 Agent Teams 冲突"一行改写为"更早代次不受支持"。
+  - **回归**：`test/agent-preset.test.ts` 的相关断言由"闸门在场"翻转为"闸门已移除"（`R0.5`、判据句、`Orchestration ready`、旧代出口四条统一为 `not.toContain`），任务板契约的 7 条断言原样保留；长度天花板 19000 不变，删除腾出的字符作为余量。
+
 ## 0.60.0 - 2026-11-06
 
 - **[codemode] 对齐内核 PTC `run_code` 使用配置、补齐前端语法高亮卡片并消除 Kimi 缓存边际损耗**

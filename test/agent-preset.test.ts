@@ -610,42 +610,36 @@ describe('the persona block the declaration transcribes', () => {
     }
   })
 
-  it('gates on the legacy team runtime only, and runs beside the current one', () => {
-    // Agent Teams moved: the current runtime only adds a shared task board and
-    // reuses the subagent coordination tools this preset mounts, so a gate keyed
-    // on wait_agent / send_message / list_agents fires in EVERY dispatch session
-    // because those tools are ours. The gate must key on spawn_teammate, which
-    // only the legacy runtime registered, and must say that the current runtime
-    // runs beside dispatch instead of replacing it.
+  it('carries no legacy-runtime gate, and keeps the board as bookkeeping', () => {
+    // The gate is gone: harness 0.2.1-rc.2 removed the legacy Agent Teams runtime
+    // outright (spawn_teammate plus the team-scoped send_message / list_agents /
+    // interrupt_agent), so "can this session orchestrate?" stopped being a
+    // generation question. What survives is the part that was never about
+    // generations - the shared task board is bookkeeping, never a dispatcher.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
-      // Detection survives unchanged, and still runs before triage.
-      expect(persona).toContain('## R0.5 · Compatibility Gate')
-      expect(persona).toContain('Criterion: whether spawn_teammate exists')
-      // The tools this mode mounts itself can never be the criterion.
-      expect(persona).toContain('Never gate on wait_agent, send_message, list_agents, or interrupt_agent')
-      // The generations are told apart by mechanism, not preference.
-      expect(persona).toContain('A legacy Agent Teams runtime (pre-#7519)')
-      expect(persona).toContain('replaces send_message / list_agents / interrupt_agent with team-scoped variants')
+      // No generation probe survives, and triage is the first pipeline step.
+      expect(persona).not.toContain('R0.5')
+      expect(persona).not.toContain('Criterion: whether spawn_teammate exists')
+      expect(persona).not.toContain('Never gate on wait_agent, send_message, list_agents, or interrupt_agent')
+      expect(persona).not.toContain('A legacy Agent Teams runtime (pre-#7519)')
+      expect(persona).not.toContain('Orchestration ready: subagent')
+      expect(persona).not.toContain('is **not orchestratable**')
+      expect(persona).not.toContain('Call ask_user_question once (see R-W) offering')
+      expect(persona).toContain('[Execution Pipeline] R0 Triage -> (L2) R-G Interview')
+      // The board contract survives, because it was never about generations.
+      expect(persona).toContain('[Agent Teams Board]')
       expect(persona).toContain('team_task_create and its list/get/update siblings')
-      // Coexistence is explicit: the board is bookkeeping, never a dispatcher.
-      expect(persona).toContain("reuses this mode's tools")
-      expect(persona).toContain('Orchestration ready: subagent')
+      expect(persona).toContain('bookkeeping, not a second dispatcher')
       // The frozen PTC declaration keeps the board tools visible when it is off,
-      // so presence is not availability and the gate must not key on it.
+      // so presence is not availability and nothing may key on it.
       expect(persona).toContain('frozen declaration, not availability')
       expect(persona).toContain('confirm with team_task_list before relying on it')
-      expect(persona).toContain('bookkeeping, not a second dispatcher')
       expect(persona).toContain('the dispatch ledger stays the dispatch authority and R5 briefs stay the task contract')
       expect(persona).toContain('never start work because a task is ready')
       expect(persona).toContain('never reassign a task to skip R6')
-      // The legacy exit stays: stop, hand the choice to the user, new session.
-      expect(persona).toContain('This session runs the legacy runtime and is **not orchestratable**')
-      expect(persona).toContain('no triage, plan, dispatch, file edits')
-      expect(persona).toContain('Call ask_user_question once (see R-W) offering')
-      expect(persona).toContain('**start a new session**')
-      // The anti-patterns that let the old degraded branch back in.
-      expect(persona).toContain('Switching to teammate vocabulary to keep orchestrating under the legacy team runtime')
+      // The anti-patterns that let a degraded branch back in.
+      expect(persona).toContain('Switching to teammate vocabulary to keep orchestrating')
       expect(persona).toContain('Treating the team task board as a substitute for R1 topology')
       // No trace of the stale premise survives in either copy.
       expect(persona).not.toContain('Dispatch Mode is **incompatible** with Agent Teams')
@@ -688,7 +682,7 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('Proactively creating a goal at the start of a task')
       expect(persona).toContain('Ending with a paragraph of prose to wait for user sign-off')
       // R-W is dispatch-side only, like every other coordinator rule.
-      expect(persona).toContain('the coordinator-facing rules in R0, R0.5, R-G, R1, R2, R4, R5, and R-W')
+      expect(persona).toContain('the coordinator-facing rules in R0, R-G, R1, R2, R4, R5, and R-W')
     }
   })
 
@@ -997,16 +991,16 @@ describe('the persona block the declaration transcribes', () => {
     expect(prefix).toContain('Compact Delta Brief')
     expect(prefix).toContain('use a Compact Delta Brief by default')
     // Dual-track Code Mode wording: no stale PTC-only parentheticals remain.
-    expect(prefix).toContain('Criterion: whether spawn_teammate exists (check via code_run).')
+    expect(prefix).not.toContain('Criterion: whether spawn_teammate exists')
     expect(prefix).toContain('The board tools stay declared whether or not the board is on')
     expect(prefix).toContain('(native calls; use code_run Promise.all for batch filter/MCP)')
     expect(prefix).not.toContain('(PTC: tools.spawn_teammate)')
     expect(prefix).not.toContain('stay visible in the PTC SDK')
     expect(prefix).not.toContain('(in PTC mode: tools.list_subagent_models)')
     expect(prefix).not.toContain('(via Promise.all in PTC mode)')
-    // Raised from 18500 when R0.5 gained the team-board contract: the ceiling
-    // still catches unbounded growth, it just budgets the coexistence rule the
-    // current harness needs.
+    // The legacy-runtime gate left the prefix; the board contract it used to
+    // carry stayed as [Agent Teams Board]. The ceiling is unchanged - it still
+    // catches unbounded growth, and the freed characters become headroom.
     expect(prefix.length).toBeLessThan(19000)
     expect(prefix).toContain('23. Asking the user about an implementation detail an existing-standard in the repository already settles')
     expect(prefix).toContain('24. Penalizing a clean status: hand_back scope escalation as a failed run')

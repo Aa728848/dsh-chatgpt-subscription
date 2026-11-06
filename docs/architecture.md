@@ -109,7 +109,7 @@
    - 通过 `R0` 分诊（L0 直做 / L1 轻量 / L2 完整治理）、`R-G` 澄清访谈、`R9` 计划模式管线、`R1` 拓扑选择（`Lead-Core` / `Hybrid` / `Fan-out`）、`R2` 显式子代理模型路由与 `R6` 证据验收组织复杂工程任务。
    - **呈现方式是 Code Mode**：预设自己注册的工具保持原生可调，预设清单以外的一切（MCP 服务端、profile 级插件工具、按 agent 注册的工具集）不进入模型上下文，只能在 `code_run` 程序里用 `code_tools_list` / `code_tools_search` / `code_tools_describe` 现查现调；模型直呼被遮蔽的名字会在派发前被拒绝并给出发现指引。遮蔽与拒绝发生在 per-scope `ToolExecutor`（`ctx.tools.setExecutor()`，0.2.2+）里，程序内子调用整批委托给内核原生 executor，因此策略、审批与 post-execute 管线一个不少。解析不到 `@deepseek-ai/dsh-tool-executor-native` 的代次自动退回 PTC 呈现。详见 `src/host/codemode/` 与 `src/entry-codemode.ts`。
    - `dispatch_ledger` 在根工具注册面上静态注册，通过尾部工具返回按需提供 Mandate v2 协议与可复制头部骨架，配合 `ctx.tools.guard()` 防重、验血缘与防越权，**全程零工具声明面变动、零前缀缓存漂移**。
-   - 与 Agent Teams 的关系按代划分：**旧代**运行时（注册 `spawn_teammate` 并顶替 `send_message` / `list_agents` / `interrupt_agent`）与调度模式互斥，`R0.5` 会首轮检测并交由用户决策；**现行**运行时只追加共享任务板 `team_task_*` 并复用 `list_agents` / `send_message` / `wait_agent`，与调度模式并行运行。开关打开时分工固定：`dispatch_ledger` 仍是派发权威、R5 任务书仍是任务契约，任务板只公开跨代理依赖与写作用域（一条 brief 一条 task，由子代理 claim/complete，ready 不等于开工，不得用 `reassign` 绕开 R6）。
+   - 与 Agent Teams 的关系：现行运行时只追加共享任务板 `team_task_*` 并复用 `list_agents` / `send_message` / `wait_agent`，与调度模式并行运行；旧代运行时（注册 `spawn_teammate` 并顶替协调工具）已在 harness 0.2.1-rc.2 整体移除，因此调度模式以该代为下限，persona 不再按代检测（原 `R0.5` 闸门已删除）。开关打开时分工固定：`dispatch_ledger` 仍是派发权威、R5 任务书仍是任务契约，任务板只公开跨代理依赖与写作用域（一条 brief 一条 task，由子代理 claim/complete，ready 不等于开工，不得用 `reassign` 绕开 R6）。
 
 2. **子代理模型授权守卫（`subagent-model-authorization.ts` + 客户端增强卡片）**
    - 修补 DSH 默认允许省略 `provider`/`model` 静默继承主模型绕过白名单的缺口：记录了白名单的会话调用 `subagent` 时必须成对显式传入合法 `{ provider, model }`（连 PTC `run_code` 内通过 SDK 发起的调用一并拦截）；调用 `subagent_fork` 等继承类工具时则校验父会话当前实际路由是否在白名单内（或对当前主模型显式开启了允许同路由 `subagent_fork` 自继承）。

@@ -886,9 +886,9 @@ describe('the lineage the three readers share', () => {
 describe('the resident character budgets', () => {
   it('keeps the persona prefix and the guide line inside their budgets', () => {
     // persona 是每一步都重发的常驻字节：system 段或工具表一变，Kimi 的整个前缀
-    // 缓存就归零。所以它的长度是被测出来的，不是估出来的。R0.5 now carries the
-    // team-board contract (board is bookkeeping, ledger stays authoritative), so the
-    // budget moves 18500 -> 19000; the ceiling itself still guards unbounded growth.
+    // 缓存就归零。所以它的长度是被测出来的，不是估出来的。R0.5 闸门删除后，任务板契约
+    // 改由 [Agent Teams Board] 段承载（board is bookkeeping, ledger stays
+    // authoritative），预算保持 19000 作为余量；天花板仍负责挡住无界增长。
     const budget = 19000
     for (const [name, persona] of [['YAML', yamlPersona()], ['声明', declaredPersona()]] as const) {
       expect(persona.length, `${name} 侧 persona 超出 ${budget} 字符预算（还差 ${persona.length - budget}）`)
