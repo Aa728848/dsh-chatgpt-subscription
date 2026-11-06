@@ -19,13 +19,22 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { NOTIFY_USER_TOOL } from './tool.ts'
 
-/** 注入到模型上下文里的催促正文。 */
+/**
+ * 注入到模型上下文里的催促正文。
+ *
+ * 措辞要覆盖**两种调用面**：工具清单里直接有这个名字时直接调；Code Mode / PTC 下模型
+ * 只看得见 `code_run`，其余工具要经程序里的 `tools.<name>` 调。只点名直呼形式时，模型
+ * 会照着发出一个自己清单里没有的名字——那次调用没有派发，历史里留下一个没有结果的
+ * `tool_use`，MiniMax 线路从此每一轮都是 400（见 issue #89）。
+ */
 export const NUDGE_TEXT = [
   'You have made a run of tool calls without reporting progress to the user.',
   'If you are still in the middle of multi-step work, send one progress update now with the '
     + NOTIFY_USER_TOOL + ' tool:',
   'one short title line and the details in the body — what you have established so far, where things stand, '
     + 'and what you are doing next.',
+  'Call it directly when your tool list has it; in Code Mode / PTC, call it inside code_run instead: '
+    + 'await tools.' + NOTIFY_USER_TOOL + '({ title, message }).',
   'Skip it when there is genuinely nothing new to report.',
 ].join(' ')
 
