@@ -119,24 +119,31 @@ function searchDefinition(name: string, rules: CodemodeRules, catalog: () => rea
             items: {
               type: 'object',
               additionalProperties: false,
-              required: ['name', 'description', 'parameters'],
+              required: ['name', 'namespace', 'description', 'parameters'],
               properties: {
                 name: { type: 'string' },
+                namespace: { type: 'string', description: 'Namespace of the tool: an MCP server name, or "plugin".' },
                 description: { type: 'string' },
                 parameters: {},
+                output: { description: 'The tool\'s declared output schema, when it has one.' },
               },
             },
           },
         },
       },
-      render: (_args: unknown, value: { tools: readonly { name: string; description: string; parameters: unknown }[]; fallback?: boolean }) => [{
+      render: (_args: unknown, value: {
+        tools: readonly { name: string; namespace: string; description: string; parameters: unknown; output?: unknown }[]
+        fallback?: boolean
+      }) => [{
         type: 'text',
         text: value.tools.length === 0
           ? 'No tool matched that query, and this session has no tools to browse.'
           : (value.fallback === true
             ? 'No exact match. These are the callable tools, grouped by namespace — call one by exact name, or refine the query:'
             : '')
-            + value.tools.map((hit) => hit.name + '\n  ' + hit.description + '\n  parameters: ' + safeJson(hit.parameters)).join('\n\n'),
+            + value.tools.map((hit) => hit.name + '  [' + hit.namespace + ']\n  ' + hit.description
+              + '\n  parameters: ' + safeJson(hit.parameters)
+              + (hit.output === undefined ? '' : '\n  output: ' + safeJson(hit.output))).join('\n\n'),
       }],
     },
     async execute(args: unknown) {
@@ -162,8 +169,10 @@ function searchDefinition(name: string, rules: CodemodeRules, catalog: () => rea
         return {
           tools: hits.map((row) => ({
             name: row.indexed.entry.name,
+            namespace: namespaceOfName(row.indexed.entry.name),
             description: clip(row.indexed.entry.description),
             parameters: row.indexed.entry.parameters,
+            ...row.indexed.entry.output === undefined ? {} : { output: row.indexed.entry.output },
           })),
         }
       }
@@ -193,15 +202,26 @@ function describeDefinition(name: string, catalog: () => readonly CatalogEntry[]
         properties: {
           found: { type: 'boolean' },
           name: { type: 'string' },
+          namespace: { type: 'string' },
           description: { type: 'string' },
           parameters: {},
+          output: { description: 'The tool\'s declared output schema, when it has one.' },
         },
       },
-      render: (_args: unknown, value: { found: boolean; name?: string; description?: string; parameters?: unknown }) => [{
+      render: (_args: unknown, value: {
+        found: boolean
+        name?: string
+        namespace?: string
+        description?: string
+        parameters?: unknown
+        output?: unknown
+      }) => [{
         type: 'text',
         text: value.found !== true
           ? 'No tool named that is callable from this session.'
-          : String(value.name) + '\n' + String(value.description) + '\nparameters: ' + safeJson(value.parameters),
+          : String(value.name) + '  [' + String(value.namespace) + ']\n' + String(value.description)
+            + '\nparameters: ' + safeJson(value.parameters)
+            + (value.output === undefined ? '' : '\noutput: ' + safeJson(value.output)),
       }],
     },
     async execute(args: unknown) {
@@ -209,7 +229,14 @@ function describeDefinition(name: string, catalog: () => readonly CatalogEntry[]
       const wanted = typeof record['name'] === 'string' ? record['name'] : ''
       const entry = catalog().find((row) => row.name === wanted)
       if (entry === undefined) return { found: false }
-      return { found: true, name: entry.name, description: clip(entry.description), parameters: entry.parameters }
+      return {
+        found: true,
+        name: entry.name,
+        namespace: namespaceOfName(entry.name),
+        description: clip(entry.description),
+        parameters: entry.parameters,
+        ...entry.output === undefined ? {} : { output: entry.output },
+      }
     },
   }
 }
@@ -263,7 +290,7 @@ function namespaceOf(args: unknown): string | undefined {
 function browseByNamespace(
   entries: readonly CatalogEntry[],
   limit: number,
-): { name: string; description: string; parameters: unknown }[] {
+): { name: string; namespace: string; description: string; parameters: unknown; output?: unknown }[] {
   const groups = new Map<string, CatalogEntry[]>()
   for (const entry of entries) {
     const namespace = namespaceOfName(entry.name)
@@ -273,11 +300,17 @@ function browseByNamespace(
   }
   const ordered = [...groups.entries()].sort((left, right) => right[1].length - left[1].length
     || left[0].localeCompare(right[0]))
-  const rows: { name: string; description: string; parameters: unknown }[] = []
+  const rows: { name: string; namespace: string; description: string; parameters: unknown; output?: unknown }[] = []
   for (const [namespace, bucket] of ordered) {
     for (const entry of bucket.slice(0, 2)) {
       if (rows.length >= limit) return rows
-      rows.push({ name: entry.name, description: clip(namespace + ': ' + entry.description), parameters: entry.parameters })
+      rows.push({
+        name: entry.name,
+        namespace,
+        description: clip(namespace + ': ' + entry.description),
+        parameters: entry.parameters,
+        ...entry.output === undefined ? {} : { output: entry.output },
+      })
     }
   }
   return rows

@@ -278,24 +278,27 @@ export function buildCodemodeSectionText(input: SectionInput): string {
   const searchTool = input.metaTools[1] ?? 'code_tools_search'
   const describeTool = input.metaTools[2] ?? 'code_tools_describe'
   const run = input.runToolName
+  // 示例必须能照抄运行：`tools.read` 回的是 `{ path, offset, lines, totalLines }` 信封，
+  // 不是文件正文。在信封上写 `r.includes(...)` / `r.split(...)` / `r.splitlines()` 是
+  // 每一条照抄示例的程序都会踩的陷阱，所以这里只示范读 `lines[].text`。
   const example = python
     ? [
         '```py',
         '# standard tools and hidden tools alike',
         'import asyncio',
         'found = await tools.glob({"pattern": "src/**/*.ts"})',
-        'rows = await asyncio.gather(*(tools.read({"file_path": p}) for p in found["paths"]))',
-        '[r.splitlines()[0] for r in rows if "TODO" in r]',
+        'pages = await asyncio.gather(*(tools.read({"file_path": p}) for p in found["paths"]))',
+        '[l["text"] for page in pages for l in page["lines"] if "TODO" in l["text"]]',
         '```',
       ]
     : [
         '```js',
         '// standard tools and hidden tools alike',
         'const { paths } = await tools.glob({ pattern: "src/**/*.ts" })',
-        'const rows = await Promise.all(paths.map((p) => tools.read({ file_path: p })))',
+        'const pages = await Promise.all(paths.map((p) => tools.read({ file_path: p })))',
         retained
-          ? 'rows.filter((r) => r.includes("TODO")).map((r) => r.split("\\n")[0])'
-          : 'return rows.filter((r) => r.includes("TODO")).map((r) => r.split("\\n")[0])',
+          ? 'pages.flatMap((r) => r.lines.filter((l) => l.text.includes("TODO")).map((l) => l.text))'
+          : 'return pages.flatMap((r) => r.lines.filter((l) => l.text.includes("TODO")).map((l) => l.text))',
         '```',
       ]
   const lines = [
@@ -315,7 +318,9 @@ export function buildCodemodeSectionText(input: SectionInput): string {
         ? '- A retained TypeScript REPL: top-level declarations, await, and a final expression. Its variables and imported modules survive into your later programs in this session.'
         : '- Erasable TypeScript, run as the body of an async function: top-level await and return work.'),
     '- Only what you return or console.log reaches the conversation; every intermediate result stays in the program, so filter and aggregate there instead of returning raw payloads.',
-    '- Every tool result is a named-field object, never a bare array: `glob` answers `{ root, paths }` and ' + listTool + ' answers `{ tools }`. Read the field before you map or filter it — calling `.filter` on the envelope throws.',
+    '- File, search, and shell tool results are named-field objects, never bare strings (whereas `job_list` returns a bare array): `glob` answers `{ root, paths }`, `grep` answers `{ matches }` with matches shaped `{ path, lineNumber, line }`, `read` answers `{ path, offset, lines, totalLines }` with `lines` items shaped `{ number, text }`, and `win_bash` answers `{ stdout, stderr, exitCode }`. A named-field object carries its list or text inside those fields — `r.lines.map((l) => l.text)` — so never call `.map`, `.filter`, `.split`, `.splitlines` or `in` on the envelope itself.',
+    '- Discovery returns whole objects too: `' + listTool + '` answers `{ tools: [{ name, description, namespace }] }`, `' + searchTool + '` answers `{ tools: [{ name, namespace, description, parameters, output? }], fallback? }`, and `' + describeTool + '` answers `{ found, name?, namespace?, description?, parameters?, output? }`.',
+    '- Tool argument objects and `return` values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or print it with `console.log`.',
     '- Prefer batching multi-step read/search chains inside one ' + run + ' program instead of issuing many sequential single-tool turns.',
     '- Independent read-only calls may overlap under Promise.all; mutating calls run alone, in submission order.',
     '- A failed sub-call rejects; try/catch or Promise.allSettled it to keep the calls that succeeded. Completed calls are real side effects and are not rolled back.',
@@ -323,8 +328,8 @@ export function buildCodemodeSectionText(input: SectionInput): string {
     '### Discovery API (callable from inside a program)',
     '',
     '- tools.' + listTool + '({ namespace? }) - every callable tool as { name, description, namespace }, hidden ones included.',
-    '- tools.' + searchTool + '({ query, limit?, namespace? }) - ranked matches with their full parameter schemas; the intended first step. Query with the English keywords the tool is likely named and described with (tool names and descriptions are English); a phrase in another language is only matched literally.',
-    '- tools.' + describeTool + '({ name }) - one tool description and complete parameter schema.',
+    '- tools.' + searchTool + '({ query, limit?, namespace? }) - ranked matches with their full parameter schemas and output schema when the tool declares one; the intended first step. Query with the English keywords the tool is likely named and described with (tool names and descriptions are English); a phrase in another language is only matched literally.',
+    '- tools.' + describeTool + '({ name }) - one tool description, its complete parameter schema, and its output schema when declared.',
     '',
     'If a hidden tool name is called directly instead of from a program, the call is refused and the refusal names the discovery call to make.',
   ]

@@ -41,10 +41,12 @@ import { findScopeKey, resolveCatalogView, resolveNameView } from './host/codemo
 import {
   createTransportDefinition,
   currentCatalogSnapshot,
+  type ActiveRunHandle,
   type CallToolOutcome,
   type CallToolRequest,
   type CatalogEntry,
   type CodemodeHost,
+  type DispatchLogShape,
   type EscalationTargetMode,
   type PtcRuntimeLike,
   type RunAuthority,
@@ -132,6 +134,7 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
     logger?: { info?: (message: string) => void; warn?: (message: string) => void; debug?: (message: string) => void }
     on?: (event: string, listener: (...args: never[]) => unknown, options?: unknown) => unknown
     effect?: (callback: () => unknown, label?: string) => void
+    waterfall?: (receiver: unknown, event: string, ...args: unknown[]) => unknown
   }
   const log = (level: 'info' | 'warn' | 'debug', message: string): void => {
     try {
@@ -196,6 +199,106 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
   const retention = createRetention(runtimeOf)
   if (typeof context.effect === 'function') {
     context.effect(() => () => { void retention.dispose() }, 'codemode retained environments')
+  }
+
+  /** 会话里一只在飞程序：取消入口 + 这轮运行生效的沙箱模式。 */
+  interface ActiveRun {
+    /** 这轮运行的取消入口。 */
+    readonly controller: AbortController
+    /** 生效的沙箱模式；`undefined` 表示运行时不接管沙箱模式。 */
+    readonly mode?: string
+  }
+
+  /** 在飞运行：会话键 → 该会话里正在跑的程序。 */
+  const activeRuns = new Map<unknown, Set<ActiveRun>>()
+
+  /**
+   * 登记一只在飞运行，返回运行结算时的 disposer。
+   *
+   * 传输层每轮运行（含常驻环境换策略后的重跑）都登记一次，入口因此知道「这一轮跑在哪个
+   * 会话、当时的沙箱模式是什么」。会话切模式时，模式不匹配的运行必须停：常驻环境换策略
+   * 会抛错，而已经跑起来的那一轮不能继续用旧权限往下写。
+   */
+  const trackRun = (run: ActiveRunHandle): (() => void) => {
+    const key = sessionKeyOf(run.agent)
+    if (key === undefined) return () => undefined
+    const record: ActiveRun = {
+      controller: run.controller,
+      ...run.mode === undefined ? {} : { mode: run.mode },
+    }
+    let bucket = activeRuns.get(key)
+    if (bucket === undefined) {
+      bucket = new Set()
+      activeRuns.set(key, bucket)
+    }
+    bucket.add(record)
+    return () => {
+      const current = activeRuns.get(key)
+      if (current === undefined) return
+      current.delete(record)
+      if (current.size === 0) activeRuns.delete(key)
+    }
+  }
+
+  /**
+   * 会话的 `sandbox/mode` 事件：生效模式已经变了的在飞运行直接取消（内核 `PtcCalls` 同此）。
+   *
+   * 只取消「能确认模式变了」的那些：拿不到模式（运行时不管沙箱）或模式相同的运行一律不动。
+   */
+  const cancelOnModeChange = (session: unknown, event: unknown): void => {
+    if (typeof event !== 'object' || event === null) return
+    const record = event as { readonly type?: unknown; readonly data?: unknown }
+    if (record.type !== 'sandbox/mode') return
+    const data = typeof record.data === 'object' && record.data !== null
+      ? (record.data as { readonly mode?: unknown })
+      : undefined
+    const mode = data?.mode
+    if (typeof mode !== 'string') return
+    const key = sessionKeyOf(session)
+    if (key === undefined) return
+    for (const run of activeRuns.get(key) ?? []) {
+      if (run.mode !== undefined && run.mode !== mode) run.controller.abort(new Error('sandbox mode changed'))
+    }
+  }
+
+  if (typeof context.on === 'function') {
+    try {
+      const off = context.on('session/event', cancelOnModeChange as never, { global: true })
+      if (typeof context.effect === 'function') {
+        context.effect(() => () => {
+          if (typeof off === 'function') (off as () => void)()
+        }, 'codemode sandbox mode cancellation')
+      }
+    } catch (error: unknown) {
+      log('warn', '[codemode] could not subscribe to session/event; an in-flight code_run keeps running after the session sandbox mode changes: '
+        + messageOf(error))
+    }
+  }
+
+  /**
+   * 把一条子调用回放记录交给 `tools/ptc-dispatch-log` 瀑布（内核 `ptc.ts` 的同名钩子）。
+   *
+   * 监听器的失败必须在这里吞掉：它决定的只是日志副本长什么样，不是程序拿到的结果。内核
+   * 用 `scopeTarget(tools, agent)` 当接收方；本包不依赖 `@deepseek-ai/dsh-scope`，直接以
+   * `tools` 为接收方——作用域过滤由宿主自己的监听器完成。
+   */
+  const shapeDispatchLog = async (dispatch: DispatchLogShape): Promise<readonly unknown[]> => {
+    const waterfall = context.waterfall
+    if (typeof waterfall !== 'function') return dispatch.content
+    try {
+      const shaped = await waterfall.call(
+        context,
+        tools,
+        'tools/ptc-dispatch-log',
+        dispatch,
+        () => Promise.resolve(dispatch.content),
+      )
+      return Array.isArray(shaped) ? shaped : dispatch.content
+    } catch (error: unknown) {
+      log('warn', 'tools: ptc-dispatch-log listener failed for ' + dispatch.name + ': '
+        + messageOf(error) + '; logging the original settled content')
+      return dispatch.content
+    }
   }
 
   const scopeKey = findScopeKey(ctx)
@@ -266,6 +369,8 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
         source: { kind: PLUGIN_MESSAGE_SOURCE_KIND },
       })
     },
+    trackRun,
+    shapeDispatchLog,
     async callTool(request: CallToolRequest): Promise<CallToolOutcome> {
       const call = {
         type: 'tool-call',
@@ -376,10 +481,17 @@ function toCatalogEntry(definition: unknown): CatalogEntry | undefined {
   if (typeof toolName !== 'string' || toolName.length === 0) return undefined
   const description = typeof record['description'] === 'string' ? record['description'] : ''
   const safe = record['isConcurrencySafe']
+  const declaredOutput = record['output']
+  // `output` 是 `{ schema, render, presentationMeta }`；只有 `schema` 对程序内的模型有用，
+  // 而它是「这个工具回什么形状」的唯一权威来源（`read` 回 `{ lines }` 就是从这里知道的）。
+  const output = typeof declaredOutput === 'object' && declaredOutput !== null
+    ? (declaredOutput as { readonly schema?: unknown }).schema
+    : undefined
   const entry: CatalogEntry = {
     name: toolName,
     description,
     parameters: record['parameters'],
+    ...output === undefined ? {} : { output },
     ...typeof safe === 'function' ? { isConcurrencySafe: safe as (args: unknown) => boolean } : {},
   }
   return entry
@@ -427,6 +539,25 @@ function errorInfoOf(result: ToolResultLike): {
 /** 非空字符串，或 `undefined`。 */
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * 一个会话的身份键。
+ *
+ * 优先用会话 id（与内核 `session/event` 监听器里的 `session.id` 对齐）；取不到 id 时退回
+ * 会话对象本身——调用方 agent 上的 `session` 与事件里的会话是同一个对象，靠身份比对同样
+ * 成立。连会话都没有时返回 `undefined`，这类运行不参与取消。
+ *
+ * @param value - 一个 agent，或一个会话对象。
+ * @returns 会话 id / 会话对象，或 `undefined`。
+ */
+function sessionKeyOf(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) return undefined
+  const nested = (value as { readonly session?: unknown }).session
+  const session = typeof nested === 'object' && nested !== null ? nested : value
+  const id = (session as { readonly id?: unknown }).id
+  if (typeof id === 'string' && id.length > 0) return id
+  return session
 }
 
 /** 把内容块里的文本拼起来。 */

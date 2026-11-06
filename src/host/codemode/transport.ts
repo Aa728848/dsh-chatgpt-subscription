@@ -68,6 +68,8 @@ export interface CatalogEntry {
   readonly description: string
   /** 完整参数 JSON Schema。 */
   readonly parameters: unknown
+  /** 工具声明的输出 JSON Schema（没有声明时省略）。 */
+  readonly output?: unknown
   /** 并发分类（内核约定：只有 true 表示可并发）。 */
   readonly isConcurrencySafe?: (args: unknown) => boolean
 }
@@ -103,6 +105,30 @@ export interface SandboxEscalationInput {
   readonly signal: AbortSignal
 }
 
+/** 一条子调用回放记录的内容投影（内核 `tools/ptc-dispatch-log` 瀑布的入参）。 */
+export interface DispatchLogShape {
+  /** 调用方 agent。 */
+  readonly agent: unknown
+  /** 子调用的工具名。 */
+  readonly name: string
+  /** 已规范化的子调用参数。 */
+  readonly arguments: unknown
+  /** 子调用是否失败。 */
+  readonly isError: boolean
+  /** 已裁剪的面向前模型内容块。 */
+  readonly content: readonly unknown[]
+}
+
+/** 一只在飞程序运行的登记信息：入口据此响应会话级沙箱策略变更。 */
+export interface ActiveRunHandle {
+  /** 调用方 agent（入口用它定位会话）。 */
+  readonly agent: unknown
+  /** 这轮运行的取消入口：abort 会连同程序与已排队子调用一起停下。 */
+  readonly controller: AbortController
+  /** 这轮运行生效的沙箱模式；`undefined` 表示运行时不接管沙箱模式。 */
+  readonly mode?: string
+}
+
 /** 程序的运行环境句柄：由入口提供，传输层只调用。 */
 export interface CodemodeHost {
   /** 当前可调用的工具清单（含被遮蔽的）。 */
@@ -130,6 +156,20 @@ export interface CodemodeHost {
    * 将携带图片块的子调用内容包装成可投递给 `exec.deferContext` 的合法用户消息。
    */
   createImageContext?(content: readonly unknown[]): unknown
+  /**
+   * 重写一条子调用回放记录的内容块（内核 `tools/ptc-dispatch-log` 瀑布）。
+   *
+   * 实现**必须**自己吞掉监听器的失败并回落到原始内容（内核 `ptc.ts` 同此）：这里决定的
+   * 只是日志长什么样，落盘失败不许影响程序结果。
+   */
+  shapeDispatchLog?(dispatch: DispatchLogShape): Promise<readonly unknown[]>
+  /**
+   * 登记一只在飞的运行，返回的 disposer 在运行结算时调用。
+   *
+   * 入口靠它拿到「这一轮跑在哪个会话、生效模式是什么、怎么取消」，从而在会话的
+   * `sandbox/mode` 事件与这轮运行不一致时取消它。
+   */
+  trackRun?(run: ActiveRunHandle): () => void
 }
 
 /** 一次子调用请求。 */
@@ -424,7 +464,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
       const owner = host.stateOwner(exec.agent)
       let maxSubCalls: number = rules.options.maxSubCalls
       let attempts = 0
-      const scheduler = createSubCallScheduler(rules.options.maxParallelSubCalls, () => runController.signal.aborted)
+      const lane = createCommitLane(rules.options.maxParallelSubCalls, () => runController.signal.aborted)
       const definitions = new Map<string, CatalogEntry>()
       for (const entry of catalog) definitions.set(entry.name, entry)
       const functions = Object.create(null) as Record<string, (rawArgs: unknown) => Promise<unknown>>
@@ -450,46 +490,66 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             name: entry.name,
             arguments: loggedArgs,
           })
-          const run = async (): Promise<unknown> => {
-            // start 记在 lane 里而不是提交时：排队中被放弃的调用一条都不写（内核同此）。
-            dispatchLog.start()
-            let outcome: CallToolOutcome
-            try {
-              outcome = await host.callTool({
-                name: entry.name,
-                args: parsed,
-                callId,
-                signal: nestedSignal,
-                agent: exec.agent,
-                toolSet: exec.toolSet,
-              })
-            } catch (error: unknown) {
-              // 成对收尾，否则界面留下一条永远不收尾的行。
-              dispatchLog.settle({ error: error instanceof Error ? error.message : String(error) })
-              throw error
-            }
-            dispatchLog.settle(outcome)
-            if (outcome.error === undefined && Array.isArray(outcome.content) && hasImageBlock(outcome.content)) {
-              const imageMsg = host.createImageContext?.(outcome.content)
-              if (imageMsg !== undefined) exec.deferContext?.(imageMsg)
-            }
-            if (Array.isArray(outcome.additionalContexts)) {
-              for (const contextMsg of outcome.additionalContexts) {
-                exec.deferContext?.(contextMsg)
-              }
-            }
-            if (outcome.error === undefined && outcome.concluded === true) {
-              exec.concludeTurn?.()
-            }
-            if (runController.signal.aborted) {
-              throw new Error(runToolName + ' run is over; ' + entry.name + ' result discarded')
-            }
-            if (outcome.error !== undefined) throw new Error(outcome.error)
-            return outcome.value !== undefined ? outcome.value : outcome.text ?? null
-          }
           const mode = isConcurrencySafe(definitions.get(entry.name), parsed) ? 'parallel' : 'exclusive'
-          return scheduler.schedule(mode, run, () => {
-            throw new Error(runToolName + ' run is over; ' + entry.name + ' tool call abandoned')
+          return lane.schedule(mode, {
+            // start 记在 lane 里而不是提交时：排队中被放弃的调用一条都不写（内核同此）。
+            start() {
+              dispatchLog.start()
+            },
+            body: async (): Promise<CallToolOutcome> => await host.callTool({
+              name: entry.name,
+              args: parsed,
+              callId,
+              signal: nestedSignal,
+              agent: exec.agent,
+              toolSet: exec.toolSet,
+            }),
+            /**
+             * 提交阶段：按**提交顺序**逐条执行，落在会话里的副作用因此与提交顺序一致。
+             *
+             * 内核把这几步全部放在同一条有序 lane 里（`ptc.ts` 的 commit 游标）：回放内容
+             * 投影、settle 事件、图片与附加上下文、`concludeTurn`、放行互斥屏障。并发的
+             * body 谁先跑完都不影响这一串的顺序——否则界面里的子调用记录会错位，延迟上下文
+             * 也会插到错误的位置。
+             */
+            async commit(parked): Promise<unknown> {
+              // body 抛错（提交被取消、approval 拒绝等）：成对收尾，否则界面留下一条永远
+              // 不收尾的行。
+              if (!parked.ok) {
+                dispatchLog.settle({ error: messageOf(parked.error) })
+                throw parked.error
+              }
+              const outcome = parked.value
+              const isError = outcome.error !== undefined
+              const content = await shapeDispatchContent(host, {
+                agent: exec.agent,
+                name: entry.name,
+                arguments: loggedArgs,
+                isError,
+                content: clipContent(outcome.content),
+              })
+              dispatchLog.settle({ ...outcome, content })
+              if (!isError && Array.isArray(outcome.content) && hasImageBlock(outcome.content)) {
+                const imageMsg = host.createImageContext?.(outcome.content)
+                if (imageMsg !== undefined) exec.deferContext?.(imageMsg)
+              }
+              if (Array.isArray(outcome.additionalContexts)) {
+                for (const contextMsg of outcome.additionalContexts) {
+                  exec.deferContext?.(contextMsg)
+                }
+              }
+              if (!isError && outcome.concluded === true) {
+                exec.concludeTurn?.()
+              }
+              if (runController.signal.aborted) {
+                throw new Error(runToolName + ' run is over; ' + entry.name + ' result discarded')
+              }
+              if (outcome.error !== undefined) throw new Error(outcome.error)
+              return outcome.value !== undefined ? outcome.value : outcome.text ?? null
+            },
+            abandon(): never {
+              throw new Error(runToolName + ' run is over; ' + entry.name + ' tool call abandoned')
+            },
           })
         }
         Object.defineProperty(functions, entry.name, {
@@ -508,6 +568,8 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
          * `stateOwner`，避免把单次授权固化到常驻环境中（对齐内核 `ptc.ts`）。
          */
         let approvedEscalatedMode: EscalationTargetMode | undefined
+        /** 这次运行在入口那边的登记；结算时释放（重跑会重新登记一次）。 */
+        let untrackRun: () => void = () => {}
         const attempt = async (): Promise<PtcRunResultLike> => {
           const authority = await host.runAuthority?.(exec.agent, nestedSignal)
           const standingPolicy = authority?.sandboxPolicy
@@ -534,6 +596,15 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             }
             escalated = modeOfPolicy(effectivePolicy) !== modeOfPolicy(standingPolicy)
           }
+          // 会话的 `sandbox/mode` 事件靠这条登记取消在飞运行；重跑时用同一个 controller
+          // 重新登记，所以先释放上一次。
+          untrackRun()
+          const runMode = modeOfPolicy(effectivePolicy)
+          untrackRun = host.trackRun?.({
+            agent: exec.agent,
+            controller: runController,
+            ...runMode === undefined ? {} : { mode: runMode },
+          }) ?? (() => {})
           const request: PtcRunRequestLike = {
             program: input.code,
             bindings: [{
@@ -567,7 +638,8 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
           }
         } finally {
           runController.abort(runToolName + ' settled')
-          await scheduler.drain()
+          await lane.drain()
+          untrackRun()
         }
 
         if (result.error !== undefined) {
@@ -728,7 +800,8 @@ function createDispatchLog(agent: unknown, entry: DispatchLogEntry): DispatchLog
       write('tool/ptc-dispatch', {
         ...base,
         isError: outcome.error !== undefined,
-        content: clipContent(outcome.content),
+        // 内容块由提交车道先裁剪、再过 `tools/ptc-dispatch-log` 瀑布，这里写的就是最终那份。
+        content: Array.isArray(outcome.content) ? outcome.content : [],
         ...(outcome.meta === undefined ? {} : { meta: outcome.meta }),
         ...(outcome.errorInfo === undefined ? {} : { error: outcome.errorInfo }),
       })
@@ -802,7 +875,13 @@ function readArguments(args: unknown): {
   const record = args as Record<string, unknown>
   const code = record['code']
   const description = record['description']
-  if (typeof code !== 'string' || code.trim().length === 0) throw new Error('codemode: invalid code: expected a non-empty string')
+  if (typeof code !== 'string' || code.trim().length === 0) {
+    // 回显收到的键：模型常常把源码放进 `program` / `source` / `script`，只回一句
+    // 「expected a non-empty string」它下一轮还会照原来那样再发一次。
+    const received = Object.keys(record)
+    throw new Error('codemode: invalid code: expected a non-empty string'
+      + (received.length === 0 ? '' : ' (received keys: ' + received.join(', ') + '; pass program source in "code")'))
+  }
   if (typeof description !== 'string' || description.trim().length === 0) {
     throw new Error('codemode: invalid description: expected a non-empty string')
   }
@@ -836,79 +915,176 @@ function isConcurrencySafe(entry: CatalogEntry | undefined, args: unknown): bool
 }
 
 /**
- * 子调用并发与互斥调度器（对齐内核 `ptc.ts` 的读写屏障）：
+ * 子调用的并发、提交顺序与互斥屏障（对齐内核 `ptc.ts` 的 ordered commit lane）。
  *
- * - `parallel` 调用可并发重叠，最多 `maxParallel` 个同时在飞；
- * - `exclusive` 调用必须等待所有已在飞调用结算后独占运行，并在自身结算后才放行后续调用；
- * - 排队期间若外层运行已中止，直接放弃且不启动任务（保证未启动调用零 `start` 事件）；
- * - `drain()` 等待全部已启动任务结算。
+ * - `start()`（记 start 事件 + 启动 body）在 lane 里按提交顺序执行：`parallel` body 之间
+ *   可以并发重叠，最多 `maxParallel` 个同时在飞；
+ * - `commit()`（记 settle 事件 + 转发图片/附加上下文 + `concludeTurn` + 放行互斥屏障）
+ *   按**提交顺序**逐条执行：前一条没提交完，后一条的结果不会先落到会话里；
+ * - `exclusive` 调用等所有在飞 body 结算后独占运行，并独占到自己 commit 完成才放行后续；
+ * - 排队期间若外层运行已中止，直接放弃且不启动任务（未启动调用零 `start` 事件）；
+ * - `drain()` 等到 lane 彻底静止（所有 body 结算、所有 commit 完成）才返回。
+ *
+ * 程序拿到的值在 commit 里结算（与内核同）：body 结束不保证顺序，提交才是顺序。
+ *
+ * @param maxParallel - 同时在飞的上限。
+ * @param isAborted - 外层运行是否已中止。
+ * @returns 调度入口与排空。
  */
-function createSubCallScheduler(maxParallel: number, isAborted: () => boolean) {
-  interface QueuedTask {
-    readonly mode: 'parallel' | 'exclusive'
+function createCommitLane(maxParallel: number, isAborted: () => boolean) {
+  /** body 的结局：成功值或抛出的错误。 */
+  type Parked<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }
+  interface Task<T, R> {
+    /** 有序预执行：记 start 事件。 */
     start(): void
+    /** 并发执行的 body：真正调用工具。 */
+    body(): Promise<T>
+    /** 有序提交：写回放、转发上下文、屏障放行，并给出程序拿到的值。 */
+    commit(parked: Parked<T>): R | Promise<R>
+    /** 排队中被放弃（运行已结束）时抛出的错误。 */
+    abandon(): never
+  }
+  interface Entry {
+    readonly mode: 'parallel' | 'exclusive'
+    settled: boolean
+    flight: Promise<void>
+    start(): void
+    commit(): Promise<void>
     abandon(): void
   }
   const cap = Math.max(1, maxParallel)
-  const queue: QueuedTask[] = []
+  const queue: Entry[] = []
+  const commitQueue: Entry[] = []
   const inFlight = new Set<Promise<void>>()
   let exclusiveActive = false
+  let driving = false
+  let driverRun: Promise<void> = Promise.resolve()
+  let wake: (() => void) | undefined
+  const wakeup = (): void => {
+    const release = wake
+    wake = undefined
+    release?.()
+  }
 
-  const pump = (): void => {
-    while (queue.length > 0) {
-      const head = queue[0]!
-      if (isAborted()) {
-        queue.shift()
-        head.abandon()
-        continue
+  /**
+   * 唯一的有序车道：每一轮先提交队首已结算的调用，再在有空位时启动下一个排队调用，
+   * 否则睡到「有 body 结算或有新提交」为止。三条队列全空即静止。
+   */
+  const drive = (): Promise<void> => {
+    if (driving) return driverRun
+    driving = true
+    driverRun = (async () => {
+      try {
+        for (;;) {
+          // 先建唤醒 promise 再查状态：两者之间到达的结算或提交不会丢。
+          const signal = new Promise<void>((resolve) => { wake = resolve })
+          const commitHead = commitQueue[0]
+          if (commitHead !== undefined && commitHead.settled) {
+            commitQueue.shift()
+            await commitHead.commit()
+            if (commitHead.mode === 'exclusive') exclusiveActive = false
+            continue
+          }
+          const head = queue[0]
+          if (head !== undefined) {
+            if (isAborted()) {
+              queue.shift()
+              head.abandon()
+              continue
+            }
+            const capacity = !exclusiveActive
+              && (head.mode === 'exclusive' ? inFlight.size === 0 : inFlight.size < cap)
+            if (capacity) {
+              if (head.mode === 'exclusive') exclusiveActive = true
+              queue.shift()
+              // 先入提交队列再启动：提交游标看到的永远是提交顺序。
+              commitQueue.push(head)
+              head.start()
+              const flight: Promise<void> = head.flight.finally(() => {
+                inFlight.delete(flight)
+                wakeup()
+              })
+              inFlight.add(flight)
+              continue
+            }
+          }
+          if (queue.length === 0 && commitQueue.length === 0 && inFlight.size === 0) return
+          await signal
+        }
+      } finally {
+        driving = false
+        wake = undefined
       }
-      if (exclusiveActive) return
-      if (head.mode === 'exclusive') {
-        if (inFlight.size > 0) return
-        exclusiveActive = true
-        queue.shift()
-        head.start()
-        return
-      }
-      if (inFlight.size >= cap) return
-      queue.shift()
-      head.start()
-    }
+    })()
+    return driverRun
   }
 
   return {
-    schedule<T>(mode: 'parallel' | 'exclusive', task: () => Promise<T>, onAbandon: () => never): Promise<T> {
-      return new Promise<T>((resolve, reject) => {
-        queue.push({
+    schedule<T, R>(mode: 'parallel' | 'exclusive', task: Task<T, R>): Promise<R> {
+      return new Promise<R>((resolve, reject) => {
+        let parked: Parked<T> | undefined
+        const entry: Entry = {
           mode,
-          abandon() {
+          settled: false,
+          flight: Promise.resolve(),
+          start() {
+            task.start()
+            entry.flight = (async () => {
+              try {
+                parked = { ok: true, value: await task.body() }
+              } catch (error: unknown) {
+                parked = { ok: false, error }
+              }
+              entry.settled = true
+              wakeup()
+            })()
+          },
+          async commit() {
+            const result = parked
+            if (result === undefined) return
             try {
-              onAbandon()
-            } catch (error) {
+              resolve(await task.commit(result))
+            } catch (error: unknown) {
               reject(error)
             }
           },
-          start() {
-            const p = task().then(resolve, reject).finally(() => {
-              inFlight.delete(tracked)
-              if (mode === 'exclusive') exclusiveActive = false
-              pump()
-            })
-            const tracked = p.then(() => undefined, () => undefined)
-            inFlight.add(tracked)
+          abandon() {
+            try {
+              task.abandon()
+            } catch (error: unknown) {
+              reject(error)
+            }
           },
-        })
-        pump()
+        }
+        queue.push(entry)
+        wakeup()
+        void drive()
       })
     },
     async drain(): Promise<void> {
-      pump()
-      while (inFlight.size > 0) {
-        await Promise.allSettled([...inFlight])
-        pump()
-      }
+      await drive()
     },
   }
+}
+
+/**
+ * 回放内容的投影：先按日志上限裁剪，再交给入口的 `tools/ptc-dispatch-log` 瀑布。
+ *
+ * 瀑布失败**不**影响这条记录：回落裁剪后的原始内容（内核 `ptc.ts` 同此）。
+ */
+async function shapeDispatchContent(host: CodemodeHost, dispatch: DispatchLogShape): Promise<readonly unknown[]> {
+  if (typeof host.shapeDispatchLog !== 'function') return dispatch.content
+  try {
+    const shaped = await host.shapeDispatchLog(dispatch)
+    return Array.isArray(shaped) ? shaped : dispatch.content
+  } catch {
+    return dispatch.content
+  }
+}
+
+/** 一个抛出值的消息。 */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 const JSON_INDENT = '  '

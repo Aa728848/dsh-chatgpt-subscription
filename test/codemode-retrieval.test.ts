@@ -120,3 +120,64 @@ describe('程序内检索的行为基线', () => {
     }
   })
 })
+
+/**
+ * 结果的形状：模型要能一眼看出「这个工具在哪个 namespace、回什么」。
+ *
+ * 检索名次是另一组测试的事，这里只锁字段：`namespace` 每个命中都要有，`output` 只在工具
+ * 真的声明了输出 schema 时出现——绝不为了让字段整齐而编造一个。
+ */
+describe('程序内检索结果的形状', () => {
+  const shapedCatalog = [
+    {
+      name: 'mcp__fs__read_file',
+      description: 'Read a file from disk',
+      parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      output: { type: 'object', properties: { lines: { type: 'array' } } },
+    },
+    { name: 'todo_write', description: 'Write the task list', parameters: { type: 'object' } },
+  ]
+
+  function definitions(catalogEntries: typeof shapedCatalog) {
+    const rules = createRules({})
+    return createDiscoveryDefinitions(rules, () => catalogEntries, () => null) as {
+      name: string
+      execute: (args: unknown) => Promise<{
+        tools: { name: string; namespace?: string; output?: unknown; parameters?: unknown }[]
+        fallback?: boolean
+        found?: boolean
+        namespace?: string
+        output?: unknown
+      }>
+    }[]
+  }
+
+  it('命中带 namespace 与工具声明的 output schema，未声明的就不给', async () => {
+    const search = definitions(shapedCatalog).find((definition) => definition.name === 'code_tools_search')!
+    const hit = await search.execute({ query: 'read file disk' })
+    expect(hit.tools[0]).toMatchObject({ name: 'mcp__fs__read_file', namespace: 'fs' })
+    expect(hit.tools[0]!.output).toEqual({ type: 'object', properties: { lines: { type: 'array' } } })
+    const plain = await search.execute({ query: 'write task list' })
+    expect(plain.tools[0]).toMatchObject({ name: 'todo_write', namespace: 'plugin' })
+    expect(plain.tools[0]!.output).toBeUndefined()
+  })
+
+  it('零命中的浏览兜底同样带 namespace', async () => {
+    const search = definitions(shapedCatalog).find((definition) => definition.name === 'code_tools_search')!
+    const browse = await search.execute({ query: 'zzzzz' })
+    expect(browse.fallback).toBe(true)
+    expect(browse.tools.length).toBeGreaterThan(0)
+    for (const row of browse.tools) expect(typeof row.namespace).toBe('string')
+  })
+
+  it('describe 给出 namespace 与 output schema', async () => {
+    const describe = definitions(shapedCatalog).find((definition) => definition.name === 'code_tools_describe')!
+    const found = await describe.execute({ name: 'mcp__fs__read_file' })
+    expect(found).toMatchObject({ found: true, name: 'mcp__fs__read_file', namespace: 'fs' })
+    expect(found.output).toEqual({ type: 'object', properties: { lines: { type: 'array' } } })
+    const plain = await describe.execute({ name: 'todo_write' })
+    expect(plain).toMatchObject({ found: true, name: 'todo_write', namespace: 'plugin' })
+    expect(plain.output).toBeUndefined()
+    expect(await describe.execute({ name: 'nope' })).toEqual({ found: false })
+  })
+})

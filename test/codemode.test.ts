@@ -42,9 +42,9 @@ describe('Code Mode 说明段', () => {
     const base = { runToolName: rules.options.runToolName, metaTools: rules.options.metaTools }
     const body = buildCodemodeSectionText({ ...base, programFormat: 'function-body' })
     const repl = buildCodemodeSectionText({ ...base, programFormat: 'repl' })
-    expect(body).toContain('return rows.filter')
-    expect(repl).toContain('rows.filter')
-    expect(repl).not.toContain('return rows.filter')
+    expect(body).toContain('return pages.flatMap')
+    expect(repl).toContain('pages.flatMap')
+    expect(repl).not.toContain('return pages.flatMap')
   })
 
   it('示例读 glob 结果的 paths 字段，而不是把整个信封当数组', () => {
@@ -59,6 +59,44 @@ describe('Code Mode 说明段', () => {
     const py = buildCodemodeSectionText({ ...base, language: 'python', programFormat: 'function-body' })
     expect(py).toContain('found["paths"]')
     expect(py).not.toContain('for f in files')
+  })
+
+  it('示例读 read 结果的 lines[].text，而不是把信封当字符串', () => {
+    const rules = createRules({})
+    const base = { runToolName: rules.options.runToolName, metaTools: rules.options.metaTools }
+    // 回归：`tools.read` 回 `{ path, offset, lines: [{ number, text }], totalLines }`。
+    // 照抄 `r.includes(...)` / `r.split(...)` / `r.splitlines()` 的程序 100% 抛
+    // `includes is not a function`，所以示例与说明段都不许出现这些写法。
+    const js = buildCodemodeSectionText({ ...base, programFormat: 'function-body' })
+    expect(js).toContain('const pages = await Promise.all(paths.map((p) => tools.read({ file_path: p })))')
+    expect(js).toContain('return pages.flatMap((r) => r.lines.filter((l) => l.text.includes("TODO")).map((l) => l.text))')
+    expect(js).not.toContain('r.includes(')
+    expect(js).not.toContain('r.split(')
+    const py = buildCodemodeSectionText({ ...base, language: 'python', programFormat: 'function-body' })
+    expect(py).toContain('pages = await asyncio.gather(*(tools.read({"file_path": p}) for p in found["paths"]))')
+    expect(py).toContain('l["text"] for page in pages for l in page["lines"]')
+    // 只看示例块本身：正文里提到 `splitlines` 是在说「不要这么写」。
+    const pyExample = py.slice(py.indexOf('```py'), py.indexOf('```', py.indexOf('```py') + '```py'.length))
+    expect(pyExample).not.toContain('splitlines')
+  })
+
+  it('说明段公开内置与发现工具的信封形状，以及无损 JSON 规则', () => {
+    const rules = createRules({})
+    const input = { runToolName: rules.options.runToolName, metaTools: rules.options.metaTools, programFormat: 'function-body' }
+    const text = buildCodemodeSectionText(input)
+    // 信封：模型最常搞错的就是把 read / grep 的结果当字符串或数组。
+    expect(text).toContain('`glob` answers `{ root, paths }`')
+    expect(text).toContain('`grep` answers `{ matches }`')
+    expect(text).toContain('`read` answers `{ path, offset, lines, totalLines }`')
+    expect(text).toContain('`win_bash` answers `{ stdout, stderr, exitCode }`')
+    // 发现工具：list / search / describe 的返回形状连同 output 字段一起点名。
+    const [listTool, searchTool, describeTool] = rules.options.metaTools
+    expect(text).toContain('`' + String(listTool) + '` answers `{ tools: [{ name, description, namespace }] }`')
+    expect(text).toContain('`' + String(searchTool) + '` answers `{ tools: [{ name, namespace, description, parameters, output? }], fallback? }`')
+    expect(text).toContain('`' + String(describeTool) + '` answers `{ found, name?, namespace?, description?, parameters?, output? }`')
+    // 内核 PTC 的无损 JSON 规则：属性值不能是 undefined。
+    expect(text).toContain('never leave `undefined` in an object property value')
+    expect(text).toContain('x.opt ?? null')
   })
 })
 
@@ -438,6 +476,61 @@ it('程序内的清单快照与绑定一致：运行中改执行器级清单不�
     await expect(run({ code: 'x', description: '' }, exec)).rejects.toThrow(/invalid description/)
     await expect(run({ code: 'x', description: 'd', timeoutMs: -1 }, exec)).rejects.toThrow(/invalid timeoutMs/)
     await expect(run({ code: 'x', description: 'd' }, exec)).rejects.toThrow(/no PTC runtime/)
+  })
+
+  it('无效 code 参数回显收到的键，让模型知道源码放错了字段', async () => {
+    const host = {
+      catalog: () => catalog,
+      runtime: () => undefined,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({}),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const run = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
+    const exec = { callId: 'outer', signal: new AbortController().signal }
+    // 前缀保持原样（已有测试与日志都靠它），后面补上「你实际发来了哪些键」。
+    await expect(run({ program: 'return 1', description: 'x' }, exec)).rejects
+      .toThrow(/invalid code: expected a non-empty string \(received keys: program, description; pass program source in "code"\)/)
+  })
+
+  it('并发子调用按提交顺序提交：先提交的先落盘，先跑完不算数', async () => {
+    const committed: string[] = []
+    const deferred: unknown[] = []
+    const laneCatalog = [
+      { name: 'slow', description: 'slow', parameters: {}, isConcurrencySafe: () => true },
+      { name: 'fast', description: 'fast', parameters: {}, isConcurrencySafe: () => true },
+    ]
+    const host = {
+      catalog: () => laneCatalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      /** 提交阶段的第一步（内核的 `tools/ptc-dispatch-log` 瀑布）。 */
+      shapeDispatchLog: async (dispatch: { name: string; content: readonly unknown[] }) => {
+        committed.push(dispatch.name)
+        return dispatch.content
+      },
+      async callTool(req: { name: string }) {
+        // 后提交的先跑完：落盘顺序必须仍然是提交顺序。
+        await new Promise((resolve) => setTimeout(resolve, req.name === 'slow' ? 25 : 1))
+        return { value: req.name, content: [{ type: 'text', text: req.name }], additionalContexts: [{ kind: req.name }] }
+      },
+      runtime: () => ({
+        async run(request: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          const fn = request.bindings[0]!.functions
+          await Promise.all([fn['slow']!({}), fn['fast']!({})])
+          return { value: 'done', logs: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    await (definition.execute as (args: unknown, exec: unknown) => Promise<unknown>)(
+      { code: 'return 1', description: 'commit order' },
+      { callId: 'outer', signal: new AbortController().signal, deferContext: (msg: unknown) => { deferred.push(msg) } },
+    )
+    expect(committed).toEqual(['slow', 'fast'])
+    // 延迟上下文也跟着提交顺序，而不是完成顺序。
+    expect(deferred).toEqual([{ kind: 'slow' }, { kind: 'fast' }])
   })
 
   it('配置校验：发现工具不得与传输工具同名，非法值退回缺省', () => {
