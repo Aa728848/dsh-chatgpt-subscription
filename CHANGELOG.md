@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.63.0 - 2026-11-07
+
+- **[codemode] 全量对齐内核 PTC 生命周期/提交车道/错误语义，新增融合参数救援与子调用入参别名容错**
+  - **两段拼接参数救援与别名兜底**（`src/host/codemode/transport.ts`）：`parseArguments` 支持原生对象、JSON 字符串、两段拼接（`{"title":…,"message":…}{"code":…}`）与纯程序文本四种形态；拼接时自动提取末段源码并将前段作为 `progress_update` 简报补发（`<callId>:ptc:0`）；兼容 `program` / `source` / `script` 等源码别名键，`description` 缺失时按 `summary → 简报标题 → 源码首行` 三级兜底，拒绝时回显实际传入键名与前 120 字符原始片段。
+  - **宿主层子调用入参别名容错**（`normalizeSubCallArgs`）：当目标规范键未提供且别名键非该工具原生属性时，自动将 `read` / `edit` / `write` / `read_image` 的 `path` / `filePath` 映射为 `file_path`、`glob` / `grep` 的 `file_path` / `filePath` 映射为 `path`、`edit` 的驼峰键映射为下划线键、`win_bash` 的 `cwd` / `timeout_ms` / `runInBackground` 映射为规范键、`job_output` / `job_kill` 的 `jobId` 映射为 `job_id`。
+  - **对齐内核 `PtcExecutor` / `PtcCalls` 五项机制**（`src/host/codemode/retention.ts`、`executor.ts`、`entry-codemode.ts`、`transport.ts`）：
+    1. 展开 Cordis `cordis.original` 包装链，按 `(agent, originalProvider)` 在 `agent.ctx.effect` 上去重注册释放钩子，修复会话/子代理销毁时常驻进程未自动释放的泄漏；
+    2. 新增会话级 `awaitPredecessors` 与 `executor.reset(agent)`，新调用进入前等待同会话已 `abort` 的前序运行与进行中的重置排空，重置失败抛 `CodeResetFailedError` 并阻塞后续调用直至重试成功；
+    3. 优先通过 `ctx.tools.definitions(exec.agent, exec.toolSet)` 按调用方实时解析可见工具集，消除多会话并发时模块级 `catalog` 互相覆盖；
+    4. Commit Lane 在队列头部启动时惰性求值并发分类 `classify()`，并在同步挂载图片与 `additionalContexts` 后立即向程序返回子调用结果，将 `shapeDispatchLog` 与 `tool/ptc-dispatch` 落盘放入带 `maxParallelSubCalls` 背压的有序 `logWork` 链中后台排空；
+    5. 对齐 `ToolCallLimitExceededError`、`CodeRunFailedError`（`CODE_RUN_FAILED`）与外层取消 `AbortError`（`ABORTED`），常驻模式下保留子调用超限原始原因与完整诊断。
+  - **恒定说明段强化**（`src/host/codemode/rules.ts`）：静态形状表覆盖 10 个内置信封与 2 个裸数组（`job_list` / `list_agents`），补充 `file_path` / `path` / `workdir` 参数键区分、Windows 路径/正则反斜杠转义、非模块图限制，以及子进程 `process.env` 为空（`os.tmpdir()` 与 `node:child_process` 调 `gh`/`git` 缺失环境变量）应改用 `await tools.win_bash({ command })` 的规则，同一部署下保持逐字节恒定。
+
+- **[kimi-code / cache-warmup] 静态引导前缀重排、突发预填充节流与大输出预览留存优化**
+  - **静态前缀重排与指纹扩展**（`src/host/kimi-code/mapper.ts`、`adapter.ts`）：识别首轮用户消息中的静态引导块（`AGENTS.md` 指令、技能目录、语言覆盖提示）并稳定前置排序，使主代理与子代理共享更长静态前缀；`prefixFingerprints` 与 `coldStartGroupKey` 纳入 `staticPrefixHash`。
+  - **主会话标题让行与子代理突发错峰**（`src/host/kimi-code/adapter.ts`）：`session-title-first-prompt-llm` 旁路请求等待主会话首轮响应头到达后再发出；同账号/同模型并发子代理首轮长负载按 `acquireSubagentBurstPacing` 错峰进入预填充；后台预热增加最小草稿长度（6 字符）与剩余额度比例（20%）门限。
+  - **缓存预热投影与留存修正**（`src/host/cache-warmup/projection.ts`、`install.ts`、`retrieval-intent.ts`、`usage.ts`）：区分构建/测试失败日志中内嵌的局部 `diff --git` 与纯补丁输出，避免 25KB+ 测试日志因含快照 diff 而跳过投影；20KB+ 超大 `grep`/`glob` 输出自动开启导航预览；补齐含 `cache_read_input_tokens` 原始字段的命中率统计。
+
 - **[proxy] 系统代理探测不再为无控制台宿主闪出 cmd 黑窗，win32 也不再经过 shell 层（#91）**
   - **根因**：#19 曾以 completed 关闭，但修复从未进入 `src/host/proxy-manager.ts`——win32 分支的 `execSync('reg query …')` 一直缺 `windowsHide`。`execSync` 默认经 `cmd.exe /d /s /c`，当宿主自身没有控制台时（detached 启动的 `dsh web`、GUI 拉起的父进程），Windows 会为这条短命 shell **新分配一个可见控制台**；又因为系统代理缓存 TTL 只有 5 秒，`resolveActiveProxyUrl()` 每跨过一次 TTL 的请求都会复现一次黑窗。
   - **修法**：三条探测（win32 `reg query`、macOS `scutil --proxy`、Linux `gsettings get`）统一改走新增的 `runSystemProbe()`，以 `execFileSync` + `windowsHide: true` 直接起可执行文件：既不再有 `cmd.exe` 这一层（`reg.exe` 的键路径作为独立参数传入，无需 shell 引号），也不会再分配可见控制台。macOS/Linux 上 `windowsHide` 是空操作，但让三个平台的意图只写一次。
