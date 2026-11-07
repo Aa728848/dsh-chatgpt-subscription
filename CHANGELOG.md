@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.62.0 - 2026-11-07
+
 - **[opendesign] 随包模型表补齐价目表新增的 4 个模型（37 → 41）**
   - **来源**：`GET /api/v1/public/model-prices`（公开、免鉴权）实测 2026-11-07 返回 41 个 chat 模型，随包表仍是 2026-10-21 抓取的 37 条，差集为 `deepseek-v4.1-flash-eco`（截图里的 DeepSeek V4.1 Flash Eco）、`gpt-6.1-terra`、`hy4`、`kimi-k3.1-pro`。
   - **价格照抄、其余继承**：四条价格取自价目表本身；窗口/输出上限/输入模态/推理档位没有任何来源单独发布，故各自继承同族行（`deepseek-v4.1-flash`、`gpt-6.1-sol`、`hy4-preview`、`kimi-k3`），沿用 `deepseek-v4-flash-vision-exp` 已有的写法，并在行内注释与 `docs/opendesign-line-plan.md` 的风险段标明「继承而来、非独立来源」。`hy4` 与既有 `hy4-preview` 价差正好一倍，是否两者都对外服务未实测。
