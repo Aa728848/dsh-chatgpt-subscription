@@ -38,6 +38,7 @@
 - [订阅服务设置中心重构（settings-hub-redesign.md）](settings-hub-redesign.md)
 - [线路 Agent 性能优化方案（plan-provider-agent-optimizations.md）](plan-provider-agent-optimizations.md)
 - [Antigravity / Claude 缓存审计（antigravity-claude-cache-audit.md）](antigravity-claude-cache-audit.md)
+- [Code Mode `code_run` 报错审计（codemode-code-run-error-audit.md）](codemode-code-run-error-audit.md)
 
 ### 各供应线路接入方案与上游探测档案
 - **Kimi Code**：[差距分析](kimi-code-gap-analysis.md) · [缓存与工具差距](kimi-code-cache-tools-gap.md) · [改造方案](kimi-code-change-plan.md)

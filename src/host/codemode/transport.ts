@@ -49,6 +49,9 @@ export function currentCatalogSnapshot(): readonly CatalogEntry[] | undefined {
 /** 传输工具名（与 {@link DEFAULT_RUN_TOOL_NAME} 一致，导出方便测试引用）。 */
 export const TRANSPORT_TOOL_NAME = 'code_run'
 
+/** 进展汇报工具名：融合参数里救回来的简报用它补发。 */
+const PROGRESS_UPDATE_TOOL = 'progress_update'
+
 /** 允许单次提权的目标沙箱模式（对齐 `@deepseek-ai/dsh-sandbox` 的 `ESCALATION_TARGETS`）。 */
 export const ESCALATION_TARGETS = Object.freeze(['workspace-write', 'danger-full-access'] as const)
 export type EscalationTargetMode = (typeof ESCALATION_TARGETS)[number]
@@ -432,18 +435,17 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
       },
     },
     presentCall(args: unknown) {
-      if (typeof args !== 'object' || args === null) return undefined
-      const record = args as Record<string, unknown>
-      const code = record['code']
-      const description = record['description']
-      if (typeof code !== 'string' || typeof description !== 'string' || description.trim().length === 0) {
+      // 卡片标题走与执行同一条解析路径：融合参数、别名键、纯程序文本都能显示正确标题。
+      try {
+        const input = readArguments(args)
+        return {
+          card: 'generic' as const,
+          title: input.description,
+          kind: 'execute' as const,
+          rawInput: input.code,
+        }
+      } catch {
         return undefined
-      }
-      return {
-        card: 'generic' as const,
-        title: description,
-        kind: 'execute' as const,
-        rawInput: code,
       }
     },
     async execute(args: unknown, exec: TransportExecution): Promise<TransportOutput> {
@@ -461,6 +463,8 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
       if (exec.signal.aborted) runController.abort(exec.signal.reason)
       else exec.signal.addEventListener('abort', onOuterAbort, { once: true })
       const nestedSignal = markNested(runController.signal) ?? runController.signal
+      // 融合参数里救回来的简报先补发：模型本来就想「说完这段再跑这段」。
+      if (input.narration !== undefined) await forwardNarration(host, input.narration, exec, nestedSignal)
       const owner = host.stateOwner(exec.agent)
       let maxSubCalls: number = rules.options.maxSubCalls
       let attempts = 0
@@ -863,35 +867,314 @@ export function validateEscalationArgs(
   }
 }
 
-/** 校验并读出工具参数。 */
-function readArguments(args: unknown): {
+/** 程序源码可能出现的键名。模型偶尔把源码写进 `program` / `source` / `script`。 */
+const CODE_KEYS: readonly string[] = Object.freeze([
+  'code', 'program', 'source', 'script', 'code_run', 'codecode', 'program_source', 'programSource',
+])
+
+/** 模型把「先汇报再执行」写成一次调用时，简报落在 `progress_update` 的那两个键上。 */
+const NARRATION_TITLE_KEY = 'title'
+
+/** 见 {@link NARRATION_TITLE_KEY}。 */
+const NARRATION_MESSAGE_KEY = 'message'
+
+/** 回显原始参数时最多带多少字符。 */
+const RAW_EXCERPT_LIMIT = 120
+
+/** 模型在同一次调用里顺手写的进展简报。 */
+interface Narration {
+  /** 简报标题。 */
+  readonly title: string
+  /** 简报正文。 */
+  readonly message: string
+}
+
+/** 参数是怎么读出来的：原生对象、字符串里的 JSON、两段拼接、或只有一段纯程序。 */
+type ArgumentsOrigin = 'object' | 'json' | 'fused' | 'bare'
+
+/** 一次参数解析的结果。 */
+interface ParsedArguments {
+  /** 已解析的参数对象。 */
+  readonly record: Record<string, unknown>
+  /** 从融合文本里救回来的进展简报。 */
+  readonly narration?: Narration
+  /** 参数的来源形态。 */
+  readonly origin: ArgumentsOrigin
+  /** 原始参数的文本形态，只用于错误回显。 */
+  readonly raw: string
+}
+
+/** 校验并读出的工具入参。 */
+interface TransportInput {
+  /** 程序源码。 */
   code: string
+  /** 一句话描述（缺失时从源码首行或简报标题兜底）。 */
   description: string
+  /** 单次运行的时间预算。 */
   timeoutMs?: number
+  /** 单次沙箱提权目标模式。 */
   sandboxPermissions?: EscalationTargetMode
+  /** 提权理由。 */
   justification?: string
-} {
-  if (typeof args !== 'object' || args === null) throw new Error('codemode: expected an arguments object')
-  const record = args as Record<string, unknown>
-  const code = record['code']
-  const description = record['description']
-  if (typeof code !== 'string' || code.trim().length === 0) {
-    // 回显收到的键：模型常常把源码放进 `program` / `source` / `script`，只回一句
-    // 「expected a non-empty string」它下一轮还会照原来那样再发一次。
-    const received = Object.keys(record)
-    throw new Error('codemode: invalid code: expected a non-empty string'
-      + (received.length === 0 ? '' : ' (received keys: ' + received.join(', ') + '; pass program source in "code")'))
+  /** 需要补发的进展简报。 */
+  narration?: Narration
+}
+
+/** 一个值是不是普通对象。 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** 尝试解析一段 JSON 文本。 */
+function tryJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
   }
-  if (typeof description !== 'string' || description.trim().length === 0) {
-    throw new Error('codemode: invalid description: expected a non-empty string')
+}
+
+/**
+ * 切出一段文本里的顶层平衡 JSON 对象片段。
+ *
+ * 模型偶尔把两次调用的参数写进同一段文本（`{"title":…,"message":…}{"code":…}`），
+ * 整段 `JSON.parse` 必然失败；按花括号配对切出来的每一段却都还能解析，程序因此可救。
+ *
+ * @param text - 待切分的原始参数文本。
+ * @returns 按出现顺序排列的片段（字符串内的花括号不算）。
+ */
+function topLevelJsonObjects(text: string): string[] {
+  const fragments: string[] = []
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === '{') {
+      if (depth === 0) start = index
+      depth += 1
+      continue
+    }
+    if (ch !== '}') continue
+    if (depth === 0) continue
+    depth -= 1
+    if (depth === 0 && start >= 0) {
+      fragments.push(text.slice(start, index + 1))
+      start = -1
+    }
   }
+  return fragments
+}
+
+/** 从一个参数对象里读出程序源码。 */
+function codeOf(record: Record<string, unknown>): string | undefined {
+  for (const key of CODE_KEYS) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim().length > 0) return value
+  }
+  return undefined
+}
+
+/** 从一个参数对象里读出进展简报（`title` / `message` 至少有一个）。 */
+function narrationOf(record: Record<string, unknown>): Narration | undefined {
+  const title = stringOf(record[NARRATION_TITLE_KEY])
+  const message = stringOf(record[NARRATION_MESSAGE_KEY])
+  if (title === undefined && message === undefined) return undefined
+  const lead = title ?? message!.slice(0, 40)
+  return { title: lead, message: message ?? title! }
+}
+
+/** 一个非空字符串（**不裁剪**内容，源码要原样送出）。 */
+function stringOf(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
+
+/** 错误回显里的一段原始文本。 */
+function excerpt(text: string): string {
+  const flat = text.replace(/[\r\n]+/g, '⏎').replace(/\s+/g, ' ').trim()
+  return flat.length <= RAW_EXCERPT_LIMIT ? flat : flat.slice(0, RAW_EXCERPT_LIMIT) + '…'
+}
+
+/** 参数完全不成形时的错误。 */
+function invalidArgumentsError(args: unknown, raw: string, keys?: readonly string[]): Error {
+  const head = 'codemode: invalid arguments: expected an object with "code" and "description"'
+  if (args === null) return new Error(head + ' (received null)')
+  if (typeof args !== 'string') return new Error(head + ' (received ' + typeof args + ')')
+  if (keys !== undefined && keys.length > 0) return new Error(head + ' (received keys: ' + keys.join(', ') + ')')
+  if (raw.trim().length === 0) return new Error(head + ' (received an empty string)')
+  return new Error(head + ' (received a string that is not a JSON object: ' + excerpt(raw) + ')')
+}
+
+/** 参数里没有程序源码、又不是可救形态时的错误。 */
+function missingCodeError(record: Record<string, unknown>, raw: string): Error {
+  const keys = Object.keys(record)
+  const note = keys.length === 0
+    ? ''
+    : ' (received keys: ' + keys.join(', ')
+      + (raw.trim().length > 0 ? '; raw: ' + excerpt(raw) : '')
+      + '; pass program source in "code")'
+  return new Error('codemode: invalid code: expected a non-empty string' + note)
+}
+
+/** 一段文本像不像程序源码（模型把源码直接发成字符串时判这个）。 */
+function looksLikeProgram(text: string): boolean {
+  return text.includes('\n') || /\b(await|return|const|let|function|import|console\.)\b/.test(text)
+}
+
+/** 从源码首行兜底出一句描述。 */
+function descriptionFromCode(code: string): string {
+  const first = code.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? ''
+  const cleaned = first.replace(/^(\/\/|#)\s*/, '').slice(0, 80)
+  return cleaned.length > 0 ? cleaned : 'code program'
+}
+
+/**
+ * 把工具收到的原始参数读成一个对象。
+ *
+ * ## 为什么要容错
+ *
+ * 模型有四种真实存在的发送形态，照搬内核 PTC 的严格 schema 会把它们全判死：
+ *
+ * 1. **原生对象**（正常）；
+ * 2. **字符串里的 JSON**（执行器把解析失败的文本原样传下来）；
+ * 3. **两段 JSON 拼接**——`{"title":…,"message":…}{"code":…}`，模型想在同一次调用里
+ *    既汇报又执行，整段解析必失败，但按花括号切开后两段都合法（实测 7/7 可救）；
+ * 4. **只有一段纯程序**（模型直接把源码当参数发）。
+ *
+ * @param args - 工具收到的原始参数。
+ * @returns 参数对象、可选的简报与来源形态。
+ */
+function parseArguments(args: unknown): ParsedArguments {
+  if (isRecord(args)) return { record: args, origin: 'object', raw: '' }
+  if (typeof args !== 'string') throw invalidArgumentsError(args, '')
+  const raw = args
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) throw invalidArgumentsError(args, raw)
+
+  const parsed = tryJson(trimmed)
+  if (isRecord(parsed)) {
+    const narration = narrationOf(parsed)
+    return { record: parsed, origin: 'json', raw, ...narration === undefined ? {} : { narration } }
+  }
+  if (Array.isArray(parsed)) {
+    const hit = parsed.find((entry) => isRecord(entry) && codeOf(entry) !== undefined)
+    if (isRecord(hit)) {
+      const narration = narrationOf(hit)
+      return { record: hit, origin: 'json', raw, ...narration === undefined ? {} : { narration } }
+    }
+  }
+
+  // 融合形态：模型把两次调用的参数连写了。挑**最后一个**装了源码的对象，前面那段当简报。
+  const fragments = topLevelJsonObjects(trimmed)
+  let chosen: Record<string, unknown> | undefined
+  let narration: Narration | undefined
+  for (const fragment of fragments) {
+    const value = tryJson(fragment)
+    if (!isRecord(value)) continue
+    if (codeOf(value) !== undefined) {
+      chosen = value
+      narration ??= narrationOf(value)
+      continue
+    }
+    narration ??= narrationOf(value)
+  }
+  if (chosen !== undefined) {
+    return {
+      record: chosen,
+      origin: fragments.length > 1 ? 'fused' : 'json',
+      raw,
+      ...narration === undefined ? {} : { narration },
+    }
+  }
+
+  // 纯程序文本：比严格 schema 多救一种形态，比拒绝多给模型一次机会。
+  if (looksLikeProgram(trimmed)) return { record: { code: raw }, origin: 'bare', raw }
+
+  throw invalidArgumentsError(args, raw, keysOf(fragments))
+}
+
+/** 把若干 JSON 片段里出现过的键并起来（错误回显用）。 */
+function keysOf(fragments: readonly string[]): string[] {
+  const keys = new Set<string>()
+  for (const fragment of fragments) {
+    const value = tryJson(fragment)
+    if (!isRecord(value)) continue
+    for (const key of Object.keys(value)) keys.add(key)
+  }
+  return [...keys]
+}
+
+/** 校验并读出工具参数。 */
+function readArguments(args: unknown): TransportInput {
+  const parsed = parseArguments(args)
+  const record = parsed.record
+  const code = codeOf(record)
+  if (code === undefined) throw missingCodeError(record, parsed.raw)
+  // `description` 是界面卡片标题与回放的可读性来源；模型漏发时按「summary → 简报标题 →
+  // 源码首行」兜底，而不是把整段程序退回去重写——回退的成本远高于自动兜底。
+  const description = stringOf(record['description'])?.trim()
+    ?? stringOf(record['desc'])?.trim()
+    ?? stringOf(record['summary'])?.trim()
+    ?? parsed.narration?.title
+    ?? descriptionFromCode(code)
   const escalation = validateEscalationArgs(record['sandbox_permissions'], record['justification'])
   const timeoutMs = record['timeoutMs']
-  if (timeoutMs === undefined) return { code, description, ...escalation }
-  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error('codemode: invalid timeoutMs: expected a positive finite number')
+  if (timeoutMs !== undefined) {
+    if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error('codemode: invalid timeoutMs: expected a positive finite number')
+    }
   }
-  return { code, description, timeoutMs, ...escalation }
+  return {
+    code,
+    description,
+    ...timeoutMs === undefined ? {} : { timeoutMs },
+    ...escalation,
+    ...parsed.narration === undefined ? {} : { narration: parsed.narration },
+  }
+}
+
+/**
+ * 把救回来的进展简报补发成一次 `progress_update`。
+ *
+ * 简报只影响界面，因此这里的任何失败都被吞掉：发不出去（没有投影、没有服务端、外层已取消）
+ * 绝不能连累这次程序。
+ *
+ * @param host - 运行环境句柄。
+ * @param narration - 从融合参数里救回来的简报。
+ * @param exec - 本次执行上下文。
+ * @param signal - 已带嵌套标记的取消信号。
+ */
+async function forwardNarration(
+  host: CodemodeHost,
+  narration: Narration,
+  exec: TransportExecution,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    if (!host.catalog().some((entry) => entry.name === PROGRESS_UPDATE_TOOL)) return
+    await host.callTool({
+      name: PROGRESS_UPDATE_TOOL,
+      args: { title: narration.title, message: narration.message },
+      // `:ptc:0`：程序自己的子调用从 `:ptc:1` 起编号，两者不会撞车。
+      callId: String(exec.callId) + NESTED_CALL_ID_MARKER + '0',
+      signal,
+      agent: exec.agent,
+      toolSet: exec.toolSet,
+    })
+  } catch {
+    // 见函数文档：简报是界面提示，不是运行结果。
+  }
 }
 
 /** 子调用参数必须是可无损 JSON 化的值。 */

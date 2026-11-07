@@ -268,6 +268,10 @@ export interface SectionInput {
  * 工具的数量、namespace 分布、会话 id 或时间，因此同一部署下逐字节恒定：挂载或卸载
  * MCP 服务端不会改写它，前缀缓存不会因为它失效。
  *
+ * 结果形状索引（`read` / `glob` / `grep` … 的顶层字段）也**必须是静态的**：它照抄自各工具
+ * 声明过的 output schema，不读活 catalog。按 catalog 生成会让「挂一个 MCP 服务端」改写系统
+ * 提示词首段，正好毁掉这一层要保住的前缀缓存。
+ *
  * @param input - 传输工具名、发现工具名与程序形态。
  * @returns 说明段正文。
  */
@@ -318,9 +322,19 @@ export function buildCodemodeSectionText(input: SectionInput): string {
         ? '- A retained TypeScript REPL: top-level declarations, await, and a final expression. Its variables and imported modules survive into your later programs in this session.'
         : '- Erasable TypeScript, run as the body of an async function: top-level await and return work.'),
     '- Only what you return or console.log reaches the conversation; every intermediate result stays in the program, so filter and aggregate there instead of returning raw payloads.',
-    '- File, search, and shell tool results are named-field objects, never bare strings (whereas `job_list` returns a bare array): `glob` answers `{ root, paths }`, `grep` answers `{ matches }` with matches shaped `{ path, lineNumber, line }`, `read` answers `{ path, offset, lines, totalLines }` with `lines` items shaped `{ number, text }`, and `win_bash` answers `{ stdout, stderr, exitCode }`. A named-field object carries its list or text inside those fields — `r.lines.map((l) => l.text)` — so never call `.map`, `.filter`, `.split`, `.splitlines` or `in` on the envelope itself.',
+    '- File, search, and shell tool results are named-field objects, never bare strings — read the field, not the envelope (`job_list` and `list_agents` are the only bare arrays):',
+    '  `read` → `{ path, offset, lines: [{ number, text }], totalLines }` · `glob` → `{ root, paths }` · `grep` → `{ matches: [{ path, lineNumber, line }] }` · `edit` → `{ path, before, after }` · `write` → `{ path, operation, before, after }` · `win_bash` → `{ stdout, stderr, exitCode }` · `web_fetch` → `{ url, statusCode, body, truncated }` · `job_output` → `{ text, job }` · `read_image` → `{ path, image }` · `skill` → `{ name, content }`.',
+    python
+      ? '- Read the field: `page["lines"]`, `match["text"]`. Calling `.split()`, `.splitlines()` or `in` on the envelope itself is always wrong.'
+      : '- Read the field: `r.lines.map((l) => l.text)`. Calling `.map`, `.filter`, `.split` or `in` on the envelope itself is always wrong.',
+    '- Anything not listed above (MCP tools, hidden plugin tools) answers with its **declared output schema**: call `' + describeTool + '({ name })` and read the top-level keys before picking a field. One discovery call is far cheaper than the `TypeError` that loses the whole program.',
     '- Discovery returns whole objects too: `' + listTool + '` answers `{ tools: [{ name, description, namespace }] }`, `' + searchTool + '` answers `{ tools: [{ name, namespace, description, parameters, output? }], fallback? }`, and `' + describeTool + '` answers `{ found, name?, namespace?, description?, parameters?, output? }`.',
     '- Tool argument objects and `return` values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or print it with `console.log`.',
+    // 程序文本本身的两类陷阱：写错了连求值都进不去，报错还没有行号。措辞只描述事实，不给自动改写。
+    ...(python ? [] : [
+      '- Paths and regexes: write a Windows path with forward slashes (`C:/Users/...`) or wrap it in `String.raw`; a literal `C:\\Users` inside an ordinary string is read as the escape `\\U` and the program never starts (`Expected unicode escape`). Regex backslashes (`\\d`, `\\.`) have the same trap — double them or use `String.raw`.',
+      '- A program is not a module: `import(\'./src/x.ts\')` and `import(\'vscode\')` cannot resolve — the program runs in a fresh process with no module graph. Read files with `tools.read`; `await import(\'node:fs\')` works only for Node built-ins.',
+    ]),
     '- Prefer batching multi-step read/search chains inside one ' + run + ' program instead of issuing many sequential single-tool turns.',
     '- Independent read-only calls may overlap under Promise.all; mutating calls run alone, in submission order.',
     '- A failed sub-call rejects; try/catch or Promise.allSettled it to keep the calls that succeeded. Completed calls are real side effects and are not rolled back.',

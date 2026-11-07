@@ -85,10 +85,10 @@ describe('Code Mode 说明段', () => {
     const input = { runToolName: rules.options.runToolName, metaTools: rules.options.metaTools, programFormat: 'function-body' }
     const text = buildCodemodeSectionText(input)
     // 信封：模型最常搞错的就是把 read / grep 的结果当字符串或数组。
-    expect(text).toContain('`glob` answers `{ root, paths }`')
-    expect(text).toContain('`grep` answers `{ matches }`')
-    expect(text).toContain('`read` answers `{ path, offset, lines, totalLines }`')
-    expect(text).toContain('`win_bash` answers `{ stdout, stderr, exitCode }`')
+    expect(text).toContain('`glob` → `{ root, paths }`')
+    expect(text).toContain('`grep` → `{ matches: [{ path, lineNumber, line }] }`')
+    expect(text).toContain('`read` → `{ path, offset, lines: [{ number, text }], totalLines }`')
+    expect(text).toContain('`win_bash` → `{ stdout, stderr, exitCode }`')
     // 发现工具：list / search / describe 的返回形状连同 output 字段一起点名。
     const [listTool, searchTool, describeTool] = rules.options.metaTools
     expect(text).toContain('`' + String(listTool) + '` answers `{ tools: [{ name, description, namespace }] }`')
@@ -473,12 +473,14 @@ it('程序内的清单快照与绑定一致：运行中改执行器级清单不�
     const run = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
     const exec = { callId: 'outer', signal: new AbortController().signal }
     await expect(run({ code: '  ', description: 'x' }, exec)).rejects.toThrow(/invalid code/)
-    await expect(run({ code: 'x', description: '' }, exec)).rejects.toThrow(/invalid description/)
+    // description 现在可以兜底（summary → 简报标题 → 源码首行）：空串不再整段拒绝，
+    // 执行一路走到「没有运行时」这一步。
+    await expect(run({ code: 'x', description: '' }, exec)).rejects.toThrow(/no PTC runtime/)
     await expect(run({ code: 'x', description: 'd', timeoutMs: -1 }, exec)).rejects.toThrow(/invalid timeoutMs/)
     await expect(run({ code: 'x', description: 'd' }, exec)).rejects.toThrow(/no PTC runtime/)
   })
 
-  it('无效 code 参数回显收到的键，让模型知道源码放错了字段', async () => {
+  it('源码放错字段时：认识的别名键直接执行，不认识的键回显出来', async () => {
     const host = {
       catalog: () => catalog,
       runtime: () => undefined,
@@ -489,9 +491,11 @@ it('程序内的清单快照与绑定一致：运行中改执行器级清单不�
     const definition = createTransportDefinition(host as never, rules)
     const run = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
     const exec = { callId: 'outer', signal: new AbortController().signal }
-    // 前缀保持原样（已有测试与日志都靠它），后面补上「你实际发来了哪些键」。
-    await expect(run({ program: 'return 1', description: 'x' }, exec)).rejects
-      .toThrow(/invalid code: expected a non-empty string \(received keys: program, description; pass program source in "code"\)/)
+    // `program` 是认识的别名：不再报错，直接走到执行（这里只有「没有运行时」拦路）。
+    await expect(run({ program: 'return 1', description: 'x' }, exec)).rejects.toThrow(/no PTC runtime/)
+    // 完全陌生的键才回显，让模型知道该改哪个字段。
+    await expect(run({ scratch: 'return 1', description: 'x' }, exec)).rejects
+      .toThrow(/invalid code: expected a non-empty string \(received keys: scratch, description; pass program source in "code"\)/)
   })
 
   it('并发子调用按提交顺序提交：先提交的先落盘，先跑完不算数', async () => {
