@@ -191,7 +191,26 @@ npm run build       # lib/index.js、lib/codemode.js 等 9 个产物构建成功
 
 ---
 
-## 九、复现方法
+## 九、前缀缓存核对（kimi-code / minimax-code 按缓存计费）
+
+改动动到了系统提示首段，必须证明它**没有破坏前缀缓存**。四项证据：
+
+| 检查 | 方法 | 结果 |
+| --- | --- | --- |
+| 工具 schema 未变 | `git diff <改动前提交> -- src/host/codemode/transport.ts` 只看 schema/描述构造与注册 | **0 处**改动；hunk 只落在常量、`presentCall`、`execute` 插入与解析器块；`buildTransportParameters` / `buildTransportDescription` / `tools.register` 全未触碰 |
+| 改动前前缀本来就稳定 | 14 个 kimi 会话里取 6 个走 Code Mode 的，抽出 `## Code Mode` 段比较 | **1 个变体**（6 个会话逐字节相同，3242 字符） |
+| 改动后仍恒定 | 四种形态（ts body / ts repl / py body / py repl）各构建两次比较；扫正文里的会话标识 | 四次比对全部相等；正文不含 session id、`mcp__`、遮蔽计数；`tools:sdk` 段是 `interpolate: false` |
+| 增量是一次性的 | 老正文 vs 新正文逐行差分 | 3242 → 4251 字符（**+1009**，约 250 token）；29 行里 28 行原样，1 行换成 6 行，替换内容对每个会话都相同 |
+
+代价与影响面：
+
+- 每个新会话多一次 ~250 token 的未命中输入，之后进入缓存。走 Code Mode 的那 6 个 kimi 会话改动前命中率 **97.9%**（67.2M 缓存读 / 1.45M 新读，长会话 98.8–98.9%），250 token 相当于一条 20 万 token 前缀的 0.12%。
+- 另外 8 个 kimi 会话用的是内核 PTC `run_code` 预设，系统提示里根本没有这段正文，**零影响**。
+- 关键的反面：如果按最初的设想「从活 catalog 生成形状表」，挂载/卸载一个 MCP 服务端就会改写这段正文——那才是真正的缓存破坏。静态表正是为守住这条不变量。
+
+---
+
+## 十、复现方法
 
 会话归档是**追加式多帧 zstd**（`node:zlib.zstdDecompressSync` 只解第一帧，必须逐帧切）：
 
