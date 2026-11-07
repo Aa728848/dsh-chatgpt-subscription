@@ -824,7 +824,213 @@ function leadingSystemText(options: GenerateOptions): string | undefined {
 }
 
 function nonSystemMessages(options: GenerateOptions): Message[] {
-  return options.messages.filter((message) => message.role !== 'system')
+  const raw = options.messages.filter((message) => message.role !== 'system')
+  return orderStaticPrefixMessages(raw)
+}
+
+/**
+ * Stability tier for an initial bootstrap reminder message (`1` = most static, `4` = session-scoped).
+ *
+ * The harness appends bootstrap reminders (`agent-instructions`, `runtime-context`,
+ * `progress-updates-language`, `skill-catalog`) AFTER the first user prompt (or
+ * after the retained tail following a compaction checkpoint). Because Kimi's
+ * prefix cache matches strictly from byte 0, leaving the dynamic user prompt at
+ * index 0 prevents subagents, forked sessions, and post-compaction turns from
+ * sharing the ~8,300-token `AGENTS.md` + `skill-catalog` prefix.
+ *
+ * Mid-conversation delta reminders (`Updated instructions from:`, `Additional
+ * instructions from:`, `Instructions removed:`, `The available skill catalog changed.`)
+ * return `null` so they stay anchored at the exact history position where they
+ * arrived (append-only in-history).
+ */
+export function classifyBootstrapUserMessage(message: Message): 1 | 2 | 3 | 4 | null {
+  if (message.role !== 'user' || isToolResultMessage(message)) return null
+  const source = isRecord(message.source) ? message.source : undefined
+  const kind = source !== undefined ? asString(source.kind) : undefined
+  const text = firstTextOf(message.content)?.trimStart() ?? ''
+
+  if (
+    kind === 'progress-updates-language'
+    || text.startsWith('Progress update output language override:')
+  ) {
+    return 1
+  }
+
+  if (
+    text.startsWith('<system-reminder>\nThe following workspace instructions')
+    || (
+      kind === 'agent-instructions'
+      && !text.startsWith('<system-reminder>\nUpdated instructions')
+      && !text.startsWith('<system-reminder>\nAdditional instructions')
+      && !text.startsWith('<system-reminder>\nInstructions removed')
+    )
+  ) {
+    return 2
+  }
+
+  if (
+    text.startsWith('<system-reminder>\nA skill is a reusable set of task-specific instructions.')
+    || (
+      kind === 'skill-catalog'
+      && !text.startsWith('<system-reminder>\nThe available skill catalog changed.')
+    )
+  ) {
+    return 3
+  }
+
+  if (
+    kind === 'runtime-context'
+    || text.startsWith('Current runtime context. This snapshot supersedes')
+  ) {
+    return 4
+  }
+
+  return null
+}
+
+function isCompactCheckpointMessage(message: Message | undefined): boolean {
+  if (message === undefined || message.role !== 'user' || isToolResultMessage(message)) return false
+  const source = isRecord(message.source) ? message.source : undefined
+  if (source !== undefined && asString(source.kind) === 'compact-checkpoint') return true
+  const text = firstTextOf(message.content)?.trimStart() ?? ''
+  return text.startsWith('This is an automatically generated checkpoint condensing')
+}
+
+/**
+ * Normalize `agent-instructions` text so global `~/.dsh/` instructions precede
+ * workspace-local `AGENTS.md` instructions when both appear in the same block.
+ */
+function normalizeAgentInstructionsMessage(message: Message): Message {
+  if (!Array.isArray(message.content) || message.content.length !== 1) return message
+  const first = message.content[0]
+  if (!isRecord(first) || first.type !== 'text' || typeof first.text !== 'string') return message
+  const raw = first.text
+  const marker = '\n\nInstructions from: '
+  const firstIdx = raw.indexOf(marker)
+  if (firstIdx < 0) return message
+  const closeTag = '\n</system-reminder>'
+  const closeIdx = raw.lastIndexOf(closeTag)
+  if (closeIdx <= firstIdx) return message
+  const header = raw.slice(0, firstIdx)
+  const body = raw.slice(firstIdx + 2, closeIdx)
+  const tail = raw.slice(closeIdx)
+  const sections = body.split('\n\nInstructions from: ')
+  if (sections.length < 2) return message
+  const tagged = sections.map((sec, idx) => {
+    const firstLineEnd = sec.indexOf('\n')
+    const sourcePath = (firstLineEnd < 0 ? sec : sec.slice(0, firstLineEnd)).trim()
+    const isGlobal = sourcePath.startsWith('~/') || sourcePath.startsWith('~\\') || sourcePath.includes('/.dsh/') || sourcePath.includes('\\.dsh\\')
+    return { sec, idx, rank: isGlobal ? 0 : 1 }
+  })
+  const needsSort = tagged.some((item, i) => i > 0 && item.rank < tagged[i - 1]!.rank)
+  if (!needsSort) return message
+  tagged.sort((a, b) => a.rank - b.rank || a.idx - b.idx)
+  const rebuilt = `${header}\n\nInstructions from: ${tagged.map((t) => t.sec).join('\n\nInstructions from: ')}${tail}`
+  return {
+    ...message,
+    content: [{ ...first, text: rebuilt }] as unknown as Message['content'],
+  }
+}
+
+/**
+ * Deterministic entropy-sorted ordering for leading bootstrap reminders.
+ *
+ * 1. Within the leading pre-assistant `user` message run, orders the first
+ *    occurrence of each bootstrap tier (`1: progress-updates-language` ->
+ *    `2: agent-instructions` -> `3: skill-catalog` -> `4: runtime-context`)
+ *    ahead of the dynamic `user` prompt (`5`).
+ * 2. When the surface starts with a `compact-checkpoint` that shadowed the
+ *    original bootstrap run and the harness re-injected Tier 1/2/3 reminders
+ *    after the retained tail, hoists the first occurrence of Tier 1/2/3 ahead
+ *    of `compact-checkpoint` so the ~21k static prefix stays intact across
+ *    compaction boundaries and every step after compaction.
+ */
+export function orderStaticPrefixMessages(messages: readonly Message[]): Message[] {
+  try {
+    if (messages.length <= 1) return [...messages]
+
+    let leadEnd = 0
+    while (
+      leadEnd < messages.length
+      && messages[leadEnd]!.role === 'user'
+      && !isToolResultMessage(messages[leadEnd]!)
+    ) {
+      leadEnd += 1
+    }
+
+    // Compaction recovery: `messages[0]` is `compact-checkpoint`, and the
+    // re-injected bootstrap reminders sit after the retained tail.
+    if (leadEnd > 0 && isCompactCheckpointMessage(messages[0])) {
+      const seenInLead = new Set<number>()
+      for (let i = 0; i < leadEnd; i++) {
+        const tier = classifyBootstrapUserMessage(messages[i]!)
+        if (tier !== null) seenInLead.add(tier)
+      }
+      if (!seenInLead.has(1) && !seenInLead.has(2)) {
+        const hoistedByTier = new Map<1 | 2 | 3, { index: number; message: Message }>()
+        for (let i = leadEnd; i < messages.length; i++) {
+          const msg = messages[i]!
+          const tier = classifyBootstrapUserMessage(msg)
+          if ((tier === 1 || tier === 2 || tier === 3) && !hoistedByTier.has(tier)) {
+            hoistedByTier.set(tier, {
+              index: i,
+              message: tier === 2 ? normalizeAgentInstructionsMessage(msg) : msg,
+            })
+          }
+        }
+        if (hoistedByTier.size > 0) {
+          const hoistedIndices = new Set<number>()
+          const prefix: Message[] = []
+          for (const tier of [1, 2, 3] as const) {
+            const entry = hoistedByTier.get(tier)
+            if (entry !== undefined) {
+              hoistedIndices.add(entry.index)
+              prefix.push(entry.message)
+            }
+          }
+          const rest = messages.filter((_, idx) => !hoistedIndices.has(idx))
+          return [...prefix, ...rest]
+        }
+      }
+    }
+
+    if (leadEnd <= 1) return [...messages]
+
+    const seenTiers = new Set<number>()
+    const leadTagged: Array<{ message: Message; rank: number; index: number }> = []
+    let hasBootstrap = false
+    for (let i = 0; i < leadEnd; i++) {
+      const rawMsg = messages[i]!
+      const tier = classifyBootstrapUserMessage(rawMsg)
+      if (tier !== null && !seenTiers.has(tier)) {
+        seenTiers.add(tier)
+        hasBootstrap = true
+        leadTagged.push({
+          message: tier === 2 ? normalizeAgentInstructionsMessage(rawMsg) : rawMsg,
+          rank: tier,
+          index: i,
+        })
+      } else {
+        leadTagged.push({ message: rawMsg, rank: 5, index: i })
+      }
+    }
+
+    if (!hasBootstrap) return [...messages]
+
+    const needsReorder = leadTagged.some((item, i) => (
+      (i > 0 && item.rank < leadTagged[i - 1]!.rank)
+      || item.message !== messages[i]
+    ))
+    if (!needsReorder) return [...messages]
+
+    leadTagged.sort((a, b) => a.rank - b.rank || a.index - b.index)
+    return [
+      ...leadTagged.map((item) => item.message),
+      ...messages.slice(leadEnd),
+    ]
+  } catch {
+    return [...messages]
+  }
 }
 
 
@@ -3064,22 +3270,47 @@ export interface PrefixFingerprints {
   readonly systemPromptHash: string | null
   /** Hash of the tool list, or null when the request carries no tools. */
   readonly toolsHash: string | null
+  /** Hash of leading workspace-static bootstrap reminders (Tiers 1–3), when present. */
+  readonly staticPrefixHash?: string | null
+}
+
+/**
+ * Extract the concatenated text of leading workspace-static bootstrap reminders
+ * (Tiers 1–3: `progress-updates-language`, initial `agent-instructions`, initial
+ * `skill-catalog`) after static-prefix ordering.
+ */
+function leadingStaticBootstrapText(options: GenerateOptions): string {
+  const ordered = nonSystemMessages(options)
+  const parts: string[] = []
+  for (const message of ordered) {
+    const tier = classifyBootstrapUserMessage(message)
+    if (tier === 1 || tier === 2 || tier === 3) {
+      const text = textOf(message.content)
+      if (text !== '') parts.push(text)
+      continue
+    }
+    break
+  }
+  return parts.join('\n\n')
 }
 
 /**
  * Hash the prefix-breaking inputs of one request.
  *
  * @param options - The request about to be built.
- * @returns The hashes of its system prompt and its tool list.
+ * @returns The hashes of its system prompt, tool list, and optional static bootstrap prefix.
  */
 export function prefixFingerprints(options: GenerateOptions): PrefixFingerprints {
   const systemText = leadingSystemText(options) ?? ''
   const tools = options.tools ?? []
+  const staticBootstrap = leadingStaticBootstrapText(options)
+  const staticPrefixHash = staticBootstrap === '' ? null : fingerprint(staticBootstrap)
   return {
     systemPromptHash: systemText === '' ? null : fingerprint(systemText),
     toolsHash: tools.length === 0
       ? null
       : fingerprint(JSON.stringify(tools.map((tool) => [tool.name, tool.description ?? '', tool.parameters ?? {}]))),
+    ...(staticPrefixHash === null ? {} : { staticPrefixHash }),
   }
 }
 

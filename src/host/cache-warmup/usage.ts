@@ -120,7 +120,16 @@ export function isWarmupHitReport(
   if (cached < CACHE_WARMUP_DEFAULTS.retainedPrefixMinCachedTokens) return false
   if (prevCached < CACHE_WARMUP_DEFAULTS.retainedPrefixMinCachedTokens) return false
   if (cached < prevCached) return false
-  return fresh <= CACHE_WARMUP_DEFAULTS.retainedPrefixMaxFreshTokens
+  if (fresh <= CACHE_WARMUP_DEFAULTS.retainedPrefixMaxFreshTokens) return true
+  // 长会话稳态延续：上一轮全部输入（prevCached + prevFresh）的 256-token 完整块在本轮
+  // 100% 命中缓存且缓存块数实际增长（cached > prevCached），仅因本轮追加了大工具输出
+  // 导致分母增大（如 687104 cached + 22991 input = 96.76%），不视为缓存失效。
+  const prevFresh = finiteCount(previous.inputTokens)
+  const prevAlignedTotal = Math.floor((prevCached + prevFresh) / 256) * 256
+  if (prevCached >= 4096 && cached > prevCached && cached >= prevAlignedTotal) {
+    return true
+  }
+  return false
 }
 
 export function consecutiveWarmupHits(reports: readonly CacheWarmupUsage[]): number {

@@ -252,4 +252,23 @@ describe('navigation intent', () => {
     expect(cacheWarmupNavigationIntentOf({})).toBe(false)
     expect(cacheWarmupNavigationIntentOf({ session: { snapshotEvents: () => { throw new Error('closed') } } })).toBe(false)
   })
+
+  it('admits read-only plan mode exploration even when the initial prompt asked to fix issues', () => {
+    const activePlanSession = {
+      events: [
+        { type: 'user/message', data: { text: '把本项目的所有issues全部解决' } },
+        { type: 'plan/mode', data: { active: true } },
+      ],
+    }
+    expect(cacheWarmupNavigationIntentOf({ session: activePlanSession })).toBe(true)
+
+    const exitedPlanSession = {
+      events: [
+        { type: 'user/message', data: { text: '把本项目的所有issues全部解决' } },
+        { type: 'plan/mode', data: { active: true } },
+        { type: 'plan/mode', data: { active: false } },
+      ],
+    }
+    expect(cacheWarmupNavigationIntentOf({ session: exitedPlanSession })).toBe(false)
+  })
 })

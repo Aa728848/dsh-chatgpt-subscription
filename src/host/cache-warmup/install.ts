@@ -474,7 +474,18 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     const ptcRetrieval = isPtcTransportName(exec.name) && settings.retrievalEnabled === true
     if (sourceTool && !settings.enabled && !ptcRetrieval) return decision
     if (retrievalTool && settings.retrievalEnabled !== true) return decision
-    const navigation = retrievalTool || ptcRetrieval ? cacheWarmupNavigationIntentOf(exec.agent) : undefined
+    const blocks = decision.content ?? result.content
+    if (blocks.length === 0) return decision
+    const baseNavigation = retrievalTool || ptcRetrieval ? cacheWarmupNavigationIntentOf(exec.agent) : undefined
+    const isOversizedSearchDump =
+      (exec.name === 'grep' || exec.name === 'glob')
+      && blocks.reduce((sum, block) => {
+        const text = typeof block === 'object' && block !== null && typeof (block as { text?: unknown }).text === 'string'
+          ? (block as { text: string }).text
+          : ''
+        return sum + text.length
+      }, 0) >= 20_000
+    const navigation = baseNavigation === true || isOversizedSearchDump ? true : baseNavigation
     // 不确定、编辑或审查：连核心都不调用，原 value/content 决策逐字交回。
     if (retrievalTool && navigation !== true) return decision
     if (sourceTool && !settings.enabled && navigation !== true) return decision
@@ -489,8 +500,6 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     // 宿主的内容块与核心的结果内容就是同一批对象：核心只替换其中的文本块，非文本
     // 块逐字保留。这里只做一次形状桥接——核心的入参允许"纯文本"，宿主的决策只认
     // 块数组，两个形状之间不做任何内容改写。
-    const blocks = decision.content ?? result.content
-    if (blocks.length === 0) return decision
     const content = blocks as unknown as ProjectionResult['content']
 
     let durable: CacheWarmupDurableHint | undefined

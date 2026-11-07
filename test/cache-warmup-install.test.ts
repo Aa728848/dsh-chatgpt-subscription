@@ -695,4 +695,23 @@ describe('cache warmup host integration', () => {
     expect(typeof dispose).toBe('function')
     disposers.push(dispose)
   })
+
+  it('admits an oversized (>= 20_000 chars) grep dump even when the user prompt is an edit/fix task', async () => {
+    settings.retrievalEnabled = true
+    const { listener } = install()
+    const exec = retrievalExec('grep', '把本项目的所有issues全部解决')
+    const hugeGrepText = 'Found 250 of 794 matches\n' + 'packages/client/src/constants.ts:148: export const X = 1\n'.repeat(400)
+    expect(hugeGrepText.length).toBeGreaterThanOrEqual(20_000)
+    const hugeResult: Readonly<ToolExecutionResult> = {
+      isError: false,
+      content: [{ type: 'text', text: hugeGrepText }],
+    } as unknown as Readonly<ToolExecutionResult>
+    const decision = await listener(exec, hugeResult, async () => ({
+      kind: 'accept',
+      content: hugeResult.content,
+    }))
+    expect(projectionCalls()).toBe(1)
+    expect(core.calls[0]?.navigation).toBe(true)
+    expect(decision.kind).toBe('accept')
+  })
 })

@@ -9,6 +9,7 @@ import {
   KimiCodeAdapter,
   accountLimitCooldownMs,
   classifyKimiFailure,
+  maybeWarmupStaticPrefix,
   resetColdStartSingleflightForTests,
   resolveDefaultReasoningEffort,
 } from '../src/host/kimi-code/adapter.ts'
@@ -1220,4 +1221,147 @@ describe('the Kimi Code cold-start singleflight', () => {
     releaseHungLeader!()
     await hungLeader
   }, 20_000)
+
+  it('defers a concurrent side-channel session-title request until the main turn reaches response headers', async () => {
+    const order: string[] = []
+    let releaseMain: (() => void) | undefined
+    const mainGate = new Promise<void>((resolve) => { releaseMain = resolve })
+    const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { tools?: unknown[] }
+      const isTitle = !Array.isArray(body.tools) || body.tools.length === 0
+      order.push(isTitle ? 'title' : 'main')
+      if (!isTitle) await mainGate
+      return sseResponse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { adapter } = await buildAdapter({ fetchFn })
+
+    const mainPromise = drain(adapter.stream(generateOptions('k3', {
+      sessionId: 'sess-title-defer' as never,
+      system: 'main system',
+      tools: [{ name: 'read', description: 'read file', parameters: { type: 'object' } }],
+    })))
+    await waitUntil(() => order.length === 1)
+    expect(order).toEqual(['main'])
+
+    const titlePromise = drain(adapter.stream(generateOptions('k3', {
+      sessionId: 'sess-title-defer' as never,
+      system: 'Create a concise title for an AI coding-assistant session',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages: []' }],
+      }] as never,
+    })))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    // Title request is held back while main request has not yet reached response headers
+    expect(order).toEqual(['main'])
+
+    releaseMain!()
+    await Promise.all([mainPromise, titlePromise])
+    expect(order).toEqual(['main', 'title'])
+  })
+
+  it('paces concurrent subagent mandate bursts on their first turn even when the base prefix is already warm', async () => {
+    const gates: Array<Promise<void>> = []
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      const index = calls
+      calls += 1
+      const gate = gates[index]
+      if (gate !== undefined) await gate
+      return sseResponse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1000, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 800 } },
+        },
+      ])
+    }) as unknown as typeof fetch
+    const { adapter } = await buildAdapter({ fetchFn })
+    const system = 'shared dispatch system prompt'
+
+    // Warm the prefix with the parent session first
+    await drain(adapter.stream(generateOptions('k3', { sessionId: 'parent-lead' as never, system })))
+    expect(calls).toBe(1)
+
+    let releaseSub1: (() => void) | undefined
+    gates[1] = new Promise<void>((resolve) => { releaseSub1 = resolve })
+
+    const sub1 = drain(adapter.stream(generateOptions('k3', {
+      sessionId: 'sub-1' as never,
+      system,
+      messages: [{ role: 'user', content: [{ type: 'text', text: '```dsh-mandate-v2\n{"brief_id":"b-1"}\n```' }] }] as never,
+    })))
+    await waitUntil(() => calls === 2)
+
+    const sub2 = drain(adapter.stream(generateOptions('k3', {
+      sessionId: 'sub-2' as never,
+      system,
+      messages: [{ role: 'user', content: [{ type: 'text', text: '```dsh-mandate-v2\n{"brief_id":"b-2"}\n```' }] }] as never,
+    })))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    // sub2 waits for sub1's headers instead of stampeding in the same millisecond
+    expect(calls).toBe(2)
+
+    releaseSub1!()
+    await Promise.all([sub1, sub2])
+    expect(calls).toBe(3)
+  })
+
+  it('enforces the 4 gates in maybeWarmupStaticPrefix (draft length, quota threshold, cold check, singleflight)', async () => {
+    const options = generateOptions('k3.1-pro', {
+      system: 'static system',
+      messages: [
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'dynamic user prompt' }] },
+        { role: 'user', source: { kind: 'progress-updates-language' }, content: [{ type: 'text', text: 'Progress update output language override: Simplified Chinese' }] },
+      ] as never,
+    })
+
+    // Gate 2: short or empty draft (model switch with no typing) is rejected
+    const shortDraft = await maybeWarmupStaticPrefix({
+      region: 'mainland-cn',
+      options,
+      draftText: '   ',
+    })
+    expect(shortDraft).toEqual({ warmed: false, reason: 'draft-too-short' })
+
+    // Gate 4: low quota (< 20%) is rejected
+    const lowQuota = await maybeWarmupStaticPrefix({
+      region: 'mainland-cn',
+      options,
+      draftText: '分析并修复全部问题',
+      remainingQuotaRatio: 0.15,
+    })
+    expect(lowQuota).toEqual({ warmed: false, reason: 'quota-low' })
+
+    // All 4 gates pass: sends warmup with maxTokens=1 and only static messages
+    let capturedMaxTokens: number | undefined
+    let capturedMsgCount = 0
+    const warmed = await maybeWarmupStaticPrefix({
+      region: 'mainland-cn',
+      options,
+      draftText: '分析并修复全部问题',
+      remainingQuotaRatio: 0.85,
+      sendWarmup: async (warmupOpts) => {
+        capturedMaxTokens = warmupOpts.maxTokens
+        capturedMsgCount = warmupOpts.messages.length
+        return true
+      },
+    })
+    expect(warmed.warmed).toBe(true)
+    expect(capturedMaxTokens).toBe(1)
+    // Dynamic user prompt was stripped; only the static Tier 1 reminder remained
+    expect(capturedMsgCount).toBe(1)
+
+    // Gate 1 & 3: subsequent call within 25-minute TTL is skipped as already-warm
+    const second = await maybeWarmupStaticPrefix({
+      region: 'mainland-cn',
+      options,
+      draftText: '继续修改另一个问题',
+      remainingQuotaRatio: 0.85,
+    })
+    expect(second).toEqual({ warmed: false, reason: 'already-warm' })
+  })
 })

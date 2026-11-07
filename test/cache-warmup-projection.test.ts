@@ -1258,4 +1258,34 @@ describe('projectToolResult 的超长多读/多节输出', () => {
     expect(result.preview).toContain('PACKAGE FILES: 500 lines')
     expect(result.preview).toContain('PACKAGE RULES: 500 lines (1-500)')
   })
+
+  it('带 npm 脚本头与退出码的构建/测试日志即使内嵌 diff --git 也能投影为 shell-output', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const logWithEmbeddedDiff = [
+      '> dsh-claude-style@0.19.10 checks:numbers',
+      '> node packages/testing/check-numbers.mjs',
+      '',
+      'check-numbers: recorded 348 checks and 487 numbers from 31 files',
+      'diff --git a/packages/testing/data/check-numbers.json b/packages/testing/data/check-numbers.json',
+      'index 1111111..2222222 100644',
+      '--- a/packages/testing/data/check-numbers.json',
+      '+++ b/packages/testing/data/check-numbers.json',
+      '@@ -1,5 +1,5 @@',
+      ...Array.from({ length: 80 }, (_, idx) => `+  "check-${idx}": ${idx},`),
+      'stderr | packages/testing/specs/mechanism/frame-pipeline/frame.spec.ts > a task that throws',
+      '[Error: Uncaught Error: boom]',
+      '[exit code: 1]',
+    ].join('\n')
+    const result = await projectToolResult({
+      toolName: 'win_bash',
+      sessionId: 'embedded-diff-1',
+      content: logWithEmbeddedDiff,
+      budget: WARMUP,
+      store,
+    })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('shell-output')
+    expect(result.preview).toContain('exit code: 1')
+    expect(result.preview).toContain('[Error: Uncaught Error: boom]')
+  })
 })

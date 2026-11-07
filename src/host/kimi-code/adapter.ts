@@ -62,12 +62,14 @@ import {
   assertRequestBodyFits,
   assertStreamComplete,
   buildRequest,
+  classifyBootstrapUserMessage,
   closeStream,
   createStreamState,
   estimatedInputTokens,
   mapReasoningEffort,
   MAX_REQUEST_VIDEO_BYTES,
   offloadOldestRequestVideos,
+  orderStaticPrefixMessages,
   prefixFingerprints,
   processAnthropicStreamLine,
   processOpenAIStreamLine,
@@ -944,6 +946,26 @@ const inFlightColdLeaderStartedAt = new Map<string, number>()
 const coldLeaderReleases = new Map<string, () => void>()
 
 /**
+ * In-flight main-session requests waiting for their HTTP response headers,
+ * keyed by sessionId. Used so a concurrent `session-title-first-prompt-llm`
+ * side-channel request yields to the main turn's prefill instead of competing
+ * on the same account during cold start.
+ */
+const inFlightMainSessionHeaders = new Map<string, Promise<void>>()
+const mainSessionHeaderReleases = new Map<string, () => void>()
+
+/**
+ * Per-account/model first-turn prefill pacing chain for concurrent subagent bursts.
+ */
+const inFlightSubagentBurstLeaders = new Map<string, Promise<void>>()
+const subagentBurstReleases = new Map<string, () => void>()
+
+/** Minimum non-whitespace draft characters required before composer warmup may fire. */
+export const MIN_WARMUP_DRAFT_CHARS = 6
+/** Default minimum remaining quota ratio (20%) required before background warmup may fire. */
+export const DEFAULT_MIN_WARMUP_QUOTA_RATIO = 0.2
+
+/**
  * Forget every remembered prefix and release every waiting follower.
  *
  * Test seam only: these maps are process-wide, and a test that asserts on the
@@ -951,10 +973,16 @@ const coldLeaderReleases = new Map<string, () => void>()
  */
 export function resetColdStartSingleflightForTests(): void {
   for (const release of [...coldLeaderReleases.values()]) release()
+  for (const release of [...mainSessionHeaderReleases.values()]) release()
+  for (const release of [...subagentBurstReleases.values()]) release()
   warmPrefixTimestamps.clear()
   inFlightColdLeaders.clear()
   inFlightColdLeaderStartedAt.clear()
   coldLeaderReleases.clear()
+  inFlightMainSessionHeaders.clear()
+  mainSessionHeaderReleases.clear()
+  inFlightSubagentBurstLeaders.clear()
+  subagentBurstReleases.clear()
 }
 
 /**
@@ -985,9 +1013,9 @@ const NO_COLD_START_GATE: ColdStartGate = {
  * The group of requests that address the same cached prefix.
  *
  * The service derives its cache from the request content, so two requests with
- * the same model, the same system prompt and the same tool list hit the same
- * entry. The region is part of the key because each region is a separate
- * service with a cache of its own.
+ * the same model, the same system prompt, the same tool list and the same
+ * leading static bootstrap reminders hit the same entry. The region is part of
+ * the key because each region is a separate service with a cache of its own.
  *
  * A request with no system prompt has no prefix worth warming, and gets no
  * group at all.
@@ -996,10 +1024,10 @@ const NO_COLD_START_GATE: ColdStartGate = {
  * @param options - The request about to be sent.
  * @returns The group key, or undefined when the request has no prefix.
  */
-function coldStartGroupKey(region: string, options: NormalizedGenerateOptions): string | undefined {
-  const { systemPromptHash, toolsHash } = prefixFingerprints(options)
+export function coldStartGroupKey(region: string, options: NormalizedGenerateOptions): string | undefined {
+  const { systemPromptHash, toolsHash, staticPrefixHash } = prefixFingerprints(options)
   if (systemPromptHash === null) return undefined
-  return `${region}:${options.model}:${systemPromptHash}:${toolsHash ?? 'none'}`
+  return `${region}:${options.model}:${systemPromptHash}:${toolsHash ?? 'none'}${staticPrefixHash ? ':' + staticPrefixHash : ''}`
 }
 
 /**
@@ -1007,14 +1035,203 @@ function coldStartGroupKey(region: string, options: NormalizedGenerateOptions): 
  *
  * @param groupKey - The group that was just warmed.
  */
-function rememberWarmPrefix(groupKey: string): void {
+function rememberWarmPrefix(groupKey: string, now: number = Date.now()): void {
   // Re-inserted so iteration order stays least-recently-written first.
   warmPrefixTimestamps.delete(groupKey)
-  warmPrefixTimestamps.set(groupKey, Date.now())
+  warmPrefixTimestamps.set(groupKey, now)
   while (warmPrefixTimestamps.size > MAX_WARM_PREFIX_GROUPS) {
     const oldest = warmPrefixTimestamps.keys().next()
     if (oldest.done === true) break
     warmPrefixTimestamps.delete(oldest.value)
+  }
+}
+
+/**
+ * Register an in-flight main-session request until its HTTP response headers arrive.
+ */
+function registerInFlightMainSessionHeader(sessionId: string): () => void {
+  const key = sessionId.trim()
+  if (key === '') return () => undefined
+  mainSessionHeaderReleases.get(key)?.()
+  let resolveHeader!: () => void
+  const promise = new Promise<void>((resolve) => { resolveHeader = resolve })
+  inFlightMainSessionHeaders.set(key, promise)
+  let released = false
+  const release = (): void => {
+    if (released) return
+    released = true
+    resolveHeader()
+    if (mainSessionHeaderReleases.get(key) === release) {
+      mainSessionHeaderReleases.delete(key)
+      inFlightMainSessionHeaders.delete(key)
+    }
+  }
+  mainSessionHeaderReleases.set(key, release)
+  return release
+}
+
+/**
+ * Whether a first-turn request carries a subagent mandate or large uncached
+ * dynamic payload that should stagger behind an already in-flight sibling burst.
+ */
+function isSubagentBurstCandidate(options: NormalizedGenerateOptions): boolean {
+  let dynamicChars = 0
+  for (const message of options.messages) {
+    if (message.role !== 'user') continue
+    const tier = classifyBootstrapUserMessage(message)
+    if (tier === 1 || tier === 2 || tier === 3) continue
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      if (typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'text') {
+        const text = typeof (block as { text?: unknown }).text === 'string' ? (block as { text: string }).text : ''
+        if (text.includes('dsh-mandate-v2')) return true
+        dynamicChars += text.length
+      }
+    }
+  }
+  return dynamicChars >= 1_200
+}
+
+/**
+ * Stagger concurrent subagent first-turn requests on the same account/model
+ * so they do not stampede prefill in the same millisecond.
+ */
+async function acquireSubagentBurstPacing(
+  pacingKey: string,
+  signal: AbortSignal,
+): Promise<() => void> {
+  while (true) {
+    const existing = inFlightSubagentBurstLeaders.get(pacingKey)
+    if (existing === undefined) break
+    await raceColdStartLeader(existing, signal)
+    if (signal.aborted) return () => undefined
+    if (inFlightSubagentBurstLeaders.get(pacingKey) === existing) {
+      subagentBurstReleases.get(pacingKey)?.()
+      break
+    }
+  }
+  let resolvePacing!: () => void
+  const promise = new Promise<void>((resolve) => { resolvePacing = resolve })
+  inFlightSubagentBurstLeaders.set(pacingKey, promise)
+  let settled = false
+  const release = (): void => {
+    if (settled) return
+    settled = true
+    resolvePacing()
+    if (subagentBurstReleases.get(pacingKey) === release) {
+      subagentBurstReleases.delete(pacingKey)
+      inFlightSubagentBurstLeaders.delete(pacingKey)
+    }
+  }
+  subagentBurstReleases.set(pacingKey, release)
+  return release
+}
+
+export interface StaticPrefixWarmupInput {
+  /** Target Kimi Code region (e.g. `mainland-cn`). */
+  readonly region: string
+  /** Candidate request options carrying system prompt, tools, and bootstrap messages. */
+  readonly options: GenerateOptions
+  /** Current composer draft text; must be non-empty (`>= 6` trimmed chars) to prove typing intent. */
+  readonly draftText: string
+  /** Optional known remaining quota ratio (`0..1`); below `minQuotaRatio` skips warmup. */
+  readonly remainingQuotaRatio?: number | null
+  /** Minimum quota ratio required (defaults to `0.2`). */
+  readonly minQuotaRatio?: number
+  /** Optional sender that executes the lightweight `maxTokens: 1` warmup call. */
+  readonly sendWarmup?: (warmupOptions: NormalizedGenerateOptions) => Promise<boolean>
+  /** Optional clock override for tests. */
+  readonly now?: number
+}
+
+export type StaticPrefixWarmupOutcome =
+  | {
+      readonly warmed: false
+      readonly reason: 'draft-too-short' | 'no-prefix' | 'already-warm' | 'in-flight' | 'quota-low' | 'failed'
+    }
+  | {
+      readonly warmed: true
+      readonly groupKey: string
+      readonly warmupOptions: NormalizedGenerateOptions
+    }
+
+/**
+ * Intent-driven, 4-gate static prefix warmup helper.
+ *
+ * Never fires on a bare model switch (`draftText` must have `>= 6` non-whitespace
+ * characters), skips when remaining quota is below `20%`, skips when the prefix
+ * is already warm within the 25-minute TTL or has an in-flight leader, and locks
+ * the prefix group in singleflight while warming only `L0 + L1` (`maxTokens: 1`).
+ */
+export async function maybeWarmupStaticPrefix(
+  input: StaticPrefixWarmupInput,
+): Promise<StaticPrefixWarmupOutcome> {
+  try {
+    const draft = typeof input.draftText === 'string' ? input.draftText.trim() : ''
+    if (draft.length < MIN_WARMUP_DRAFT_CHARS) {
+      return { warmed: false, reason: 'draft-too-short' }
+    }
+    const minQuota = input.minQuotaRatio ?? DEFAULT_MIN_WARMUP_QUOTA_RATIO
+    if (
+      typeof input.remainingQuotaRatio === 'number'
+      && Number.isFinite(input.remainingQuotaRatio)
+      && input.remainingQuotaRatio < minQuota
+    ) {
+      return { warmed: false, reason: 'quota-low' }
+    }
+    const normalized = normalizeGenerateOptions(input.options)
+    const groupKey = coldStartGroupKey(input.region, normalized)
+    if (groupKey === undefined) {
+      return { warmed: false, reason: 'no-prefix' }
+    }
+    const now = input.now ?? Date.now()
+    const warmedAt = warmPrefixTimestamps.get(groupKey)
+    if (warmedAt !== undefined && now - warmedAt < CACHE_TTL_MS) {
+      return { warmed: false, reason: 'already-warm' }
+    }
+    if (inFlightColdLeaders.has(groupKey)) {
+      return { warmed: false, reason: 'in-flight' }
+    }
+
+    const orderedNonSystem = orderStaticPrefixMessages(
+      normalized.messages.filter((message) => message.role !== 'system'),
+    )
+    const staticMessages = orderedNonSystem.filter((message) => {
+      const tier = classifyBootstrapUserMessage(message)
+      return tier === 1 || tier === 2 || tier === 3
+    })
+    const systemMessages = normalized.messages.filter((message) => message.role === 'system')
+    const warmupOptions: NormalizedGenerateOptions = {
+      ...normalized,
+      maxTokens: 1,
+      messages: [...systemMessages, ...staticMessages],
+    }
+
+    let resolveLeader!: () => void
+    const promise = new Promise<void>((resolve) => { resolveLeader = resolve })
+    inFlightColdLeaders.set(groupKey, promise)
+    inFlightColdLeaderStartedAt.set(groupKey, now)
+    const release = (): void => {
+      resolveLeader()
+      if (coldLeaderReleases.get(groupKey) !== release) return
+      coldLeaderReleases.delete(groupKey)
+      inFlightColdLeaders.delete(groupKey)
+      inFlightColdLeaderStartedAt.delete(groupKey)
+    }
+    coldLeaderReleases.set(groupKey, release)
+
+    try {
+      const ok = input.sendWarmup ? await input.sendWarmup(warmupOptions) : true
+      if (!ok) return { warmed: false, reason: 'failed' }
+      rememberWarmPrefix(groupKey, now)
+      return { warmed: true, groupKey, warmupOptions }
+    } catch {
+      return { warmed: false, reason: 'failed' }
+    } finally {
+      release()
+    }
+  } catch {
+    return { warmed: false, reason: 'failed' }
   }
 }
 
@@ -1463,21 +1680,6 @@ export class KimiCodeAdapter extends LlmAdapter {
     activity?: StreamActivity,
   ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-
-    const catalog = await this.catalog().catch(() => [])
-    const wire: KimiCodeWire = wireForCatalogEntry(options.model, catalog)
-
-    const entry = catalog.find((model) => model.id === options.model)
-
-    // DSH delivers pasted images as durable references because this route
-    // declares image input; both wires need bytes, so resolve them once up
-    // front and reuse the result for the single request below. Video travels
-    // the same path and is dropped oldest-first against its own, far larger
-    // budget, because one clip dwarfs the whole image allowance.
-    // Resolution runs BEFORE the budget decision so the decision is made on
-    // the bytes that will actually be sent. Measuring the stored image — as this
-    // route did — reported every scaled screenshot as several megabytes and
-    // dropped images that were about to fit in ~256 KiB each.
     const normalized = normalizeGenerateOptions(options)
     // The side-channel title request runs on this route, under this session's
     // identity, and is a DIFFERENT conversation: its prompt, its usage and its
@@ -1485,15 +1687,35 @@ export class KimiCodeAdapter extends LlmAdapter {
     // under the session has to know about it, or the title request would be
     // read as the session's own turn.
     const sideChannel = isSideChannelTitleRequest(normalized)
-    // The route's own ceiling, not the shared one: the wire version this request
-    // carries has to be the same 2000 px long edge `imageRequestTarget()` reports
-    // to screenshot callers, or the declaration and the bytes disagree.
-    const images = await resolveRequestImages(
-      normalized,
-      this.options.attachments,
-      signal,
-      KIMI_CODE_REQUEST_IMAGE_MAX_EDGE,
-    )
+    const sessionKey = typeof options.sessionId === 'string' ? options.sessionId.trim() : ''
+    const mainHeaderRelease = !sideChannel && sessionKey !== ''
+      ? registerInFlightMainSessionHeader(sessionKey)
+      : () => undefined
+
+    try {
+      const catalog = await this.catalog().catch(() => [])
+      const wire: KimiCodeWire = wireForCatalogEntry(options.model, catalog)
+
+      const entry = catalog.find((model) => model.id === options.model)
+
+      // DSH delivers pasted images as durable references because this route
+      // declares image input; both wires need bytes, so resolve them once up
+      // front and reuse the result for the single request below. Video travels
+      // the same path and is dropped oldest-first against its own, far larger
+      // budget, because one clip dwarfs the whole image allowance.
+      // Resolution runs BEFORE the budget decision so the decision is made on
+      // the bytes that will actually be sent. Measuring the stored image — as this
+      // route did — reported every scaled screenshot as several megabytes and
+      // dropped images that were about to fit in ~256 KiB each.
+      // The route's own ceiling, not the shared one: the wire version this request
+      // carries has to be the same 2000 px long edge `imageRequestTarget()` reports
+      // to screenshot callers, or the declaration and the bytes disagree.
+      const images = await resolveRequestImages(
+        normalized,
+        this.options.attachments,
+        signal,
+        KIMI_CODE_REQUEST_IMAGE_MAX_EDGE,
+      )
     // The image budget is STICKY: a picture the budget gave back stays given
     // back for the rest of the conversation, so the retained prefix the service
     // cached stops changing. The identities of the pictures dropped by earlier
@@ -1835,17 +2057,33 @@ export class KimiCodeAdapter extends LlmAdapter {
       // content, so two conversations with the same system prompt and the same
       // tools address the same entry.
       //
-      // A side-channel title request is excluded: it has no prefix of its own
-      // worth warming, and it must not delay the conversation it titles.
+      // A side-channel title request is excluded from leading a cold start: it
+      // has no prefix of its own worth warming, and when the main conversation
+      // turn is still waiting for its HTTP response headers, the title request
+      // yields until those headers arrive so it does not compete on the same
+      // account during Step 1 cold prefill.
+      if (sideChannel && sessionKey !== '') {
+        const pendingMain = inFlightMainSessionHeaders.get(sessionKey)
+        if (pendingMain !== undefined) {
+          await raceColdStartLeader(pendingMain, signal)
+          if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED')
+        }
+      }
       const coldGroupKey = sideChannel ? undefined : coldStartGroupKey(region, requestOptions)
       const coldGate = coldGroupKey === undefined
         ? undefined
         : await acquireColdStartWarmup(coldGroupKey, signal)
+      const isFirstSessionTurn = !sideChannel && sessionKey !== '' && getCacheStats(sessionKey).requests === 0
+      const burstPacingRelease = isFirstSessionTurn && isSubagentBurstCandidate(requestOptions)
+        ? await acquireSubagentBurstPacing(`${accountScope}:${options.model}`, signal)
+        : () => undefined
       let coldGateSettled = false
       const settleColdGate = (warm: boolean): void => {
         if (coldGateSettled) return
         coldGateSettled = true
         coldGate?.release()
+        burstPacingRelease()
+        mainHeaderRelease()
         if (warm) coldGate?.markWarm()
       }
       // The response headers are the hand-off point: the service is already
@@ -2072,16 +2310,19 @@ export class KimiCodeAdapter extends LlmAdapter {
         // from the provider: see streamFailure.
         throw streamFailure(error, signal)
       }
-    } finally {
-      // Filed before the reader is released: the record is what lets a status
-      // card still say "this conversation sat idle past the cache lifetime"
-      // after the process that ran it is gone.
-      // A side-channel title request files nothing under the session: it is a
-      // different conversation that merely borrowed the session's identity.
-      if (state.sawUsage && !sideChannel) {
-        noteSessionCacheState(requestOptions.sessionId ?? state.sessionId, state)
+      } finally {
+        // Filed before the reader is released: the record is what lets a status
+        // card still say "this conversation sat idle past the cache lifetime"
+        // after the process that ran it is gone.
+        // A side-channel title request files nothing under the session: it is a
+        // different conversation that merely borrowed the session's identity.
+        if (state.sawUsage && !sideChannel) {
+          noteSessionCacheState(requestOptions.sessionId ?? state.sessionId, state)
+        }
+        void reader.cancel().catch(() => undefined)
       }
-      void reader.cancel().catch(() => undefined)
+    } finally {
+      mainHeaderRelease()
     }
   }
 

@@ -294,7 +294,11 @@ function isBareFilePathLine(trimmed: string): boolean {
  */
 function isMixedEvidenceOutput(text: string): boolean {
   if (text.includes('[cache-warmup preview]')) return true
-  if (/^(?:===|---)\s+.+?(?:\s+(?:===|---))?$/m.test(text) || /^###\s+\S/m.test(text) || /^--\s+.+\s+--$/m.test(text)) {
+  if (
+    /^(?:===\s+.+?(?:\s+===)?|---\s+(?!a\/\S).+?(?:\s+---)?)$/m.test(text) ||
+    /^###\s+\S/m.test(text) ||
+    /^--\s+.+\s+--$/m.test(text)
+  ) {
     return true
   }
   const lines = text.split('\n')
@@ -725,14 +729,46 @@ function looksLikeContract(text: string): boolean {
 }
 
 /**
+ * 判断包含 `diff --git` 的文本是否为构建/测试脚本输出中内嵌的局部 diff，而非纯粹的代码补丁。
+ *
+ * 真实会话中（如 `npm run checks && npm run verify`），脚本前段可能打印一段快照 `diff --git`，
+ * 紧接着运行测试或以 `[exit code: 1]` 退出。若一刀切将所有含 `diff --git` 的输出当作源码，
+ * 会导致 25KB+ 的构建/测试失败日志无法投影。
+ */
+function isEmbeddedDiffInBuildOrTestLog(text: string): boolean {
+  const firstNonEmpty = text
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line !== '')
+  if (firstNonEmpty === undefined) return false
+  // 以 diff/patch 或 commit 头开头的输出本身就是补丁查看命令（git diff / git show），保持原样。
+  if (
+    firstNonEmpty.startsWith('diff --git ')
+    || firstNonEmpty.startsWith('--- a/')
+    || firstNonEmpty.startsWith('+++ b/')
+    || firstNonEmpty.startsWith('@@ ')
+    || /^(?:commit\s+)?[0-9a-f]{7,40}\b/.test(firstNonEmpty)
+  ) {
+    return false
+  }
+  const hasTestSummary = extractTestEvidence(text) !== undefined
+  const hasExitCode =
+    /\[exit code: -?\d+\]/i.test(text)
+    || /(?:exit code|exited with code|process exited with code)[:=\s]+-?\d+/i.test(text)
+  const hasNpmScriptHeader = /^>\s+\S+@\S+\s+\S+/m.test(text)
+  return hasTestSummary || (hasExitCode && hasNpmScriptHeader)
+}
+
+/**
  * 源码或混合证据判定：
  * - 含多处 markdown 代码围栏；
- * - 含 `git diff` 补丁块（`diff --git` / `@@ -x,y +x,y @@`）；
+ * - 含 `git diff` 补丁块（`diff --git` / `@@ -x,y +x,y @@`），除非是带测试汇总/脚本退出码的构建日志；
  * - 含至少 5 行带行号的源码切片（`1: ...` 或 `1\t...`），说明是单文件或多文件混合读取输出；
  * - 代码行占比 >= 45%。
  */
 function looksLikeSourceCode(text: string): boolean {
-  if (/^diff --git\s+/m.test(text) || /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(text)) return true
+  const hasDiff = /^diff --git\s+/m.test(text) || /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(text)
+  if (hasDiff && !isEmbeddedDiffInBuildOrTestLog(text)) return true
   let fences = 0
   for (const line of text.split('\n').slice(0, 600)) {
     if (stripLineNumberPrefix(line).trim().startsWith('```')) fences += 1
@@ -741,8 +777,19 @@ function looksLikeSourceCode(text: string): boolean {
   let code = 0
   let numbered = 0
   let nonEmpty = 0
+  let inEmbeddedDiffHunk = false
   for (const raw of text.split('\n').slice(0, 600)) {
     if (raw.trim() === '') continue
+    if (hasDiff) {
+      if (raw.startsWith('diff --git ') || raw.startsWith('--- a/') || raw.startsWith('+++ b/') || raw.startsWith('@@ ')) {
+        inEmbeddedDiffHunk = true
+        continue
+      }
+      if (inEmbeddedDiffHunk && (raw.startsWith('+') || raw.startsWith('-') || raw.startsWith(' '))) {
+        continue
+      }
+      inEmbeddedDiffHunk = false
+    }
     if (LINE_NUMBER_PREFIX.test(raw)) numbered += 1
     const trimmed = stripLineNumberPrefix(raw).trim()
     if (trimmed === '') continue

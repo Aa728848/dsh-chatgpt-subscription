@@ -226,6 +226,18 @@ describe('cacheWarmupBudget 预热期判定', () => {
     expect(cacheWarmupBudget('s', t0 + 10_000).warmup).toBe(true)
   })
 
+  it('长会话稳态延续：上一轮 686848 cached + 385 input 的全部 256-token 块在本轮（687104 cached + 22991 input，96.76%）100% 命中时，保持稳态不清零', () => {
+    const t0 = 1_000_000
+    recordCacheWarmupUsage(usage({ sessionId: 's-long', cached: 686_592, inputTokens: 461, at: t0 }))
+    recordCacheWarmupUsage(usage({ sessionId: 's-long', cached: 686_848, inputTokens: 385, at: t0 + 5_000 }))
+    // 本轮携带 22,991 tokens 工具输出，导致比值 687104 / 710095 = 96.76% < 97%，但前缀从 686848 增长到 687104（完全覆盖 floor(687233/256)*256）
+    recordCacheWarmupUsage(usage({ sessionId: 's-long', cached: 687_104, inputTokens: 22_991, at: t0 + 10_000 }))
+    const budget = cacheWarmupBudget('s-long', t0 + 15_000)
+    expect(budget.warmup).toBe(false)
+    expect(budget.maxChars).toBe(8000)
+    expect(budget.consecutiveHits).toBe(3)
+  })
+
   it('空闲超过 25 分钟（cacheTtlMs）自动预判缓存已冷，预算当场退回预热期 1200', () => {
     const t0 = 1_000_000
     recordCacheWarmupUsage(usage({ sessionId: 's', cached: 2000, inputTokens: 10, at: t0 }))

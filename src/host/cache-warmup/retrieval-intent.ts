@@ -66,12 +66,22 @@ function messageText(data: unknown): string {
 }
 
 /**
- * 最新用户消息是否明确属于导航任务。
+ * 最新用户消息是否明确属于导航任务，或当前会话正处于只读计划模式（`plan/mode` `active: true`）。
  * @param agent - 工具执行事件里的 agent。
- * @returns 只有明确导航且无源码工作信号时为 true。
+ * @returns 明确导航（无源码工作信号）或处于只读计划模式时为 true。
  */
 export function cacheWarmupNavigationIntentOf(agent: unknown): boolean {
   const events = eventsOf(agent)
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (event.type === 'plan/mode') {
+      const data = typeof event.data === 'object' && event.data !== null
+        ? event.data as Record<string, unknown>
+        : undefined
+      if (data?.active === true) return true
+      break
+    }
+  }
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]!
     if (event.type !== 'user/message') continue

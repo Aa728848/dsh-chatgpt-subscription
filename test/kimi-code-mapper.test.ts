@@ -8,6 +8,8 @@ import {
   createStreamState,
   isSideChannelTitleRequest,
   mapReasoningEffort,
+  orderStaticPrefixMessages,
+  prefixFingerprints,
   processAnthropicStreamLine,
   normalizeKimiToolSchema,
   processOpenAIStreamLine,
@@ -880,5 +882,130 @@ describe('the side-channel title request', () => {
     // it is reported as stable rather than as a broken prefix.
     buildRequest(conversation, 'openai')
     expect(getLastDriftCause('sess-main')).toBe('stable')
+  })
+})
+
+describe('entropy-sorted static prefix ordering & fingerprinting', () => {
+  it('orders leading bootstrap reminders from most static to most dynamic before the user prompt', () => {
+    const req = options({
+      system: 'You are an AI agent.',
+      messages: [
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '把本项目的所有issues全部解决' }] } as unknown as Message,
+        {
+          role: 'user',
+          source: { kind: 'agent-instructions' },
+          content: [{
+            type: 'text',
+            text: '<system-reminder>\nThe following workspace instructions may be relevant.\n\nInstructions from: AGENTS.md\nRepo rule\n\nInstructions from: ~/.dsh/AGENTS.md\nGlobal rule\n</system-reminder>',
+          }],
+        } as unknown as Message,
+        {
+          role: 'user',
+          source: { kind: 'runtime-context' },
+          content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\nYou are the root agent. Your name is "lead".' }],
+        } as unknown as Message,
+        {
+          role: 'user',
+          source: { kind: 'progress-updates-language' },
+          content: [{ type: 'text', text: 'Progress update output language override: Write in Simplified Chinese.' }],
+        } as unknown as Message,
+        {
+          role: 'user',
+          source: { kind: 'skill-catalog' },
+          content: [{ type: 'text', text: '<system-reminder>\nA skill is a reusable set of task-specific instructions.\n</system-reminder>' }],
+        } as unknown as Message,
+      ],
+    })
+
+    const built = buildOpenAIRequest(req)
+    const msgs = built.messages as Array<{ role: string; content: string }>
+    expect(msgs.map((m) => m.role)).toEqual(['system', 'user', 'user', 'user', 'user', 'user'])
+    expect(msgs[1]!.content).toContain('Progress update output language override:')
+    expect(msgs[2]!.content).toContain('The following workspace instructions')
+    // Global ~/.dsh/AGENTS.md normalized ahead of workspace AGENTS.md
+    expect(msgs[2]!.content.indexOf('~/.dsh/AGENTS.md')).toBeLessThan(msgs[2]!.content.indexOf('Instructions from: AGENTS.md'))
+    expect(msgs[3]!.content).toContain('A skill is a reusable set')
+    expect(msgs[4]!.content).toContain('Current runtime context.')
+    expect(msgs[5]!.content).toBe('把本项目的所有issues全部解决')
+  })
+
+  it('produces an identical staticPrefixHash across root session and subagents despite different runtime-context and mandate briefs', () => {
+    const sharedBootstrap = [
+      {
+        role: 'user',
+        source: { kind: 'agent-instructions' },
+        content: [{ type: 'text', text: '<system-reminder>\nThe following workspace instructions...\n</system-reminder>' }],
+      },
+      {
+        role: 'user',
+        source: { kind: 'progress-updates-language' },
+        content: [{ type: 'text', text: 'Progress update output language override: Simplified Chinese' }],
+      },
+      {
+        role: 'user',
+        source: { kind: 'skill-catalog' },
+        content: [{ type: 'text', text: '<system-reminder>\nA skill is a reusable set of task-specific instructions.\n</system-reminder>' }],
+      },
+    ]
+
+    const rootFp = prefixFingerprints(options({
+      system: 'sys',
+      messages: [
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'root prompt' }] } as unknown as Message,
+        ...sharedBootstrap as unknown as Message[],
+        { role: 'user', source: { kind: 'runtime-context' }, content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes...\nYour name is "lead".' }] } as unknown as Message,
+      ],
+    }))
+    const subFp = prefixFingerprints(options({
+      system: 'sys',
+      messages: [
+        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '```dsh-mandate-v2\n{"brief_id":"b-1"}\n```' }] } as unknown as Message,
+        ...sharedBootstrap as unknown as Message[],
+        { role: 'user', source: { kind: 'runtime-context' }, content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes...\nYour name is "scout-stream".' }] } as unknown as Message,
+      ],
+    }))
+
+    expect(rootFp.staticPrefixHash).toBeDefined()
+    expect(rootFp.staticPrefixHash).toBe(subFp.staticPrefixHash)
+  })
+
+  it('keeps mid-conversation Updated/Additional instructions anchored at their tail history position and hoists static bootstrap ahead of compact-checkpoint', () => {
+    const postCompactMessages = [
+      {
+        role: 'user',
+        source: { kind: 'compact-checkpoint' },
+        content: [{ type: 'text', text: 'This is an automatically generated checkpoint condensing an earlier span of the conversation' }],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'retained assistant turn' }],
+      },
+      {
+        role: 'user',
+        source: { kind: 'agent-instructions' },
+        content: [{ type: 'text', text: '<system-reminder>\nThe following workspace instructions may be relevant.\n</system-reminder>' }],
+      },
+      {
+        role: 'user',
+        source: { kind: 'progress-updates-language' },
+        content: [{ type: 'text', text: 'Progress update output language override: Simplified Chinese' }],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'step 748 reply' }],
+      },
+      {
+        role: 'user',
+        source: { kind: 'agent-instructions' },
+        content: [{ type: 'text', text: '<system-reminder>\nAdditional instructions from: .debug\\b\\AGENTS.md\n</system-reminder>' }],
+      },
+    ] as unknown as Message[]
+
+    const ordered = orderStaticPrefixMessages(postCompactMessages)
+    expect((ordered[0]!.content[0] as { text: string }).text).toContain('Progress update output language override:')
+    expect((ordered[1]!.content[0] as { text: string }).text).toContain('The following workspace instructions')
+    expect((ordered[2]!.content[0] as { text: string }).text).toContain('This is an automatically generated checkpoint')
+    // The Additional instructions from .debug\b\AGENTS.md stays at the very end!
+    expect((ordered[ordered.length - 1]!.content[0] as { text: string }).text).toContain('Additional instructions from: .debug\\b\\AGENTS.md')
   })
 })
