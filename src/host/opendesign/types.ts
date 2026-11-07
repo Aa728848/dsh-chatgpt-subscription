@@ -190,8 +190,13 @@ export interface OpenDesignModelMeta {
  * The subscription's models at release time, keyed by wire id.
  *
  * Id spellings and prices are transcribed from MODEL_PRICES_URL (fetched
- * 2026-10-21, 37 entries, all chat models — the plan's image models are priced
- * per call and are not in it). Display names use the pricing page's spelling
+ * 2026-11-07, 41 entries, all chat models — the plan's image models are priced
+ * per call and are not in it). A variant the list prices but no other source
+ * describes separately (`deepseek-v4.1-flash-eco`, `gpt-6.1-terra`, `hy4`,
+ * `kimi-k3.1-pro`, added 2026-11-07) transcribes only its price from that list;
+ * its window, output cap, modalities and ladder are inherited from the sibling
+ * row of the same family, which is the rule `deepseek-v4-flash-vision-exp`
+ * already follows. Display names use the pricing page's spelling
  * where that page lists the model (https://open-design.ai/pricing/) and are
  * derived from the id otherwise; the live catalog's own name wins once one is
  * read. Windows, output caps, modalities and ladders come from the sibling
@@ -208,6 +213,8 @@ export const MODEL_CATALOG: Readonly<Record<string, OpenDesignModelMeta>> = Obje
   'claude-sonnet-5': { name: 'Claude Sonnet 5', pricing: { input: 2, output: 10 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'claude-sonnet-5.5': { name: 'Claude Sonnet 5.5', pricing: { input: 2, output: 10 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'deepseek-v4.1-flash': { name: 'DeepSeek V4.1 Flash', pricing: { input: 0.3, output: 1.2 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text', 'image'], efforts: ['none', 'low', 'high', 'max'], defaultEffort: 'high' },
+  // Price from the public list; the rest of the row is its sibling's (above).
+  'deepseek-v4.1-flash-eco': { name: 'DeepSeek V4.1 Flash Eco', pricing: { input: 0.3, output: 1.2 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text', 'image'], efforts: ['none', 'low', 'high', 'max'], defaultEffort: 'high' },
   'deepseek-v4-flash': { name: 'DeepSeek V4 Flash', pricing: { input: 0.44, output: 1.32 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text'], efforts: ['none', 'low', 'medium', 'high'], defaultEffort: 'high' },
   'deepseek-v4-flash-vision-exp': { name: 'DeepSeek V4 Flash Vision Exp', pricing: { input: 0.44, output: 1.32 }, contextWindow: 1_000_000, input: ['text', 'image'], efforts: ['none', 'high', 'max'], defaultEffort: 'high' },
   'deepseek-v4-pro': { name: 'DeepSeek V4 Pro', pricing: { input: 1.32, output: 3.96 }, contextWindow: 1_000_000, maxTokens: 384_000, input: ['text'], efforts: ['none', 'low', 'high', 'max'], defaultEffort: 'high' },
@@ -221,15 +228,24 @@ export const MODEL_CATALOG: Readonly<Record<string, OpenDesignModelMeta>> = Obje
   'gpt-5.6-sol': { name: 'GPT-5.6 Sol', pricing: { input: 4, output: 20 }, contextWindow: 1_050_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'gpt-5.6-terra': { name: 'GPT-5.6 Terra', pricing: { input: 2, output: 12 }, contextWindow: 1_050_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'gpt-6.1-sol': { name: 'GPT-6.1 Sol', pricing: { input: 2, output: 10 }, contextWindow: 1_050_000, maxTokens: 128_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  // Price from the public list; window, cap, modalities and ladder inherited
+  // from `gpt-6.1-sol`, the sibling this one is the cheaper member of.
+  'gpt-6.1-terra': { name: 'GPT-6.1 Terra', pricing: { input: 1, output: 5 }, contextWindow: 1_050_000, maxTokens: 128_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'gpt-6-astra': { name: 'GPT-6 Astra', pricing: { input: 10, output: 50 }, contextWindow: 1_050_000, maxTokens: 128_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'gpt-6-luna': { name: 'GPT-6 Luna', pricing: { input: 0.1, output: 0.5 }, contextWindow: 1_050_000, maxTokens: 128_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'gpt-6-sol': { name: 'GPT-6 Sol', pricing: { input: 2, output: 10 }, contextWindow: 1_050_000, maxTokens: 128_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
   'grok-4.5': { name: 'Grok 4.5', pricing: { input: 2, output: 6 }, contextWindow: 500_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high'] },
   'grok-4.6': { name: 'Grok 4.6', pricing: { input: 2, output: 6 }, contextWindow: 500_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh'] },
   'grok-4.7': { name: 'Grok 4.7', pricing: { input: 2, output: 6 }, contextWindow: 500_000, input: ['text', 'image'], efforts: ['low', 'medium', 'high', 'xhigh'] },
+  // Price from the public list; the row is `hy4-preview`'s, this being the same
+  // family's listing at half the price.
+  'hy4': { name: 'Hunyuan H4', pricing: { input: 0.417, output: 1.2505 }, contextWindow: 1_048_576, input: ['text'], efforts: ['low', 'medium', 'high'] },
   'hy4-preview': { name: 'Hunyuan H4 Preview', pricing: { input: 0.834, output: 2.501 }, contextWindow: 1_048_576, input: ['text'], efforts: ['low', 'medium', 'high'] },
   'kimi-k2.7-code': { name: 'Kimi K2.7 Code', pricing: { input: 0.95, output: 4 }, contextWindow: 262_144, maxTokens: 262_144, input: ['text', 'image'], efforts: ['none', 'low', 'medium', 'high'] },
   'kimi-k3': { name: 'Kimi K3', pricing: { input: 3, output: 15 }, contextWindow: 1_048_576, maxTokens: 131_072, input: ['text', 'image'], efforts: ['low', 'high', 'max'] },
+  // Price from the public list; window, cap, modalities and ladder inherited
+  // from `kimi-k3`.
+  'kimi-k3.1-pro': { name: 'Kimi K3.1 Pro', pricing: { input: 2, output: 10 }, contextWindow: 1_048_576, maxTokens: 131_072, input: ['text', 'image'], efforts: ['low', 'high', 'max'] },
   // 下面三行曾写作 `reasoning: false`，依据是 command-code 注册表里同族条目的
   // 空档位标注。该依据不成立：空档位只说明没有来源声明档位，不等于非推理模型
   // （docs/opendesign-line-plan.md §3 决策 8），而同族的 cline-pass 行

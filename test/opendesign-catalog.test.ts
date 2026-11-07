@@ -95,6 +95,26 @@ describe('resolveModelInfo', () => {
     }
   })
 
+  it('advertises the four models the price list gained after the 2026-10-21 transcription', () => {
+    // Prices are the public list's own figures (MODEL_PRICES_URL, fetched
+    // 2026-11-07: 41 chat models). Window, output cap, modalities and ladder are
+    // inherited from each variant's sibling row, because no source publishes
+    // them per variant — the same rule `deepseek-v4-flash-vision-exp` follows.
+    const expected = [
+      { id: 'deepseek-v4.1-flash-eco', name: 'DeepSeek V4.1 Flash Eco', pricing: { input: 0.3, output: 1.2 }, contextWindow: 1_000_000 },
+      { id: 'gpt-6.1-terra', name: 'GPT-6.1 Terra', pricing: { input: 1, output: 5 }, contextWindow: 1_050_000 },
+      { id: 'hy4', name: 'Hunyuan H4', pricing: { input: 0.417, output: 1.2505 }, contextWindow: 1_048_576 },
+      { id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro', pricing: { input: 2, output: 10 }, contextWindow: 1_048_576 },
+    ]
+    for (const want of expected) {
+      expect(DEFAULT_MODELS, want.id).toContain(want.id)
+      const info = resolveModelInfo(want.id, { synced: [] })
+      expect(info.displayName, want.id).toBe(want.name)
+      expect(info.pricing, want.id).toEqual(want.pricing)
+      expect(info.contextWindow, want.id).toBe(want.contextWindow)
+    }
+  })
+
   it('the user override beats every published window', () => {
     const info = resolveModelInfo('gpt-6-luna', {
       synced: [{ id: 'gpt-6-luna', contextWindow: 272_000 }],

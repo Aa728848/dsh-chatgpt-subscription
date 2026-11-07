@@ -42,7 +42,7 @@
 | `step-code` | Step Code（Step Plan 订阅） | OpenAI Chat Completions | 云端轮询浏览器授权 / Platform API Key / 只读导入 `stepcode` | 纯实时运行时发现 | `/step-code/api` |
 | `cline-pass` | Cline Pass | OpenAI Chat Completions | WorkOS 设备码 OAuth（自动续期）/ API Key 兼容回退 | 随包兜底 + `recommended-models` / models.dev / 网关目录 | `/cline-pass/api` |
 | `qoder` | Qoder（订阅） | Qoder 自有（COSY 签名 + 信封 SSE） | 浏览器设备流（全球区）/ 粘贴 PAT / 只读导入 `qodercli` | 实时 COSY 签名发现 + 随包能力兜底表 | `/qoder/api` |
-| `opendesign` | OpenDesign | OpenAI Chat Completions | AMR 浏览器设备授权（签发控制 Key + 运行时 Key）/ 粘贴 API Key | 随包 37 模型表 + AMR 控制面与实时 `/v1/models` | `/opendesign/api` |
+| `opendesign` | OpenDesign | OpenAI Chat Completions | AMR 浏览器设备授权（签发控制 Key + 运行时 Key）/ 粘贴 API Key | 随包 41 模型表 + AMR 控制面与实时 `/v1/models` | `/opendesign/api` |
 | `workbuddy-subscription` | WorkBuddy（CodeBuddy 订阅） | OpenAI `/v2/chat/completions`；国区 Claude 走 `/v1/messages` | 浏览器轮询授权 / 只读采纳 CodeBuddy 桌面端登录态 | 实时 `/v3/config` + 本地快照与随包兜底 | `/workbuddy/api` |
 | `ollama` | Ollama | Ollama Native `/api/chat` + OpenAI `/v1/chat/completions` | 粘贴 Ollama Cloud API Key | 实时 `/api/tags` + `/api/show` 按模型元数据探测 | `/ollama/api` |
 
