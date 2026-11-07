@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ProxyManager,
   detectSystemProxy,
@@ -14,6 +14,31 @@ import {
   parseWindowsProxyRegistry,
   shouldBypassProxy,
 } from '../src/host/proxy-manager.ts'
+
+/**
+ * 本文件不许真的跑系统探测命令。
+ *
+ * `detectSystemProxy()` 的 win32 分支跑 `reg query`、macOS 分支跑 `scutil`、Linux 分支跑
+ * `gsettings`；放任它们真跑，等于让每次 `npm test` 在跑测试的机器上 fork 真实进程。
+ * 这里换成「记录 + 固定回显」的替身：#19 / #91 的回归点（探测必须带 `windowsHide`，
+ * 且不再经过 `cmd.exe`）于是变成一条可以断言的调用记录。
+ *
+ * 夹具只能写死在这里：`vi.mock` 的工厂会被提升到全部 import 之前求值，引用外面的
+ * `const` 会撞上 TDZ。
+ */
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  const fixtures: Record<string, string> = {
+    'reg.exe': '    ProxyEnable    REG_DWORD    0x1\n    ProxyServer    REG_SZ    127.0.0.1:7890\n',
+    scutil: '  HTTPSEnable : 1\n  HTTPSPort : 8443\n  HTTPSProxy : 127.0.0.1\n',
+    gsettings: "'manual'",
+  }
+  const execFileSync = vi.fn((file: string, _args: readonly string[], _options: Record<string, unknown>) => fixtures[file] ?? '')
+  return { ...actual, execFileSync }
+})
+
+const childProcess = await import('node:child_process')
+const probeSpy = vi.mocked(childProcess.execFileSync)
 
 describe('Proxy URL Normalization', () => {
   it('normalizes host:port to http:// URL', () => {
@@ -411,6 +436,58 @@ describe('Linux system proxy detection', () => {
 
   it('falls back to the environment when the desktop reports nothing', () => {
     expect(detectSystemProxy('linux', { HTTPS_PROXY: 'http://127.0.0.1:8888' }, () => null)).toBe('http://127.0.0.1:8888')
+  })
+})
+
+describe('System probe launch shape (#19 / #91)', () => {
+  beforeEach(() => {
+    probeSpy.mockClear()
+  })
+
+  function probeCall(index = 0): { file: string; args: readonly string[]; options: Record<string, unknown> } {
+    const [file, args, options] = probeSpy.mock.calls[index] as unknown as [
+      string,
+      readonly string[],
+      Record<string, unknown>,
+    ]
+    return { file, args, options }
+  }
+
+  it('runs reg.exe directly and hides its console window', () => {
+    expect(detectSystemProxy('win32', {})).toBe('http://127.0.0.1:7890')
+
+    const probe = probeCall()
+    // 直接起 reg.exe：中间那层 `cmd.exe /d /s /c` 正是 Windows 给无控制台宿主新分配可见控制台的那一层。
+    expect(probe.file).toBe('reg.exe')
+    expect(probe.args).toEqual(['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'])
+    expect(probe.options).toMatchObject({ windowsHide: true })
+  })
+
+  it('hides the console window of the macOS scutil probe', () => {
+    expect(detectSystemProxy('darwin', {})).toBe('http://127.0.0.1:8443')
+
+    const probe = probeCall()
+    expect(probe.file).toBe('scutil')
+    expect(probe.args).toEqual(['--proxy'])
+    expect(probe.options).toMatchObject({ windowsHide: true })
+  })
+
+  it('hides the console window of the Linux gsettings probe', () => {
+    // 替身对每个键都回同一个值，于是解析不出可用代理，探测按设计回落到环境变量。
+    expect(detectSystemProxy('linux', { HTTPS_PROXY: 'http://127.0.0.1:9999' })).toBe('http://127.0.0.1:9999')
+
+    const probe = probeCall()
+    expect(probe.file).toBe('gsettings')
+    expect(probe.args).toEqual(['get', 'org.gnome.system.proxy mode'])
+    expect(probe.options).toMatchObject({ windowsHide: true })
+  })
+
+  it('falls back to the environment when the probe itself fails', () => {
+    // 沙箱里没有 reg.exe、或权限不足时，探测失败不能变成「这条线路没代理可用」。
+    probeSpy.mockImplementationOnce(() => {
+      throw new Error('spawn reg.exe ENOENT')
+    })
+    expect(detectSystemProxy('win32', { HTTPS_PROXY: 'http://127.0.0.1:9999' })).toBe('http://127.0.0.1:9999')
   })
 })
 

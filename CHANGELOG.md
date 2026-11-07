@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **[proxy] 系统代理探测不再为无控制台宿主闪出 cmd 黑窗，win32 也不再经过 shell 层（#91）**
+  - **根因**：#19 曾以 completed 关闭，但修复从未进入 `src/host/proxy-manager.ts`——win32 分支的 `execSync('reg query …')` 一直缺 `windowsHide`。`execSync` 默认经 `cmd.exe /d /s /c`，当宿主自身没有控制台时（detached 启动的 `dsh web`、GUI 拉起的父进程），Windows 会为这条短命 shell **新分配一个可见控制台**；又因为系统代理缓存 TTL 只有 5 秒，`resolveActiveProxyUrl()` 每跨过一次 TTL 的请求都会复现一次黑窗。
+  - **修法**：三条探测（win32 `reg query`、macOS `scutil --proxy`、Linux `gsettings get`）统一改走新增的 `runSystemProbe()`，以 `execFileSync` + `windowsHide: true` 直接起可执行文件：既不再有 `cmd.exe` 这一层（`reg.exe` 的键路径作为独立参数传入，无需 shell 引号），也不会再分配可见控制台。macOS/Linux 上 `windowsHide` 是空操作，但让三个平台的意图只写一次。
+  - **不改的部分**：`SYSTEM_PROXY_CACHE_TTL_MS` 仍是 5 秒。把它放宽到 30–60 秒会改变「改完系统代理多久生效」的用户可见语义，属于产品取舍，不在本次修复内；`proxyMode` 为 `direct`/`custom` 时本就不调用探测，无需再改。
+  - **回归**：`test/proxy-manager.test.ts` 用 `vi.mock('node:child_process')` 记录探测调用（同时保证测试绝不真的 fork 系统命令），新增「System probe launch shape (#19 / #91)」4 条断言：win32 直接起 `reg.exe` 且参数为 `['query', 'HKCU\Software\…\Internet Settings']`、macOS/Linux 分支同样带 `windowsHide: true`、探测抛错（如沙箱里没有 `reg.exe`）仍回落环境变量。反向验证：摘掉 `windowsHide` 后前 3 条立即失败。
+
 ## 0.62.0 - 2026-11-07
 
 - **[opendesign] 随包模型表补齐价目表新增的 4 个模型（37 → 41）**

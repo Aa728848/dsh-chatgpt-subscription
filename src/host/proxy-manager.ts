@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -261,12 +261,33 @@ export function shouldBypassProxy(target: URL | string, noProxyList = ''): boole
 }
 
 /**
+ * Run one system probe with no console window and no shell layer.
+ *
+ * `windowsHide` is not cosmetic here. `execSync` runs through `cmd.exe /d /s /c`,
+ * and a host that has no console of its own (a detached `dsh web` host on Windows,
+ * or any GUI-launched parent) gets a NEW VISIBLE console allocated for that
+ * short-lived shell — the black window that flashed on every re-detection, because
+ * the proxy cache TTL is only 5 seconds (#19, #91). `execFileSync` additionally
+ * drops the shell hop, so one probe is one process instead of two and its argument
+ * needs no quoting. `windowsHide` is a no-op on macOS and Linux, but it states the
+ * intent once for every platform.
+ */
+function runSystemProbe(file: string, args: string[]): string {
+  return execFileSync(file, args, {
+    timeout: 1500,
+    encoding: 'utf-8',
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+}
+
+/**
  * Read one GNOME proxy setting; `null` when `gsettings` is absent or the key is
  * unreadable (headless box, no dconf session).
  */
 function readGsettings(key: string): string | null {
   try {
-    const stdout = execSync(`gsettings get ${key}`, { timeout: 1500, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const stdout = runSystemProbe('gsettings', ['get', key])
     return stdout.trim()
   } catch {
     return null
@@ -306,18 +327,14 @@ export function detectSystemProxy(
 ): string | null {
   try {
     if (platform === 'win32') {
-      const stdout = execSync(
-        'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"',
-        { timeout: 1500, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
-      )
+      const stdout = runSystemProbe('reg.exe', [
+        'query',
+        'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
+      ])
       const detected = parseWindowsProxyRegistry(stdout)
       if (detected) return detected
     } else if (platform === 'darwin') {
-      const stdout = execSync('scutil --proxy', {
-        timeout: 1500,
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      })
+      const stdout = runSystemProbe('scutil', ['--proxy'])
       const detected = parseMacOsScutilProxy(stdout)
       if (detected) return detected
     } else if (platform === 'linux') {
