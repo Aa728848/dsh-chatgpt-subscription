@@ -101,7 +101,7 @@
 
 ---
 
-## 六、四个补丁：三个已落地在本仓，一个属内核
+## 六、五个补丁：四个已落地在本仓，一个属内核
 
 按「确定性收益 / 改动面 / 风险」排序。改动全部在本仓，不动内核。
 
@@ -139,6 +139,42 @@ Python 形态换成它自己的读法（`page["lines"]`），不出现这两条 
 - `program completion must be lossless JSON`（3 条）：`packages/ptc-runtime/ptc-runtime-node/src/protocol.ts:88` 与深层快照的拒收；建议上游改成「丢弃 `undefined` 键 / 视为 `null`」。在改之前，本仓只能继续用无损 JSON 那条提示预防。
 - 语法错误的可诊断性：`async-function.ts:26` 直接 `new AsyncFunction`，`Expected unicode escape` 没有行列号。上游若在编译失败时回「第 N 行、具体非法转义序列」，模型一次就能改对。
 
+### P5 损坏负载补读（**已落地**，`src/host/codemode/transport.ts`）
+
+审计之后又出现一类此前没见过的入参损坏：**对象头被切断、并混入工具调用标记**，但 `"code"` 的值仍是完整程序。两条真实样本（`session-b3b7b035`「今日更新内容查询」，线路 `opendesign/deepseek-v4.1-flash-eco`，`reasoningEffort: max`）：
+
+| 位置 | 原始入参（关键片段） | 修复前 |
+| --- | --- | --- |
+| turn3/step15 | `{"code_badge_none">\n</｜｜DSML｜｜: "Check for now-unused imports after deletion", "code": "<878 字符程序>"}` | `program failed (exception): Unexpected token '/'` |
+| turn3/step26 | `{"code_edit_note: "Record real full-suite numbers in CHANGELOG"}` | `codemode: invalid arguments: … (received a string that is not a JSON object: …)` |
+
+两处损坏在**助手消息落库时**就已经存在（早于工具执行），因此归模型/网关侧；本条补丁要修的是我们对它的**处理方式**：旧解析器在整段 `JSON.parse` 失败、按花括号切段也失败之后，落进「纯程序文本」兜底——`looksLikeProgram` 只看了换行与 `await`/`const` 之类的关键字，于是把整段污染文本当源码编译，报一个与真实原因无关的语法错，还丢掉了里面那段能跑的程序（那次调用下一次重试换了个新程序才通过，等于白烧一轮）。
+
+现在 `parseArguments` 在兜底之前多两步：
+
+1. **`looksDamagedArguments`**：只认两种证据——以 `{"` 开头的对象形态，或正文里带 DSML 残留；不拿泛化的 `</` 判据（真程序里写 HTML 字符串是正常的）。
+2. **`splicedMember`**：按键名扫描 `"code"` / `"description"` / `"summary"`，值必须是**完整闭合**的 JSON 字符串（按转义规则扫描后再 `JSON.parse`），解出来就用；补不出来则回 `… the payload looks damaged … resend one complete call with "code" holding the program source`，**不再把整段负载送进求值器**。
+
+真实参数回放（把归档里这两条原样喂给新传输层）：
+
+| 位置 | 结果 |
+| --- | --- |
+| turn3/step15 | 补读出 878 字符程序（与原 `"code"` 值逐字节一致），`new AsyncFunction(...)` 编译通过 |
+| turn3/step26 | 明确拒绝，错误文本含 `looks damaged` 与原始键名 `code_edit_note` |
+
+同一口径的分线数据（2026-11-07 重测，含上述会话）：
+
+| 线路 × 面 | 调用 | 报错 | 失败率 |
+| --- | --- | --- | --- |
+| `opendesign/deepseek-v4.1-flash-eco` × `code_run` | 239 | 49 | **20.5%** |
+| `opendesign/deepseek-v4.1-flash` × `code_run` | 554 | 28 | 5.1% |
+| `opendesign/deepseek-v4.1-flash` × `run_code` | 227 | 4 | **1.8%** |
+| `kimi-code/kimi-for-coding` × `run_code` | 926 | 50 | 5.4% |
+
+eco 线那 49 条里有 39 条是同一种形态：**只发 `description`、不发 `code`**（集中在 dsh-web 的「解决项目 issue 并推送」会话；模型在 reasoning 里规划读/改，工具调用却只写一句描述）。这是模型行为，补丁只能把错误文本说清楚，让重试少烧一轮。
+
+测试：`test/codemode-argument-recovery.test.ts` 新增「参数容错：损坏负载」三条（DSML 污染头、尾部截断、HTML 字符串误伤回归）与「损坏负载补不出程序时明确拒绝」一条。
+
 ---
 
 ## 七、效果与验证
@@ -150,6 +186,7 @@ Python 形态换成它自己的读法（`page["lines"]`），不出现这两条 
 | P1 两段拼接救援 | 7 条 `codemode: expected an arguments object` 全部转成功 | 7/7 的 `arguments` 都能切成「简报 + 程序」，第二段恒含非空 `code` |
 | P1 别名键 / 纯文本 / 描述兜底 | 3 条别名键不再报错；5 条「只发 description」仍要模型重发，但错误文本现在带原始片段 | 见 `test/codemode-argument-recovery.test.ts` |
 | P3 两条文本规则 | 5 条转义/语法 + 4 条 import 里的绝大部分提前消失（预防性） | 属提示词，靠下一批会话验证 |
+| P5 损坏负载补读 | 1 条 `Unexpected token` 转成功（878 字符程序逐字节复原）；补不出值的损坏负载改为明确拒绝 | 归档真实入参回放（见 P5） |
 
 ### 7.2 失败率预期（改动后待观测，不是实测）
 

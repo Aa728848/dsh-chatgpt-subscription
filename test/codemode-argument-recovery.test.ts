@@ -145,6 +145,34 @@ describe('参数容错：别名与纯文本', () => {
   })
 })
 
+describe('参数容错：损坏负载', () => {
+  it('对象头被 DSML 残留污染时，补读 "code" 并照常执行', async () => {
+    // 真实形态（session-b3b7b035 turn3/step15）：网关把对象头切坏，`"code"` 的值仍是完整程序。
+    const program = 'const r = await tools.read({ file_path: "a.ts" })\nreturn r.lines.length'
+    const damaged = '{"code_badge_none">\n</｜｜DSML｜｜: "Check for now-unused imports after deletion", "code": '
+      + JSON.stringify(program) + '}'
+    const { output, probe } = await runTransport(damaged)
+    expect(probe.programs).toEqual([program])
+    // 描述键本身也被切坏了，标题退回源码首行——比整段拒绝多给一轮，标题只是降级。
+    expect(probe.titles[0]).toBe('const r = await tools.read({ file_path: "a.ts" })')
+    expect(output.result).toBe('ok')
+  })
+
+  it('尾部被截断时也补得回来（整段 JSON 本身不合法）', async () => {
+    const { output, probe } = await runTransport('{"code": "return 1", "description": "truncated tail"')
+    expect(probe.programs).toEqual(['return 1'])
+    expect(probe.titles[0]).toBe('truncated tail')
+    expect(output.result).toBe('ok')
+  })
+
+  it('源码里写 HTML 的普通程序不受影响', async () => {
+    const program = 'const html = "</div>"\nreturn html'
+    const { output, probe } = await runTransport(program)
+    expect(probe.programs).toEqual([program])
+    expect(output.result).toBe('ok')
+  })
+})
+
 describe('参数容错：拒绝时给回显', () => {
   const fail = async (args: unknown): Promise<string> => {
     const host = {
@@ -176,6 +204,14 @@ describe('参数容错：拒绝时给回显', () => {
     const message = await fail('{"description": "only a description"')
     expect(message).toContain('not a JSON object')
     expect(message).toContain('{"description"')
+  })
+
+  it('损坏负载补不出程序时明确拒绝，不把整段当源码', async () => {
+    // 真实形态（session-b3b7b035 turn3/step26）：对象头与键名都被切坏，`"code"` 无值可补。
+    const message = await fail('{"code_edit_note: "Record real full-suite numbers in CHANGELOG"}')
+    expect(message).toContain('codemode: invalid arguments')
+    expect(message).toContain('looks damaged')
+    expect(message).toContain('code_edit_note')
   })
 
   it('null 与数字各说各的', async () => {

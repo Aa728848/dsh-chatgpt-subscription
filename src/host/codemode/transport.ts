@@ -953,8 +953,8 @@ interface Narration {
   readonly message: string
 }
 
-/** 参数是怎么读出来的：原生对象、字符串里的 JSON、两段拼接、或只有一段纯程序。 */
-type ArgumentsOrigin = 'object' | 'json' | 'fused' | 'bare'
+/** 参数是怎么读出来的：原生对象、字符串里的 JSON、两段拼接、从损坏负载里补读的字段、或只有一段纯程序。 */
+type ArgumentsOrigin = 'object' | 'json' | 'fused' | 'spliced' | 'bare'
 
 /** 一次参数解析的结果。 */
 interface ParsedArguments {
@@ -1096,6 +1096,74 @@ function looksLikeProgram(text: string): boolean {
   return text.includes('\n') || /\b(await|return|const|let|function|import|console\.)\b/.test(text)
 }
 
+/**
+ * 参数文本像不像一次**被切坏**的工具调用。
+ *
+ * 审计里量到的真实形态（`opendesign/deepseek-v4.1-flash-eco`）：
+ * `{"code_badge_none">\n</｜｜DSML｜｜: "…", "code": "<完整程序>"}` —— 对象头被网关或模型的
+ * DSML 残留污染，但 `"code"` 的值本身是好的。这种文本如果落到「纯程序文本」兜底，会被整段
+ * 当源码编译，报一个与真实原因无关的语法错，还丢掉那段能跑的程序。
+ *
+ * 只认两种证据：以 `{"` 开头的对象形态（合法游离程序不会这样开头），或正文里带 DSML 残留。
+ * 不用泛化的 `</` 判据——一段真程序里写 HTML 字符串是正常的。
+ *
+ * @param text - 已裁剪首尾空白的参数文本。
+ * @returns 是否按「损坏负载」处理。
+ */
+function looksDamagedArguments(text: string): boolean {
+  return text.startsWith('{"') || text.includes('DSML') || text.includes('\uff5c')
+}
+
+/**
+ * 从一段不保证合法的文本里取出一个 JSON 字符串成员的值。
+ *
+ * 键名必须带引号（`"code": "…"`），值必须是**完整闭合**的 JSON 字符串字面量；扫描器按
+ * JSON 的转义规则走，遇到未转义的 `"` 才收尾，再从该字面量 `JSON.parse` 解码，
+ * 因此不会被值内部的引号或反斜杠骗到。
+ *
+ * @param text - 待扫描的文本。
+ * @param key - 成员键名（不带引号）。
+ * @returns 解码后的字符串，或找不到 / 解不开时为 `undefined`。
+ */
+function splicedMember(text: string, key: string): string | undefined {
+  const needle = '"' + key + '"'
+  let from = 0
+  for (;;) {
+    const at = text.indexOf(needle, from)
+    if (at < 0) return undefined
+    from = at + needle.length
+    let index = from
+    while (index < text.length && /\s/.test(text.charAt(index))) index += 1
+    if (text.charAt(index) !== ':') continue
+    index += 1
+    while (index < text.length && /\s/.test(text.charAt(index))) index += 1
+    if (text.charAt(index) !== '"') continue
+    const start = index
+    index += 1
+    let escaped = false
+    while (index < text.length) {
+      const ch = text.charAt(index)
+      if (escaped) {
+        escaped = false
+      } else if (ch === '\\') {
+        escaped = true
+      } else if (ch === '"') {
+        const value = tryJson(text.slice(start, index + 1))
+        if (typeof value === 'string') return value
+        break
+      }
+      index += 1
+    }
+  }
+}
+
+/** 参数是「被切坏的 JSON」时的错误：说明形态，并把下一步写清楚。 */
+function damagedArgumentsError(args: unknown, raw: string): Error {
+  return new Error(invalidArgumentsError(args, raw).message
+    + '; the payload looks damaged (embedded tool-call markup or a truncated JSON object)'
+    + ' — resend one complete call with "code" holding the program source')
+}
+
 /** 从源码首行兜底出一句描述。 */
 function descriptionFromCode(code: string): string {
   const first = code.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? ''
@@ -1160,6 +1228,23 @@ function parseArguments(args: unknown): ParsedArguments {
       raw,
       ...narration === undefined ? {} : { narration },
     }
+  }
+
+  // 损坏负载：还没被上面任何一条救回来的 `{"…"` 形态。先按字段补读——对象头被切坏时，
+  // `"code"` 的值常常仍是完整的（实测那条 878 字符程序可以直接编译）；补不出来就明确拒绝，
+  // 绝不把整段污染文本送进求值器。
+  if (looksDamagedArguments(trimmed)) {
+    const code = splicedMember(trimmed, 'code')
+    if (code !== undefined && code.trim().length > 0) {
+      const description = stringOf(splicedMember(trimmed, 'description'))?.trim()
+        ?? stringOf(splicedMember(trimmed, 'summary'))?.trim()
+      return {
+        record: { code, ...description === undefined ? {} : { description } },
+        origin: 'spliced',
+        raw,
+      }
+    }
+    throw damagedArgumentsError(args, raw)
   }
 
   // 纯程序文本：比严格 schema 多救一种形态，比拒绝多给模型一次机会。
