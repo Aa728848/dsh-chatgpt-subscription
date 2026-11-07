@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **[kimi-code] 删除从未接线的静态前缀预热 helper**
+  - **删的是什么**（`src/host/kimi-code/adapter.ts`）：`maybeWarmupStaticPrefix`、`StaticPrefixWarmupInput`、`StaticPrefixWarmupOutcome`、`MIN_WARMUP_DRAFT_CHARS`、`DEFAULT_MIN_WARMUP_QUOTA_RATIO`，以及因此不再被引用的 `orderStaticPrefixMessages` 导入；`test/kimi-code-adapter.test.ts` 里那条"四道闸门"用例同步删除。
+  - **为什么删**：它自 0.63.0 起只有测试调用、没有生产调用点。四道闸门里最关键的是"输入框草稿 ≥ 6 个字符"，而草稿只有客户端拿得到；宿主能碰到的唯一触发点（真实请求入口）串行预热并不比冷启动本身更快，改成与主请求并行又会在同一前缀上做双份冷预填充。语义不成立，删掉，而不是留一个永远不会跑的接线点。
+  - **未受影响**：冷启动 singleflight（`acquireColdStartWarmup`、`coldStartGroupKey`、25 分钟 TTL 记忆、2.5 秒跟随预算）、子代理突发错峰、标题请求让行、等待期续热（`cache-wait`），以及静态前缀重排（`orderStaticPrefixMessages` 在 mapper 里照旧生效）。
+  - **回归**：`npm run typecheck` 通过；`test/kimi-code-adapter.test.ts`（54 例）、`test/kimi-code-cache-wait.test.ts`、`test/cache-warmup-install.test.ts` 共 102 例通过；全套 Vitest 371 个文件通过 / 2 个跳过（6830 例通过 / 9 例跳过）。
+
 ## 0.63.0 - 2026-11-07
 
 - **[codemode] 全量对齐内核 PTC 生命周期/提交车道/错误语义，新增融合参数救援与子调用入参别名容错**

@@ -9,7 +9,6 @@ import {
   KimiCodeAdapter,
   accountLimitCooldownMs,
   classifyKimiFailure,
-  maybeWarmupStaticPrefix,
   resetColdStartSingleflightForTests,
   resolveDefaultReasoningEffort,
 } from '../src/host/kimi-code/adapter.ts'
@@ -1308,60 +1307,5 @@ describe('the Kimi Code cold-start singleflight', () => {
     releaseSub1!()
     await Promise.all([sub1, sub2])
     expect(calls).toBe(3)
-  })
-
-  it('enforces the 4 gates in maybeWarmupStaticPrefix (draft length, quota threshold, cold check, singleflight)', async () => {
-    const options = generateOptions('k3.1-pro', {
-      system: 'static system',
-      messages: [
-        { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'dynamic user prompt' }] },
-        { role: 'user', source: { kind: 'progress-updates-language' }, content: [{ type: 'text', text: 'Progress update output language override: Simplified Chinese' }] },
-      ] as never,
-    })
-
-    // Gate 2: short or empty draft (model switch with no typing) is rejected
-    const shortDraft = await maybeWarmupStaticPrefix({
-      region: 'mainland-cn',
-      options,
-      draftText: '   ',
-    })
-    expect(shortDraft).toEqual({ warmed: false, reason: 'draft-too-short' })
-
-    // Gate 4: low quota (< 20%) is rejected
-    const lowQuota = await maybeWarmupStaticPrefix({
-      region: 'mainland-cn',
-      options,
-      draftText: '分析并修复全部问题',
-      remainingQuotaRatio: 0.15,
-    })
-    expect(lowQuota).toEqual({ warmed: false, reason: 'quota-low' })
-
-    // All 4 gates pass: sends warmup with maxTokens=1 and only static messages
-    let capturedMaxTokens: number | undefined
-    let capturedMsgCount = 0
-    const warmed = await maybeWarmupStaticPrefix({
-      region: 'mainland-cn',
-      options,
-      draftText: '分析并修复全部问题',
-      remainingQuotaRatio: 0.85,
-      sendWarmup: async (warmupOpts) => {
-        capturedMaxTokens = warmupOpts.maxTokens
-        capturedMsgCount = warmupOpts.messages.length
-        return true
-      },
-    })
-    expect(warmed.warmed).toBe(true)
-    expect(capturedMaxTokens).toBe(1)
-    // Dynamic user prompt was stripped; only the static Tier 1 reminder remained
-    expect(capturedMsgCount).toBe(1)
-
-    // Gate 1 & 3: subsequent call within 25-minute TTL is skipped as already-warm
-    const second = await maybeWarmupStaticPrefix({
-      region: 'mainland-cn',
-      options,
-      draftText: '继续修改另一个问题',
-      remainingQuotaRatio: 0.85,
-    })
-    expect(second).toEqual({ warmed: false, reason: 'already-warm' })
   })
 })

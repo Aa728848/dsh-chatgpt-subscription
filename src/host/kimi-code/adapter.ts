@@ -69,7 +69,6 @@ import {
   mapReasoningEffort,
   MAX_REQUEST_VIDEO_BYTES,
   offloadOldestRequestVideos,
-  orderStaticPrefixMessages,
   prefixFingerprints,
   processAnthropicStreamLine,
   processOpenAIStreamLine,
@@ -960,11 +959,6 @@ const mainSessionHeaderReleases = new Map<string, () => void>()
 const inFlightSubagentBurstLeaders = new Map<string, Promise<void>>()
 const subagentBurstReleases = new Map<string, () => void>()
 
-/** Minimum non-whitespace draft characters required before composer warmup may fire. */
-export const MIN_WARMUP_DRAFT_CHARS = 6
-/** Default minimum remaining quota ratio (20%) required before background warmup may fire. */
-export const DEFAULT_MIN_WARMUP_QUOTA_RATIO = 0.2
-
 /**
  * Forget every remembered prefix and release every waiting follower.
  *
@@ -1125,114 +1119,6 @@ async function acquireSubagentBurstPacing(
   }
   subagentBurstReleases.set(pacingKey, release)
   return release
-}
-
-export interface StaticPrefixWarmupInput {
-  /** Target Kimi Code region (e.g. `mainland-cn`). */
-  readonly region: string
-  /** Candidate request options carrying system prompt, tools, and bootstrap messages. */
-  readonly options: GenerateOptions
-  /** Current composer draft text; must be non-empty (`>= 6` trimmed chars) to prove typing intent. */
-  readonly draftText: string
-  /** Optional known remaining quota ratio (`0..1`); below `minQuotaRatio` skips warmup. */
-  readonly remainingQuotaRatio?: number | null
-  /** Minimum quota ratio required (defaults to `0.2`). */
-  readonly minQuotaRatio?: number
-  /** Optional sender that executes the lightweight `maxTokens: 1` warmup call. */
-  readonly sendWarmup?: (warmupOptions: NormalizedGenerateOptions) => Promise<boolean>
-  /** Optional clock override for tests. */
-  readonly now?: number
-}
-
-export type StaticPrefixWarmupOutcome =
-  | {
-      readonly warmed: false
-      readonly reason: 'draft-too-short' | 'no-prefix' | 'already-warm' | 'in-flight' | 'quota-low' | 'failed'
-    }
-  | {
-      readonly warmed: true
-      readonly groupKey: string
-      readonly warmupOptions: NormalizedGenerateOptions
-    }
-
-/**
- * Intent-driven, 4-gate static prefix warmup helper.
- *
- * Never fires on a bare model switch (`draftText` must have `>= 6` non-whitespace
- * characters), skips when remaining quota is below `20%`, skips when the prefix
- * is already warm within the 25-minute TTL or has an in-flight leader, and locks
- * the prefix group in singleflight while warming only `L0 + L1` (`maxTokens: 1`).
- */
-export async function maybeWarmupStaticPrefix(
-  input: StaticPrefixWarmupInput,
-): Promise<StaticPrefixWarmupOutcome> {
-  try {
-    const draft = typeof input.draftText === 'string' ? input.draftText.trim() : ''
-    if (draft.length < MIN_WARMUP_DRAFT_CHARS) {
-      return { warmed: false, reason: 'draft-too-short' }
-    }
-    const minQuota = input.minQuotaRatio ?? DEFAULT_MIN_WARMUP_QUOTA_RATIO
-    if (
-      typeof input.remainingQuotaRatio === 'number'
-      && Number.isFinite(input.remainingQuotaRatio)
-      && input.remainingQuotaRatio < minQuota
-    ) {
-      return { warmed: false, reason: 'quota-low' }
-    }
-    const normalized = normalizeGenerateOptions(input.options)
-    const groupKey = coldStartGroupKey(input.region, normalized)
-    if (groupKey === undefined) {
-      return { warmed: false, reason: 'no-prefix' }
-    }
-    const now = input.now ?? Date.now()
-    const warmedAt = warmPrefixTimestamps.get(groupKey)
-    if (warmedAt !== undefined && now - warmedAt < CACHE_TTL_MS) {
-      return { warmed: false, reason: 'already-warm' }
-    }
-    if (inFlightColdLeaders.has(groupKey)) {
-      return { warmed: false, reason: 'in-flight' }
-    }
-
-    const orderedNonSystem = orderStaticPrefixMessages(
-      normalized.messages.filter((message) => message.role !== 'system'),
-    )
-    const staticMessages = orderedNonSystem.filter((message) => {
-      const tier = classifyBootstrapUserMessage(message)
-      return tier === 1 || tier === 2 || tier === 3
-    })
-    const systemMessages = normalized.messages.filter((message) => message.role === 'system')
-    const warmupOptions: NormalizedGenerateOptions = {
-      ...normalized,
-      maxTokens: 1,
-      messages: [...systemMessages, ...staticMessages],
-    }
-
-    let resolveLeader!: () => void
-    const promise = new Promise<void>((resolve) => { resolveLeader = resolve })
-    inFlightColdLeaders.set(groupKey, promise)
-    inFlightColdLeaderStartedAt.set(groupKey, now)
-    const release = (): void => {
-      resolveLeader()
-      if (coldLeaderReleases.get(groupKey) !== release) return
-      coldLeaderReleases.delete(groupKey)
-      inFlightColdLeaders.delete(groupKey)
-      inFlightColdLeaderStartedAt.delete(groupKey)
-    }
-    coldLeaderReleases.set(groupKey, release)
-
-    try {
-      const ok = input.sendWarmup ? await input.sendWarmup(warmupOptions) : true
-      if (!ok) return { warmed: false, reason: 'failed' }
-      rememberWarmPrefix(groupKey, now)
-      return { warmed: true, groupKey, warmupOptions }
-    } catch {
-      return { warmed: false, reason: 'failed' }
-    } finally {
-      release()
-    }
-  } catch {
-    return { warmed: false, reason: 'failed' }
-  }
 }
 
 /**
