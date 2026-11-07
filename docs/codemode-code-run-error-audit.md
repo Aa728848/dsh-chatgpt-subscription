@@ -166,9 +166,19 @@ Python 形态换成它自己的读法（`page["lines"]`），不出现这两条 
 
 ```powershell
 npm run typecheck   # host + test + scripts 三份 tsconfig 全部通过
-npm test            # 371 个测试文件、6815 项通过（新增 2 个文件 23 项）
+npm test            # 371 个测试文件、6815 项通过（新增 `codemode-argument-recovery` 10 项与 `codemode-section-shapes` 6 项）
 npm run build       # lib/index.js、lib/codemode.js 等 9 个产物构建成功
 ```
+
+**真实参数回放**（把归档里那 7 条「两段拼接」的原始 `arguments` 原样喂给新传输层的 `presentCall`）：
+
+| 会话 | 救回的源码长度 | 与原第二段的 `code` 逐字节一致 | 卡片标题（原第二段的 description） |
+| --- | --- | --- | --- |
+| `1373d144` | 201 | ✅ | 定位批量删除与行内删除按钮 |
+| `2fe5c25c` ×3 | 497 / 1829 / 2077 | ✅ | Read SquadDetail… / Update English owning note… / Update owning note (en)… |
+| `3ab7a535` ×3 | 451 / 237 / 299 | ✅ | List dsh-agents files / Read SessionTarget definition / Read apply-inject test |
+
+7/7 全部逐字节复原；改动前这 7 条各自只回一句 `codemode: expected an arguments object` 并丢掉整段程序。
 
 ---
 
