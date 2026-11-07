@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.63.1 - 2026-11-07
+
+- **[codemode] 工具调用入参被切断或混入 DSML 残留时补读 `"code"`，不再把整段污染文本当源码编译**
+  - **根因**（`src/host/codemode/transport.ts`）：`opendesign/deepseek-v4.1-flash-eco` 会把工具调用的对象头切坏并混入 `</｜｜DSML｜｜` 残留，但 `"code"` 的值往往仍是完整程序（归档里的真实样本 878 字符、可直接编译）。旧解析器在整段 `JSON.parse` 与按花括号切段都失败后落进「纯程序文本」兜底，把整段污染文本当源码编译，报一个与真实原因无关的 `Unexpected token`，还丢掉了那段能跑的程序。两条真实样本（`session-b3b7b035`「今日更新内容查询」，`reasoningEffort: max`）：`{"code_badge_none">\n</｜｜DSML｜｜: … , "code": "<878 字符程序>"}` 与 `{"code_edit_note: …`；损坏在助手消息落库时即已存在（早于工具执行），归模型/网关侧，本条修的是我们对它的**处理方式**。
+  - **修法**：`parseArguments` 在「纯程序文本」兜底之前新增损坏负载分支，三件套各自只做一件事——`looksDamagedArguments` 只认两种证据（以 `{"` 开头的对象形态、或正文带 DSML 残留，不拿泛化的 `</` 判据，因为真程序里写 HTML 字符串是正常的）；`splicedMember` 按键名扫描 `"code"` / `"description"` / `"summary"`，值必须是完整闭合的 JSON 字符串字面量（按转义规则扫描后再 `JSON.parse`，不会被值内部的引号或反斜杠骗到）；补不出来则 `damagedArgumentsError` 明确拒绝并提示重发一次完整调用，**绝不把整段负载送进求值器**。`description` 缺失时沿用 `summary → 源码首行` 的既有兜底。
+  - **不动的地方**：合法游离程序（含 `<div>` 之类 HTML 字符串）照旧走 `bare` 分支；`fused` 两段拼接、子调用入参别名容错与 `code_tools_*` 发现工具均未改，工具 Schema 未动。
+  - **回归**：`test/codemode-argument-recovery.test.ts` 新增 4 条（DSML 污染头补读后照常执行且标题降级到源码首行、尾部截断仍补得回来、源码含 HTML 的普通程序不受影响、补不出值时明确拒绝并回显实际键名 `code_edit_note`）；`docs/codemode-code-run-error-audit.md` 新增 P5 并记入两条真实入参回放。`npm run typecheck` 通过；全套 Vitest 371 个文件通过 / 2 个跳过（6834 例通过 / 9 例跳过）。
+
 - **[kimi-code] 删除从未接线的静态前缀预热 helper**
   - **删的是什么**（`src/host/kimi-code/adapter.ts`）：`maybeWarmupStaticPrefix`、`StaticPrefixWarmupInput`、`StaticPrefixWarmupOutcome`、`MIN_WARMUP_DRAFT_CHARS`、`DEFAULT_MIN_WARMUP_QUOTA_RATIO`，以及因此不再被引用的 `orderStaticPrefixMessages` 导入；`test/kimi-code-adapter.test.ts` 里那条"四道闸门"用例同步删除。
   - **为什么删**：它自 0.63.0 起只有测试调用、没有生产调用点。四道闸门里最关键的是"输入框草稿 ≥ 6 个字符"，而草稿只有客户端拿得到；宿主能碰到的唯一触发点（真实请求入口）串行预热并不比冷启动本身更快，改成与主请求并行又会在同一前缀上做双份冷预填充。语义不成立，删掉，而不是留一个永远不会跑的接线点。
