@@ -82,6 +82,8 @@ export interface CodemodeExecutor {
   describe(tools: readonly unknown[]): { schemas: readonly unknown[] }
   /** 执行一整批调用。 */
   execute(input: CodemodeBatchInput): Promise<CodemodeBatchResult>
+  /** 重置指定 Agent 的常驻程序环境（对齐内核 `PtcExecutor.reset`）。 */
+  reset?(agent: unknown): Promise<void>
 }
 
 /** 一条 executor 所属的提示词段。 */
@@ -136,6 +138,8 @@ export interface ExecutorHooks {
   onCatalog?(tools: readonly unknown[]): void
   /** 每次 describe 的决策（写日志 / debug 环）。 */
   onDescribe?(decision: DescribeDecision): void
+  /** 重置指定 Agent 的常驻程序环境（对齐内核 `PtcExecutor.reset`）。 */
+  reset?(agent: unknown): Promise<void>
   /** 委托目标；缺省时执行器不可用（入口保证它存在）。 */
   delegate: DelegateExecutor
 }
@@ -213,6 +217,13 @@ export function createCodemodeExecutor(
       })
       return { results, additionalContexts: [], concluded: false }
     },
+    ...(typeof hooks.reset === 'function'
+      ? {
+          async reset(agent: unknown): Promise<void> {
+            await hooks.reset!(agent)
+          },
+        }
+      : {}),
   }
 }
 

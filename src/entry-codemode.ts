@@ -39,9 +39,9 @@ import {
 } from './host/codemode/rules.ts'
 import { findScopeKey, resolveCatalogView, resolveNameView } from './host/codemode/scope.ts'
 import {
+  CodeResetFailedError,
   createTransportDefinition,
   currentCatalogSnapshot,
-  type ActiveRunHandle,
   type CallToolOutcome,
   type CallToolRequest,
   type CatalogEntry,
@@ -72,6 +72,8 @@ interface ToolsServiceLike {
   execute(input: unknown): Promise<ToolBatchResultLike>
   /** 按名字解析定义。 */
   get(name: string, scope?: object): unknown
+  /** 按调用方作用域与步骤准入枚举可见定义（DSH 0.2.2+）。 */
+  definitions?(scope?: unknown, toolSet?: unknown): readonly unknown[]
 }
 
 /** 一次批量执行的结果（只读需要的字段）。 */
@@ -201,69 +203,9 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
     context.effect(() => () => { void retention.dispose() }, 'codemode retained environments')
   }
 
-  /** 会话里一只在飞程序：取消入口 + 这轮运行生效的沙箱模式。 */
-  interface ActiveRun {
-    /** 这轮运行的取消入口。 */
-    readonly controller: AbortController
-    /** 生效的沙箱模式；`undefined` 表示运行时不接管沙箱模式。 */
-    readonly mode?: string
-  }
-
-  /** 在飞运行：会话键 → 该会话里正在跑的程序。 */
-  const activeRuns = new Map<unknown, Set<ActiveRun>>()
-
-  /**
-   * 登记一只在飞运行，返回运行结算时的 disposer。
-   *
-   * 传输层每轮运行（含常驻环境换策略后的重跑）都登记一次，入口因此知道「这一轮跑在哪个
-   * 会话、当时的沙箱模式是什么」。会话切模式时，模式不匹配的运行必须停：常驻环境换策略
-   * 会抛错，而已经跑起来的那一轮不能继续用旧权限往下写。
-   */
-  const trackRun = (run: ActiveRunHandle): (() => void) => {
-    const key = sessionKeyOf(run.agent)
-    if (key === undefined) return () => undefined
-    const record: ActiveRun = {
-      controller: run.controller,
-      ...run.mode === undefined ? {} : { mode: run.mode },
-    }
-    let bucket = activeRuns.get(key)
-    if (bucket === undefined) {
-      bucket = new Set()
-      activeRuns.set(key, bucket)
-    }
-    bucket.add(record)
-    return () => {
-      const current = activeRuns.get(key)
-      if (current === undefined) return
-      current.delete(record)
-      if (current.size === 0) activeRuns.delete(key)
-    }
-  }
-
-  /**
-   * 会话的 `sandbox/mode` 事件：生效模式已经变了的在飞运行直接取消（内核 `PtcCalls` 同此）。
-   *
-   * 只取消「能确认模式变了」的那些：拿不到模式（运行时不管沙箱）或模式相同的运行一律不动。
-   */
-  const cancelOnModeChange = (session: unknown, event: unknown): void => {
-    if (typeof event !== 'object' || event === null) return
-    const record = event as { readonly type?: unknown; readonly data?: unknown }
-    if (record.type !== 'sandbox/mode') return
-    const data = typeof record.data === 'object' && record.data !== null
-      ? (record.data as { readonly mode?: unknown })
-      : undefined
-    const mode = data?.mode
-    if (typeof mode !== 'string') return
-    const key = sessionKeyOf(session)
-    if (key === undefined) return
-    for (const run of activeRuns.get(key) ?? []) {
-      if (run.mode !== undefined && run.mode !== mode) run.controller.abort(new Error('sandbox mode changed'))
-    }
-  }
-
   if (typeof context.on === 'function') {
     try {
-      const off = context.on('session/event', cancelOnModeChange as never, { global: true })
+      const off = context.on('session/event', retention.cancelOnModeChange as never, { global: true })
       if (typeof context.effect === 'function') {
         context.effect(() => () => {
           if (typeof off === 'function') (off as () => void)()
@@ -307,10 +249,32 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       + rules.options.hiddenPrefixes.join(', ') + '). Mount this row inside an agent preset to hide every tool the preset does not own.')
   }
 
-  /** 最近一次 describe 收到的完整定义集（含被遮蔽的）。 */
+  /** 最近一次 describe 收到的完整定义集（含被遮蔽的），作为无 `tools.definitions` 时的回退快照。 */
   let catalog: CatalogEntry[] = []
   const debugRing: unknown[] = []
   let firstDescribeLogged = false
+
+  /**
+   * 解析当前调用方 agent 与步骤准入下的工具清单（对齐内核 `ptc.ts:662`）。
+   *
+   * 优先通过 `ctx.tools.definitions(agent, toolSet)` 实时读取调用方自己的可见集合（含
+   * `agent.ctx` 专属工具与 `tools.restrict` 过滤），避免多会话并发时被另一个会话的
+   * `describe()` 覆盖；测试替身未提供 `definitions` 时回退到最近一次 `catalog`。
+   */
+  const resolveCatalog = (agent?: unknown, toolSet?: unknown): readonly CatalogEntry[] => {
+    if (agent !== undefined && typeof tools.definitions === 'function') {
+      try {
+        const defs = tools.definitions(agent, toolSet)
+        if (Array.isArray(defs) && defs.length > 0) {
+          const entries = defs.map(toCatalogEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
+          if (entries.length > 0) return entries
+        }
+      } catch {
+        // 回退到执行器级最近一次清单。
+      }
+    }
+    return catalog
+  }
 
   const escalateSandbox = async (input: SandboxEscalationInput): Promise<unknown> => {
     const record = typeof input.standingPolicy === 'object' && input.standingPolicy !== null
@@ -357,10 +321,11 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
   }
 
   const host: CodemodeHost = {
-    catalog: () => catalog,
+    catalog: (agent?: unknown, toolSet?: unknown) => resolveCatalog(agent, toolSet),
     runtime: runtimeOf,
     stateOwner: (agent) => retention.owner(agent),
     releaseOwner: (owner) => retention.release(owner),
+    awaitPredecessors: (agent, signal) => retention.awaitPredecessors(agent, signal),
     runAuthority,
     escalateSandbox,
     createImageContext(content: readonly unknown[]): unknown {
@@ -369,7 +334,7 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
         source: { kind: PLUGIN_MESSAGE_SOURCE_KIND },
       })
     },
-    trackRun,
+    trackRun: (run) => retention.trackRun(run),
     shapeDispatchLog,
     async callTool(request: CallToolRequest): Promise<CallToolOutcome> {
       const call = {
@@ -450,6 +415,32 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
     },
     onCatalog: (definitions) => {
       catalog = definitions.map(toCatalogEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
+    },
+    async reset(agent: unknown): Promise<void> {
+      const runtime = runtimeOf()
+      if (runtime === undefined) {
+        throw new Error('codemode: no PTC runtime is mounted (ctx.ptcRuntime); the program transport is unavailable')
+      }
+      if (!runtime.retainsState) {
+        throw new CodeResetFailedError('The PTC runtime does not retain an environment')
+      }
+      try {
+        await retention.reset(agent, () => {
+          const inject = typeof agent === 'object' && agent !== null
+            ? (agent as { readonly inject?: (message: unknown) => void }).inject
+            : undefined
+          if (typeof inject === 'function') {
+            inject.call(agent, createUserMessage({
+              content: [{ type: 'text', text: 'Program environment reset; retained variables cleared. Completed tool effects remain.' }],
+              source: { kind: PLUGIN_MESSAGE_SOURCE_KIND },
+            }))
+          }
+        })
+      } catch (error: unknown) {
+        throw new CodeResetFailedError(
+          'Program environment reset failed: ' + messageOf(error) + '. State may not be cleared; retry the host reset before running more code.',
+        )
+      }
     },
     onDescribe: (decision) => {
       const hidden = summarizeHidden(decision.masked)
@@ -539,25 +530,6 @@ function errorInfoOf(result: ToolResultLike): {
 /** 非空字符串，或 `undefined`。 */
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
-}
-
-/**
- * 一个会话的身份键。
- *
- * 优先用会话 id（与内核 `session/event` 监听器里的 `session.id` 对齐）；取不到 id 时退回
- * 会话对象本身——调用方 agent 上的 `session` 与事件里的会话是同一个对象，靠身份比对同样
- * 成立。连会话都没有时返回 `undefined`，这类运行不参与取消。
- *
- * @param value - 一个 agent，或一个会话对象。
- * @returns 会话 id / 会话对象，或 `undefined`。
- */
-function sessionKeyOf(value: unknown): unknown {
-  if (typeof value !== 'object' || value === null) return undefined
-  const nested = (value as { readonly session?: unknown }).session
-  const session = typeof nested === 'object' && nested !== null ? nested : value
-  const id = (session as { readonly id?: unknown }).id
-  if (typeof id === 'string' && id.length > 0) return id
-  return session
 }
 
 /** 把内容块里的文本拼起来。 */

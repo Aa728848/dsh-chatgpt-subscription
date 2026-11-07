@@ -330,10 +330,12 @@ export function buildCodemodeSectionText(input: SectionInput): string {
     '- Anything not listed above (MCP tools, hidden plugin tools) answers with its **declared output schema**: call `' + describeTool + '({ name })` and read the top-level keys before picking a field. One discovery call is far cheaper than the `TypeError` that loses the whole program.',
     '- Discovery returns whole objects too: `' + listTool + '` answers `{ tools: [{ name, description, namespace }] }`, `' + searchTool + '` answers `{ tools: [{ name, namespace, description, parameters, output? }], fallback? }`, and `' + describeTool + '` answers `{ found, name?, namespace?, description?, parameters?, output? }`.',
     '- Tool argument objects and `return` values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or print it with `console.log`.',
+    '- Parameter keys: `read`, `edit`, `write`, and `read_image` take `file_path` (not `path`); `glob` and `grep` take `path`; `win_bash` takes `workdir` (not `cwd`).',
     // 程序文本本身的两类陷阱：写错了连求值都进不去，报错还没有行号。措辞只描述事实，不给自动改写。
     ...(python ? [] : [
       '- Paths and regexes: write a Windows path with forward slashes (`C:/Users/...`) or wrap it in `String.raw`; a literal `C:\\Users` inside an ordinary string is read as the escape `\\U` and the program never starts (`Expected unicode escape`). Regex backslashes (`\\d`, `\\.`) have the same trap — double them or use `String.raw`.',
       '- A program is not a module: `import(\'./src/x.ts\')` and `import(\'vscode\')` cannot resolve — the program runs in a fresh process with no module graph. Read files with `tools.read`; `await import(\'node:fs\')` works only for Node built-ins.',
+      '- `process.env` is empty inside the program: `os.tmpdir()` and credentialed CLIs (`gh`, `git`, `npm`) spawned via `node:child_process` miss `TEMP`, `HOME`, `APPDATA`, and auth tokens. Run shell and CLI commands through `await tools.win_bash({ command })` instead.',
     ]),
     '- Prefer batching multi-step read/search chains inside one ' + run + ' program instead of issuing many sequential single-tool turns.',
     '- Independent read-only calls may overlap under Promise.all; mutating calls run alone, in submission order.',

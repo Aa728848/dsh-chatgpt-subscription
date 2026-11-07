@@ -22,7 +22,15 @@ import {
 } from '../src/host/codemode/rules.ts'
 import { DISABLED_VIEW, resolveCatalogView, resolveNameView } from '../src/host/codemode/scope.ts'
 import { createCodemodeExecutor, isNestedCall, markNested } from '../src/host/codemode/executor.ts'
-import { createTransportDefinition } from '../src/host/codemode/transport.ts'
+import { createRetention } from '../src/host/codemode/retention.ts'
+import {
+  CodeResetFailedError,
+  CodeRunFailedError,
+  ToolCallLimitExceededError,
+  createTransportDefinition,
+  normalizeSubCallArgs,
+} from '../src/host/codemode/transport.ts'
+import { apply as applyCodemode } from '../src/entry-codemode.ts'
 
 describe('Code Mode 说明段', () => {
   it('同一部署下逐字节恒定，且不含任何遮蔽计数', () => {
@@ -820,5 +828,283 @@ describe('子调用回放', () => {
     const runtime = runtimeOf(async (tools) => await tools['read']!({ file_path: 'a.ts' }))
     const output = await run(runtime, async () => ({ value: 'body' }), undefined) as { result?: unknown }
     expect(output.result).toBe('body')
+  })
+})
+
+describe('DSH 内核 PTC 机制对齐与宿主层入参别名容错', () => {
+  const rules = createRules({ maxSubCalls: 2 })
+
+  it('宿主层入参别名容错：read/edit/write/read_image/glob/grep/win_bash/job_output 自动映射常见错键', () => {
+    expect(normalizeSubCallArgs({ name: 'read', description: '', parameters: {} }, { path: 'src/a.ts', offset: 1, limit: 50 }))
+      .toEqual({ file_path: 'src/a.ts', offset: 1, limit: 50 })
+    expect(normalizeSubCallArgs({ name: 'read_image', description: '', parameters: {} }, { filePath: 'shot.png' }))
+      .toEqual({ file_path: 'shot.png' })
+    expect(normalizeSubCallArgs({ name: 'glob', description: '', parameters: {} }, { pattern: '**/*.ts', file_path: 'src' }))
+      .toEqual({ pattern: '**/*.ts', path: 'src' })
+    expect(normalizeSubCallArgs({ name: 'edit', description: '', parameters: {} }, {
+      path: 'src/a.ts',
+      oldString: 'old',
+      newString: 'new',
+      replaceAll: true,
+    })).toEqual({
+      file_path: 'src/a.ts',
+      old_string: 'old',
+      new_string: 'new',
+      replace_all: true,
+    })
+    expect(normalizeSubCallArgs({ name: 'win_bash', description: '', parameters: {} }, {
+      command: 'pwd',
+      cwd: 'C:/work',
+      timeout_ms: 5000,
+      runInBackground: false,
+    })).toEqual({
+      command: 'pwd',
+      workdir: 'C:/work',
+      timeoutMs: 5000,
+      run_in_background: false,
+    })
+    expect(normalizeSubCallArgs({ name: 'job_output', description: '', parameters: {} }, {
+      jobId: 'job-1',
+      timeoutMs: 3000,
+    })).toEqual({
+      job_id: 'job-1',
+      timeout_ms: 3000,
+    })
+    // 已提供规范键时不覆盖
+    expect(normalizeSubCallArgs({ name: 'read', description: '', parameters: {} }, {
+      file_path: 'canonical.ts',
+      path: 'ignored.ts',
+    })).toEqual({
+      file_path: 'canonical.ts',
+      path: 'ignored.ts',
+    })
+  })
+
+  it('子调用配额超限：抛 ToolCallLimitExceededError 并在常驻模式覆盖 abort 文本时保留真实超限原因', async () => {
+    const catalog = [{ name: 'read', description: 'read', parameters: {}, isConcurrencySafe: () => true }]
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+      runtime: () => ({
+        retainsState: true,
+        async run(request: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          const fn = request.bindings[0]!.functions['read']!
+          await fn({ file_path: '1.ts' })
+          await fn({ file_path: '2.ts' })
+          try {
+            await fn({ file_path: '3.ts' })
+          } catch (error) {
+            expect(error).toBeInstanceOf(ToolCallLimitExceededError)
+          }
+          // 模拟 ptc-runtime-node 常驻进程被 abort 后返回泛化的 execution canceled 消息
+          return {
+            logs: [],
+            error: { kind: 'abort', message: 'execution canceled; retained variables were preserved' },
+          }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const execute = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
+    let caught: unknown
+    try {
+      await execute({ code: 'return 1', description: 'exceed limit' }, { callId: 'outer', signal: new AbortController().signal })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(CodeRunFailedError)
+    expect((caught as CodeRunFailedError).code).toBe('CODE_RUN_FAILED')
+    expect((caught as Error).message).toContain('code_run exceeded its limit of 2 tool calls')
+    expect((caught as Error).message).toContain('call 3 was not dispatched')
+    expect((caught as Error).message).toContain('execution canceled; retained variables were preserved')
+  })
+
+  it('外层调用方主动取消：映射为 AbortError (code: ABORTED) 并保留常驻状态说明', async () => {
+    const outer = new AbortController()
+    const host = {
+      catalog: () => [{ name: 'read', description: 'read', parameters: {} }],
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+      runtime: () => ({
+        retainsState: true,
+        async run() {
+          outer.abort(new Error('user cancelled'))
+          return {
+            logs: [],
+            error: { kind: 'abort', message: 'execution canceled; retained variables were preserved' },
+          }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const execute = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
+    await expect(execute({ code: 'return 1', description: 'abort check' }, { callId: 'outer', signal: outer.signal }))
+      .rejects.toMatchObject({
+        name: 'AbortError',
+        code: 'ABORTED',
+        message: 'tool call aborted: execution canceled; retained variables were preserved',
+      })
+  })
+
+  it('Commit Lane：程序立即拿到子调用返回值而不被慢速 shapeDispatchLog 阻塞，且 drain 保证落盘完成', async () => {
+    let logSettled = false
+    let programSawLogSettled = true
+    const host = {
+      catalog: () => [{ name: 'read', description: 'read', parameters: {}, isConcurrencySafe: () => true }],
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      shapeDispatchLog: async (dispatch: { content: readonly unknown[] }) => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        logSettled = true
+        return dispatch.content
+      },
+      callTool: async () => ({ value: 'fast-value', content: [{ type: 'text', text: 'fast-value' }] }),
+      runtime: () => ({
+        async run(request: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          const val = await request.bindings[0]!.functions['read']!({ path: 'src/index.ts' })
+          programSawLogSettled = logSettled
+          return { value: val, logs: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, createRules({}))
+    const output = await (definition.execute as (args: unknown, exec: unknown) => Promise<{ result?: unknown }>)(
+      { code: 'return 1', description: 'non-blocking log' },
+      { callId: 'outer', signal: new AbortController().signal, agent: { session: { append() {} } } },
+    )
+    expect(output.result).toBe('fast-value')
+    // 程序拿到返回值时，慢速日志落盘尚未完成；但整个 code_run 返回时 drain 已将其排空。
+    expect(programSawLogSettled).toBe(false)
+    expect(logSettled).toBe(true)
+  })
+
+  it('retention：挂载 agent.ctx.effect（展开 cordis.original 去重）、等待已取消前序调用排空并支持 reset()', async () => {
+    const releasedOwners: unknown[] = []
+    let failRelease = false
+    const rawProvider = {
+      retainsState: true,
+      async release(owner: object) {
+        if (failRelease) throw new Error('process kill timeout')
+        releasedOwners.push(owner)
+      },
+      async run() {
+        return { logs: [] }
+      },
+    }
+    const origSym = Symbol('cordis.original')
+    const wrappedRuntime = Object.create(rawProvider, {
+      [origSym]: { value: rawProvider, enumerable: false },
+    }) as typeof rawProvider
+
+    const retention = createRetention(() => wrappedRuntime)
+    const agentDisposers: (() => Promise<void>)[] = []
+    const injected: unknown[] = []
+    const agent = {
+      session: { id: 'sess-retention' },
+      ctx: {
+        effect(cb: () => () => Promise<void>) {
+          agentDisposers.push(cb())
+        },
+      },
+      inject(msg: unknown) {
+        injected.push(msg)
+      },
+    }
+
+    // 多次获取 owner 只在原初 provider 上登记一次 agent.ctx.effect
+    retention.owner(agent)
+    retention.owner(agent)
+    expect(agentDisposers).toHaveLength(1)
+
+    // 前序已 abort 的在飞调用排空前，新调用在 awaitPredecessors 等待
+    const c1 = new AbortController()
+    const untrack1 = retention.trackRun({ agent, controller: c1, signal: c1.signal, mode: 'workspace-write' })
+    c1.abort(new Error('cancelled'))
+    let secondAdmitted = false
+    const waitPromise = retention.awaitPredecessors(agent, new AbortController().signal).then(() => {
+      secondAdmitted = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(secondAdmitted).toBe(false)
+    untrack1()
+    await waitPromise
+    expect(secondAdmitted).toBe(true)
+
+    // reset 失败时阻塞后续调用，重试成功后恢复并注入通知
+    failRelease = true
+    await expect(retention.reset(agent, () => injected.push('notified'))).rejects.toThrow(/process kill timeout/)
+    await expect(retention.awaitPredecessors(agent, new AbortController().signal))
+      .rejects.toThrow(/Program environment unavailable: process kill timeout/)
+
+    failRelease = false
+    await retention.reset(agent, () => injected.push('notified'))
+    expect(releasedOwners).toEqual([agent])
+    expect(injected).toEqual(['notified'])
+    await expect(retention.awaitPredecessors(agent, new AbortController().signal)).resolves.toBeUndefined()
+  })
+
+  it('entry-codemode：按调用方 agent+toolSet 动态枚举工具清单，并暴露 executor.reset(agent)', async () => {
+    const registered: { name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }[] = []
+    let capturedExecutor: { reset?: (agent: unknown) => Promise<void> } | undefined
+    const seenToolNames: string[][] = []
+    const runtime = {
+      language: 'typescript',
+      programFormat: 'function-body',
+      retainsState: true,
+      resolve: (req: Record<string, unknown>) => ({ ...req, sandboxPolicy: { mode: 'read-only' } }),
+      async release() {},
+      async run(spec: { bindings: readonly { functions: Record<string, unknown> }[] }) {
+        seenToolNames.push(Object.keys(spec.bindings[0]!.functions))
+        return { value: 'ok', logs: [] }
+      },
+    }
+    const ctx = {
+      tools: {
+        register(def: { name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }) {
+          registered.push(def)
+          return () => undefined
+        },
+        setExecutor(exec: { reset?: (agent: unknown) => Promise<void> }) {
+          capturedExecutor = exec
+          return () => undefined
+        },
+        get: () => undefined,
+        definitions(scope?: { id?: string }) {
+          if (scope?.id === 'agent-sub') {
+            return [{ name: 'read', description: 'r', parameters: {} }]
+          }
+          return [
+            { name: 'read', description: 'r', parameters: {} },
+            { name: 'subagent', description: 's', parameters: {} },
+          ]
+        },
+        execute: async () => ({ results: [] }),
+      },
+      get: (name: string) => (name === 'ptcRuntime' ? runtime : undefined),
+    }
+    applyCodemode(ctx, {})
+    const codeRun = registered.find((d) => d.name === 'code_run')!
+    await codeRun.execute(
+      { code: 'return 1', description: 'lead run' },
+      { callId: 'c-lead', signal: new AbortController().signal, agent: { id: 'agent-lead', session: { id: 's1' } } },
+    )
+    await codeRun.execute(
+      { code: 'return 1', description: 'sub run' },
+      { callId: 'c-sub', signal: new AbortController().signal, agent: { id: 'agent-sub', session: { id: 's2' } } },
+    )
+    expect(seenToolNames).toEqual([['read', 'subagent'], ['read']])
+
+    const injected: unknown[] = []
+    await capturedExecutor!.reset!({
+      session: { id: 's1' },
+      inject(msg: unknown) { injected.push(msg) },
+    })
+    expect(injected).toHaveLength(1)
+
+    runtime.retainsState = false
+    await expect(capturedExecutor!.reset!({ session: { id: 's1' } })).rejects.toBeInstanceOf(CodeResetFailedError)
   })
 })

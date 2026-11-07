@@ -21,6 +21,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 
 import { NESTED_CALL_ID_MARKER, markNested } from './executor.ts'
 import type { CodemodeRules } from './rules.ts'
@@ -55,6 +56,42 @@ const PROGRESS_UPDATE_TOOL = 'progress_update'
 /** 允许单次提权的目标沙箱模式（对齐 `@deepseek-ai/dsh-sandbox` 的 `ESCALATION_TARGETS`）。 */
 export const ESCALATION_TARGETS = Object.freeze(['workspace-write', 'danger-full-access'] as const)
 export type EscalationTargetMode = (typeof ESCALATION_TARGETS)[number]
+
+/**
+ * 子调用配额耗尽时的宿主中止原因（对齐 `@deepseek-ai/dsh-tool-executor-ptc` 的 `ToolCallLimitExceededError`）。
+ *
+ * 超出的那一次调用不会派发；结算阶段识别此错误并保留完整诊断，防止常驻模式下的泛化取消文案吞掉真实原因。
+ */
+export class ToolCallLimitExceededError extends Error {
+  constructor(limit: number, callNumber: number, callsPerMinute: number, runToolName = TRANSPORT_TOOL_NAME) {
+    super(
+      `${runToolName} exceeded its limit of ${String(limit)} tool calls (${String(callsPerMinute)} per minute of its timeout); `
+      + `call ${String(callNumber)} was not dispatched. The ${runToolName} program may contain an infinite loop. `
+      + `Check loop termination or split the work into smaller ${runToolName} calls.`,
+    )
+    this.name = 'ToolCallLimitExceededError'
+  }
+}
+
+/**
+ * 程序运行自身失败时抛出的结构化错误（对齐内核 `CodeRunFailedError`，`code: 'CODE_RUN_FAILED'`）。
+ */
+export class CodeRunFailedError extends HarnessError {
+  constructor(message: string) {
+    super(message, 'CODE_RUN_FAILED')
+    this.name = 'CodeRunFailedError'
+  }
+}
+
+/**
+ * 常驻环境重置不支持或失败时抛出的结构化错误（对齐内核 `CodeResetFailedError`，`code: 'CODE_RESET_FAILED'`）。
+ */
+export class CodeResetFailedError extends HarnessError {
+  constructor(message: string) {
+    super(message, 'CODE_RESET_FAILED')
+    this.name = 'CodeResetFailedError'
+  }
+}
 
 /** 与内核 `run_code` 一致的 `description` 参数说明。 */
 const DESCRIPTION_PARAM_DESCRIPTION =
@@ -122,20 +159,22 @@ export interface DispatchLogShape {
   readonly content: readonly unknown[]
 }
 
-/** 一只在飞程序运行的登记信息：入口据此响应会话级沙箱策略变更。 */
+/** 一只在飞程序运行的登记信息：入口据此响应会话级沙箱策略变更并协调前序取消排空。 */
 export interface ActiveRunHandle {
   /** 调用方 agent（入口用它定位会话）。 */
   readonly agent: unknown
   /** 这轮运行的取消入口：abort 会连同程序与已排队子调用一起停下。 */
   readonly controller: AbortController
+  /** 融合了外层取消与本轮 controller 的信号，供前序排空判据读取。 */
+  readonly signal?: AbortSignal
   /** 这轮运行生效的沙箱模式；`undefined` 表示运行时不接管沙箱模式。 */
   readonly mode?: string
 }
 
 /** 程序的运行环境句柄：由入口提供，传输层只调用。 */
 export interface CodemodeHost {
-  /** 当前可调用的工具清单（含被遮蔽的）。 */
-  catalog(): readonly CatalogEntry[]
+  /** 当前可调用的工具清单（支持按调用方 agent 与步骤 toolSet 动态解析，含被遮蔽工具）。 */
+  catalog(agent?: unknown, toolSet?: unknown): readonly CatalogEntry[]
   /** 执行一次子调用（内部走 `ctx.tools.execute()`）。 */
   callTool(request: CallToolRequest): Promise<CallToolOutcome>
   /** 读 PTC 运行时（结构探测）。 */
@@ -144,6 +183,10 @@ export interface CodemodeHost {
   stateOwner(agent: unknown): object
   /** 程序结束时释放 owner 的常驻环境。 */
   releaseOwner(owner: object): Promise<void>
+  /**
+   * 新调用进入前等待同会话已取消的前序运行与进行中的环境重置排空（对齐 `PtcCalls.run`）。
+   */
+  awaitPredecessors?(agent: unknown, signal: AbortSignal): Promise<void>
   /**
    * 取这次运行的会话级授权（目录 + 文件策略）。
    *
@@ -457,7 +500,8 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
       if (input.timeoutMs !== undefined && runtime.timeout !== undefined === false && isStrictTimeoutUnsupported(runtime)) {
         throw new Error('timeoutMs is not available for this PTC runtime')
       }
-      const catalog = host.catalog()
+      await host.awaitPredecessors?.(exec.agent, exec.signal)
+      const catalog = host.catalog(exec.agent, exec.toolSet)
       const runController = new AbortController()
       const onOuterAbort = (): void => { runController.abort(exec.signal.reason) }
       if (exec.signal.aborted) runController.abort(exec.signal.reason)
@@ -480,11 +524,16 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
           }
           const n = ++attempts
           if (n > maxSubCalls) {
-            const limitErr = new Error('program sub-call limit exceeded: ' + String(maxSubCalls) + ' calls')
+            const limitErr = new ToolCallLimitExceededError(
+              maxSubCalls,
+              n,
+              rules.options.maxSubCallsPerMinute,
+              runToolName,
+            )
             runController.abort(limitErr)
             throw limitErr
           }
-          const parsed = losslessArgs(rawArgs)
+          const parsed = normalizeSubCallArgs(definitions.get(entry.name), losslessArgs(rawArgs))
           const loggedArgs = losslessArgs(parsed)
           const callId = String(exec.callId) + NESTED_CALL_ID_MARKER + String(n)
           const dispatchLog = createDispatchLog(exec.agent, {
@@ -494,8 +543,9 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             name: entry.name,
             arguments: loggedArgs,
           })
-          const mode = isConcurrencySafe(definitions.get(entry.name), parsed) ? 'parallel' : 'exclusive'
-          return lane.schedule(mode, {
+          return lane.schedule({
+            // 并发模式在队列头部真正启动时才求值（对齐内核 `ptc.ts:461` 惰性分类）。
+            classify: () => (isConcurrencySafe(definitions.get(entry.name), parsed) ? 'parallel' : 'exclusive'),
             // start 记在 lane 里而不是提交时：排队中被放弃的调用一条都不写（内核同此）。
             start() {
               dispatchLog.start()
@@ -511,28 +561,22 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             /**
              * 提交阶段：按**提交顺序**逐条执行，落在会话里的副作用因此与提交顺序一致。
              *
-             * 内核把这几步全部放在同一条有序 lane 里（`ptc.ts` 的 commit 游标）：回放内容
-             * 投影、settle 事件、图片与附加上下文、`concludeTurn`、放行互斥屏障。并发的
-             * body 谁先跑完都不影响这一串的顺序——否则界面里的子调用记录会错位，延迟上下文
-             * 也会插到错误的位置。
+             * 对齐内核 `ptc.ts:537-634`：延迟上下文（图片与 `additionalContexts`）与 `concludeTurn`
+             * 按提交顺序同步生效后，**立刻**向程序返回子调用结果，避免慢速日志落盘监听器阻塞程序
+             * 后续执行；`shapeDispatchLog` 与 `tool/ptc-dispatch` 事件通过带背压的有序 `logWork`
+             * 队列异步结算，并在 `lane.drain()` 中完整排空。
              */
-            async commit(parked): Promise<unknown> {
+            commit(parked, enqueueLog): unknown {
               // body 抛错（提交被取消、approval 拒绝等）：成对收尾，否则界面留下一条永远
               // 不收尾的行。
               if (!parked.ok) {
-                dispatchLog.settle({ error: messageOf(parked.error) })
+                enqueueLog(async () => {
+                  dispatchLog.settle({ error: messageOf(parked.error) })
+                })
                 throw parked.error
               }
               const outcome = parked.value
               const isError = outcome.error !== undefined
-              const content = await shapeDispatchContent(host, {
-                agent: exec.agent,
-                name: entry.name,
-                arguments: loggedArgs,
-                isError,
-                content: clipContent(outcome.content),
-              })
-              dispatchLog.settle({ ...outcome, content })
               if (!isError && Array.isArray(outcome.content) && hasImageBlock(outcome.content)) {
                 const imageMsg = host.createImageContext?.(outcome.content)
                 if (imageMsg !== undefined) exec.deferContext?.(imageMsg)
@@ -545,6 +589,16 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
               if (!isError && outcome.concluded === true) {
                 exec.concludeTurn?.()
               }
+              enqueueLog(async () => {
+                const content = await shapeDispatchContent(host, {
+                  agent: exec.agent,
+                  name: entry.name,
+                  arguments: loggedArgs,
+                  isError,
+                  content: clipContent(outcome.content),
+                })
+                dispatchLog.settle({ ...outcome, content })
+              })
               if (runController.signal.aborted) {
                 throw new Error(runToolName + ' run is over; ' + entry.name + ' result discarded')
               }
@@ -572,7 +626,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
          * `stateOwner`，避免把单次授权固化到常驻环境中（对齐内核 `ptc.ts`）。
          */
         let approvedEscalatedMode: EscalationTargetMode | undefined
-        /** 这次运行在入口那边的登记；结算时释放（重跑会重新登记一次）。 */
+        /** 这次运行在入口那边的登记；结算时释放（重跑原位更新 mode，外层 finally 统一释放）。 */
         let untrackRun: () => void = () => {}
         const attempt = async (): Promise<PtcRunResultLike> => {
           const authority = await host.runAuthority?.(exec.agent, nestedSignal)
@@ -600,13 +654,11 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             }
             escalated = modeOfPolicy(effectivePolicy) !== modeOfPolicy(standingPolicy)
           }
-          // 会话的 `sandbox/mode` 事件靠这条登记取消在飞运行；重跑时用同一个 controller
-          // 重新登记，所以先释放上一次。
-          untrackRun()
           const runMode = modeOfPolicy(effectivePolicy)
           untrackRun = host.trackRun?.({
             agent: exec.agent,
             controller: runController,
+            signal: nestedSignal,
             ...runMode === undefined ? {} : { mode: runMode },
           }) ?? (() => {})
           const request: PtcRunRequestLike = {
@@ -647,6 +699,15 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
         }
 
         if (result.error !== undefined) {
+          const limitError = runController.signal.reason instanceof ToolCallLimitExceededError
+            ? runController.signal.reason
+            : undefined
+          if (result.error.kind === 'abort' && exec.signal.aborted && limitError === undefined) {
+            const message = runtime.retainsState ? `tool call aborted: ${result.error.message}` : 'tool call aborted'
+            const abortError = new HarnessError(message, 'ABORTED')
+            abortError.name = 'AbortError'
+            throw abortError
+          }
           const logsText = Array.isArray(result.logs) && result.logs.length > 0
             ? '\nCaptured output:\n' + result.logs.join('\n')
             : ''
@@ -656,7 +717,10 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
               + (result.sandbox.enforcement === undefined ? '' : '; enforcement: ' + result.sandbox.enforcement)
               + (result.sandbox.denied ? '; operation denied' : '') + '.'
           const hint = result.sandbox?.denied ? escalationGuidance(runtime.sandboxMode) : ''
-          throw new Error('program failed (' + result.error.kind + '): ' + result.error.message + logsText + sandboxText + hint)
+          const failureText = limitError === undefined || limitError.message === result.error.message
+            ? result.error.message
+            : `${limitError.message}\n${result.error.message}`
+          throw new CodeRunFailedError('program failed (' + result.error.kind + '): ' + failureText + logsText + sandboxText + hint)
         }
         const output: TransportOutput = {
           logs: [...(result.logs ?? [])],
@@ -1187,6 +1251,80 @@ function losslessArgs(value: unknown): unknown {
   }
 }
 
+/** 内置按单文件 `file_path` 寻址的工具名。 */
+const FILE_PATH_TOOLS: ReadonlySet<string> = new Set(['read', 'edit', 'write', 'read_image'])
+
+/** 内置按目录/目标 `path` 寻址的检索工具名。 */
+const SEARCH_PATH_TOOLS: ReadonlySet<string> = new Set(['glob', 'grep'])
+
+/**
+ * 宿主层子调用入参别名容错：把模型在 `code_run` 内高频写错的参数键名映射到工具真实声明的键名。
+ *
+ * 审计证据（`session-e190c243` seq 171-182 等）：模型在 `Promise.all` 里容易把 `tools.read` 的
+ * `file_path` 写成 `glob`/`grep` 的 `path`（或反过来），或者把 snake_case 写成 camelCase，导致整段
+ * 程序因单个属性名不匹配而抛 `ToolCallError: invalid arguments: missing required property "file_path"`。
+ *
+ * 规则：仅当目标规范键尚未提供（`=== undefined`）、别名键存在且类型匹配、且别名键本身不是该工具声明的
+ * 独立参数时，才把值搬运到规范键并删掉多余别名键（防止 `additionalProperties: false` 拒收）。
+ *
+ * @param entry - 工具清单条目（含参数 schema）。
+ * @param value - 已脱离引用的 JSON 参数值。
+ * @returns 归一化后的参数值。
+ */
+export function normalizeSubCallArgs(entry: CatalogEntry | undefined, value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const name = entry?.name ?? ''
+  const schemaProps = isRecord(entry?.parameters) && isRecord((entry.parameters as { properties?: unknown }).properties)
+    ? ((entry.parameters as { properties: Record<string, unknown> }).properties)
+    : undefined
+  const declares = (key: string): boolean => schemaProps !== undefined && Object.prototype.hasOwnProperty.call(schemaProps, key)
+
+  const out: Record<string, unknown> = { ...value }
+  const remap = (target: string, aliases: readonly string[], predicate: (v: unknown) => boolean): void => {
+    if (out[target] !== undefined) return
+    for (const alias of aliases) {
+      if (declares(alias)) continue
+      const candidate = out[alias]
+      if (predicate(candidate)) {
+        out[target] = candidate
+        delete out[alias]
+        return
+      }
+    }
+  }
+
+  const isString = (v: unknown): boolean => typeof v === 'string'
+  const isNumber = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v)
+  const isBoolean = (v: unknown): boolean => typeof v === 'boolean'
+
+  if (FILE_PATH_TOOLS.has(name) || (declares('file_path') && !declares('path'))) {
+    remap('file_path', ['path', 'filePath'], isString)
+  } else if (SEARCH_PATH_TOOLS.has(name) || (declares('path') && !declares('file_path'))) {
+    remap('path', ['file_path', 'filePath'], isString)
+  }
+
+  if (name === 'edit' || declares('old_string') || declares('new_string')) {
+    remap('old_string', ['oldString'], isString)
+    remap('new_string', ['newString'], isString)
+    remap('replace_all', ['replaceAll'], isBoolean)
+  }
+
+  if (name === 'win_bash' || declares('workdir')) {
+    remap('workdir', ['cwd', 'workingDirectory', 'working_directory'], isString)
+    remap('timeoutMs', ['timeout_ms'], isNumber)
+    remap('run_in_background', ['runInBackground'], isBoolean)
+  }
+
+  if (name === 'job_output' || name === 'job_kill' || declares('job_id')) {
+    remap('job_id', ['jobId'], isString)
+    if (name === 'job_output' || declares('timeout_ms')) {
+      remap('timeout_ms', ['timeoutMs'], isNumber)
+    }
+  }
+
+  return out
+}
+
 /** 一个工具的调用是否可以与兄弟调用重叠（只有明确 true 才算）。 */
 function isConcurrencySafe(entry: CatalogEntry | undefined, args: unknown): boolean {
   if (entry === undefined || typeof entry.isConcurrencySafe !== 'function') return false
@@ -1198,37 +1336,42 @@ function isConcurrencySafe(entry: CatalogEntry | undefined, args: unknown): bool
 }
 
 /**
- * 子调用的并发、提交顺序与互斥屏障（对齐内核 `ptc.ts` 的 ordered commit lane）。
+ * 子调用的并发、提交顺序与互斥屏障（对齐内核 `ptc.ts` 的 ordered commit lane + `logWork` 背压）。
  *
+ * - `classify()` 在队列头部真正出队启动时惰性求值，保证前序调用产生的状态变更可被观察；
  * - `start()`（记 start 事件 + 启动 body）在 lane 里按提交顺序执行：`parallel` body 之间
  *   可以并发重叠，最多 `maxParallel` 个同时在飞；
- * - `commit()`（记 settle 事件 + 转发图片/附加上下文 + `concludeTurn` + 放行互斥屏障）
- *   按**提交顺序**逐条执行：前一条没提交完，后一条的结果不会先落到会话里；
+ * - `commit()`（转发图片/附加上下文 + `concludeTurn` + 放行互斥屏障）按**提交顺序**逐条执行，
+ *   并在同步完成上下文挂载后**立刻**将结果返回给程序；`shapeDispatchLog` 与 settle 事件作为
+ *   有序后台 `logWork` 执行，超出 `maxParallel` 时在提交车道施加背压；
  * - `exclusive` 调用等所有在飞 body 结算后独占运行，并独占到自己 commit 完成才放行后续；
  * - 排队期间若外层运行已中止，直接放弃且不启动任务（未启动调用零 `start` 事件）；
- * - `drain()` 等到 lane 彻底静止（所有 body 结算、所有 commit 完成）才返回。
+ * - `drain()` 等到 lane 彻底静止且所有后台 `logWork` 落盘完成才返回。
  *
- * 程序拿到的值在 commit 里结算（与内核同）：body 结束不保证顺序，提交才是顺序。
- *
- * @param maxParallel - 同时在飞的上限。
+ * @param maxParallel - 同时在飞的上限（同时作为 `logWork` 背压上限）。
  * @param isAborted - 外层运行是否已中止。
  * @returns 调度入口与排空。
  */
 function createCommitLane(maxParallel: number, isAborted: () => boolean) {
   /** body 的结局：成功值或抛出的错误。 */
   type Parked<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }
+  /** 入队一条按提交顺序串行化落盘的异步日志任务。 */
+  type EnqueueLog = (work: () => Promise<void>) => void
   interface Task<T, R> {
+    /** 启动前惰性判定并发模式（默认按入参决定）。 */
+    classify?(): 'parallel' | 'exclusive'
     /** 有序预执行：记 start 事件。 */
     start(): void
     /** 并发执行的 body：真正调用工具。 */
     body(): Promise<T>
-    /** 有序提交：写回放、转发上下文、屏障放行，并给出程序拿到的值。 */
-    commit(parked: Parked<T>): R | Promise<R>
+    /** 有序提交：转发上下文、登记后台回放落盘、并立即给出程序拿到的值。 */
+    commit(parked: Parked<T>, enqueueLog: EnqueueLog): R | Promise<R>
     /** 排队中被放弃（运行已结束）时抛出的错误。 */
     abandon(): never
   }
   interface Entry {
-    readonly mode: 'parallel' | 'exclusive'
+    mode: 'parallel' | 'exclusive'
+    classify(): 'parallel' | 'exclusive'
     settled: boolean
     flight: Promise<void>
     start(): void
@@ -1239,6 +1382,8 @@ function createCommitLane(maxParallel: number, isAborted: () => boolean) {
   const queue: Entry[] = []
   const commitQueue: Entry[] = []
   const inFlight = new Set<Promise<void>>()
+  const logWork = new Set<Promise<void>>()
+  let logTail: Promise<void> = Promise.resolve()
   let exclusiveActive = false
   let driving = false
   let driverRun: Promise<void> = Promise.resolve()
@@ -1247,6 +1392,15 @@ function createCommitLane(maxParallel: number, isAborted: () => boolean) {
     const release = wake
     wake = undefined
     release?.()
+  }
+
+  const enqueueLog: EnqueueLog = (work) => {
+    const next = logTail.then(work, work)
+    logTail = next.catch(() => undefined)
+    const tracked: Promise<void> = logTail.finally(() => {
+      logWork.delete(tracked)
+    })
+    logWork.add(tracked)
   }
 
   /**
@@ -1275,10 +1429,12 @@ function createCommitLane(maxParallel: number, isAborted: () => boolean) {
               head.abandon()
               continue
             }
+            const mode = head.classify()
             const capacity = !exclusiveActive
-              && (head.mode === 'exclusive' ? inFlight.size === 0 : inFlight.size < cap)
+              && (mode === 'exclusive' ? inFlight.size === 0 : inFlight.size < cap)
             if (capacity) {
-              if (head.mode === 'exclusive') exclusiveActive = true
+              head.mode = mode
+              if (mode === 'exclusive') exclusiveActive = true
               queue.shift()
               // 先入提交队列再启动：提交游标看到的永远是提交顺序。
               commitQueue.push(head)
@@ -1303,11 +1459,18 @@ function createCommitLane(maxParallel: number, isAborted: () => boolean) {
   }
 
   return {
-    schedule<T, R>(mode: 'parallel' | 'exclusive', task: Task<T, R>): Promise<R> {
+    schedule<T, R>(task: Task<T, R>): Promise<R> {
       return new Promise<R>((resolve, reject) => {
         let parked: Parked<T> | undefined
         const entry: Entry = {
-          mode,
+          mode: 'exclusive',
+          classify() {
+            try {
+              return task.classify ? task.classify() : 'exclusive'
+            } catch {
+              return 'exclusive'
+            }
+          },
           settled: false,
           flight: Promise.resolve(),
           start() {
@@ -1326,9 +1489,14 @@ function createCommitLane(maxParallel: number, isAborted: () => boolean) {
             const result = parked
             if (result === undefined) return
             try {
-              resolve(await task.commit(result))
+              // 程序在此刻立刻拿到子调用返回值（不等待后台 logWork 落盘）。
+              resolve(await task.commit(result, enqueueLog))
             } catch (error: unknown) {
               reject(error)
+            }
+            // 对齐内核 `ptc.ts:633`：当待落盘日志任务超过并发上限时施加背压。
+            while (logWork.size > cap) {
+              await Promise.race(logWork)
             }
           },
           abandon() {
@@ -1346,6 +1514,9 @@ function createCommitLane(maxParallel: number, isAborted: () => boolean) {
     },
     async drain(): Promise<void> {
       await drive()
+      while (logWork.size > 0) {
+        await Promise.allSettled([...logWork])
+      }
     },
   }
 }
