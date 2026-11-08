@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.64.0 - 2026-11-08
+
+- **[dispatch] 派发前被拒的调用不再烧掉命名空间；`subagent_fork` 的路由约束写进工具描述与人格**
+  - **现象**（现场会话 `session-9e27d9f1`，dispatch preset + `opendesign/deepseek-v4.1-flash-eco`）：一个回合里四次派发尝试全部失败——① 模型把 `provider`/`model` 传给 `subagent_fork`，被模型选择守卫拒；② 换成 `subagent` 沿用同一命名空间重试，撞 `MANDATE_DUPLICATE`；③ 换新命名空间却漏了 `provider`，被判「只给了一半」；④ 补上 `provider` 再用第 ③ 次的命名空间，又撞 `MANDATE_DUPLICATE`。模型随后放弃派发，用户只能自己接手。这不是偶发：一次形状错误必然烧掉一个命名空间，修正后的调用随之被重复判定挡住。
+  - **根因**（`src/host/dispatch-ledger/ledger.ts`、`guard.ts`、`src/host/subagent-model-authorization.ts`、`presets/dispatch/agent.cordis.yml`）：
+    1. `classifyToolOutcome` 只认账本自己的 `DISPATCH_LEDGER_V2:` 前缀，模型选择守卫的 `subagent model selection:` 被记成 `tool_error`、运行落 `released`；而 `checkDispatchMandate` 只看命名空间是否已存在，不看这次运行是否**真的派发出去过**。账本其实早就有 `denied`（全部 attempt 都被派发前拒绝）这个状态，只是这族拒绝从未被识别成它。
+    2. 人格 R2 写的是「每次派发都写 route 并传拆开的 `provider` 与 `model`」，而 `subagent_fork` 按设计不接受任何路由字段，上游的工具描述也不说这件事——模型只能在被拒之后才学到。
+  - **修法**：`ledger.ts` 新增 `SUBAGENT_SELECTION_DENIAL_PREFIX` / `SUBAGENT_SELECTION_DENIAL_CODE`，`detectGuardDenialCode` 把这类结果也认成派发前拒绝；`aggregateRunState` 把 `denied` 从「终态不被复写」里摘出（`released`/`completed`/`blocked` 仍严格单调），`recordAttempt` 复用 `denied` 运行时用新这次尝试刷新 `body_sha256` 与 `tool`（此前那些身体一次都没落地）；`guard.ts` 的重复判定改为 `runClaimedByDispatch`——除**本次调用自己的待结算 attempt** 以外，`succeeded`／`toolError`／其余 `unknown` 任一存在才算「真的派发过」，只看 `state` 会被本次重试自己的那条 `tool/call` 翻回 `booked`（宿主先写日志再跑守卫，探针实测仍被判 `MANDATE_DUPLICATE`），并让「预约者本身是一条从未派发的运行」时的内存预约失效（fork 那次留下的 30 分钟预约否则足以再演一整轮失败）；`protocol.ts` 的 `MANDATE_DUPLICATE` 解释改成「只有真正派发出去的尝试才占用命名空间，派发前被拒的可以用同一套 id 重发修正后的调用」。
+  - **提示词侧**：新增 `inheritRouteNoticeSentence`，给显式路由工具追加「永远不要把 `provider`/`model` 传给它」、给继承式工具追加「本工具不接受路由字段，要选路由请调用显式工具」，Native 的 `tools` 数组与 PTC 的 `tools:sdk` 正文两条呈现都覆盖且不叠句；`inheritOverrideReason` 由「某个支持显式选择的工具」改为点名实际存在的显式工具；自带 preset 人格的 R2 把「传 `provider` 与 `model`」限定为显式路由工具，并明写 fork 拒绝路由字段（YAML 与内联声明两份副本同步）。
+  - **刻意不改**：`released` 语义不变（那次调用真的执行了、只是失败，命名空间必须继续占着）；容量上限（256 runs / 64 briefs）与 `MANDATE_BRIEF_BUSY` 判定不变；不 bump 版本、不发布会话内未要求的改动。
+  - **复盘**：第一版只改 `aggregateRunState` 就被单测放过了，因为单测没把「本次调用自己的 `tool/call`」写进会话事件；按真实写入顺序做探针后才发现现场仍被拒，于是补上 `runClaimedByDispatch` 与预约失效两条判据。
+  - **回归**：新增 12 例——守卫层另 3 例按**真实写入顺序**（含本次调用自己的 `tool/call`）覆盖「重试放行」「被拒调用留下的预约不挡重试」「真正的并行同命名空间仍被拒」；折叠层 3 例（识别 `SUBAGENT_MODEL_SELECTION`、`denied` 收到修正后尝试回到 `booked` 且正文/工具名以新尝试为准、普通工具失败仍记 `tool_error`）、守卫层 3 例（被拒后同一命名空间重试放行、修正后真的派发出去则重新占住、`released` 仍不可复用）、鉴权层 2 例（两句描述互指且重复装配不叠句、拒绝文案点名 `subagent`）、人格 1 例（两份副本都必须写清 fork 不接受路由字段）。`npm run typecheck` 通过；全量 Vitest 371 个文件通过 / 2 个跳过（6843 例通过 / 9 例跳过，较 0.63.1 的 6834 多 9 例）。
+
+- **[dispatch] 头部骨架改成多行缩进，不再单行压缩**
+  - **现象**：派发消息里那段 `dsh-mandate-v2` 头是一行 JSON，落进对话栏的窄框里整块糊掉——`brief_id`、`run_id`、`policy` 谁也扫不出来，复查一次得先复制出去重新格式化。
+  - **改法**（`src/host/dispatch-ledger/tool.ts` 的 `readyToSendBlock`、`protocol.ts` 的样板）：新增 `prettyHeaderJson`——键各占一行、`policy` 缩进一层、数组保持内联；`dispatch_ledger {action:"self"}` 渲染的 dispatch 与 report 骨架、以及协议正文里的样板同步改。解析器只做 `JSON.parse`，多行与单行等价，4096 字符的协议预算与 4096 字节的头部上限都照旧通过。
+  - **回归**：`test/dispatch-ledger-tool.test.ts` 新增 1 例（骨架 ≥5 行、含缩进的 `brief_id` 与 `policy`、且仍判 `ok`）；`test/dispatch-ledger-header.test.ts` 的样板用例补一条多行断言。
+
+- **[dispatch] 新增派发卡片：`subagent` / `subagent_fork` 的 mandate 头拆成结构，结果与拒绝码单独呈现**
+  - **现象**：通用工具行把调用参数当纯文本铺开，`dsh-mandate-v2` 围栏 + JSON 头 + 任务正文挤在窄栏里，`brief` / `run` / 路由 / 边界谁也扫不出来；被守卫拒时，唯一的有效信息（`MANDATE_*` 拒绝码）埋在那团文本里。
+  - **做法**：用 DSH 公开的 `tool.call.toolview` 按工具名注册（**不改 DSH 本体、不 fork 内置 UI 包**；该槽「占用 key 即替换该工具的整行」）。新模块 `src/client/dispatch-ledger/`：标题行区分普通派发与继承上下文、带状态词；展开后 `brief` / `run` / `idem` / 路由徽章、`task` / `boundary` / `followup` 条目、任务正文、独立结果区（拒绝标红）、以及「原始参数」折叠——换呈现不丢证据。新增命名空间 `dsh-dispatch-ledger`，中英俄三语齐备。
+  - **为什么不是 fork**：通用行来自 DSH 自己的客户端包；fork 会接管**所有**工具行，还要在本仓库支持的每一代 harness 上维护一份副本。槽已经能完成同一件事，且只影响这两个工具名。
+  - **回归**：新增 `test/dispatch-ledger-tool-view.test.tsx` 7 例（头部拆分、拒绝码标红且不被吞、原始参数可取回、无 mandate 头降级、fork 标题区分、头部解析三种退化）；`test/client-registration.test.ts` 的槽位清单与 `test/russian-locale.test.tsx` 的命名空间表同步更新。`npm run typecheck` 通过；全量 6866 例（6857 通过 / 9 跳过 / 0 失败）。
+
 ## 0.63.1 - 2026-11-07
 
 - **[codemode] 工具调用入参被切断或混入 DSML 残留时补读 `"code"`，不再把整段污染文本当源码编译**
