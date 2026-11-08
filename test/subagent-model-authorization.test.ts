@@ -1017,3 +1017,52 @@ describe('route-parameter adaptivity', () => {
   })
 })
 
+describe('路由约束写进工具描述', () => {
+  const assembly = {
+    sections: [{ name: 'tools:sdk', text: 'subagent_fork: Delegate a task to a subagent that inherits this conversation.' }],
+    tools: [
+      {
+        name: 'subagent',
+        description: 'Delegate a task to a subagent (spawn).',
+        parameters: { type: 'object', properties: {} },
+      },
+      {
+        name: 'subagent_fork',
+        description: 'Delegate a task to a subagent that inherits this conversation.',
+        parameters: { type: 'object', properties: { cwd: { type: 'string' } } },
+      },
+      {
+        name: 'read',
+        description: 'Read a file.',
+        parameters: { type: 'object', properties: {} },
+      },
+    ],
+  }
+
+  it('显式工具与继承工具各拿到一句指向对方的说明，别的工具一个字不动', () => {
+    const rewritten = rewriteAuthorizedPromptAssembly(
+      assembly, [MINIMAX], ['subagent'], ['subagent_fork'],
+    )
+    expect(rewritten.tools[0]!.description).toContain('Never pass provider/model to "subagent_fork"')
+    expect(rewritten.tools[1]!.description).toContain('This tool takes no provider/model')
+    expect(rewritten.tools[1]!.description).toContain('call "subagent" with provider and model')
+    expect(rewritten.tools[2]!.description).toBe('Read a file.')
+    // PTC 模式下整段 SDK 正文就是工具面，所以那句也要落在正文末尾一次。
+    expect(rewritten.sections[0]!.text).toContain('Never pass provider/model to "subagent_fork"')
+    // 同一份装配再走一次不会叠第二句。
+    const twice = rewriteAuthorizedPromptAssembly(rewritten, [MINIMAX], ['subagent'], ['subagent_fork'])
+    expect(twice.tools[0]!.description.split('Never pass provider/model').length - 1).toBe(1)
+    // 没有 allowlist 的会话，装配原样返回。
+    expect(rewriteAuthorizedPromptAssembly(assembly, [], ['subagent'], ['subagent_fork'])).toBe(assembly)
+  })
+
+  it('拒绝文案点名可以换用的显式工具，并提示保留父路由的另一种做法', () => {
+    const named = inheritOverrideReason('subagent_fork', 'opendesign', 'deepseek-v4.1-flash-eco', ['subagent'])
+    expect(named).toContain('delegate through "subagent" with provider and model')
+    expect(named).toContain('Remove those fields to keep the child on your own route')
+    // 未给显式工具名时退回旧说法，不产生半截句子。
+    expect(inheritOverrideReason('subagent_fork', 'a', 'b'))
+      .toContain('a tool that supports explicit child model selection')
+  })
+})
+

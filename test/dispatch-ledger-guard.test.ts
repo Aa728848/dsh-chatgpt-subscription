@@ -590,3 +590,84 @@ describe('调度账本守卫：prompt_ref 快照校验', () => {
     expect(guard(dispatch(prompt, session, 'call-a'))).toBeUndefined()
   })
 })
+
+describe('调度账本守卫：派发前被拒的命名空间允许重试', () => {
+  // 现场原样（`session-9e27d9f1`）：模型先把路由传给 subagent_fork，被模型选择
+  // 守卫拒掉；改成 subagent 之后沿用同一命名空间，旧实现撞 MANDATE_DUPLICATE。
+  const selectionDenial = 'Error: subagent model selection: "subagent_fork" always runs on the calling agent\'s own route and accepts no provider/model.'
+
+  it('fork 带路由被拒之后，同一命名空间的 subagent 重试放行', () => {
+    const { guard } = harness()
+    const prompt = withHeader(dispatchFields())
+    const session = makeSession('dispatcher-1', [
+      nativeCall(1, 'call-fork', prompt, 'subagent_fork'),
+      nativeResult(2, 'call-fork', true, selectionDenial),
+    ])
+    expect(guard(dispatch(prompt, session, 'call-sub'))).toBeUndefined()
+  })
+
+  it('真实写入顺序下也放行：本次调用自己的 tool/call 已经在日志里', () => {
+    // 宿主先写 tool/call 再跑守卫，所以那条待结算 attempt 早在账本里；它会把
+    // denied 的运行重新算成 booked，只看 state 就会把这次重试重新判成重复。
+    const { guard } = harness()
+    const prompt = withHeader(dispatchFields())
+    const session = makeSession('dispatcher-1', [
+      nativeCall(1, 'call-fork', prompt, 'subagent_fork'),
+      nativeResult(2, 'call-fork', true, selectionDenial),
+      nativeCall(3, 'call-sub', prompt),
+    ])
+    expect(guard(dispatch(prompt, session, 'call-sub'))).toBeUndefined()
+  })
+
+  it('那次被拒调用留下的预约同样不能挡住重试', () => {
+    // 账本守卫对第一次 fork 调用是放行的（它看不见模型守卫会拒），于是建了预约。
+    const { guard } = harness()
+    const prompt = withHeader(dispatchFields())
+    const forkOnly = makeSession('dispatcher-1', [nativeCall(1, 'call-fork', prompt, 'subagent_fork')])
+    expect(guard({
+      name: 'subagent_fork', arguments: { prompt }, agent: { session: forkOnly }, callId: 'call-fork',
+    })).toBeUndefined()
+    // 随后模型守卫拒掉它；修正后的调用沿用同一套 id。
+    const afterDenial = makeSession('dispatcher-1', [
+      nativeCall(1, 'call-fork', prompt, 'subagent_fork'),
+      nativeResult(2, 'call-fork', true, selectionDenial),
+      nativeCall(3, 'call-sub', prompt),
+    ])
+    expect(guard(dispatch(prompt, afterDenial, 'call-sub'))).toBeUndefined()
+  })
+
+  it('真正的并行同名空间调用仍然被拒（各自都有自己的 tool/call）', () => {
+    const { guard } = harness()
+    const prompt = withHeader(dispatchFields())
+    const session = makeSession('dispatcher-1', [
+      nativeCall(1, 'call-a', prompt),
+      nativeCall(2, 'call-b', prompt),
+    ])
+    expect(guard(dispatch(prompt, session, 'call-b'))).toContain('MANDATE_DUPLICATE')
+  })
+
+  it('修正后的调用真的派发出去之后，命名空间重新被占住', () => {
+    const { guard } = harness()
+    const prompt = withHeader(dispatchFields())
+    const deniedThenBooked = makeSession('dispatcher-1', [
+      nativeCall(1, 'call-fork', prompt, 'subagent_fork'),
+      nativeResult(2, 'call-fork', true, selectionDenial),
+      nativeCall(3, 'call-sub', prompt),
+      nativeResult(4, 'call-sub', false, 'done'),
+    ])
+    const denial = guard(dispatch(prompt, deniedThenBooked, 'call-third'))
+    expect(denial).toContain('MANDATE_DUPLICATE')
+    expect(denial?.startsWith('DISPATCH_LEDGER_V2:MANDATE_DUPLICATE:')).toBe(true)
+  })
+
+  it('派发本身失败（released）仍然永不可复用', () => {
+    // released ≠ denied：那次调用真的被执行了、只是失败了，命名空间照样占着。
+    const { guard } = harness()
+    const prompt = withHeader(dispatchFields())
+    const session = makeSession('dispatcher-1', [
+      nativeCall(1, 'call-a', prompt),
+      nativeResult(2, 'call-a', true, 'Error: boom'),
+    ])
+    expect(guard(dispatch(prompt, session, 'call-b'))).toContain('MANDATE_DUPLICATE')
+  })
+})

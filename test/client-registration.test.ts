@@ -316,6 +316,9 @@ describe('client registration', () => {
       'tool.call.toolview',
       // Code Mode 的 code_run 源码卡片，接在 MiniMax 视频卡片之后。
       'tool.call.toolview',
+      // 派发卡片：subagent 与 subagent_fork 各占一个 keyed 视图（占用即替换整行）。
+      'tool.call.toolview',
+      'tool.call.toolview',
       // MiniMax 视频的侧边栏渲染器：正文注册在宿主的文档页签槽上。
       'sidebar.right.tab.document',
       // 进展更新子模块（./progress-updates/）：对话流进展行、侧栏页签的正文与
@@ -362,6 +365,9 @@ describe('client registration', () => {
       expect.objectContaining({ key: ANTIGRAVITY_IMAGE_TOOL_NAME }),
       expect.objectContaining({ key: 'minimax_generate_video' }),
       expect.objectContaining({ key: CODE_RUN_TOOL_NAME }),
+      // 派发卡片：按工具名占用整行，把 mandate 头拆成结构并留住拒绝码。
+      expect.objectContaining({ key: 'subagent' }),
+      expect.objectContaining({ key: 'subagent_fork' }),
       expect.objectContaining({ key: 'progress_update' }),
     ])
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()

@@ -648,12 +648,22 @@ export function prefixedModelReason(
  * @param toolName - the tool the model called.
  * @param provider - the provider the call named.
  * @param model - the model the call named.
+ * @param explicitTools - Tools that DO expose a route pair; naming them gives the
+ *   next call a concrete target instead of "some other tool".
  * @returns the corrective reason handed back to the model.
  */
-export function inheritOverrideReason(toolName: string, provider: string, model: string): string {
+export function inheritOverrideReason(
+  toolName: string,
+  provider: string,
+  model: string,
+  explicitTools: readonly string[] = [],
+): string {
+  const instead = explicitTools.length === 0
+    ? 'a tool that supports explicit child model selection'
+    : explicitTools.map(name => '"' + name + '"').join(' or ')
   return `subagent model selection: "${toolName}" always runs on the calling agent's own route and accepts no `
-    + `provider/model. This call named "${provider}/${model}". Remove those fields, or delegate through a tool `
-    + `that supports explicit child model selection.`
+    + `provider/model. This call named "${provider}/${model}". Remove those fields to keep the child on your own `
+    + `route, or delegate through ${instead} with provider and model.`
 }
 
 /**
@@ -1102,17 +1112,47 @@ interface MutablePromptAssembly {
 }
 
 /**
+ * The sentence that keeps a route out of an inherit-mode delegation tool.
+ *
+ * The persona can say "pass provider and model" while the inherit tool has no such
+ * field, and no upstream description says so: the inherited route is implied by the
+ * tool itself. Stating it in the tool's own description is the only place the model
+ * reads immediately before it decides how to spell the call.
+ * @param explicitTools - Tools that expose a `provider`/`model` pair.
+ * @param inheritTools - Tools whose child always runs on the caller's own route.
+ * @param target - Which side of the pair is being described.
+ * @returns one sentence, or '' when there is nothing to say.
+ */
+export function inheritRouteNoticeSentence(
+  explicitTools: readonly string[],
+  inheritTools: readonly string[],
+  target: 'explicit' | 'inherit',
+): string {
+  if (explicitTools.length === 0 || inheritTools.length === 0) return ''
+  const explicit = explicitTools.map(name => '"' + name + '"').join(' or ')
+  const inherit = inheritTools.map(name => '"' + name + '"').join(' or ')
+  return target === 'explicit'
+    ? 'Never pass provider/model to ' + inherit + ': it always runs its child on the calling agent\'s own '
+      + 'route and rejects any route field.'
+    : 'This tool takes no provider/model: its child always runs on the calling agent\'s own route. '
+      + 'To choose a route, call ' + explicit + ' with provider and model.'
+}
+
+/**
  * Rewrite one assembled prompt's `tools:sdk` section and native tool schemas
  * when the target Agent's Session enforces a subagent model allowlist.
  * @param assembly - Assembled prompt from `system-prompt/assemble`.
  * @param allowed - Routes the calling Session authorizes.
  * @param toolNames - Explicit-route delegation tool names.
+ * @param inheritToolNames - Tools whose child keeps the caller's route; their
+ *   descriptions gain the matching route notice.
  * @returns the updated assembly, or the original object when nothing changed.
  */
 export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>(
   assembly: T,
   allowed: readonly AllowedModelRoute[],
   toolNames: readonly string[] = DEFAULT_DELEGATION_TOOLS,
+  inheritToolNames: readonly string[] = DEFAULT_SUBAGENT_INHERIT_TOOLS,
 ): T {
   if (allowed.length === 0) return assembly
   let sectionsChanged = false
@@ -1120,9 +1160,15 @@ export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>
     ? assembly.sections.map((section) => {
         if (section?.name !== 'tools:sdk' || typeof section.text !== 'string') return section
         const rewritten = rewriteAuthorizedToolDescriptions(section.text, allowed)
-        if (rewritten === section.text) return section
+        // In PTC mode this section IS the whole tool surface, so one sentence at its
+        // end reaches the same reader the per-tool description reaches in Native mode.
+        const notice = inheritRouteNoticeSentence(toolNames, inheritToolNames, 'explicit')
+        const text = notice.length > 0 && !rewritten.includes(notice)
+          ? rewritten + '\n\n' + notice
+          : rewritten
+        if (text === section.text) return section
         sectionsChanged = true
-        return { ...section, text: rewritten }
+        return { ...section, text }
       })
     : assembly.sections
 
@@ -1130,12 +1176,22 @@ export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>
   const tools = Array.isArray(assembly.tools)
     ? assembly.tools.map((tool) => {
         const name = asString(tool?.name)
-        if (name === undefined || (name !== 'list_subagent_models' && !toolNames.includes(name))) {
-          return tool
-        }
-        const description = typeof tool.description === 'string'
+        if (name === undefined) return tool
+        const isExplicit = toolNames.includes(name)
+        const isInherit = inheritToolNames.includes(name)
+        if (name !== 'list_subagent_models' && !isExplicit && !isInherit) return tool
+        const rewrittenDescription = typeof tool.description === 'string'
           ? rewriteAuthorizedToolDescriptions(tool.description, allowed)
           : tool.description
+        // The route notice belongs on the delegation tools themselves: the explicit
+        // tool carries the pair, the inherit tool carries none and now says so.
+        const notice = isExplicit || isInherit
+          ? inheritRouteNoticeSentence(toolNames, inheritToolNames, isExplicit ? 'explicit' : 'inherit')
+          : ''
+        const description = typeof rewrittenDescription === 'string' && notice.length > 0
+          && !rewrittenDescription.includes(notice)
+          ? rewrittenDescription + ' ' + notice
+          : rewrittenDescription
         let params = tool.parameters
         const paramsRecord = asRecord(params)
         const propsRecord = asRecord(paramsRecord?.['properties'])
@@ -1223,7 +1279,8 @@ export function delegationDenialReason(
     // more precise diagnostic, and it holds even when the inherited route (or
     // `allowParentFork`) is authorized.
     if (requestedProvider !== undefined || requestedModel !== undefined) {
-      return inheritOverrideReason(toolName, requestedProvider ?? '', requestedModel ?? '')
+      return inheritOverrideReason(
+        toolName, requestedProvider ?? '', requestedModel ?? '', toolNames)
     }
     if (parentForkToolNames.includes(toolName)
       && effectiveAllowParentFork(agent, preference, sessions, lockSnapshot)) {
@@ -1587,7 +1644,7 @@ export function installSubagentModelAuthorization(
       const assembled = await next()
       const agent = (context?.agent ?? context?.scope) as AuthorizationAgent | undefined
       const allowed = effectiveAllowedRoutes(agent, currentPreference(), sessions, scope, true)
-      return rewriteAuthorizedPromptAssembly(assembled, allowed, toolNames)
+      return rewriteAuthorizedPromptAssembly(assembled, allowed, toolNames, inheritToolNames)
     },
   )
 

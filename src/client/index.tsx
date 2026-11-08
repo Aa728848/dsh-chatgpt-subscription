@@ -67,6 +67,9 @@ import { installWorkBuddyStyles } from './workbuddy/styles.ts'
 import { installSubagentSettingsCard } from './subagent/index.ts'
 import { installSubagentStyles } from './subagent/styles.ts'
 import { dictionaries as subagentDicts, NS_SUBAGENT, type SubagentLocaleKey } from './subagent/locales.ts'
+import { MandateToolView } from './dispatch-ledger/MandateToolView.tsx'
+import { installDispatchLedgerStyles } from './dispatch-ledger/styles.ts'
+import { dictionaries as dispatchLedgerDicts, NS_DISPATCH_LEDGER, type DispatchLedgerLocaleKey } from './dispatch-ledger/locales.ts'
 import { CodeRunToolView } from './codemode/CodeRunToolView.tsx'
 import { installCodemodeStyles } from './codemode/styles.ts'
 import { CODE_RUN_TOOL_NAME } from './codemode/tool-name.ts'
@@ -96,6 +99,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-progress-updates': ProgressUpdatesLocaleKey
     'dsh-workbuddy': WorkBuddyLocaleKey
     'dsh-subagent-settings': SubagentLocaleKey
+    'dsh-dispatch-ledger': DispatchLedgerLocaleKey
   }
 }
 
@@ -187,6 +191,7 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
   // 之外再记一份「全局默认 + 按主代理模型」的两级列表。样式表无条件安装，
   // 注册本身在 installSubagentSettingsCard 里按服务是否就绪决定。
   ctx.effect(() => ctx.locale.register(NS_SUBAGENT, subagentDicts), 'dsh-subagent-settings: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS_DISPATCH_LEDGER, dispatchLedgerDicts), 'dsh-dispatch-ledger: dictionaries')
   ctx.effect(() => {
     installSubagentStyles()
     return () => {}
@@ -196,6 +201,7 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
   ctx.effect(() => {
     installPoolStyles()
     installCodemodeStyles()
+  installDispatchLedgerStyles()
     return () => {}
   }, 'dsh-chatgpt-subscription: pool styles')
   ctx.effect(() => setupMermaidObserver(), 'dsh-mermaid: observer')
@@ -323,6 +329,15 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     key: CODE_RUN_TOOL_NAME,
     locale: NS,
   }, CodeRunToolView))
+  // 派发卡片：按工具名占用 `tool.call.toolview`（占用即替换整行），把 mandate 头
+  // 拆成结构、把结果与 MANDATE_* 拒绝码单独留在醒目位置。只影响这两个工具名。
+  for (const key of ['subagent', 'subagent_fork'] as const) {
+    ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+      name: 'tool.call.toolview',
+      key,
+      locale: NS_DISPATCH_LEDGER,
+    }, MandateToolView))
+  }
 
   // MiniMax 视频的侧边栏渲染器：两段注册（定义 + keyed 正文），id 是同一个字符串。
   // 形状照抄宿主 ui-sidebar-documentpreview 的 image/index.ts。

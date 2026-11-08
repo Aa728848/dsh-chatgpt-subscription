@@ -11,12 +11,19 @@
  * - `tool/result` / `tool/ptc-dispatch`——同一次尝试的**结局**；
  * - `agent/inbox/spliced`——子代理**报告**落到 owner 会话。
  *
- * ## 命名空间永久占用
+ * ## 命名空间占用
  *
- * 命名空间 = (brief_id, run_id, idem)。它由**第一次派发尝试**占用，此后
- * **永不可复用**——不管那次运行后来是完成了还是被释放了。`released` 只解禁
- * **brief**（同一个工作项可以开新的一次运行），不解禁命名空间。所以重做一件
- * 事必须换新的 `run_id` 与新的 `idem`。
+ * 命名空间 = (brief_id, run_id, idem)。它由**第一次真正执行（或确实派发出去）**
+ * 的尝试占用，此后**不可复用**——不管那次运行后来是完成了还是被释放了。
+ * `released` 只解禁 **brief**（同一个工作项可以开新的一次运行），不解禁命名空间。
+ * 所以重做一件事要换新的 `run_id` 与新的 `idem`。
+ *
+ * **例外：派发前就被拒的尝试不占用命名空间。** 判据是 {@link classifyToolOutcome}
+ * 能证明这次调用根本没有落地——账本自己的 `DISPATCH_LEDGER_V2:` 拒绝，以及本插件
+ * 模型选择守卫的 `subagent model selection:` 拒绝。它们把运行置为 `denied`，
+ * 而 `denied` 的运行允许同一命名空间再收一次修正后的尝试：否则"第一次调用形状
+ * 写错了"会永久烧掉这个命名空间，模型改对之后必然撞 `MANDATE_DUPLICATE`，
+ * 一步错误变成一整轮派不出去（`session-9e27d9f1` 实测四次尝试全部落空）。
  *
  * ## attempt 层与聚合
  *
@@ -28,8 +35,9 @@
  * - 否则 `tool_error` > 0 → released（派发本身失败）
  * - 否则全是 `guard_denied` → denied（从未派发出去）
  *
- * **`guard_denied` 永远不参与聚合**。这就是"第二次并行调用被守卫拒掉"不会
- * 把第一次仍在 booked 的运行释放掉的原因。
+ * **`guard_denied` 不参与"释放"判定**。这就是"第二次并行调用被守卫拒掉"不会
+ * 把第一次仍在 booked 的运行释放掉的原因；只有**全部**尝试都是被守卫拒的
+ * （`denied`）才说明这个运行从未派发出去。
  *
  * 展示的 attempt 列表最多 {@link MAX_ATTEMPTS_SHOWN} 条，但**聚合计数另存**
  * 在 `attemptTotals` 里——截断展示不会改变状态。
@@ -84,6 +92,19 @@ export const DEFAULT_DISPATCH_TOOLS: readonly string[] = ['subagent', 'subagent_
 
 /** 守卫拒绝文案的统一前缀。 */
 export const DISPATCH_GUARD_DENIAL_PREFIX = 'DISPATCH_LEDGER_V2'
+
+/**
+ * 模型选择守卫（{@link ../subagent-model-authorization.ts}）那族拒绝的文案前缀。
+ *
+ * 那族守卫在派发**之前**就拒（{@link ../subagent-model-authorization.ts} 的
+ * `inheritOverrideReason` 等理由全部以这句开头），所以它和账本自己的拒绝一样，
+ * 证明这次调用从未落地。识别它，运行才会落到 `denied`，被拒的命名空间才有
+ * 机会接收修正后的重试。
+ */
+export const SUBAGENT_SELECTION_DENIAL_PREFIX = 'subagent model selection:'
+
+/** 模型选择守卫拒绝时记下的拒绝码。 */
+export const SUBAGENT_SELECTION_DENIAL_CODE = 'SUBAGENT_MODEL_SELECTION'
 
 /** 一次尝试的结局。 */
 export type AttemptOutcome = 'succeeded' | 'tool_error' | 'guard_denied' | 'unknown'
@@ -215,7 +236,7 @@ export interface DispatchLedgerCounters {
   unmandated: number
   /** 头部损坏或角色不匹配。 */
   malformed: number
-  /** 同命名空间的重复尝试。 */
+  /** 同命名空间的重复尝试（在派发前被拒的运行上重试不算重复）。 */
   duplicates: number
   /** 同工作项被另一个未了结的运行占用。 */
   briefBusy: number
@@ -548,7 +569,13 @@ export function detectGuardDenialCode(content: unknown): string | undefined {
   if (texts.length === 0) return undefined
   const joined = texts.join('\n').trim()
   const match = new RegExp('^(?:Error:\\s*)?' + DISPATCH_GUARD_DENIAL_PREFIX + ':([A-Z_]+)').exec(joined)
-  return match?.[1]
+  if (match?.[1] !== undefined) return match[1]
+  // 本插件另一族「派发前就拒」的守卫：模型选择。它的每一条理由都以
+  // `subagent model selection:` 开头，宿主把它包成 `Error: <reason>`。
+  // 认不出它，这类拒绝会被记成 `tool_error`、运行变 `released`，命名空间
+  // 于是被永久占住——修正后的重试只能拿到 `MANDATE_DUPLICATE`。
+  const selection = new RegExp('^(?:Error:\\s*)?' + SUBAGENT_SELECTION_DENIAL_PREFIX)
+  return selection.test(joined) ? SUBAGENT_SELECTION_DENIAL_CODE : undefined
 }
 
 /**
@@ -559,15 +586,18 @@ export function detectGuardDenialCode(content: unknown): string | undefined {
  * 两条额外的单调性规则：
  *
  * 1. **报告是终态**：报告到达之后，后来的 attempt 不再改写状态。
- * 2. **终态不被后来的 attempt 改写**：released / denied / completed / blocked
+ * 2. **已落地的终态不被后来的 attempt 改写**：released / completed / blocked
  *    之后不再回到 booked——否则"第二次被拒的失败"会把第一次的结论改掉。
+ *    `denied` **是例外**：它只说明这个运行的尝试全部被守卫在派发前拒掉，
+ *    没有任何已经发生的派发值得保护，所以再收到一次尝试时按计数重算
+ *    （修正后的同一命名空间因此能真的派发出去）。
  * @param run - 当前运行记录。
  * @param totals - attempt 聚合计数。
  * @returns 运行状态。
  */
 export function aggregateRunState(run: LedgerRun, totals: AttemptTotals): RunState {
   if (run.report !== undefined) return run.state
-  if (run.state !== 'booked') return run.state
+  if (run.state !== 'booked' && run.state !== 'denied') return run.state
   if (totals.succeeded > 0) return 'booked'
   if (totals.unknown > 0) return 'booked'
   if (totals.toolError > 0) return 'released'
@@ -713,9 +743,17 @@ function recordAttempt(
     }
     return refreshLedger({ ...state, runs, pending: boundedPending, counters })
   }
-  const run = applyAttemptToRun(existing, attempt)
+  // 复用一个 denied 运行：它此前的身体一次都没落地，所以账本以**这次**尝试为准——
+  // 正文哈希与工具名都换成新的，attempts 历史仍然保留。
+  const base = existing.state === 'denied'
+    ? { ...existing, body_sha256: sha256Hex(body), tool }
+    : existing
+  const run = applyAttemptToRun(base, attempt)
   const runs = { ...state.runs, [ns]: run }
-  const counters = { ...state.counters, duplicates: state.counters.duplicates + 1 }
+  // 在 denied 运行上重试是「修正后重派」，不是重复：它不计数。
+  const counters = existing.state === 'denied'
+    ? state.counters
+    : { ...state.counters, duplicates: state.counters.duplicates + 1 }
   return refreshLedger({ ...state, runs, pending: boundedPending, counters })
 }
 

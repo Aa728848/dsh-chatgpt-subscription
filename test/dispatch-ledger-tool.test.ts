@@ -448,6 +448,22 @@ describe('dispatch_ledger 工具：可复制的头部骨架', () => {
     expect(text.endsWith(DISPATCH_MANDATE_PROTOCOL)).toBe(true)
   })
 
+  it('骨架排版成多行缩进，而不是单行压缩', async () => {
+    // 头部是模型和人一起读的：单行 JSON 放进对话栏就糊成一整块，brief / run /
+    // policy 谁也扫不出来。解析器只做 JSON.parse，多行与单行等价。
+    const tool = createDispatchLedgerTool({
+      cache: createDispatchLedgerCache(),
+      policyFor: () => POLICY,
+      promptRef: 'p-abc123def456',
+    })
+    const args = { action: 'self' }
+    const fence = fencesOf(render(tool, args, await run(tool, args, makeSession('dispatcher-1', []))))[0] ?? ''
+    expect(fence.split('\n').length).toBeGreaterThan(5)
+    expect(fence).toContain('\n  "brief_id"')
+    expect(fence).toContain('\n  "policy": {')
+    expect(parseFence(fence).state).toBe('ok')
+  })
+
   it('每次渲染都现造 ids：照抄两次也不会撞命名空间', async () => {
     const tool = createDispatchLedgerTool({
       cache: createDispatchLedgerCache(),

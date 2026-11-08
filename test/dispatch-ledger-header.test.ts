@@ -242,6 +242,8 @@ describe('协议正文', () => {
     // 被自己的 kind 校验判成"抄错角色"。
     const blocks = [...DISPATCH_MANDATE_PROTOCOL.matchAll(/```dsh-mandate-v2\n([\s\S]*?)\n```/g)]
     expect(blocks.length, '协议里一段样板都没有').toBeGreaterThan(0)
+    // 样板也是给人看的：键各占一行，而不是压成一行塞进窄栏。
+    expect(blocks[0]?.[1]?.split('\n').length ?? 0).toBeGreaterThan(5)
     for (const block of blocks) {
       const text = MANDATE_FENCE_OPEN + '\n' + block[1] + '\n' + MANDATE_FENCE_CLOSE + '\nbody'
       const parsed = parseMandateHeader(text)

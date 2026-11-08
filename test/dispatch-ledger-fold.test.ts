@@ -12,6 +12,7 @@ import {
   briefIsBusy,
   bindChildMandates,
   dispatchLedgerCapacity,
+  SUBAGENT_SELECTION_DENIAL_CODE,
   detectGuardDenialCode,
   foldDispatchLedger,
   foldDispatchLedgerEvents,
@@ -645,5 +646,42 @@ describe('守卫可用的纯接口', () => {
       }],
     }
     expect(bindChildMandates(state, parent, () => undefined, [stranger])).toBe(state)
+  })
+})
+
+describe('调度账本：派发前被模型选择守卫拒绝的尝试', () => {
+  const selectionDenial = 'Error: subagent model selection: "subagent_fork" always runs on the calling agent\'s own route and accepts no provider/model.'
+
+  it('认成 guard_denied：运行落到 denied，而不是自称派发失败', () => {
+    const prompt = withHeader(dispatchFields())
+    const state = fold([
+      nativeCall(1, 'call-fork', prompt, 'subagent_fork'),
+      nativeResult(2, 'call-fork', true, selectionDenial),
+    ])
+    const run = state.runs[nsOf('b-7f', 'r-1', 'i-1')]
+    expect(run?.state).toBe('denied')
+    expect(run?.attemptTotals.guardDenied).toBe(1)
+    expect(run?.attempts[0]?.denialCode).toBe(SUBAGENT_SELECTION_DENIAL_CODE)
+  })
+
+  it('同一命名空间的修正后尝试把 denied 带回 booked，正文与工具名以新尝试为准', () => {
+    const prompt = withHeader(dispatchFields())
+    const corrected = withHeader(dispatchFields(), 'do the corrected work')
+    const state = fold([
+      nativeCall(1, 'call-fork', prompt, 'subagent_fork'),
+      nativeResult(2, 'call-fork', true, selectionDenial),
+      nativeCall(3, 'call-sub', corrected),
+      nativeResult(4, 'call-sub', false, 'done'),
+    ])
+    const run = state.runs[nsOf('b-7f', 'r-1', 'i-1')]
+    expect(run?.state).toBe('booked')
+    expect(run?.tool).toBe('subagent')
+    expect(run?.body_sha256).toBe(sha256Hex('do the corrected work'))
+  })
+
+  it('只认这族文案：普通工具失败仍记 tool_error', () => {
+    expect(detectGuardDenialCode([{ type: 'text', text: selectionDenial }]))
+      .toBe(SUBAGENT_SELECTION_DENIAL_CODE)
+    expect(detectGuardDenialCode([{ type: 'text', text: 'Error: boom' }])).toBeUndefined()
   })
 })

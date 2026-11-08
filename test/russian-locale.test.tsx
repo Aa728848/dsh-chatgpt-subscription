@@ -18,6 +18,7 @@ import { dictionaries as antigravityDicts, NS_ANTIGRAVITY } from '../src/client/
 import { dictionaries as claudeDicts, NS_CLAUDE } from '../src/client/claude/locales.ts'
 import { dictionaries as clinePassDicts, NS_CLINE_PASS } from '../src/client/cline-pass/locales.ts'
 import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from '../src/client/command-code/locales.ts'
+import { dictionaries as dispatchLedgerDicts, NS_DISPATCH_LEDGER } from '../src/client/dispatch-ledger/locales.ts'
 import { dictionaries as glmDicts, NS_GLM_CODING_PLAN } from '../src/client/glm-coding-plan/locales.ts'
 import { dictionaries as kimiDicts, NS_KIMI_CODE } from '../src/client/kimi-code/locales.ts'
 import { dictionaries as minimaxDicts, NS_MINIMAX_CODE } from '../src/client/minimax-code/locales.ts'
@@ -35,6 +36,7 @@ import { dictionary as antigravityRu } from '../src/client/locales-ru/antigravit
 import { dictionary as claudeRu } from '../src/client/locales-ru/claude.ts'
 import { dictionary as clinePassRu } from '../src/client/locales-ru/cline-pass.ts'
 import { dictionary as commandCodeRu } from '../src/client/locales-ru/command-code.ts'
+import { dictionary as dispatchLedgerRu } from '../src/client/locales-ru/dispatch-ledger.ts'
 import { dictionary as glmRu } from '../src/client/locales-ru/glm-coding-plan.ts'
 import { dictionary as hubRu } from '../src/client/locales-ru/hub.ts'
 import { dictionary as kimiRu } from '../src/client/locales-ru/kimi-code.ts'
@@ -64,6 +66,7 @@ const NAMESPACES = [
   // Appended to the end of the list, matching the registration order in
   // 'locales-ru/index.ts': an insert would shift every line after it.
   { ns: NS_WORKBUDDY, zh: workbuddyDicts.zh as Record<string, string>, en: workbuddyDicts.en as Record<string, string>, ru: workbuddyRu },
+  { ns: NS_DISPATCH_LEDGER, zh: dispatchLedgerDicts.zh as Record<string, string>, en: dispatchLedgerDicts.en as Record<string, string>, ru: dispatchLedgerRu },
 ]
 
 /** `{name}` placeholders in a template, in the order they appear. */

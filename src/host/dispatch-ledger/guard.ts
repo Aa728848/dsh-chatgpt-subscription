@@ -386,6 +386,16 @@ export interface DispatchLedgerReservations {
    */
   conflicts(issuer: string, ns: string, callId: string): boolean
   /**
+   * 这个命名空间当前由哪一次调用预约（没有时 undefined）。
+   *
+   * 守卫用它判定「这条预约是不是来自一个从未派发出去的调用」——那种预约
+   * 只可能属于一次被派发前拒绝的尝试，不能挡住修正后的重试。
+   * @param issuer - 签发方会话 id。
+   * @param ns - 命名空间键。
+   * @returns 预约者的调用 id；没有预约（或已过期）时 undefined。
+   */
+  holder(issuer: string, ns: string): string | undefined
+  /**
    * 预约一个命名空间（**只有所有校验通过之后**才调用）。
    * @param issuer - 签发方会话 id。
    * @param ns - 命名空间键。
@@ -428,6 +438,10 @@ export function createDispatchLedgerReservations(options: {
       const entry = entries.get(keyOf(issuer, ns))
       if (entry === undefined) return false
       return entry.callId !== callId
+    },
+    holder(issuer: string, ns: string): string | undefined {
+      prune()
+      return entries.get(keyOf(issuer, ns))?.callId
     },
     reserve(issuer: string, ns: string, callId: string): void {
       prune()
@@ -505,6 +519,23 @@ export function dispatchCapacityExcluding(
 }
 
 /**
+ * 这条运行除「本次调用自己那条待结算 attempt」以外，是否有过真实的派发尝试。
+ *
+ * 判定只读 `attemptTotals`：它是权威计数，而展示用的 `attempts` 会被截断。
+ * `succeeded` / `toolError` 都证明那次调用真的执行过；`unknown` 还包含「结局
+ * 丢失但其实派出去了」——这些都必须继续占住命名空间。只有「本次调用自己的
+ * 那条」要减掉，因为宿主在守卫之前就把它写进了日志。
+ * @param run - 运行记录。
+ * @param ownPending - 本次调用自己的那条 attempt 是否仍在待结算表里。
+ * @returns 除本次调用外是否有过真实派发。
+ */
+function runClaimedByDispatch(run: LedgerRun, ownPending: boolean): boolean {
+  const totals = run.attemptTotals
+  const unknownOthers = totals.unknown - (ownPending ? 1 : 0)
+  return totals.succeeded > 0 || totals.toolError > 0 || unknownOthers > 0
+}
+
+/**
  * 校验一次**派发**调用。
  * @param header - 派发头。
  * @param state - 调用方会话的账本状态。
@@ -537,8 +568,20 @@ export function checkDispatchMandate(
   }
   const ns = mandateNamespaceKey(header)
   // 重复判定先于容量判定：重复的命名空间是最具体的那个错，先说它。
+  //
+  // `denied` 的运行**不占用**命名空间：它的尝试全部被守卫在派发前拒掉，
+  // 没有一次真的派发出去，所以同一套 id 允许接收修正后的重试。真正派发过的
+  // 运行（booked / released / completed / blocked）照旧永不可复用。
   const existing = runOf(state, ns)
-  if (existing !== undefined && existing.createdByCallId !== callId) {
+  // 「本次调用自己那条待结算 attempt」必须排除：宿主先把 tool/call 写进日志，
+  // 这条 attempt 会把一条 denied 的运行重新算成 booked，只看 state 就会把
+  // 修正后的重试重新判成重复——现场 session-9e27d9f1 的第 2 次尝试正是这样被挡回去的。
+  const ownPending = callId !== undefined && state.pending[callId] === ns
+  if (
+    existing !== undefined
+    && existing.createdByCallId !== callId
+    && runClaimedByDispatch(existing, ownPending)
+  ) {
     return dispatchDenial(
       'MANDATE_DUPLICATE',
       'the namespace (brief_id "' + header.brief_id + '", run_id "' + header.run_id
@@ -797,7 +840,19 @@ export function createDispatchLedgerGuard(
         callId,
         policy,
         options.promptRef,
-        issuer === undefined ? undefined : (key: string) => reservations.conflicts(issuer, key, callId ?? ''),
+        issuer === undefined ? undefined : (key: string) => {
+          if (!reservations.conflicts(issuer, key, callId ?? '')) return false
+          // 预约来自一次已被派发前拒绝的调用：它从未落地，只留下这条预约。
+          // 不能让这条预约挡住修正后的重试（TTL 是 30 分钟，足以重演整轮失败）。
+          const holder = reservations.holder(issuer, key)
+          const heldRun = runOf(state, key)
+          const ownPendingForHeld = callId !== undefined && state.pending[callId] === key
+          if (holder !== undefined && heldRun !== undefined && heldRun.createdByCallId === holder
+            && !runClaimedByDispatch(heldRun, ownPendingForHeld)) {
+            return false
+          }
+          return true
+        },
       )
       // **只有所有校验都通过**才预约：被拒的调用不占预约。
       if (denial === undefined && issuer !== undefined && callId !== undefined) {

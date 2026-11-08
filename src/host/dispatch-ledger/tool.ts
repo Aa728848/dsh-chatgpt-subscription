@@ -360,8 +360,28 @@ function skeletonId(prefix: string): string {
  * @param header - 头部值。
  * @returns 引导语 + 围栏块；判不出 `ok` 时 undefined。
  */
+/**
+ * 把一段头部值渲染成**多行缩进**的 JSON。
+ *
+ * 头部是模型与人都要读的东西：单行压缩后放进窄栏里就是一整块糊掉的文本，
+ * 谁也扫不出 brief / run / policy 在哪。解析器只做 `JSON.parse`，多行与单行
+ * 等价，所以这里换成键各占一行（数组仍内联，免得一个两项数组占掉三行）。
+ * @param header - 头部值。
+ * @returns 多行 JSON 文本。
+ */
+export function prettyHeaderJson(header: Record<string, unknown>): string {
+  const rows: string[] = []
+  for (const [key, value] of Object.entries(header)) {
+    const rendered = isRecord(value)
+      ? '{\n' + Object.entries(value).map(([innerKey, innerValue]) => '    ' + JSON.stringify(innerKey) + ': ' + JSON.stringify(innerValue)).join(',\n') + '\n  }'
+      : JSON.stringify(value)
+    rows.push('  ' + JSON.stringify(key) + ': ' + rendered)
+  }
+  return '{\n' + rows.join(',\n') + '\n}'
+}
+
 function readyToSendBlock(lead: string, header: Record<string, unknown>): string | undefined {
-  const block = '```' + MANDATE_PROTOCOL_ID + '\n' + JSON.stringify(header) + '\n' + '```'
+  const block = '```' + MANDATE_PROTOCOL_ID + '\n' + prettyHeaderJson(header) + '\n' + '```'
   if (parseMandateHeader(block).state !== 'ok') return undefined
   return lead + '\n' + block
 }

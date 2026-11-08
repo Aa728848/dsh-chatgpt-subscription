@@ -22,6 +22,7 @@ import { NS_KIMI_CODE } from '../kimi-code/locales.ts'
 import { NS_MINIMAX_CODE } from '../minimax-code/locales.ts'
 import { NS_OLLAMA } from '../ollama/locales.ts'
 import { NS_OPENDESIGN } from '../opendesign/locales.ts'
+import { NS_DISPATCH_LEDGER } from '../dispatch-ledger/locales.ts'
 import { NS_PROGRESS_UPDATES } from '../progress-updates/locales.ts'
 import { NS_QODER } from '../qoder/locales.ts'
 import { NS_STEP_CODE } from '../step-code/locales.ts'
@@ -37,6 +38,7 @@ import { dictionary as kimiCode } from './kimi-code.ts'
 import { dictionary as minimaxCode } from './minimax-code.ts'
 import { dictionary as ollama } from './ollama.ts'
 import { dictionary as openDesign } from './opendesign.ts'
+import { dictionary as dispatchLedger } from './dispatch-ledger.ts'
 import { dictionary as progressUpdates } from './progress-updates.ts'
 import { dictionary as qoder } from './qoder.ts'
 import { dictionary as stepCode } from './step-code.ts'
@@ -92,6 +94,7 @@ export function installRussianLocale(ctx: ClientContext): void {
     // Appended, never inserted: a new line joins the end of the list so the
     // registration order of the lines that were already shipped never moves.
     [NS_WORKBUDDY, workbuddy],
+    [NS_DISPATCH_LEDGER, dispatchLedger],
   ]
 
   for (const [ns, dictionary] of dictionaries) {

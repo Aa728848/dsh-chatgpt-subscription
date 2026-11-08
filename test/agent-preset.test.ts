@@ -569,6 +569,18 @@ describe('the persona block the declaration transcribes', () => {
     }
   })
 
+  it('keeps a route out of the inherit tool in both copies', () => {
+    // 现场反馈：人格写着「每次派发都传 provider 与 model」，模型照做传给了
+    // subagent_fork，守卫只能拒；四轮尝试全落空。两份副本都必须点名那个不接受
+    // 路由字段的工具，以及要选路由时该用哪个。
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
+      expect(persona).toContain('Before every dispatch through an explicit-route tool (subagent)')
+      expect(persona).toContain('Never pass provider/model to subagent_fork')
+      expect(persona).toContain('Never pass provider/model to it')
+    }
+  })
+
   it('names no prompt variable, so a model switch cannot rewrite the prefix', () => {
     // `{{model}}` resolves from the agent's route at assembly time. Rendered
     // into the persona it makes the head of the system prompt depend on the
