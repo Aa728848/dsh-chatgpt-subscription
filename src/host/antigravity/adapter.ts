@@ -15,6 +15,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
+  FALLBACK_PROJECT_ID,
   MODELS,
   PROVIDER_ID,
   PROVIDER_NAME,
@@ -402,7 +403,7 @@ export class AntigravityAdapter extends LlmAdapter {
       }
 
       const { account, token, projectId: defaultProj } = eff
-      const projectId = defaultProj || 'antigravity-default'
+      const projectId = defaultProj || FALLBACK_PROJECT_ID
       triedAccountIds.add(account.id)
 
       const body = JSON.stringify(buildRequest(requestOptions, model, projectId, runtimeModel, effort, images, {

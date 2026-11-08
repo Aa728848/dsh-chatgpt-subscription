@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmError,
@@ -12,7 +13,6 @@ import {
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
-  ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
   ANTIGRAVITY_SYSTEM_INSTRUCTION,
   GEMINI_ROLE,
   PROVIDER_ID,
@@ -692,12 +692,14 @@ export function buildRequest(
 ): Record<string, unknown> {
   const request: Record<string, unknown> = {
     contents: convertMessages(options, model, runtimeModel, images),
+    // The persona part is the native client's own opening and nothing else. The
+    // `[ignore]`-wrapped duplicate and the "never restate rules" guard that used
+    // to ride beside it were this plugin's own text, and they sat in the one part
+    // every single request carries -- the cheapest possible fingerprint.
     systemInstruction: {
       role: GEMINI_ROLE.user,
       parts: [
         { text: ANTIGRAVITY_SYSTEM_INSTRUCTION },
-        { text: `Please ignore following [ignore]${ANTIGRAVITY_SYSTEM_INSTRUCTION}[/ignore]` },
-        { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION },
         ...(options.system ? [{ text: sanitizeText(options.system) }] : []),
       ],
     },
@@ -783,7 +785,9 @@ export function buildRequest(
     request,
     requestType: 'agent',
     userAgent: 'antigravity',
-    requestId: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    // The Hub's own request ids are `agent-<unique>`; an opaque id with no
+    // vocabulary of its own is what a captured request carries.
+    requestId: `agent-${randomUUID()}`,
   }
 }
 

@@ -1,10 +1,11 @@
 import {
-  DEFAULT_ANTIGRAVITY_CL,
-  DEFAULT_ANTIGRAVITY_VERSION,
   DEFAULT_ENDPOINT,
   DISCOVERY_TIMEOUT_MS,
   ENDPOINT_FALLBACKS,
+  FALLBACK_PROJECT_ID,
   FREE_TIER_ID,
+  HUB_ONBOARD_API_CLIENT,
+  HUB_ONBOARD_UA_SUFFIX,
   MODELS,
   ONBOARD_POLL_INTERVAL_MS,
   ONBOARD_TIMEOUT_MS,
@@ -16,6 +17,7 @@ import {
   type AntigravityCatalogModel,
 } from './token-store.ts'
 import { ensureApiKey } from './oauth.ts'
+import { currentHubVersion, hubChangelist, refreshHubVersion } from './client-version.ts'
 import type {
   AntigravityAccountQuota,
   AntigravityQuotaGroup,
@@ -31,12 +33,41 @@ let quotaCacheEpoch = 0
 const PLATFORM = process.platform === 'darwin' ? 'MACOS' : process.platform === 'win32' ? 'WINDOWS' : 'LINUX'
 
 export function defaultUserAgent(): string {
-  const version = process.env.DSH_ANTIGRAVITY_VERSION || DEFAULT_ANTIGRAVITY_VERSION
-  const cl = process.env.DSH_ANTIGRAVITY_CL || DEFAULT_ANTIGRAVITY_CL
+  const version = currentHubVersion()
+  // A release whose changelist is unknown omits the field rather than claiming
+  // another build's: that is what the official client does for its own builds.
+  const cl = hubChangelist(version)
   const os = process.env.DSH_ANTIGRAVITY_OS
     || (process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux')
   const arch = process.env.DSH_ANTIGRAVITY_ARCH || (process.arch === 'x64' ? 'amd64' : process.arch)
-  return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl})`
+  return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}${cl === undefined ? '' : `; cl=${cl}`})`
+}
+
+/**
+ * The identity headers a captured Antigravity request does NOT carry.
+ *
+ * `X-Goog-Api-Client` and `Client-Metadata` are Gemini-CLI idioms: the native
+ * `language_server` states its `ideType` in the JSON envelope (the
+ * `loadCodeAssist` metadata) and sends a much smaller header set. Sending them
+ * on every request therefore marked this route as a reimplementation while
+ * buying nothing.
+ *
+ * Captures disagree about the exact header set, so the pair stays reachable
+ * behind `DSH_ANTIGRAVITY_LEGACY_HEADERS` — an account that turns out to need it
+ * gets a one-line switch instead of a code change.
+ */
+const LEGACY_IDENTITY_HEADERS: Record<string, string> = {
+  'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
+  'Client-Metadata': JSON.stringify({
+    ideType: 'ANTIGRAVITY',
+    platform: PLATFORM,
+    pluginType: 'GEMINI',
+  }),
+}
+
+export function legacyIdentityHeadersEnabled(): boolean {
+  const raw = (process.env.DSH_ANTIGRAVITY_LEGACY_HEADERS || '').trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on'
 }
 
 export function antigravityHeaders(token: string): Record<string, string> {
@@ -45,12 +76,7 @@ export function antigravityHeaders(token: string): Record<string, string> {
     'Content-Type': 'application/json',
     Accept: 'text/event-stream',
     'User-Agent': process.env.DSH_ANTIGRAVITY_USER_AGENT || defaultUserAgent(),
-    'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
-    'Client-Metadata': JSON.stringify({
-      ideType: 'ANTIGRAVITY',
-      platform: PLATFORM,
-      pluginType: 'GEMINI',
-    }),
+    ...(legacyIdentityHeadersEnabled() ? LEGACY_IDENTITY_HEADERS : {}),
   }
 }
 
@@ -58,6 +84,22 @@ export function jsonHeaders(token: string): Record<string, string> {
   return {
     ...antigravityHeaders(token),
     Accept: 'application/json',
+  }
+}
+
+/**
+ * The identity the Hub presents on `onboardUser` control-plane calls.
+ *
+ * Onboarding is the one surface where the native client is visibly a Node API
+ * client: it appends `google-api-nodejs-client/<version>` to its User-Agent and
+ * states `X-Goog-Api-Client`. Content requests carry neither, which is why this
+ * is a separate builder rather than another field on {@link antigravityHeaders}.
+ */
+export function antigravityControlPlaneHeaders(token: string): Record<string, string> {
+  return {
+    ...jsonHeaders(token),
+    'User-Agent': `${process.env.DSH_ANTIGRAVITY_USER_AGENT || defaultUserAgent()} ${HUB_ONBOARD_UA_SUFFIX}`,
+    'X-Goog-Api-Client': HUB_ONBOARD_API_CLIENT,
   }
 }
 
@@ -100,6 +142,8 @@ export interface AntigravityTierInfo {
   id?: string
   name?: string
   description?: string
+  /** The tier the Hub itself onboards a new account into. */
+  isDefault?: boolean
 }
 
 export interface AntigravityIneligibleTier {
@@ -122,11 +166,9 @@ export async function loadCodeAssistDetail(
   fetchFn: typeof fetch = fetch,
   signal?: AbortSignal,
 ): Promise<LoadCodeAssistDetailResult | undefined> {
-  const metadata = {
-    ideType: 'ANTIGRAVITY',
-    platform: 'PLATFORM_UNSPECIFIED',
-    pluginType: 'GEMINI',
-  }
+  // Only `ideType`: the Hub omits platform and plugin type here, and those
+  // values (MACOS/WINDOWS) are not valid Cloud Code platform enum members.
+  const metadata = { ideType: 'ANTIGRAVITY' }
 
   for (const endpoint of endpointCandidates()) {
     try {
@@ -166,11 +208,18 @@ export async function onboardUser(
   token: string,
   fetchFn: typeof fetch = fetch,
   signal?: AbortSignal,
+  tierId: string = FREE_TIER_ID,
 ): Promise<void> {
   const deadline = Date.now() + ONBOARD_TIMEOUT_MS
+  // Onboarding states its identity in snake_case control-plane fields, unlike the
+  // camelCase `ideType` the project-discovery call sends.
   const body = JSON.stringify({
-    tierId: FREE_TIER_ID,
-    metadata: { ideType: 'ANTIGRAVITY' },
+    tierId,
+    metadata: {
+      ide_type: 'ANTIGRAVITY',
+      ide_version: currentHubVersion(),
+      ide_name: 'antigravity',
+    },
   })
   let lastError: unknown
 
@@ -182,7 +231,7 @@ export async function onboardUser(
 
       const response = await fetchFn(`${endpoint}/v1internal:onboardUser`, {
         method: 'POST',
-        headers: jsonHeaders(token),
+        headers: antigravityControlPlaneHeaders(token),
         body,
         signal: callSignal,
       })
@@ -226,7 +275,7 @@ export async function onboardUser(
 
         const pollResp = await fetchFn(`${endpoint}/v1internal/${operationName}`, {
           method: 'GET',
-          headers: jsonHeaders(token),
+          headers: antigravityControlPlaneHeaders(token),
           signal: pollSignal,
         })
 
@@ -450,21 +499,20 @@ export async function fetchAccountQuota(
 
   const epoch = quotaCacheEpoch
   const request = (async (): Promise<AntigravityAccountQuota> => {
+    // The quota card is the one place a long-lived process is guaranteed to come
+    // back to, so it is also where a stale Hub release gets re-read.
+    void refreshHubVersion(fetchFn)
     const { token, projectId: credentialProjectId } = await ensureApiKey(store, fetchFn)
 
     const [assistResult, summaryResult] = await Promise.all([
       postJson('/v1internal:loadCodeAssist', token, {
-        metadata: {
-          ideType: 'ANTIGRAVITY',
-          platform: 'PLATFORM_UNSPECIFIED',
-          pluginType: 'GEMINI',
-        },
+        metadata: { ideType: 'ANTIGRAVITY' },
       }, fetchFn).catch(() => null),
       postJson('/v1internal:retrieveUserQuotaSummary', token, {}, fetchFn).catch(() => null),
     ])
 
     const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined
-    const projectId = credentialProjectId || discoveredProject || 'antigravity-default'
+    const projectId = credentialProjectId || discoveredProject || FALLBACK_PROJECT_ID
 
     const modelsCall = await postJson('/v1internal:fetchAvailableModels', token, { project: projectId }, fetchFn).catch(() => null)
     const modelsData = modelsCall?.data

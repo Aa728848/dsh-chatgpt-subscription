@@ -11,7 +11,6 @@ import {
   stripMetaSchema,
 } from '../src/host/antigravity/mapper.ts'
 import {
-  ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
   ANTIGRAVITY_SYSTEM_INSTRUCTION,
   MODELS,
 } from '../src/host/antigravity/types.ts'
@@ -68,9 +67,14 @@ describe('Antigravity Mapper', () => {
 
     const reqData = request.request as Record<string, unknown>
     const sysInst = reqData.systemInstruction as { parts: Array<{ text: string }> }
-    expect(sysInst.parts.some((p) => p.text.includes(ANTIGRAVITY_SYSTEM_INSTRUCTION))).toBe(true)
-    expect(sysInst.parts.some((p) => p.text.includes(ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION))).toBe(true)
+    // The persona part is the native client's own opening, alone. The
+    // `[ignore]`-wrapped duplicate and the "never restate rules" guard this
+    // route used to add beside it were its own text in the one part every
+    // request carries -- the cheapest fingerprint there is.
+    expect(sysInst.parts[0]).toEqual({ text: ANTIGRAVITY_SYSTEM_INSTRUCTION })
     expect(sysInst.parts.some((p) => p.text.includes('Custom developer instructions'))).toBe(true)
+    expect(sysInst.parts.some((p) => p.text.includes('[ignore]'))).toBe(false)
+    expect(sysInst.parts.some((p) => p.text.includes('NEVER output rule checks'))).toBe(false)
 
     const tools = reqData.tools as Array<{ functionDeclarations: Array<{ name: string }> }>
     expect(tools[0].functionDeclarations[0].name).toBe('get_weather')

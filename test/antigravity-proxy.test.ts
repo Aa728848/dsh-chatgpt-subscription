@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, type LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type z from '@deepseek-ai/schemastery'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fetch as undiciFetch, ProxyAgent } from 'undici'
+import { Agent, fetch as undiciFetch, ProxyAgent } from 'undici'
 import { apply } from '../src/index.ts'
 import * as platformStore from '../src/host/platform-token-store.ts'
 import { ProxyManager } from '../src/host/proxy-manager.ts'
@@ -13,6 +13,7 @@ import { MacKeychainCredentialStore } from '../src/host/token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../src/host/credential-store-secret-service.ts'
 import { getWebLoginStatus } from '../src/host/antigravity/oauth.ts'
 import { FileCredentialStore, FileModelSettingsStore, type AntigravityCredentials } from '../src/host/antigravity/token-store.ts'
+import { HUB_MANIFEST_URL, resetHubVersionCache } from '../src/host/antigravity/client-version.ts'
 import { DAILY_ENDPOINT, DEFAULT_ENDPOINT, TOKEN_URL } from '../src/host/antigravity/types.ts'
 import { PREFERENCES_NAMESPACE } from '../src/shared/preferences.ts'
 
@@ -30,6 +31,8 @@ const proxyFetch = vi.mocked(undiciFetch)
 beforeEach(() => {
   vi.stubGlobal('fetch', directFetch.mockReset().mockRejectedValue(new Error('Unexpected direct request')))
   proxyFetch.mockReset().mockRejectedValue(new Error('Unexpected proxied request'))
+  // Each test mounts the plugin, and mounting reads the Hub updater manifest once.
+  resetHubVersionCache()
   vi.stubEnv('DSH_ANTIGRAVITY_ENDPOINT', '')
   vi.stubEnv('DSH_ANTIGRAVITY_CLIENT_ID', 'test-client')
   vi.stubEnv('DSH_ANTIGRAVITY_CLIENT_SECRET', 'test-client-secret')
@@ -162,7 +165,14 @@ async function mountPlugin() {
 }
 
 function mockProxy(respond: (url: string, init?: RequestInit) => Response) {
-  proxyFetch.mockImplementation(async (input, init) => respond(String(input), init as RequestInit) as unknown as Awaited<ReturnType<typeof undiciFetch>>)
+  proxyFetch.mockImplementation(async (input, init) => {
+    // Mounting the plugin reads the Hub updater manifest once, through the same
+    // proxied transport as everything else this file exercises.
+    if (String(input) === HUB_MANIFEST_URL) {
+      return new Response('version: 2.24.0\n', { status: 200 }) as unknown as Awaited<ReturnType<typeof undiciFetch>>
+    }
+    return respond(String(input), init as RequestInit) as unknown as Awaited<ReturnType<typeof undiciFetch>>
+  })
 }
 
 function geminiResponse() {
@@ -177,10 +187,46 @@ async function generate(adapter: LlmAdapter, provider = 'antigravity', model = '
   return chunks
 }
 
-function expectSharedDispatcher() {
-  const dispatchers = proxyFetch.mock.calls.map(([, init]) => init?.dispatcher)
-  expect(dispatchers[0]).toBeInstanceOf(ProxyAgent)
+/**
+ * The pooled agent behind a shaping wrapper.
+ *
+ * This route strips the browser headers fetch adds, so what reaches the transport
+ * is a filter that delegates to the pool; the pool is what the assertions here
+ * are about.
+ */
+function unwrapDispatcher(dispatcher: unknown): unknown {
+  return (dispatcher as { wrapped?: unknown } | undefined)?.wrapped ?? dispatcher
+}
+
+function expectOneDispatcher(dispatchers: unknown[]) {
+  expect(dispatchers.length).toBeGreaterThan(0)
+  expect(unwrapDispatcher(dispatchers[0])).toBeInstanceOf(ProxyAgent)
   expect(new Set(dispatchers).size).toBe(1)
+}
+
+/**
+ * Two pools, not one.
+ *
+ * This route pools by credential, so its calls split in exactly two: the ones
+ * that carry no `Authorization` (the Hub manifest read, the OAuth token
+ * exchange, which puts its credential in the form body) keep the shared pool,
+ * and every credentialed call shares one pool per credential. With a single
+ * account in these fixtures that is one pool on each side, and they must differ.
+ */
+function expectCredentialPoolGrouping() {
+  const credentialed = new Set<unknown>()
+  const anonymous = new Set<unknown>()
+  for (const [, init] of proxyFetch.mock.calls) {
+    const authorization = new Headers(init?.headers as HeadersInit).get('authorization')
+    ;(authorization ? credentialed : anonymous).add(init?.dispatcher)
+  }
+  expect(credentialed.size).toBe(1)
+  expect(anonymous.size).toBe(1)
+  const [credentialPool] = credentialed
+  const [sharedPool] = anonymous
+  expect(unwrapDispatcher(credentialPool)).toBeInstanceOf(ProxyAgent)
+  expect(unwrapDispatcher(sharedPool)).toBeInstanceOf(ProxyAgent)
+  expect(credentialPool).not.toBe(sharedPool)
 }
 
 describe('Antigravity shared proxy settings', () => {
@@ -196,12 +242,23 @@ describe('Antigravity shared proxy settings', () => {
     expect(await generate(gemini)).toContainEqual({ type: 'text-delta', index: 0, text: 'connected' })
     await generate(plugin.adapters.get('codex-chatgpt')!, 'codex-chatgpt', 'gpt-5.6-sol')
     expect(proxyFetch.mock.calls.map(([url]) => String(url))).toEqual([
+      HUB_MANIFEST_URL,
       TOKEN_URL,
       `${DAILY_ENDPOINT}/v1internal:streamGenerateContent?alt=sse`,
       `${DEFAULT_ENDPOINT}/v1internal:streamGenerateContent?alt=sse`,
       expect.stringContaining('/responses'),
     ])
-    expectSharedDispatcher()
+    // This route pins HTTP/1.1 and pools by credential. Its four calls therefore
+    // split in two: the manifest and the token refresh carry no credential and
+    // share the anonymous pool, while daily and prod share the account's pool --
+    // and those two pools must never be the same one. The GPT call keeps the
+    // manager's ordinary shared pool, which is a third one.
+    const dispatchers = proxyFetch.mock.calls.map(([, init]) => init?.dispatcher)
+    expectOneDispatcher(dispatchers.slice(0, 2))
+    expectOneDispatcher(dispatchers.slice(2, 4))
+    expect(dispatchers[0]).not.toBe(dispatchers[2])
+    expect(unwrapDispatcher(dispatchers[4])).toBeInstanceOf(ProxyAgent)
+    expect(dispatchers[4]).not.toBe(dispatchers[0])
     expect(plugin.credentials().access).toBe('refreshed-access')
     expect(directFetch).not.toHaveBeenCalled()
 
@@ -210,15 +267,21 @@ describe('Antigravity shared proxy settings', () => {
     await plugin.preferences.update({ proxyMode: 'auto' })
     mockProxy(() => geminiResponse())
     await generate(gemini)
-    expect(proxyFetch.mock.calls.at(-1)?.[1]?.dispatcher).toBeInstanceOf(ProxyAgent)
+    expect(unwrapDispatcher(proxyFetch.mock.calls.at(-1)?.[1]?.dispatcher)).toBeInstanceOf(ProxyAgent)
     expect(proxyFetch.mock.calls.at(-1)?.[1]?.dispatcher).not.toBe(customDispatcher)
 
     const proxiedCount = proxyFetch.mock.calls.length
     await plugin.preferences.update({ proxyMode: 'direct' })
-    directFetch.mockImplementation(async () => geminiResponse())
+    mockProxy(() => geminiResponse())
     await generate(gemini)
-    expect(directFetch).toHaveBeenCalledTimes(1)
-    expect(proxyFetch).toHaveBeenCalledTimes(proxiedCount)
+    // Without a proxy this route still keeps a pool of its own: one TLS
+    // connection per account is the point of the credential-pooled fetch, and
+    // Node's process-wide fetch pool is exactly what it must not use.
+    const directCalls = proxyFetch.mock.calls.slice(proxiedCount)
+    expect(directCalls).toHaveLength(1)
+    expect(unwrapDispatcher(directCalls[0][1]?.dispatcher)).toBeInstanceOf(Agent)
+    expect(unwrapDispatcher(directCalls[0][1]?.dispatcher)).not.toBeInstanceOf(ProxyAgent)
+    expect(directFetch).not.toHaveBeenCalled()
   })
 
   it('uses the selected proxy for quota requests, catalog discovery, and credential refresh from the settings route', async () => {
@@ -234,9 +297,14 @@ describe('Antigravity shared proxy settings', () => {
     expect(result.value.quota.projectId).toBe('test-project')
     expect(result.value.quota.groups[0].buckets[0].remainingFraction).toBe(0.75)
     expect(result.value.quota.catalogModels).toEqual([{ id: 'gemini-3.7-flash', name: 'Gemini' }])
-    expect(proxyFetch).toHaveBeenCalledTimes(4)
-    expectSharedDispatcher()
-    for (const [, init] of proxyFetch.mock.calls.slice(1)) {
+    // Manifest read at mount, refresh, loadCodeAssist, quota summary, catalogue.
+    expect(proxyFetch).toHaveBeenCalledTimes(5)
+    const dispatchers = proxyFetch.mock.calls.map(([, init]) => init?.dispatcher)
+    // Manifest and token refresh are uncredentialed; the three account reads are not.
+    expectOneDispatcher(dispatchers.slice(0, 2))
+    expectOneDispatcher(dispatchers.slice(2))
+    expect(dispatchers[0]).not.toBe(dispatchers[2])
+    for (const [, init] of proxyFetch.mock.calls.slice(2)) {
       expect(new Headers(init?.headers as HeadersInit).get('Authorization')).toBe('Bearer quota-access')
     }
     expect(directFetch).not.toHaveBeenCalled()
@@ -272,8 +340,8 @@ describe('Antigravity shared proxy settings', () => {
     // flow that never finishes; it just tolerates the DPAPI round trips.
     await vi.waitFor(() => expect(getWebLoginStatus().status).toBe('complete'), { timeout: 10_000, interval: 50 })
     expect(plugin.credentials()).toMatchObject({ access: 'login-access', refresh: 'login-refresh', email: 'test@example.test', projectId: 'login-project' })
-    expect(proxyFetch).toHaveBeenCalledTimes(6)
-    expectSharedDispatcher()
+    expect(proxyFetch).toHaveBeenCalledTimes(7)
+    expectCredentialPoolGrouping()
     expect(directFetch).not.toHaveBeenCalled()
   })
 })

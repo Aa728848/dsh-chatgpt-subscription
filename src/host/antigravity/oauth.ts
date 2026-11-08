@@ -293,6 +293,23 @@ export function assertFreeTierEligible(payload: LoadCodeAssistDetailResult): voi
   throw err
 }
 
+/**
+ * The tier to onboard with, chosen the way the Hub chooses one.
+ *
+ * The Hub onboards into its own default allowed tier; this route additionally
+ * requires the free tier to be on offer (it is the only tier this line claims
+ * eligibility for), so that one is preferred next. Everything else is the
+ * reference implementation's order: first allowed tier, current tier, free tier.
+ */
+export function selectOnboardTier(payload: LoadCodeAssistDetailResult): string {
+  const allowed = payload.allowedTiers ?? []
+  return allowed.find((tier) => tier.isDefault === true && tier.id)?.id
+    ?? allowed.find((tier) => tier.id === FREE_TIER_ID)?.id
+    ?? allowed[0]?.id
+    ?? payload.currentTier?.id
+    ?? FREE_TIER_ID
+}
+
 export async function discoverAntigravityProject(
   token: string,
   fetchFn: typeof fetch = fetch,
@@ -310,7 +327,7 @@ export async function discoverAntigravityProject(
   const canOnboard = initial.allowedTiers?.some((tier) => tier.id === FREE_TIER_ID) === true
   if (canOnboard && !initial.currentTier) {
     onProgress?.('正在为新账号开通 Antigravity 免费额度...')
-    await onboardUser(token, fetchFn, signal)
+    await onboardUser(token, fetchFn, signal, selectOnboardTier(initial))
     onProgress?.('正在获取专属项目 (Project ID)...')
     const refreshed = await loadCodeAssistDetail(token, fetchFn, signal)
     if (refreshed?.projectId) {

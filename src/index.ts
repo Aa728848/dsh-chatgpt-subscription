@@ -52,10 +52,11 @@ import {
   modelSettingsPath,
 } from './host/antigravity/token-store.ts'
 import { AccountPoolStore } from './host/antigravity/account-pool.ts'
+import { refreshHubVersion } from './host/antigravity/client-version.ts'
 import { configurePoolStorage } from './host/common/pool-storage.ts'
 import { PoolStorageSettings } from './host/common/pool-storage-settings.ts'
 import { asCredentialsSeam } from './host/common/credentials-compat.ts'
-import { PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_PROVIDER_NAME } from './host/antigravity/types.ts'
+import { ANTIGRAVITY_ABSENT_HEADERS, PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_PROVIDER_NAME } from './host/antigravity/types.ts'
 import { CommandCodeAdapter } from './host/command-code/adapter.ts'
 import { CommandCodeAccountPool } from './host/command-code/account-pool.ts'
 import { registerCommandCodeRoutes } from './host/command-code/routes.ts'
@@ -959,9 +960,30 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       logger: ctx.logger,
     })
     const proxyFetch = proxyManager.createFetch()
+    // Antigravity is pinned to HTTP/1.1 on the proxied path too. The native
+    // `language_server` speaks HTTP/1.1 (one credential per process, keep-alive
+    // sized against GFE's 240 s HTTP/1.1 cutoff), and this manager's direct path
+    // is Node's global fetch, which offers http/1.1 only -- without the pin one
+    // route would speak h2 behind a proxy and HTTP/1.1 without one.
+    // `stripHeaders` drops the two browser headers `fetch` adds and the direct
+    // path's `omitAlpn` keeps the hello free of an ALPN extension, both measured
+    // against the native client's Go shape.
+    const antigravityProxyFetch = proxyManager.createFetch({
+      allowH2: false,
+      credentialPools: true,
+      stripHeaders: ANTIGRAVITY_ABSENT_HEADERS,
+      omitAlpn: true,
+    })
+    // The Hub release Cloud Code gates its catalogue on is read once from the
+    // updater manifest: not awaited, because the first requests only need a
+    // usable version and the built-in one already is.
+    void refreshHubVersion(antigravityProxyFetch)
     const providerLimits = readModelRequestLimits()
+    const baseFetchFor = (provider: ControlledProvider) => (
+      provider === 'antigravity' ? antigravityProxyFetch : proxyFetch
+    )
     const modelFetch = Object.fromEntries(CONTROLLED_PROVIDERS.map(provider => [
-      provider, createControlledModelFetch(createDiagnosticFetch(proxyFetch, {
+      provider, createControlledModelFetch(createDiagnosticFetch(baseFetchFor(provider), {
         provider,
         onRecord: record => ctx.logger.info('[provider-diagnostics] ' + JSON.stringify(record)),
       }), { provider, limits: providerLimits }),
@@ -985,7 +1007,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       antigravityStore,
       antigravityModelSettings,
       antigravityPreferences,
-      proxyFetch,
+      antigravityProxyFetch,
       antigravityAccountPool,
     )
     const disposeCommandCodeRoutes = registerCommandCodeRoutes(
@@ -1791,7 +1813,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       antigravityAccountPool,
       antigravityStore,
       ctx.attachments,
-      { fetchFn: proxyFetch, isEnabled: () => antigravityPreferences.status().enabled !== false },
+      { fetchFn: antigravityProxyFetch, isEnabled: () => antigravityPreferences.status().enabled !== false },
     ))
     // The video ingress for the Kimi route. Registered here because the tool
     // needs the plugin context to resolve the calling session's route before it

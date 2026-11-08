@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { HarnessError, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
@@ -9,6 +10,7 @@ import { retryDelayMs, upstreamBodyExcerpt } from './adapter.ts'
 import { antigravityHeaders, endpointCandidates } from './client.ts'
 import { ensureApiKey } from './oauth.ts'
 import { FileCredentialStore } from './token-store.ts'
+import { FALLBACK_PROJECT_ID } from './types.ts'
 
 type FetchLike = typeof fetch
 
@@ -104,7 +106,10 @@ export function buildImageRequest(
     },
     requestType: 'image_gen',
     userAgent: 'antigravity',
-    requestId: `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    // Same `agent-` vocabulary the Hub uses for its own request ids: no capture
+    // exists for the image envelope, and inventing a second prefix would be one
+    // more thing only this route sends.
+    requestId: `agent-${randomUUID()}`,
   }
 }
 
@@ -425,7 +430,7 @@ async function requestImage(
   while (true) {
     const { account, token, projectId } = await acquireAccount(accountPool, store, tried, fetchFn)
     tried.add(account.id)
-    const body = JSON.stringify(buildImageRequest(prompt, projectId || 'antigravity-default', aspectRatio, imageSize))
+    const body = JSON.stringify(buildImageRequest(prompt, projectId || FALLBACK_PROJECT_ID, aspectRatio, imageSize))
 
     let response: Response | undefined
     // The response this attempt reports. The FIRST endpoint that answers owns

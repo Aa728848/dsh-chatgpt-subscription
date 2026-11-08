@@ -1,10 +1,13 @@
 import fs from 'node:fs'
+import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Agent, ProxyAgent, fetch as realUndiciFetch } from 'undici'
 import {
   ProxyManager,
+  buildNativeConnector,
   detectSystemProxy,
   normalizeProxyUrl,
   parseEnvProxy,
@@ -12,7 +15,9 @@ import {
   parseMacOsScutilProxy,
   parseNoProxy,
   parseWindowsProxyRegistry,
+  proxyAgentOptions,
   shouldBypassProxy,
+  stripDispatchHeaders,
 } from '../src/host/proxy-manager.ts'
 
 /**
@@ -644,6 +649,231 @@ describe('ProxyManager destroyed-client recovery', () => {
     const manager = managerWith(proxyFetchFn)
     await expect(manager.createFetch()('https://api.example.com/v1')).rejects.toThrow('fetch failed')
     expect(proxyFetchFn).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+})
+
+describe('ProxyManager protocol pinning', () => {
+  const PROXY = 'http://127.0.0.1:7890'
+
+  function pinnedManager(proxyFetchFn: unknown): ProxyManager {
+    return new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: PROXY }),
+      baseFetch: (async () => new Response('direct', { status: 200 })) as never,
+      proxyFetchFn: proxyFetchFn as never,
+      noProxyReader: () => '',
+    })
+  }
+
+  it('states allowH2 only when HTTP/1.1 is pinned', () => {
+    // An absent key leaves undici's negotiation exactly as it was; only the
+    // explicit `false` takes h2 out of the tunnel's ALPN offer.
+    expect(proxyAgentOptions(PROXY)).toEqual({ uri: PROXY, connectTimeout: 60_000 })
+    expect(proxyAgentOptions(PROXY, true)).toEqual({ uri: PROXY, connectTimeout: 60_000 })
+    expect(proxyAgentOptions(PROXY, false)).toEqual({ uri: PROXY, connectTimeout: 60_000, allowH2: false })
+  })
+
+  it('keeps one pool per protocol policy and never reuses across them', async () => {
+    const dispatchers: unknown[] = []
+    const proxyFetchFn = vi.fn(async (_input: unknown, init?: { dispatcher?: unknown }) => {
+      dispatchers.push(init?.dispatcher)
+      return new Response('ok', { status: 200 })
+    })
+    const manager = pinnedManager(proxyFetchFn)
+    const negotiate = manager.createFetch()
+    const pinned = manager.createFetch({ allowH2: false })
+
+    await negotiate('https://api.example.com/v1')
+    await negotiate('https://api.example.com/v1')
+    await pinned('https://api.example.com/v1')
+    await pinned('https://api.example.com/v1')
+
+    // Same policy reuses its agent; the h1 pin must never land on the h2 pool.
+    expect(dispatchers[0]).toBe(dispatchers[1])
+    expect(dispatchers[2]).toBe(dispatchers[3])
+    expect(dispatchers[0]).not.toBe(dispatchers[2])
+    manager.dispose()
+  })
+})
+
+describe('ProxyManager credential pools', () => {
+  const PROXY = 'http://127.0.0.1:7890'
+  const bearer = (token: string) => ({ Authorization: `Bearer ${token}` })
+
+  function capturingManager(
+    proxyMode: 'custom' | 'direct',
+    dispatchers: unknown[],
+    baseFetch?: unknown,
+  ): ProxyManager {
+    return new ProxyManager({
+      getPreferences: () => ({ proxyMode, customProxyUrl: PROXY }),
+      baseFetch: (baseFetch ?? (async () => new Response('direct', { status: 200 }))) as never,
+      proxyFetchFn: (async (_input: unknown, init?: { dispatcher?: unknown }) => {
+        dispatchers.push(init?.dispatcher)
+        return new Response('ok', { status: 200 })
+      }) as never,
+      noProxyReader: () => '',
+    })
+  }
+
+  it('gives every credential its own pool and reuses it for that credential alone', async () => {
+    const dispatchers: unknown[] = []
+    const manager = capturingManager('custom', dispatchers)
+    const fetchWith = manager.createFetch({ allowH2: false, credentialPools: true })
+
+    await fetchWith('https://api.example.com/v1', { headers: bearer('token-a') })
+    await fetchWith('https://api.example.com/v1', { headers: bearer('token-a') })
+    await fetchWith('https://api.example.com/v1', { headers: bearer('token-b') })
+
+    expect(dispatchers[0]).toBeInstanceOf(ProxyAgent)
+    expect(dispatchers[0]).toBe(dispatchers[1])
+    // A second account must not ride the first account's connection: one
+    // connection carrying several `Authorization` values is a rotation, which no
+    // native client ever produces.
+    expect(dispatchers[2]).not.toBe(dispatchers[0])
+    manager.dispose()
+  })
+
+  it('pools direct traffic per credential instead of using the process-wide fetch', async () => {
+    const dispatchers: unknown[] = []
+    const baseFetch = vi.fn(async () => new Response('shared', { status: 200 }))
+    const manager = capturingManager('direct', dispatchers, baseFetch)
+    const fetchWith = manager.createFetch({ allowH2: false, credentialPools: true })
+
+    await fetchWith('https://api.example.com/v1', { headers: bearer('token-a') })
+    await fetchWith('https://api.example.com/v1', { headers: bearer('token-a') })
+    await fetchWith('https://api.example.com/v1', { headers: bearer('token-b') })
+
+    // Node's global fetch has one process-wide pool, so a credentialed request
+    // cannot be given a private connection through it.
+    expect(baseFetch).not.toHaveBeenCalled()
+    expect(dispatchers[0]).toBeInstanceOf(Agent)
+    expect(dispatchers[0]).not.toBeInstanceOf(ProxyAgent)
+    expect(dispatchers[0]).toBe(dispatchers[1])
+    expect(dispatchers[2]).not.toBe(dispatchers[0])
+    manager.dispose()
+  })
+
+  it('keeps uncredentialed calls on the shared pool', async () => {
+    const dispatchers: unknown[] = []
+    const baseFetch = vi.fn(async () => new Response('shared', { status: 200 }))
+    const manager = capturingManager('direct', dispatchers, baseFetch)
+    const fetchWith = manager.createFetch({ allowH2: false, credentialPools: true })
+
+    const response = await fetchWith('https://api.example.com/manifest.yml', {
+      headers: { 'User-Agent': 'electron-builder' },
+    })
+
+    // The Hub manifest read carries no credential, so it belongs to no account
+    // and must not mint a pool per install.
+    expect(await response.text()).toBe('shared')
+    expect(baseFetch).toHaveBeenCalledTimes(1)
+    expect(dispatchers).toHaveLength(0)
+    manager.dispose()
+  })
+})
+
+describe('ProxyManager native request shape', () => {
+  const PROXY = 'http://127.0.0.1:7890'
+
+  it('drops the headers fetch adds on its own, in both header shapes', () => {
+    const received: unknown[] = []
+    const inner = {
+      dispatch: (options: Record<string, unknown>, _handler?: unknown) => { received.push(options.headers); return true },
+      close: () => undefined,
+      destroy: () => undefined,
+    }
+    const shaped = stripDispatchHeaders(inner, ['sec-fetch-mode', 'accept-language'])
+
+    shaped.dispatch({ headers: { authorization: 'Bearer t', 'sec-fetch-mode': 'cors', 'accept-language': '*', 'user-agent': 'ua' } }, {})
+    shaped.dispatch({ headers: [['sec-fetch-mode', 'cors'], ['authorization', 'Bearer t']] }, {})
+
+    expect(received[0]).toEqual({ authorization: 'Bearer t', 'user-agent': 'ua' })
+    expect(received[1]).toEqual([['authorization', 'Bearer t']])
+  })
+
+  it('offers no ALPN on the native connector, and still sends SNI', () => {
+    const seen: Array<Record<string, unknown>> = []
+    const connectTls = ((options: Record<string, unknown>) => {
+      seen.push(options)
+      return { setTimeout: () => undefined, once: () => undefined, destroy: () => undefined } as never
+    }) as never
+
+    const connector = buildNativeConnector({ connectTls, timeoutMs: 1_000 })
+    connector({ hostname: 'cloudcode-pa.googleapis.com', protocol: 'https:', port: '' } as never, () => {})
+
+    expect(seen[0]).toMatchObject({
+      host: 'cloudcode-pa.googleapis.com',
+      port: 443,
+      servername: 'cloudcode-pa.googleapis.com',
+    })
+    // The whole point: no ALPN extension is offered at all.
+    expect('ALPNProtocols' in seen[0]).toBe(false)
+  })
+
+  it('keeps sec-fetch-mode and accept-language off the wire', async () => {
+    const raw: string[][] = []
+    const server = http.createServer((request, response) => {
+      raw.push(request.rawHeaders)
+      response.end('ok')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'direct', customProxyUrl: '' }),
+      baseFetch: (async () => new Response('shared')) as never,
+      proxyFetchFn: realUndiciFetch as never,
+      noProxyReader: () => '',
+    })
+    try {
+      const fetchWith = manager.createFetch({
+        allowH2: false,
+        credentialPools: true,
+        stripHeaders: ['sec-fetch-mode', 'accept-language'],
+        omitAlpn: true,
+      })
+      const response = await fetchWith(`http://127.0.0.1:${port}/v1internal:loadCodeAssist`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer t', 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      expect(await response.text()).toBe('ok')
+    } finally {
+      manager.dispose()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+
+    const names = raw[0].filter((_, index) => index % 2 === 0).map((name) => name.toLowerCase())
+    expect(names).not.toContain('sec-fetch-mode')
+    expect(names).not.toContain('accept-language')
+    expect(names).toContain('authorization')
+  })
+
+  it('uses its own dispatcher once a header shape is requested', async () => {
+    const dispatchers: unknown[] = []
+    const baseFetch = vi.fn(async () => new Response('shared', { status: 200 }))
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: PROXY }),
+      baseFetch: baseFetch as never,
+      proxyFetchFn: (async (_input: unknown, init?: { dispatcher?: unknown }) => {
+        dispatchers.push(init?.dispatcher)
+        return new Response('ok', { status: 200 })
+      }) as never,
+      noProxyReader: () => '',
+    })
+    const fetchWith = manager.createFetch({
+      allowH2: false,
+      credentialPools: true,
+      stripHeaders: ['sec-fetch-mode'],
+      omitAlpn: true,
+    })
+    await fetchWith('https://api.example.com/v1', { headers: { Authorization: 'Bearer t' } })
+
+    expect(baseFetch).not.toHaveBeenCalled()
+    const shaped = dispatchers[0] as { dispatch?: unknown; wrapped?: unknown }
+    expect(typeof shaped.dispatch).toBe('function')
+    // The wrapper filters headers; the pooled agent underneath is what connects.
+    expect(shaped.wrapped).toBeInstanceOf(ProxyAgent)
     manager.dispose()
   })
 })

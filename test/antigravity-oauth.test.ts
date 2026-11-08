@@ -108,6 +108,18 @@ describe('Antigravity OAuth & Client Onboarding', () => {
       if (url.includes('/v1internal:onboardUser')) {
         const body = JSON.parse(String(init?.body))
         expect(body.tierId).toBe(FREE_TIER_ID)
+        // The onboarding surface states the snake_case control-plane identity and
+        // the Node API client the Hub presents there -- not the camelCase
+        // `ideType` the discovery call sends, and not the content-request header set.
+        expect(body.metadata).toEqual({
+          ide_type: 'ANTIGRAVITY',
+          ide_version: DEFAULT_ANTIGRAVITY_VERSION,
+          ide_name: 'antigravity',
+        })
+        const headers = new Headers(init?.headers as HeadersInit)
+        expect(headers.get('x-goog-api-client')).toBe('gl-node/22.21.1')
+        expect(headers.get('user-agent')).toContain('google-api-nodejs-client/10.3.0')
+        expect(headers.get('client-metadata')).toBeNull()
         return new Response(
           JSON.stringify({
             name: 'operations/onboard-op-42',

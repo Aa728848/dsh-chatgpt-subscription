@@ -23,11 +23,56 @@ export const ENDPOINT_FALLBACKS = [
 ]
 
 export const FREE_TIER_ID = 'free-tier'
+
+/**
+ * The `project` a request names when discovery returned nothing.
+ *
+ * The native client always names a real project. The placeholder this route
+ * used before, `antigravity-default`, names nothing any client ever sends, so
+ * every request that fell through discovery announced itself as a
+ * reimplementation by that string alone. This is the default project the wider
+ * Code Assist ecosystem falls back to in the same situation: a request carrying
+ * it reads as one whose project is unresolved, not as one from another client.
+ */
+export const FALLBACK_PROJECT_ID = 'rising-fact-p41fc'
+
 export const ONBOARD_TIMEOUT_MS = 30_000
 export const ONBOARD_POLL_INTERVAL_MS = 1_000
 
-export const DEFAULT_ANTIGRAVITY_VERSION = '2.23.0'
-export const DEFAULT_ANTIGRAVITY_CL = '998057262'
+/**
+ * The Hub release reported when the updater manifest has not been read yet.
+ *
+ * Cloud Code gates its model catalogue and its Gemini quota buckets on this
+ * version, so it is the *floor* of what this route may claim: keep it at or
+ * above the reference implementations' minimum, and refresh it together with
+ * `HUB_RELEASE_CHANGELISTS` (see `client-version.ts`).
+ */
+export const DEFAULT_ANTIGRAVITY_VERSION = '2.29.0'
+export const DEFAULT_ANTIGRAVITY_CL = '1013060670'
+
+/**
+ * The two identity fields the Hub adds on `onboardUser` control-plane calls.
+ *
+ * Onboarding is not served by the same surface as inference: the Hub appends a
+ * Node API client to its User-Agent there and states an X-Goog-Api-Client, while
+ * content requests carry neither.
+ */
+export const HUB_ONBOARD_UA_SUFFIX = 'google-api-nodejs-client/10.3.0'
+export const HUB_ONBOARD_API_CLIENT = 'gl-node/22.21.1'
+
+/**
+ * Headers the native Antigravity client never sends, but Node's fetch adds itself.
+ *
+ * `sec-fetch-mode` and `accept-language` are browser idioms: undici's `fetch` adds
+ * them to every request and offers no way to suppress them, so the only seam is
+ * the dispatcher underneath. The native client is a Go HTTP client and sends
+ * neither, which makes them a shape difference an upstream can match on without
+ * any TLS inspection.
+ *
+ * `connection: keep-alive` is deliberately NOT listed: undici's HTTP/1.1 writer
+ * re-adds it regardless of what the dispatcher is handed.
+ */
+export const ANTIGRAVITY_ABSENT_HEADERS = ['sec-fetch-mode', 'accept-language'] as const
 
 export const REDIRECT_PATH = '/oauth-callback'
 export const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -52,12 +97,18 @@ export const DEFAULT_CLIENT_SECRET = Buffer.from(
   'base64',
 ).toString('utf8')
 
+/**
+ * The Antigravity persona, as the native client states it.
+ *
+ * Only these two opening sentences are attested — they are the part captured
+ * `language_server` traffic and the reference reimplementations quote. The
+ * capture's tail is a truncated fragment (`**Absolute paths only****
+ * Proactiveness**`), so nothing past these sentences is reconstructed here: a
+ * guessed continuation would be one more thing only this route sends.
+ */
 export const ANTIGRAVITY_SYSTEM_INSTRUCTION =
-  'You are Antigravity, a powerful agentic AI coding assistant designed by Google DeepMind. ' +
-  'You are pair programming with a user to solve coding tasks. Be concise, practical, and tool-aware.'
-
-export const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
-  'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists, or thinking/personality preambles in the final response. Output only the final response.'
+  'You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team ' +
+  'working on Advanced Agentic Coding. You are pair programming with a USER to solve their coding task.'
 
 export const GEMINI_ROLE = {
   user: 'user',

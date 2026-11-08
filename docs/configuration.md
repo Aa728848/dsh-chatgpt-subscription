@@ -186,7 +186,8 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | | `DSH_CLAUDE_OAUTH_AUTHORIZE_URL` | 覆盖 Claude OAuth 授权入口 URL |
 | **Antigravity** | `DSH_ANTIGRAVITY_ENDPOINT` | 覆盖 Code Assist 上游端点 |
 | | `DSH_ANTIGRAVITY_CALLBACK_PORT` | 指定本地 OAuth 回调监听端口（规避 Windows 保留端口段冲突） |
-| | `DSH_ANTIGRAVITY_VERSION` / `_CL` / `_OS` / `_ARCH` / `_USER_AGENT` | 覆盖客户端元数据头字段 |
+| | `DSH_ANTIGRAVITY_VERSION` / `_CL` / `_OS` / `_ARCH` / `_USER_AGENT` | 覆盖客户端元数据头字段；`_VERSION`/`_CL` 一旦设置就**钉死**，不再从 Hub 更新清单自动跟随（默认每 6 小时读一次清单取官方当前版本） |
+| | `DSH_ANTIGRAVITY_LEGACY_HEADERS` | 恢复旧的身份头（`X-Goog-Api-Client` 与 `Client-Metadata`）；默认为关——官方 `language_server` 不发这两个头，若某账号的资格判定因此异常再打开 |
 | **Kimi Code** | `DSH_KIMI_CODE_OAUTH_HOST` / `KIMI_CODE_OAUTH_HOST` | 覆盖 OAuth 主机（国际区设为 `https://auth.kimi.ai`） |
 | | `DSH_KIMI_CODE_BASE_URL` / `KIMI_CODE_BASE_URL` | 覆盖模型接口基址（国际区设为 `https://api.kimi.ai/coding`） |
 | | `DSH_KIMI_CODE_MAX_BODY_BYTES` | 强制覆盖单次请求序列化字节上限（最高优先级） |

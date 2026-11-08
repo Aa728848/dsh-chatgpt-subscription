@@ -1,8 +1,11 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
+import net from 'node:net'
 import path from 'node:path'
 import os from 'node:os'
-import { ProxyAgent, fetch as undiciFetch } from 'undici'
+import tls from 'node:tls'
+import { Agent, ProxyAgent, buildConnector, fetch as undiciFetch } from 'undici'
 import type { ProxyMode, SubscriptionPreferencesDto } from '../shared/contracts.ts'
 
 export type FetchLike = typeof fetch
@@ -25,6 +28,165 @@ const SYSTEM_PROXY_CACHE_TTL_MS = 5_000
  * CONNECT phase only; the request itself keeps undici's own timeouts.
  */
 const PROXY_CONNECT_TIMEOUT_MS = 60_000
+
+/**
+ * The ProxyAgent constructor options for one proxy URL.
+ *
+ * `allowH2` is stated only when a caller asks to pin HTTP/1.1: ProxyAgent
+ * forwards whatever it is given into the per-origin Agent, and `allowH2: false`
+ * is what keeps h2 out of the tunnel's ALPN offer. Every other caller gets the
+ * option object it had before, byte for byte.
+ */
+export function proxyAgentOptions(
+  uri: string,
+  allowH2?: boolean,
+): { uri: string; connectTimeout: number; allowH2?: false } {
+  return { uri, connectTimeout: PROXY_CONNECT_TIMEOUT_MS, ...(allowH2 === false ? { allowH2: false as const } : {}) }
+}
+
+/** One pool per (proxy, protocol policy, credential): neither policy nor identity may be shared. */
+function agentCacheKey(proxyUrl: string, allowH2?: boolean, poolKey?: string): string {
+  return `${poolKey ?? 'shared'}:${allowH2 === false ? 'h1' : 'auto'}:${proxyUrl}`
+}
+
+/** The key of the dispatcher that serves one credential's unproxied traffic. */
+function directAgentKey(poolKey: string, allowH2?: boolean, omitAlpn?: boolean): string {
+  return `direct:${poolKey}:${allowH2 === true ? 'auto' : 'h1'}:${omitAlpn === true ? 'noalpn' : 'alpn'}`
+}
+
+/**
+ * How many pooled dispatchers may exist at once.
+ *
+ * A pool is per credential, so the bound has to clear the largest account pool
+ * this plugin supports with room for a rotation or two. The oldest pool is
+ * closed (not destroyed) when it is exceeded, so an evicted pool still finishes
+ * the request it is serving.
+ */
+const DISPATCHER_POOL_CAPACITY = 64
+
+/**
+ * The pool a request belongs to, derived from its credential.
+ *
+ * Two accounts must never share one TLS connection: the native client is one
+ * credential per process, so a server watching a connection that carries several
+ * different `Authorization` values is watching a rotating pool, which no real
+ * client does. The token is hashed, so the map never holds a raw credential.
+ *
+ * A request with no `Authorization` header is not credentialed (project
+ * discovery before a token exists, the Hub release manifest) and keeps the
+ * shared pool.
+ */
+function credentialPoolKey(init: Parameters<FetchLike>[1]): string | undefined {
+  const headers = init?.headers
+  if (headers === undefined) return undefined
+  // The host tsconfig has no DOM lib, so the fetch types arrive through
+  // `typeof fetch` while `Headers` is a runtime/undici global: the cast bridges
+  // the two without naming a DOM-only type in this file.
+  const authorization = new Headers(headers as never).get('authorization')
+  if (!authorization) return undefined
+  return createHash('sha256').update(authorization).digest('hex').slice(0, 16)
+}
+
+/** The connector contract undici's Client accepts for its `connect` option. */
+type Connector = ReturnType<typeof buildConnector>
+
+/** Timeout for establishing an origin connection on the native connector. */
+const NATIVE_CONNECT_TIMEOUT_MS = 30_000
+
+/** One connector instance serves every direct agent: it holds no state of its own. */
+const NATIVE_CONNECTOR = buildNativeConnector()
+
+/**
+ * A connector that offers no ALPN at all.
+ *
+ * The native Antigravity client is a Go HTTP/1.1 client and sends no ALPN
+ * extension; undici's built-in connector always advertises `http/1.1`. Offering
+ * nothing does not change the protocol that ends up being spoken (the server
+ * falls back to HTTP/1.1 either way) but it removes one extension the client this
+ * route imitates does not have.
+ *
+ * SNI is set explicitly: undici hands the connector an empty `servername`, and a
+ * hello without SNI is refused by Cloud Code (measured: a bare
+ * `SSL_ALERT_HANDSHAKE_FAILURE`).
+ *
+ * HTTP targets keep a plain TCP connect -- the ALPN question only exists for TLS.
+ * `connectTls` / `connectTcp` are the seams that keep the shape testable.
+ */
+export function buildNativeConnector(options: {
+  connectTls?: typeof tls.connect
+  connectTcp?: typeof net.connect
+  timeoutMs?: number
+} = {}): Connector {
+  const connectTls = options.connectTls ?? tls.connect
+  const connectTcp = options.connectTcp ?? net.connect
+  const timeoutMs = options.timeoutMs ?? NATIVE_CONNECT_TIMEOUT_MS
+  return (connectorOptions, callback) => {
+    const protocol = String(connectorOptions.protocol ?? 'https:')
+    // undici hands the authority over as `host` and leaves `port` empty for a
+    // default port; for plain HTTP the port can also arrive glued to the host.
+    const rawHost = String(connectorOptions.hostname || connectorOptions.host || '')
+    const glued = /^\[?([^\]]+)\]?:(\d+)$/.exec(rawHost)
+    const host = glued === null ? rawHost : glued[1]
+    const port = Number(connectorOptions.port) || Number(glued?.[2] ?? '') || (protocol === 'http:' ? 80 : 443)
+    if (protocol === 'http:') {
+      const socket = connectTcp({ host, port })
+      socket.setTimeout(timeoutMs, () => { socket.destroy(); callback(new Error('connect timeout'), null) })
+      socket.once('error', (error) => { socket.destroy(); callback(error, null) })
+      socket.once('connect', () => { socket.setTimeout(0); callback(null, socket) })
+      return
+    }
+    const socket = connectTls({
+      host,
+      port,
+      servername: connectorOptions.servername || host,
+    })
+    socket.setTimeout(timeoutMs, () => { socket.destroy(); callback(new Error('connect timeout'), null) })
+    socket.once('error', (error) => { socket.destroy(); callback(error, null) })
+    socket.once('secureConnect', () => { socket.setTimeout(0); callback(null, socket) })
+  }
+}
+
+/**
+ * Drop headers before the request is written.
+ *
+ * `fetch` adds `sec-fetch-mode: cors` and `accept-language: *` to every request
+ * and offers no way to suppress a header it adds itself. The dispatcher is the
+ * seam it hands the header list to, so a consumer that imitates a non-browser
+ * client can remove them there. The wrapped dispatcher keeps the inner agent's
+ * pool: this is a filter, not a new connection pool.
+ */
+export function stripDispatchHeaders<T extends object>(dispatcher: T, headers: readonly string[]): T {
+  const banned = new Set(headers.map((name) => name.toLowerCase()))
+  const strip = (input: unknown): unknown => {
+    if (Array.isArray(input)) {
+      return input.filter((entry) => !banned.has(String((entry as unknown[])[0]).toLowerCase()))
+    }
+    if (input !== null && typeof input === 'object') {
+      const kept: Record<string, unknown> = {}
+      for (const [name, value] of Object.entries(input as Record<string, unknown>)) {
+        if (!banned.has(name.toLowerCase())) kept[name] = value
+      }
+      return kept
+    }
+    return input
+  }
+  const inner = dispatcher as unknown as {
+    dispatch: (options: Record<string, unknown>, handler: unknown) => boolean
+    close: (...args: unknown[]) => unknown
+    destroy: (...args: unknown[]) => unknown
+  }
+  const shaped = {
+    dispatch(options: Record<string, unknown>, handler: unknown) {
+      return inner.dispatch({ ...options, headers: strip(options.headers) }, handler)
+    },
+    close: (...args: unknown[]) => inner.close(...args),
+    destroy: (...args: unknown[]) => inner.destroy(...args),
+  }
+  // Non-enumerable: the wrapped dispatcher stays reachable for diagnostics and
+  // tests without becoming part of the object's visible surface.
+  Object.defineProperty(shaped, 'wrapped', { value: dispatcher, enumerable: false })
+  return shaped as unknown as T
+}
 
 export function normalizeProxyUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim()
@@ -413,7 +575,9 @@ export class ProxyManager {
   private lastNoProxyCheck = 0
   private detected = false
   private readonly proxyListeners = new Set<SystemProxyListener>()
-  private readonly agents = new Map<string, ProxyAgent>()
+  private readonly agents = new Map<string, ProxyAgent | Agent>()
+  /** One shaping wrapper per pooled dispatcher, so a pool keeps a stable identity. */
+  private readonly shaped = new WeakMap<object, object>()
 
   constructor(options: ProxyFetchOptions) {
     this.getPreferences = options.getPreferences
@@ -504,26 +668,105 @@ export class ProxyManager {
     return this.getSystemProxy()
   }
 
-  private getOrCreateAgent(proxyUrl: string): ProxyAgent {
-    let agent = this.agents.get(proxyUrl)
-    if (!agent) {
-      // The options-object form, and deliberately not `new ProxyAgent(url, options)`:
-      // undici's ProxyAgent constructor takes ONE argument, so a second one is
-      // dropped silently and the connect timeout would never be applied - the
-      // agent would fall back to the 10s default and fail the same way it
-      // always did, with nothing in the code to show why.
-      agent = new ProxyAgent({ uri: proxyUrl, connectTimeout: PROXY_CONNECT_TIMEOUT_MS })
-      this.agents.set(proxyUrl, agent)
-    }
+  private getOrCreateAgent(proxyUrl: string, allowH2?: boolean, poolKey?: string): ProxyAgent {
+    const key = agentCacheKey(proxyUrl, allowH2, poolKey)
+    const existing = this.agents.get(key)
+    if (existing instanceof ProxyAgent) return existing
+    // The options-object form, and deliberately not `new ProxyAgent(url, options)`:
+    // undici's ProxyAgent constructor takes ONE argument, so a second one is
+    // dropped silently and the connect timeout would never be applied - the
+    // agent would fall back to the 10s default and fail the same way it
+    // always did, with nothing in the code to show why.
+    const agent = new ProxyAgent(proxyAgentOptions(proxyUrl, allowH2))
+    this.remember(key, agent)
     return agent
   }
 
-  createFetch(): FetchLike {
+  /**
+   * The dispatcher for one credential's direct (unproxied) traffic.
+   *
+   * Node's global fetch pools every origin in one process-wide agent, so a
+   * credentialed request cannot be given a private connection through it. The
+   * pooled path therefore dispatches through undici's own fetch with an agent of
+   * its own; HTTP/1.1 stays the default, because that is what the global fetch
+   * this replaces would have spoken.
+   */
+  private getOrCreateDirectAgent(
+    poolKey: string,
+    overrides?: { allowH2?: boolean; omitAlpn?: boolean },
+  ): Agent {
+    const key = directAgentKey(poolKey, overrides?.allowH2, overrides?.omitAlpn)
+    const existing = this.agents.get(key)
+    if (existing instanceof Agent) return existing
+    const agent = new Agent({
+      allowH2: overrides?.allowH2 === true,
+      ...(overrides?.omitAlpn === true ? { connect: NATIVE_CONNECTOR } : {}),
+    })
+    this.remember(key, agent)
+    return agent
+  }
+
+  /** Store a dispatcher, retiring the oldest pool once the bound is reached. */
+  private remember(key: string, agent: ProxyAgent | Agent): void {
+    if (this.agents.size >= DISPATCHER_POOL_CAPACITY) {
+      const oldest = this.agents.keys().next()
+      if (!oldest.done) {
+        const evicted = this.agents.get(oldest.value)
+        this.agents.delete(oldest.value)
+        // close(), not destroy(): an evicted pool may still be answering.
+        void evicted?.close().catch(() => undefined)
+      }
+    }
+    this.agents.set(key, agent)
+  }
+
+  /** Hand one request to a specific dispatcher through undici's fetch. */
+  private dispatchWith(
+    input: Parameters<FetchLike>[0],
+    init: Parameters<FetchLike>[1],
+    dispatcher: ProxyAgent | Agent,
+  ): Promise<Response> {
+    return this.proxyFetchFn(input, { ...(init as any), dispatcher } as any) as unknown as Promise<Response>
+  }
+
+  /**
+   * A fetch that follows this manager's proxy policy, with optional protocol and
+   * credential pins for one consumer.
+   *
+   * `allowH2: false` keeps TLS at HTTP/1.1. Antigravity asks for it: the native
+   * `language_server` speaks HTTP/1.1, and the direct path this manager falls
+   * back to is Node's global fetch, which offers http/1.1 only - without the pin
+   * the same route would speak h2 behind a proxy and HTTP/1.1 without one.
+   *
+   * `credentialPools: true` gives every distinct credential its own connection
+   * pool on both paths, which is what keeps a multi-account rotation from being
+   * visible as one connection carrying several identities.
+   */
+  createFetch(overrides?: {
+    allowH2?: boolean
+    credentialPools?: boolean
+    /** Header names to drop before the request is written; see {@link stripDispatchHeaders}. */
+    stripHeaders?: readonly string[]
+    /** Offer no ALPN on unproxied connections. Proxied ones cannot: ProxyAgent owns their connector. */
+    omitAlpn?: boolean
+  }): FetchLike {
+    const shape = <T extends object>(dispatcher: T): T => {
+      const headers = overrides?.stripHeaders
+      if (headers === undefined || headers.length === 0) return dispatcher
+      const cached = this.shaped.get(dispatcher)
+      if (cached !== undefined) return cached as T
+      const shaped = stripDispatchHeaders(dispatcher, headers)
+      this.shaped.set(dispatcher, shaped)
+      return shaped
+    }
     return async (input: Parameters<FetchLike>[0], init?: Parameters<FetchLike>[1]): Promise<Response> => {
+      const poolKey = overrides?.credentialPools === true ? credentialPoolKey(init) : undefined
       const activeProxy = this.resolveActiveProxyUrl()
 
       if (!activeProxy) {
-        return this.baseFetch(input, init)
+        return poolKey === undefined
+          ? this.baseFetch(input, init)
+          : this.dispatchWith(input, init, shape(this.getOrCreateDirectAgent(poolKey, overrides)))
       }
 
       // A loopback target or a `NO_PROXY` host is reached better by this process
@@ -531,7 +774,9 @@ export class ProxyManager {
       // bare fetch for that reason, and a proxy whose DNS answers with its own
       // fake-ip range (Clash/Mihomo) cannot be used to reach its own host at all.
       if (shouldBypassProxy(requestTarget(input), this.getNoProxyList())) {
-        return this.baseFetch(input, init)
+        return poolKey === undefined
+          ? this.baseFetch(input, init)
+          : this.dispatchWith(input, init, shape(this.getOrCreateDirectAgent(poolKey, overrides)))
       }
 
       // One retry, and only for a client undici has already destroyed: the
@@ -541,15 +786,12 @@ export class ProxyManager {
       // recovered answer and a line that stays broken until the process restarts.
       for (let attempt = 0; ; attempt += 1) {
         try {
-          const agent = this.getOrCreateAgent(activeProxy)
+          const agent = shape(this.getOrCreateAgent(activeProxy, overrides?.allowH2, poolKey))
           // undiciFetch supports dispatcher option
-          return (await this.proxyFetchFn(input, {
-            ...(init as any),
-            dispatcher: agent,
-          } as any)) as unknown as Response
+          return await this.dispatchWith(input, init, agent)
         } catch (error) {
           if (attempt === 0 && isDestroyedClientError(error)) {
-            this.agents.delete(activeProxy)
+            this.agents.delete(agentCacheKey(activeProxy, overrides?.allowH2, poolKey))
             continue
           }
           throw error
