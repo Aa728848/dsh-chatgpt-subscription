@@ -331,10 +331,19 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
   }, CodeRunToolView))
   // 派发卡片：按工具名占用 `tool.call.toolview`（占用即替换整行），把 mandate 头
   // 拆成结构、把结果与 MANDATE_* 拒绝码单独留在醒目位置。只影响这两个工具名。
+  //
+  // `priority: -10` 不是可选装饰：宿主自己的 `details-toolview` 已经用**默认**
+  // priority 0 占了 `subagent` 与 `subagent_fork`。keyed 槽位一个 key 在一个
+  // priority 上只允许一条，同优先级再注册会抛错；而这个错发生在 `apply()` 里，
+  // Cordis 会判定整个客户端插件启动失败并**回滚它的全部注册**——设置枢纽、额度
+  // 胶囊、工具卡片会一起消失。keyed 槽位里最低优先级的那条渲染，所以降到 -10
+  // 才是"遮蔽宿主那张 details 行"，用同 id + `priority: -10` 遮蔽宿主设置卡
+  // 是同一个道理（见 ./subagent/index.ts）。
   for (const key of ['subagent', 'subagent_fork'] as const) {
     ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
       name: 'tool.call.toolview',
       key,
+      priority: -10,
       locale: NS_DISPATCH_LEDGER,
     }, MandateToolView))
   }

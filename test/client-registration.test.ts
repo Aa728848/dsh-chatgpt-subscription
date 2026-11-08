@@ -265,6 +265,18 @@ describe('client registration', () => {
     const injectedSlots: string[] = []
     const registrations: Array<Record<string, unknown>> = []
     const disposers: Array<() => void> = []
+    // The host's own `details-toolview` (packages/client/ui-tool .../toolviews/
+    // details-row.tsx) occupies these two tool names in `tool.call.toolview` at the
+    // default priority 0. A keyed slot keeps ONE entry per key and priority and
+    // throws on a second one at the same priority, so a plugin that takes the row
+    // over must register at a lower priority ("lowest renders"). This map models
+    // that occupancy; without it the fake below accepts a colliding registration
+    // and the plugin looks healthy right up to the moment the host rolls the whole
+    // client entry back.
+    const occupied = new Map<string, number>([
+      ['tool.call.toolview\0subagent', 0],
+      ['tool.call.toolview\0subagent_fork', 0],
+    ])
     const ctx = {
       effect(factory: () => void | (() => void)) {
         const dispose = factory()
@@ -280,6 +292,16 @@ describe('client registration', () => {
           disposers.push(callback())
         },
         register(options: Record<string, unknown>) {
+          const key = options.key
+          if (typeof options.name === 'string' && typeof key === 'string') {
+            const priority = typeof options.priority === 'number' ? options.priority : 0
+            const slot = `${options.name}\0${key}`
+            const occupant = occupied.get(slot)
+            if (occupant === priority) {
+              throw new Error(`keyed slot "${options.name}" already has an entry for key "${key}" at priority ${priority} (registered by details-toolview) — register at a different priority to shadow it (lowest renders)`)
+            }
+            occupied.set(slot, priority)
+          }
           registrations.push(options)
           return () => undefined
         },
@@ -369,6 +391,14 @@ describe('client registration', () => {
       expect.objectContaining({ key: 'subagent' }),
       expect.objectContaining({ key: 'subagent_fork' }),
       expect.objectContaining({ key: 'progress_update' }),
+    ])
+    // 宿主在 priority 0 上已经占了这两个 key，同优先级再注册会抛错并把**整个**
+    // 客户端插件回滚（设置枢纽、额度胶囊、工具卡片一起消失）。所以这两行必须是
+    // 更低优先级——keyed 槽位里最低的那一条渲染，其余只是被遮蔽。
+    expect(registrations.filter((registration) => registration.name === 'tool.call.toolview'
+      && (registration.key === 'subagent' || registration.key === 'subagent_fork'))).toEqual([
+      expect.objectContaining({ key: 'subagent', priority: -10 }),
+      expect.objectContaining({ key: 'subagent_fork', priority: -10 }),
     ])
     expect(document.querySelector('style[data-plugin="@eddyskywalker/dsh-chatgpt-subscription"]')).not.toBeNull()
     for (const dispose of disposers.reverse()) dispose()

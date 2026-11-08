@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[client] 修复 0.64.0 的派发卡片撞车：整个客户端插件被回滚，设置枢纽与全部工具卡片一起消失**
+  - **现象**（真实浏览器，0.64.0 + DSH 0.2.2-rc.1）：设置面板里只剩宿主自己的分页和别的插件的分页，本插件的「订阅」枢纽、每条线路的额度胶囊、生图/视频/`code_run` 卡片全部不见；控制台只有一行：
+    `@eddyskywalker/dsh-chatgpt-subscription: failed: Error: keyed slot "tool.call.toolview" already has an entry for key "subagent" at priority 0 (registered by details-toolview) — register at a different priority to shadow it (lowest renders)`。
+  - **根因**（`src/client/index.tsx`）：派发卡片给 `subagent` / `subagent_fork` 注册 `tool.call.toolview` 时没写 `priority`，而宿主自己的 `details-toolview` 已经用**默认** priority 0 占了这两个 key。keyed 槽位一个 key 在一个 priority 上只允许一条，同优先级再注册直接抛错；这个错发生在 `apply()` 里，于是 Cordis 判定整个客户端插件启动失败并**回滚它的全部注册**——所以消失的不是某个分页，而是这一插件的整个客户端面。（宿主侧不受影响：host half 照常挂载，`dispatch_ledger` 等工具正常。）
+  - **修法**：两条注册降到 `priority: -10`。keyed 槽位里最低优先级的那条渲染，其余只是被遮蔽——这正是「用更低优先级遮蔽宿主那一行」的正确写法，与 `installSubagentSettingsCard` 用同 id + `priority: -10` 遮蔽宿主设置卡是同一个道理。
+  - **回归**：`test/client-registration.test.ts` 的假 `slots` 现在**按宿主契约判占用**（预置 `details-toolview` 的 priority 0 占用，同 key 同优先级即抛错），并断言这两行必须是 `priority: -10`。改前该测试复现浏览器里一字不差的报错，改后通过——它此前只是一份「记录注册」的假实现，所以这类冲突能一路发到线上。
+  - **验证**：`npx tsc -b --force` 通过；`npm run build` 重建 `lib/client.js`；用 jsdom 加载**重建后的产物**、按宿主占用规则跑 `apply()`，6 条 `tool.call.toolview` 全部注册成功（`subagent`/`subagent_fork` = -10，其余 = 0），`settings.section` 的两格（`subscription-hub@45`、`progress-updates@150`）也都在。
+
 ## 0.64.0 - 2026-11-08
 
 - **[dispatch] 派发前被拒的调用不再烧掉命名空间；`subagent_fork` 的路由约束写进工具描述与人格**
