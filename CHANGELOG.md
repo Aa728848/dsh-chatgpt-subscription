@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.64.1 - 2026-11-08
+
 - **[client] 修复 0.64.0 的派发卡片撞车：整个客户端插件被回滚，设置枢纽与全部工具卡片一起消失**
   - **现象**（真实浏览器，0.64.0 + DSH 0.2.2-rc.1）：设置面板里只剩宿主自己的分页和别的插件的分页，本插件的「订阅」枢纽、每条线路的额度胶囊、生图/视频/`code_run` 卡片全部不见；控制台只有一行：
     `@eddyskywalker/dsh-chatgpt-subscription: failed: Error: keyed slot "tool.call.toolview" already has an entry for key "subagent" at priority 0 (registered by details-toolview) — register at a different priority to shadow it (lowest renders)`。
