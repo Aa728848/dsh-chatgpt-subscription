@@ -54,8 +54,10 @@ import {
 } from '../../shared/step-code-contracts.ts'
 import {
   cachedStepCodeModelCatalog,
+  readStepCodeCacheHint,
   readStepCodeCacheStats,
 } from './adapter.ts'
+import type { PromptCacheOverride } from '../common/prompt-cache-policy.ts'
 import { adoptStepCodeSignIn, type StepCodeAdoptedCredential } from './adopt.ts'
 import {
   stepCodePoolStatus,
@@ -261,6 +263,8 @@ export interface StepCodeRouteOptions {
   openBrowser?: (url: string) => void
   /** 环境变量读取处；缺省 process.env，且**调用时**读取。 */
   env?: NodeJS.ProcessEnv
+  /** 与适配器共用同一份部署级缓存策略覆盖。 */
+  promptCache?: PromptCacheOverride
 }
 
 /** 号池凭据 → 上游面认得的三件事（client.ts 的结构化超集）。 */
@@ -340,6 +344,7 @@ export async function getStepCodeStatus(sources: StepCodeStatusSources): Promise
   const settingsValue = await settings.status()
   const quota = sources.quota
   const cacheStats = sources.cacheStats
+  const cacheHint = readStepCodeCacheHint(undefined, sources.options.promptCache)
   const accountCount = sources.pool.accounts.length
   return {
     ...sources.pool,
@@ -367,6 +372,7 @@ export async function getStepCodeStatus(sources: StepCodeStatusSources): Promise
     cacheRequestParams: settingsValue.cacheRequestParams === true,
     // 「还没有样本」与「样本全是 0」必须能被区分，所以缺失就是缺失。
     ...(cacheStats === undefined ? {} : { cacheStats }),
+    ...(cacheHint === null ? {} : { cacheHint }),
     serving: readOption(options.serving, true),
     conflict: readOption(options.conflict, null),
   }

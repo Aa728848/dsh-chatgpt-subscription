@@ -51,11 +51,19 @@ import {
   type GenerateOptions as NormalizedGenerateOptions,
 } from '../common/llm-compat.ts'
 import { outputReservation } from '../common/output-reservation.ts'
+import { sharedPrefixGroupKey, withStaticPrefixOrdering } from '../common/prefix-stability.ts'
+import { promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-cache-policy.ts'
+import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from '../common/prefix-request-coordinator.ts'
 import { requestImageTargetOrOriginal, type AttachmentImageReader } from '../common/request-images.ts'
 import { retryAfterMs } from '../wire-auth.ts'
-import { promptTokensOf, type StepCodeCacheUsage } from './cache-stats.ts'
+import { NOISE_FLOOR_TOKENS, promptTokensOf, type StepCodeCacheUsage } from './cache-stats.ts'
+import { promptCacheActivityStore } from '../common/cache-activity.ts'
+import { evaluateCacheHint } from '../common/cache-hint.ts'
+import { orderAffinityCandidates, remainingQuotaShare } from '../common/cache-affinity.ts'
+import type { AccountSelectionHint } from '../common/account-pool.ts'
 import {
   getCachedStepModelCatalog,
+  getCachedStepQuotaFor,
   stepChatCompletionsUrl,
   stepCodeModelHeaders,
   type StepCodeCatalogEntry,
@@ -245,7 +253,12 @@ export interface StepCodeAdapterOptions {
   attachments?: AttachmentImageReader
   /** 多账号号池；缺省走单凭据路径（无头 host 与测试）。 */
   accountPool?: StepCodeAccountPool
+  /** Optional deployment override for cache-prefix behaviour. */
+  promptCache?: PromptCacheOverride
 }
+
+const stepPrefixRequests = new PrefixRequestCoordinator()
+const stepCacheActivity = promptCacheActivityStore('step-code')
 
 /**
  * Step Code（Step Plan 订阅）线路的 LlmAdapter 实现。
@@ -310,10 +323,13 @@ export class StepCodeAdapter extends LlmAdapter {
    * 两条路径都**不刷新**：Step 的 api_key 永不过期，号池的 refresh 钩子恒抛
    * `StepCodeCredentialRefreshError`，所以这里不存在「刷新失败后再试一次」的分支。
    */
-  private async credentialFor(excludeIds?: ReadonlySet<string>): Promise<StepCodePickedCredential> {
+  private async credentialFor(
+    excludeIds?: ReadonlySet<string>,
+    selection?: AccountSelectionHint,
+  ): Promise<StepCodePickedCredential> {
     const fetchFn = this.options.fetchFn ?? fetch
     if (this.accountPool !== null) {
-      const effective = await this.accountPool.getEffectiveCredential(excludeIds, fetchFn)
+      const effective = await this.accountPool.getEffectiveCredential(excludeIds, fetchFn, selection)
       const credentials = effective.credentials
       return {
         accountId: effective.account.id,
@@ -340,6 +356,26 @@ export class StepCodeAdapter extends LlmAdapter {
         ...(stored.uid === null || stored.uid === '' ? {} : { uid: stored.uid }),
       },
     }
+  }
+
+  /** Warm-prefix account preference, inert unless a deployment proves account scope. */
+  private async cacheAffinityHint(options: NormalizedGenerateOptions): Promise<AccountSelectionHint | undefined> {
+    const pool = this.accountPool
+    if (pool === null) return undefined
+    const policy = promptCachePolicyOf('step-code', this.options.promptCache)
+    if (!policy.affinity || policy.ttlMs === undefined) return undefined
+    const data = await pool.read().catch(() => undefined)
+    if (data === undefined || data.accounts.length < 2) return undefined
+    const candidates: Array<{ id: string; warm: boolean }> = []
+    const remainingShareById: Record<string, number | null> = {}
+    for (const account of data.accounts) {
+      const key = sharedPrefixGroupKey('step-code', options, account.credentials.profile, account.id)
+      if (key === undefined || !stepPrefixRequests.isWarm(key, policy.ttlMs)) continue
+      candidates.push({ id: account.id, warm: true })
+      remainingShareById[account.id] = remainingQuotaShare(getCachedStepQuotaFor(account.id))
+    }
+    const preferAccountIds = orderAffinityCandidates({ candidates, remainingShareById })
+    return preferAccountIds.length === 0 ? undefined : { preferAccountIds }
   }
 
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
@@ -439,7 +475,7 @@ export class StepCodeAdapter extends LlmAdapter {
   ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const settings = await this.settings()
-    const normalized = normalizeGenerateOptions(options)
+    const normalized = withStaticPrefixOrdering('step-code', normalizeGenerateOptions(options), this.options.promptCache)
     // 图片**先解析**，再把**同一份解析结果**交给预算关卡。
     //
     // 顺序反了，预算量的是**存储字节**：一张 5 MB 的截图会被算成 ~6.7 MB 的 base64，
@@ -451,7 +487,8 @@ export class StepCodeAdapter extends LlmAdapter {
     const tried = new Set<string>()
     let response: Response | undefined
     let url = ''
-    let picked = await this.credentialFor(tried)
+    const affinity = await this.cacheAffinityHint(requestOptions)
+    let picked = await this.credentialFor(tried, affinity)
 
     while (true) {
       if (picked.accountId !== null) tried.add(picked.accountId)
@@ -472,14 +509,25 @@ export class StepCodeAdapter extends LlmAdapter {
       url = stepChatCompletionsUrl(picked.credentials.profile)
 
       try {
-        response = await fetchWithContextBudgetRecovery(fetchFn)(url, {
-          method: 'POST',
-          headers: streamHeadersFor(picked.credentials),
-          body,
-          // 空闲看门狗拥有这个 deadline：它在出字时重置，所以一次又长又活跃的生成
-          // 不会被一个墙钟上限砍断。
-          signal,
-        })
+        const cachePolicy = promptCachePolicyOf('step-code', this.options.promptCache)
+        const groupKey = cachePolicy.coldStart === 'off'
+          ? undefined
+          : sharedPrefixGroupKey('step-code', requestOptions, picked.credentials.profile, picked.accountId ?? 'legacy')
+        response = await fetchWithPrefixCoordination(
+          fetchWithContextBudgetRecovery(fetchFn),
+          stepPrefixRequests,
+          groupKey,
+          cachePolicy.coldStart === 'warm' ? cachePolicy.ttlMs : undefined,
+          url,
+          {
+            method: 'POST',
+            headers: streamHeadersFor(picked.credentials),
+            body,
+            // 空闲看门狗拥有这个 deadline：它在出字时重置，所以一次又长又活跃的生成
+            // 不会被一个墙钟上限砍断。
+            signal,
+          },
+        )
         // Headers are transport activity: the streaming idle budget starts at
         // the hand-off, so a slow prefill is not spent from it.
         activity?.pulse()
@@ -505,7 +553,7 @@ export class StepCodeAdapter extends LlmAdapter {
             .markCooldown(picked.accountId, after ?? STEP_CODE_POOL_COOLDOWN_MS, PROVIDER_NAME + ' 429：上游限流或额度用尽')
             .catch(() => undefined)
           if (await this.accountPool.hasAnotherAvailableAccount(tried)) {
-            picked = await this.credentialFor(tried)
+            picked = await this.credentialFor(tried, affinity)
             continue
           }
         } else if (failure.code === 'AUTH') {
@@ -513,7 +561,7 @@ export class StepCodeAdapter extends LlmAdapter {
           // 本线路没有刷新链，所以这里绝不试图「刷新一次再试」。
           await this.accountPool.markAuthFailed(picked.accountId, failure.message).catch(() => undefined)
           if (await this.accountPool.hasAnotherAvailableAccount(tried)) {
-            picked = await this.credentialFor(tried)
+            picked = await this.credentialFor(tried, affinity)
             continue
           }
         }
@@ -568,10 +616,35 @@ export class StepCodeAdapter extends LlmAdapter {
           cacheReadTokens: state.cacheReadTokens,
           cacheWriteTokens: state.cacheWriteTokens,
         })
+        stepCacheActivity.record(options.sessionId, promptTokensOf({
+          inputTokens: state.inputTokens,
+          outputTokens: state.outputTokens,
+          cacheReadTokens: state.cacheReadTokens,
+          cacheWriteTokens: state.cacheWriteTokens,
+        }))
       }
       void reader.cancel().catch(() => undefined)
     }
   }
+}
+
+/** Cache-expiry hint for one session, or the latest recorded session when omitted. */
+export function readStepCodeCacheHint(
+  sessionId?: string,
+  override?: PromptCacheOverride,
+): { idleMs: number; totalTokens: number } | null {
+  const policy = promptCachePolicyOf('step-code', override)
+  if (!policy.hint) return null
+  const activity = stepCacheActivity.read(sessionId)
+  if (activity === undefined) return null
+  const decision = evaluateCacheHint({
+    now: Date.now(),
+    lastActiveAt: activity.lastActiveAt,
+    totalTokens: activity.totalTokens,
+    ttlMs: policy.ttlMs,
+    minTokensToHint: NOISE_FLOOR_TOKENS,
+  })
+  return decision.kind === 'hint' ? { idleMs: decision.idleMs, totalTokens: decision.totalTokens } : null
 }
 
 export { PROVIDER_ID, PROVIDER_NAME }

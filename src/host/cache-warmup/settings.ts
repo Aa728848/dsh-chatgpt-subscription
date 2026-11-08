@@ -34,14 +34,12 @@ export const CACHE_WARMUP_RETRIEVAL_SETTING = 'cacheWarmupRetrieval'
  * 迟早变成「卡片说只影响新结果、schema 说立刻生效」这种自相矛盾。
  */
 export const CACHE_WARMUP_SETTING_DESCRIPTION =
-  'Kimi Code 专用：启用缓存预热的结果投影——Kimi 线路上可以可靠结构化提取的超大工具结果会被替换成带 ref:// 引用的预览，'
+  '按线路配置结果投影：可以可靠结构化提取的超大工具结果会被替换成带 ref:// 引用的预览，'
   + '需要原文时由 cache_warmup_result 精确补读。关闭只影响之后产生的新结果，已进入历史的内容不变。'
-  + '本开关只对 Kimi Code 线路生效，其他线路开着关着都没有区别。'
 
 export const CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION =
-  'Kimi Code 专用：启用检索型结果投影——明确导航任务中的大文件、网页和搜索结果可显示为大纲或分布预览，原文由 cache_warmup_result 补读。'
+  '按线路配置检索型结果投影：明确导航任务中的大文件、网页和搜索结果可显示为大纲或分布预览，原文由 cache_warmup_result 补读。'
   + '编辑、审查和意图不明的读取保持原文。默认开启，只影响之后的新结果。'
-  + '本开关只对 Kimi Code 线路生效，其他线路开着关着都没有区别。'
 
 /** 一次挂载读到的有效设置。 */
 export interface CacheWarmupSettings {
@@ -49,10 +47,16 @@ export interface CacheWarmupSettings {
   enabled: boolean
   /** 检索型投影开关。独立于总开关，默认开启，只影响之后的新结果。 */
   retrievalEnabled?: boolean
+  /** 允许产生新预览的线路；空数组表示全部关闭。 */
+  providers?: readonly string[]
 }
 
-/** 缺省设置：日志投影与检索投影均开启。 */
-export const DEFAULT_CACHE_WARMUP_SETTINGS: CacheWarmupSettings = { enabled: true, retrievalEnabled: true }
+/** 缺省设置由宿主注入 controlled provider 列表；独立使用时保持 Kimi 兼容。 */
+export const DEFAULT_CACHE_WARMUP_SETTINGS: CacheWarmupSettings = {
+  enabled: true,
+  retrievalEnabled: true,
+  providers: ['kimi-code'],
+}
 
 /**
  * 设置字段在运行时可能是活引用（volatile）或普通值（手工构造的上下文、测试）。
@@ -75,6 +79,8 @@ export interface CacheWarmupConfigFields {
   cacheWarmup?: CacheWarmupConfigField<boolean>
   /** 检索型投影的独立开关字段。 */
   cacheWarmupRetrieval?: CacheWarmupConfigField<boolean>
+  /** 允许产生新预览的 provider 列表。 */
+  cacheWarmupProviders?: CacheWarmupConfigField<readonly string[]>
 }
 
 /**
@@ -101,6 +107,10 @@ export function readCacheWarmupConfigField<T>(field: CacheWarmupConfigField<T>):
 export function resolveCacheWarmupSettings(config?: CacheWarmupConfigFields): CacheWarmupSettings {
   const enabled = readCacheWarmupConfigField(config?.cacheWarmup)
   const retrievalEnabled = readCacheWarmupConfigField(config?.cacheWarmupRetrieval)
-  // 两个开关都只有明确 false 才关闭；未声明字段时按默认开启处理。
-  return { enabled: enabled !== false, retrievalEnabled: retrievalEnabled !== false }
+  const configuredProviders = readCacheWarmupConfigField(config?.cacheWarmupProviders)
+  const providers = configuredProviders === undefined
+    ? DEFAULT_CACHE_WARMUP_SETTINGS.providers
+    : [...new Set(configuredProviders.map(provider => provider.trim()).filter(provider => provider !== ''))]
+  // 两个开关都只有明确 false 才关闭；provider 空列表是有意的全关。
+  return { enabled: enabled !== false, retrievalEnabled: retrievalEnabled !== false, providers }
 }

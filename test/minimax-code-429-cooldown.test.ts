@@ -552,12 +552,10 @@ describe('a 429 the pool can answer from another account', () => {
       }],
     } as never)) chunks.push(chunk)
 
-    // The upload ran per round, every time under the account serving that round,
-    // which is the whole reason it moved into the rotation. Two uploads per round
-    // because uploadOversizedMedia walks the content once per media map and the
-    // clip is collectable from both; the pair belongs to one round either way, and
-    // it is the SECOND pair that carries the second account.
-    expect(uploads).toEqual(['Bearer at-1', 'Bearer at-1', 'Bearer at-2', 'Bearer at-2'])
+    // The upload still runs once per account, under the account serving that round.
+    // The shared singleflight core removes the duplicate collection of the same bytes
+    // inside one round, but never reuses account A's id for account B.
+    expect(uploads).toEqual(['Bearer at-1', 'Bearer at-2'])
     expect(messages).toEqual(['Bearer at-1', 'Bearer at-2'])
     // And the replayed body therefore references the SECOND account file, not the
     // first one: a stale mm_file:// reference is unreadable by the account now

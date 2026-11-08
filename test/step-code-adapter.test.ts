@@ -15,7 +15,8 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest'
-import { StepCodeAdapter } from '../src/host/step-code/adapter.ts'
+import { StepCodeAdapter, readStepCodeCacheHint } from '../src/host/step-code/adapter.ts'
+import { promptCacheActivityStore } from '../src/host/common/cache-activity.ts'
 import { clearCachedStepModelCatalog, loadStepModelCatalog } from '../src/host/step-code/client.ts'
 import {
   StepCodeCredentialStore,
@@ -332,5 +333,13 @@ describe('StepCodeAdapter：wire 上的输出上限', () => {
 
     const sent = JSON.parse(body()) as Record<string, unknown>
     expect(sent.max_tokens).toBe(4096)
+  })
+
+  it('活动记录超过官方 TTL 后产生提示，且可被策略关闭', () => {
+    const store = promptCacheActivityStore('step-code')
+    const session = 'hint-' + Date.now()
+    store.record(session, 2_048, Date.now() - 301_000)
+    expect(readStepCodeCacheHint(session)).toMatchObject({ totalTokens: 2_048 })
+    expect(readStepCodeCacheHint(session, { hint: false })).toBeNull()
   })
 })

@@ -14,9 +14,9 @@
  * @module dsh-chatgpt-subscription/kimi-code-session-cache-state
  */
 
-import fs from 'node:fs'
 import path from 'node:path'
 import { dshHomeDir } from '../common/home.ts'
+import { CommonSessionCacheStateStore } from '../common/session-cache-state.ts'
 
 /**
  * Conversations kept in the document.
@@ -88,19 +88,10 @@ export interface KimiCodeSessionCacheRecord {
   updatedAt: number
 }
 
-/** On-disk shape. */
-interface SessionCacheDocument {
-  version: 1
-  sessions: Record<string, KimiCodeSessionCacheRecord>
-}
-
 /** Where the document lives; beside the other plugin-owned JSON. */
 export function sessionCacheStatePath(): string {
   return path.join(dshHomeDir(), 'storages', 'dsh-chatgpt-subscription-kimi-cache.json')
 }
-
-/** Distinguishes concurrent temporary files written by one process. */
-let writeSequence = 0
 
 /**
  * Whether a scheduled write should reach the disk.
@@ -121,162 +112,26 @@ function persistenceEnabled(): boolean {
  * are debounced: a turn reports once, and several turns in flight must not
  * rewrite the document several times.
  */
-export class SessionCacheStateStore {
-  private document: SessionCacheDocument | undefined
-  private pending: ReturnType<typeof setTimeout> | undefined
-
-  /**
-   * @param filePath - Document location; defaults to {@link sessionCacheStatePath}.
-   * @param maxEntries - Conversations kept; the oldest are dropped first.
-   */
-  private readonly filePath: string
-  private readonly maxEntries: number
-  /**
-   * Whether this store may write at all.
-   *
-   * A store built on an explicit path is someone's own file - a test's temporary
-   * document - and always writes. The default-path store belongs to the user's
-   * harness home, and a test that never named a path must not overwrite it.
-   */
-  private readonly allowWrite: boolean
-
+export class SessionCacheStateStore extends CommonSessionCacheStateStore<KimiCodeSessionCacheRecord> {
   constructor(filePath = sessionCacheStatePath(), maxEntries = MAX_SESSION_RECORDS) {
-    this.filePath = filePath
-    this.maxEntries = maxEntries
-    this.allowWrite = filePath !== sessionCacheStatePath() || persistenceEnabled()
+    super({
+      filePath,
+      maxEntries,
+      allowWrite: filePath !== sessionCacheStatePath() || persistenceEnabled(),
+      normalizeRecord,
+    })
   }
 
-  /**
-   * The record for one conversation, or the most recently active one.
-   *
-   * The fallback is what makes the status card useful without a session named:
-   * the card describes the line, and the only conversation it can honestly
-   * describe in that case is the one that ran last.
-   * @param sessionId - Conversation to read; omit for the most recent one.
-   * @returns the record, or undefined when nothing has ever been recorded.
-   */
-  read(sessionId?: string): KimiCodeSessionCacheRecord | undefined {
-    const sessions = this.load().sessions
-    const named = sessionId?.trim()
-    if (named !== undefined && named !== '') return sessions[named]
-    let newest: KimiCodeSessionCacheRecord | undefined
-    for (const record of Object.values(sessions)) {
-      if (newest === undefined || record.updatedAt > newest.updatedAt) newest = record
-    }
-    return newest
-  }
-
-  /**
-   * File one conversation's state and schedule the document write.
-   * @param sessionId - Conversation the record belongs to; ignored when blank.
-   * @param record - Complete record for that conversation.
-   */
-  write(sessionId: string, record: KimiCodeSessionCacheRecord): void {
-    const key = sessionId.trim()
-    if (key === '') return
-    const document = this.load()
-    document.sessions[key] = record
-    this.prune(document)
-    this.schedule()
-  }
-
-  /**
-   * Update the warmup consecutive-hit streak on an already-written session record
-   * in place, without issuing a second `write()` call.
-   */
+  /** Update the warmup streak without creating a record for an unknown session. */
   noteWarmupStreak(sessionId: string, consecutiveHits: number): void {
-    const key = sessionId.trim()
-    if (key === '') return
-    const document = this.load()
-    const existing = document.sessions[key]
-    if (existing === undefined) return
-    const normalized = count(consecutiveHits)
-    if (normalized > 0) {
-      document.sessions[key] = { ...existing, warmupConsecutiveHits: normalized }
-    } else if (existing.warmupConsecutiveHits !== undefined) {
+    this.update(sessionId, existing => {
+      const normalized = count(consecutiveHits)
+      if (normalized > 0) return { ...existing, warmupConsecutiveHits: normalized }
+      if (existing.warmupConsecutiveHits === undefined) return existing
       const { warmupConsecutiveHits: _dropped, ...rest } = existing
-      document.sessions[key] = rest
-    } else {
-      return
-    }
-    this.schedule()
+      return rest
+    })
   }
-
-  /**
-   * Write the document now, synchronously.
-   *
-   * Exposed for tests and for a caller that is about to lose the process; the
-   * debounced path is what normal turns use.
-   */
-  flush(): void {
-    this.cancelPending()
-    const document = this.document
-    if (document === undefined) return
-    this.persist(document)
-  }
-
-  /** Drop everything older than the newest maxEntries conversations. */
-  private prune(document: SessionCacheDocument): void {
-    const entries = Object.entries(document.sessions)
-    if (entries.length <= this.maxEntries) return
-    entries.sort((a, b) => b[1].updatedAt - a[1].updatedAt)
-    document.sessions = Object.fromEntries(entries.slice(0, this.maxEntries))
-  }
-
-  /** Read the document once; a missing or corrupt file reads as empty. */
-  private load(): SessionCacheDocument {
-    if (this.document !== undefined) return this.document
-    try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(this.filePath, 'utf8'))
-      this.document = normalizeDocument(parsed)
-    } catch {
-      this.document = { version: 1, sessions: {} }
-    }
-    return this.document
-  }
-
-  /** Coalesce the writes one turn's several fields would otherwise cause. */
-  private schedule(): void {
-    if (!this.allowWrite || this.pending !== undefined) return
-    this.pending = setTimeout(() => {
-      this.pending = undefined
-      const document = this.document
-      if (document !== undefined) this.persist(document)
-    }, 250)
-    // A status read must never keep the process alive.
-    ;(this.pending as unknown as { unref?: () => void }).unref?.()
-  }
-
-  private cancelPending(): void {
-    if (this.pending === undefined) return
-    clearTimeout(this.pending)
-    this.pending = undefined
-  }
-
-  /** Write through a temporary file so a crash cannot leave half a document. */
-  private persist(document: SessionCacheDocument): void {
-    if (!this.allowWrite) return
-    try {
-      fs.mkdirSync(path.dirname(this.filePath), { recursive: true })
-      const temporary = this.filePath + '.' + process.pid + '.' + (++writeSequence) + '.tmp'
-      fs.writeFileSync(temporary, JSON.stringify(document), 'utf8')
-      fs.renameSync(temporary, this.filePath)
-    } catch {
-      // Diagnostic state only: an unwritable home must not fail a turn.
-    }
-  }
-}
-
-/** Validate one parsed document, dropping entries that do not describe a record. */
-function normalizeDocument(value: unknown): SessionCacheDocument {
-  const sessions: Record<string, KimiCodeSessionCacheRecord> = {}
-  if (isRecord(value) && isRecord(value.sessions)) {
-    for (const [key, entry] of Object.entries(value.sessions)) {
-      const record = normalizeRecord(entry)
-      if (record !== undefined) sessions[key] = record
-    }
-  }
-  return { version: 1, sessions }
 }
 
 function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined {

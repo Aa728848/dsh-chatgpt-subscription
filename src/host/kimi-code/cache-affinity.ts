@@ -18,6 +18,11 @@
  */
 
 import type { KimiCodeAccountQuota } from '../../shared/kimi-code-contracts.ts'
+import {
+  DEFAULT_AFFINITY_QUOTA_FLOOR_SHARE,
+  orderAffinityCandidates as orderSharedAffinityCandidates,
+  remainingQuotaShare as sharedRemainingQuotaShare,
+} from '../common/cache-affinity.ts'
 
 /**
  * Remaining share below which a warm account stops being preferred.
@@ -29,7 +34,7 @@ import type { KimiCodeAccountQuota } from '../../shared/kimi-code-contracts.ts'
  * so the two decisions agree about when an account is running dry instead of
  * each inventing its own answer.
  */
-export const AFFINITY_QUOTA_FLOOR_SHARE = 0.2
+export const AFFINITY_QUOTA_FLOOR_SHARE = DEFAULT_AFFINITY_QUOTA_FLOOR_SHARE
 
 /**
  * The share of its tightest window an account has left, or null when unknown.
@@ -45,30 +50,13 @@ export const AFFINITY_QUOTA_FLOOR_SHARE = 0.2
  * @returns the smallest remaining fraction in `[0, 1]`, or null when unknown.
  */
 export function remainingQuotaShare(quota: KimiCodeAccountQuota | null | undefined): number | null {
-  if (quota === null || quota === undefined || quota.windows.length === 0) return null
-  let tightest: number | null = null
-  for (const window of quota.windows) {
-    // Every window in a snapshot was built from a ratio the service actually
-    // reported (an unmeasured one is dropped where the snapshot is built), so
-    // `usedFraction` is a measurement here and never a default.
-    const used = window.usedFraction
-    if (typeof used !== 'number' || !Number.isFinite(used)) continue
-    const remaining = clampShare(1 - used)
-    tightest = tightest === null ? remaining : Math.min(tightest, remaining)
-  }
-  return tightest
-}
-
-/** Clamp a computed share into `[0, 1]`; rounding must not invent a negative. */
-function clampShare(value: number): number {
-  if (!Number.isFinite(value)) return 0
-  return Math.min(1, Math.max(0, value))
+  return sharedRemainingQuotaShare(quota)
 }
 
 /** Settings-card description for the cache-affinity switch. */
 export const CACHE_AFFINITY_SETTING_DESCRIPTION =
-  'Kimi Code 专用：多账号轮换时优先选「这条前缀的缓存还热着」的账号，前提是它剩余额度不低于 20%；'
-  + '热账号已接近用尽时照旧让位给额度更足的账号，关闭后完全按原轮换策略；非 Kimi 线路开关无影响。'
+  '多账号轮换时优先选「这条前缀的缓存还热着」且额度充足的账号；默认用于 Kimi。'
+  + '其他线路需在 promptCacheOverrides 中证明 scope:"account" 并显式启用；关闭后回到原轮换策略。'
 
 /**
  * Environment override for the affinity switch.
@@ -152,23 +140,5 @@ export interface AffinityOrderInput {
  * @returns account ids in preference order; empty when nothing is preferred.
  */
 export function orderAffinityCandidates(input: AffinityOrderInput): string[] {
-  const floor = input.floorShare ?? AFFINITY_QUOTA_FLOOR_SHARE
-  const measured: Array<{ id: string; share: number }> = []
-  const unmeasured: string[] = []
-  for (const candidate of input.candidates) {
-    if (!candidate.warm) continue
-    const share = input.remainingShareById?.[candidate.id]
-    if (share === null || share === undefined || !Number.isFinite(share)) {
-      unmeasured.push(candidate.id)
-      continue
-    }
-    // At the floor is still usable: a floor is a boundary, not a trap, and
-    // flipping the comparison would silently raise it by one request's worth.
-    if (share < floor) continue
-    measured.push({ id: candidate.id, share })
-  }
-  // Stable sort over the candidate order, so two equally full accounts stay in
-  // pool order rather than swapping on every request.
-  measured.sort((left, right) => right.share - left.share)
-  return [...measured.map((entry) => entry.id), ...unmeasured]
+  return orderSharedAffinityCandidates(input)
 }

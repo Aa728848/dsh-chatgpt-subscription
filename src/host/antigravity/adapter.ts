@@ -46,6 +46,9 @@ import {
 } from './mapper.ts'
 import { offloadOldestRequestImages } from '../common/request-images.ts'
 import { normalizeGenerateOptions } from '../common/llm-compat.ts'
+import { sharedPrefixGroupKey, withStaticPrefixOrdering } from '../common/prefix-stability.ts'
+import { promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-cache-policy.ts'
+import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from '../common/prefix-request-coordinator.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { recordCacheRequest, recordCacheUsage } from './cache-stats.ts'
 
@@ -213,6 +216,8 @@ function streamFailure(error: unknown, signal: AbortSignal): LlmError {
   return new LlmError(`Antigravity stream failed: ${detail}`, 'TRANSPORT', { cause: error })
 }
 
+const antigravityPrefixRequests = new PrefixRequestCoordinator()
+
 export class AntigravityAdapter extends LlmAdapter {
   private readonly accountPool: AccountPoolStore
   /**
@@ -225,7 +230,7 @@ export class AntigravityAdapter extends LlmAdapter {
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
     private readonly preferences?: AntigravityPreferenceStore,
-    private readonly options: { fetchFn?: typeof fetch; attachments?: AttachmentImageReader } = {},
+    private readonly options: { fetchFn?: typeof fetch; attachments?: AttachmentImageReader; promptCache?: PromptCacheOverride } = {},
     accountPool?: AccountPoolStore,
   ) {
     super()
@@ -366,7 +371,7 @@ export class AntigravityAdapter extends LlmAdapter {
     // or an estimate of the scale target -- reported every scaled screenshot as
     // over the ceiling and replaced images that fit comfortably once scaled,
     // and every replacement rewrites the prefix Google's cache matches.
-    const normalizedOptions = normalizeGenerateOptions(options)
+    const normalizedOptions = withStaticPrefixOrdering('antigravity', normalizeGenerateOptions(options), this.options.promptCache)
     const images = await resolveRequestImages(normalizedOptions, this.options.attachments, signal)
     // The budget stays this route's own 12 MB. The shared kernel's default is
     // Kimi's 1.5 MB, and borrowing another route's number here would refuse
@@ -428,12 +433,23 @@ export class AntigravityAdapter extends LlmAdapter {
       for (const endpoint of endpointCandidates()) {
         try {
           let sentBody = body
-          response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-            method: 'POST',
-            headers,
-            body,
-            signal,
-          })
+          const cachePolicy = promptCachePolicyOf('antigravity', this.options.promptCache)
+          const groupKey = cachePolicy.coldStart === 'off'
+            ? undefined
+            : sharedPrefixGroupKey('antigravity', requestOptions, endpoint, account.id)
+          response = await fetchWithPrefixCoordination(
+            fetchFn,
+            antigravityPrefixRequests,
+            groupKey,
+            cachePolicy.coldStart === 'warm' ? cachePolicy.ttlMs : undefined,
+            `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
+            {
+              method: 'POST',
+              headers,
+              body,
+              signal,
+            },
+          )
           // Headers are transport activity: the streaming idle budget starts at
           // the hand-off, so a slow prefill is not spent from it.
           activity?.pulse()

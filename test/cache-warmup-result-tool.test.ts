@@ -31,9 +31,10 @@ let store: { page: (request: Record<string, unknown>) => Promise<unknown>, relea
 let logged: Array<Record<string, unknown>>
 
 /** 造一次调用。 */
-function makeTool(): ToolDefinition {
+function makeTool(allowProvider?: (provider: string) => boolean): ToolDefinition {
   return createCacheWarmupResultTool({
     provider: PROVIDER,
+    ...(allowProvider === undefined ? {} : { allowProvider }),
     routeOf: () => route,
     store: () => store as never,
     log: event => { logged.push(event as unknown as Record<string, unknown>) },
@@ -158,6 +159,14 @@ describe('cache_warmup_result authorization', () => {
     expect(value.ok).toBe(false)
     expect(value.error?.code).toBe('WRONG_PROVIDER')
     expect(pageRequests).toHaveLength(0)
+  })
+
+  it('allows an admitted provider without weakening session ownership', async () => {
+    route = { provider: 'codex-chatgpt', sessionId: 'sess-1' }
+    const tool = makeTool(provider => provider === 'codex-chatgpt')
+    const value = await tool.execute({ action: 'page', refId: 'ref://sess-1/abc' }, { agent: undefined } as never) as CacheWarmupResultValue
+    expect(value.ok).toBe(true)
+    expect(pageRequests[0]).toMatchObject({ sessionId: 'sess-1', refId: 'ref://sess-1/abc' })
   })
 
   it('refuses when the session cannot be resolved', async () => {

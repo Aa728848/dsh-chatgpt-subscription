@@ -3,7 +3,7 @@
  *
  * 这个文件把核心（结果投影、预算、引用存储、指标）接到宿主上，挂四样东西：
  *
- * 1. `tools/post-execute` 上的**新结果投影**：Kimi 线路的程序传输结果（PTC 的
+ * 1. `tools/post-execute` 上的**新结果投影**：受控线路的程序传输结果（PTC 的
  *    `run_code` 与 Code Mode 的 `code_run`）交给
  *    `projectToolResult`，能可靠结构化提取的大结果被换成带 `ref://` 引用的预览；
  * 2. `cache_warmup_result` 工具（`result-tool.ts`），预览的唯一精确补读入口；
@@ -55,12 +55,13 @@ import { CACHE_WARMUP_PTC_TRANSPORT_TOOLS, isPtcTransportName } from './projecti
 import { createCacheWarmupResultTool } from './result-tool.ts'
 import { CACHE_WARMUP_RETRIEVAL_TOOLS, cacheWarmupNavigationIntentOf } from './retrieval-intent.ts'
 import type { CacheWarmupSettings } from './settings.ts'
+import { CONTROLLED_PROVIDERS, type ControlledProvider } from '../common/model-request-control.ts'
 
 /**
  * 本模块服务的线路。
  *
- * 结果投影的正确性依赖这条线路的缓存语义（内容前缀命中），别的线路上把结果换成
- * 预览只有坏处没有好处，所以这里写死一个 provider 名而不是做成开关。
+ * Kimi 是缺少显式 provider 列表时的兼容回退；宿主正常接线会注入受控线路表。
+ * 是否投影由当前设置决定，是否补读已有 ref 则由会话所有权与受支持路由决定。
  */
 export const CACHE_WARMUP_PROVIDER = 'kimi-code'
 
@@ -190,7 +191,7 @@ export interface CacheWarmupOptions {
   /**
    * 进程重启后尚无内存报告时的持久化预热状态回退读取器（可选）。
    */
-  durableHint?: (sessionId: string) => CacheWarmupDurableHint | undefined
+  durableHint?: (sessionId: string, provider?: string) => CacheWarmupDurableHint | undefined
 }
 
 /** 本模块读得到的宿主上下文（Cordis Context 结构上满足；测试可用假对象）。 */
@@ -304,10 +305,10 @@ function claimMount(ctx: CacheWarmupContext): (() => void) | undefined {
  * @param sessionId - 会话标识。
  * @returns 快照，或读不到时的 undefined。
  */
-function readCacheWarmupSnapshot(sessionId: string): CacheWarmupSnapshotLike | undefined {
+function readCacheWarmupSnapshot(sessionId: string, provider?: string): CacheWarmupSnapshotLike | undefined {
   try {
-    const read = cacheWarmupSnapshot as unknown as (session?: string) => unknown
-    const raw = read(sessionId)
+    const read = cacheWarmupSnapshot as unknown as (session?: string, now?: number, route?: string) => unknown
+    const raw = read(sessionId, undefined, provider)
     return typeof raw === 'object' && raw !== null ? raw as CacheWarmupSnapshotLike : undefined
   } catch {
     return undefined
@@ -392,6 +393,7 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     }
     return tools.register(createCacheWarmupResultTool({
       provider: CACHE_WARMUP_PROVIDER,
+      allowProvider: provider => CONTROLLED_PROVIDERS.includes(provider as ControlledProvider),
       routeOf: exec => cacheWarmupRouteOf((exec as { agent?: unknown } | undefined)?.agent),
       store: storeOf,
       log,
@@ -418,12 +420,13 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
    * @param sessionId - 会话标识。
    * @param budget - 本轮读到的预算对象。
    */
-  const trackWarmup = (sessionId: string, budget: PreviewBudget): CacheWarmupMetrics => {
-    const snapshot = readCacheWarmupSnapshot(sessionId)
+  const trackWarmup = (sessionId: string, budget: PreviewBudget, provider?: string): CacheWarmupMetrics => {
+    const snapshot = readCacheWarmupSnapshot(sessionId, provider)
     const warmup = booleanOf(snapshot?.warmup) ?? booleanOf(budget.warmup)
     const consecutiveHits = numberOf(snapshot?.consecutiveHits) ?? numberOf(budget.consecutiveHits)
     const hitRatio = numberOf(snapshot?.hitRatio) ?? numberOf(budget.hitRatio)
-    const previous = warmupState.get(sessionId)
+    const scope = (provider ?? CACHE_WARMUP_PROVIDER) + ':' + sessionId
+    const previous = warmupState.get(scope)
     if (previous === true && warmup === false) {
       const reason = exitReasonOf(consecutiveHits)
       log({
@@ -434,7 +437,7 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
         ...(hitRatio === undefined ? {} : { hitRatio }),
       })
     }
-    if (warmup !== undefined) warmupState.set(sessionId, warmup)
+    if (warmup !== undefined) warmupState.set(scope, warmup)
     return {
       ...(warmup === undefined ? {} : { warmup }),
       ...(consecutiveHits === undefined ? {} : { consecutiveHits }),
@@ -490,7 +493,8 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     if (retrievalTool && navigation !== true) return decision
     if (sourceTool && !settings.enabled && navigation !== true) return decision
     const route = cacheWarmupRouteOf(exec.agent)
-    if (route.provider !== CACHE_WARMUP_PROVIDER) return decision
+    const admittedProviders = settings.providers ?? [CACHE_WARMUP_PROVIDER]
+    if (route.provider === undefined || !admittedProviders.includes(route.provider)) return decision
     const sessionId = route.sessionId
     // 会话拿不到就不投影：refId 的归属、预算与命中率都按会话记账，猜一个桶名
     // 会让两个会话互相看不见彼此的引用。
@@ -504,13 +508,13 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
 
     let durable: CacheWarmupDurableHint | undefined
     try {
-      durable = options.durableHint?.(sessionId)
+      durable = options.durableHint?.(sessionId, route.provider)
     } catch {
       durable = undefined
     }
     const budget: PreviewBudget = durable === undefined
-      ? cacheWarmupBudget(sessionId)
-      : cacheWarmupBudget(sessionId, Date.now(), durable)
+      ? cacheWarmupBudget(sessionId, Date.now(), undefined, route.provider)
+      : cacheWarmupBudget(sessionId, Date.now(), durable, route.provider)
     // 投影是锦上添花：它抛一次错，不能让一条本来成功的工具结果变成失败，所以
     // 用 `catch` 收成 undefined 而不是让异常冒到宿主的事件瀑布上。
     const projected = await projectToolResult({
@@ -530,7 +534,7 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     })
     if (projected === undefined) return decision
 
-    const metrics = trackWarmup(sessionId, budget)
+    const metrics = trackWarmup(sessionId, budget, route.provider)
     log({
       event: 'projection',
       session: sessionId,

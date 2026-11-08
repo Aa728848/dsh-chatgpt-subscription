@@ -28,6 +28,9 @@ import { NO_ANSWER_PHRASE } from '../minimax-code/mapper.ts'
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import { errorText, isAuthenticationError, isRecord, unwrapEnvelope } from './protocol.ts'
 import { PROVIDER_NAME } from './types.ts'
+import { ReasoningKeyDialect } from '../common/reasoning-dialect.ts'
+
+const clineReasoningDialect = new ReasoningKeyDialect()
 
 /**
  * The one wording the shared detector does not know.
@@ -90,7 +93,7 @@ function serializeAssistant(message: Message): ClinePassWireMessage {
   return {
     role: 'assistant',
     content: text,
-    ...(reasoning.length > 0 ? { reasoning_content: reasoning } : {}),
+    ...(reasoning.length > 0 ? { [clineReasoningDialect.outboundKey()]: reasoning } : {}),
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
   }
 }
@@ -406,6 +409,7 @@ function acceptIdentity(current: string | undefined, incoming: unknown): string 
  * parts, which is where a gateway that omits the flat field puts the same text.
  */
 export function reasoningOf(delta: Record<string, unknown>): string | undefined {
+  clineReasoningDialect.observe(delta)
   for (const field of ['reasoning', 'reasoning_content']) {
     const value = delta[field]
     if (typeof value === 'string' && value.length > 0) return value

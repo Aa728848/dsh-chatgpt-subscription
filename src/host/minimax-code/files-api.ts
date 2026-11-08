@@ -33,6 +33,10 @@
 
 import { createHash } from 'node:crypto'
 import { dshHomeDir } from '../common/home.ts'
+import {
+  HostedMediaUploadCoordinator,
+  type HostedMediaCache,
+} from '../common/hosted-media.ts'
 
 /** Path suffix appended to the messages URL to reach the Files API. */
 export const FILES_UPLOAD_PATH = '/files/upload'
@@ -181,6 +185,65 @@ export function resetInMemoryFileIds(): void {
   FileIdStore.memory = undefined
 }
 
+/** Durable MiniMax cache adapted to the shared upload singleflight core. */
+class MiniMaxHostedFileCache implements HostedMediaCache<string> {
+  private readonly store: FileIdStore
+  private readonly now: () => number
+
+  constructor(options: FilesApiUploadOptions) {
+    this.store = new FileIdStore(options.storePath)
+    this.now = options.nowMs ?? Date.now
+  }
+
+  async get(key: string): Promise<string | undefined> {
+    const cached = (await this.store.read().catch(() => ({}) as Record<string, CachedFileId>))[key]
+    return cached !== undefined && cached.expiresAtMs > this.now() ? cached.fileId : undefined
+  }
+
+  async set(key: string, fileId: string): Promise<void> {
+    const cache = await this.store.read().catch(() => ({}) as Record<string, CachedFileId>)
+    await this.store.write({
+      ...cache,
+      [key]: { fileId, expiresAtMs: this.now() + DEFAULT_FILE_ID_TTL_SEC * 1_000 },
+    }).catch(() => undefined)
+  }
+
+  async delete(key: string): Promise<boolean> {
+    const cache = await this.store.read().catch(() => ({}) as Record<string, CachedFileId>)
+    const existed = cache[key] !== undefined
+    if (existed) {
+      delete cache[key]
+      await this.store.write(cache).catch(() => undefined)
+    }
+    return existed
+  }
+
+  async clear(): Promise<void> { await this.store.write({}).catch(() => undefined) }
+}
+
+const UPLOAD_COORDINATORS = new Map<string, HostedMediaUploadCoordinator<string>>()
+const CLOCK_IDS = new WeakMap<() => number, number>()
+let clockSequence = 0
+
+function uploadCoordinator(options: FilesApiUploadOptions): HostedMediaUploadCoordinator<string> {
+  let clockKey = ''
+  if (options.nowMs !== undefined) {
+    let id = CLOCK_IDS.get(options.nowMs)
+    if (id === undefined) {
+      id = ++clockSequence
+      CLOCK_IDS.set(options.nowMs, id)
+    }
+    clockKey = ':clock:' + String(id)
+  }
+  const key = (options.storePath ?? '<memory>') + clockKey
+  let coordinator = UPLOAD_COORDINATORS.get(key)
+  if (coordinator === undefined) {
+    coordinator = new HostedMediaUploadCoordinator<string>({ cache: new MiniMaxHostedFileCache(options) })
+    UPLOAD_COORDINATORS.set(key, coordinator)
+  }
+  return coordinator
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -262,45 +325,37 @@ export async function uploadMediaFile(
   accountKey: string,
   options: FilesApiUploadOptions = {},
 ): Promise<string | undefined> {
-  const purpose = filesPurposeFor(request.mediaType)
-  if (purpose === undefined) return undefined
+  if (filesPurposeFor(request.mediaType) === undefined) return undefined
   if (request.bytes > MAX_UPLOAD_BYTES) {
     throw new FilesApiError(
       'too-large',
       'the file is ' + formatBytes(request.bytes) + ', above the ' + formatBytes(MAX_UPLOAD_BYTES) + ' upload ceiling',
     )
   }
-
   const key = cacheKey(request.base64, accountKey)
-  const nowMs = options.nowMs ?? Date.now
-  const store = new FileIdStore(options.storePath)
-  const cache = await store.read().catch(() => ({}) as Record<string, CachedFileId>)
-  const cached = cache[key]
-  if (cached !== undefined && cached.expiresAtMs > nowMs()) return cached.fileId
+  return uploadCoordinator(options).upload(key, request.signal, controller =>
+    performMediaUpload(request, options, controller))
+}
 
+/** One shared transport flight; cache reads/writes live in MiniMaxHostedFileCache. */
+async function performMediaUpload(
+  request: Omit<FilesApiUploadRequest, 'purpose' | 'filename'>,
+  options: FilesApiUploadOptions,
+  controller: AbortController,
+): Promise<string> {
+  const purpose = filesPurposeFor(request.mediaType)!
   const fetchFn = options.fetchFn ?? fetch
   const form = new FormData()
-  // purpose BEFORE file: the official client appends them in this order and the
-  // server parses the form positionally for the part it binds.
   form.append('purpose', purpose)
   form.append(
     'file',
     new Blob([Buffer.from(request.base64, 'base64')], { type: request.mediaType }),
     filenameForMediaType(request.mediaType),
   )
-
-  const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS)
-  const abortForTurn = (): void => controller.abort(request.signal?.reason)
-  if (request.signal?.aborted === true) abortForTurn()
-  else request.signal?.addEventListener('abort', abortForTurn, { once: true })
-
-  let fileId: string | undefined
   try {
     const response = await fetchFn(filesUploadUrl(request.baseUrl), {
       method: 'POST',
-      // Authorization ALONE. See the module doc: the X-Msh-* identity headers
-      // this line sends everywhere else make this surface answer 2013.
       headers: { Authorization: 'Bearer ' + request.accessToken },
       body: form,
       signal: controller.signal,
@@ -308,46 +363,28 @@ export async function uploadMediaFile(
     if (response.status === 401 || response.status === 403) {
       throw new FilesApiError('unauthorized', 'the Files API rejected the credential (HTTP ' + response.status + ')')
     }
-    // 503/50115 is the gateway saying the route is not enabled for this
-    // credential - a different situation from the Files API refusing a
-    // well-formed upload, and one a user cannot fix by retrying.
     if (response.status === 503) {
       throw new FilesApiError(
         'route-not-configured',
         'this MiniMax Code account has no Files API route configured, so the media stays inline',
       )
     }
-    if (!response.ok) {
-      throw new FilesApiError(
-        'rejected',
-        'the Files API upload failed with HTTP ' + response.status,
-      )
-    }
+    if (!response.ok) throw new FilesApiError('rejected', 'the Files API upload failed with HTTP ' + response.status)
     const raw = await response.text().catch(() => '')
     const payload: unknown = safeJson(raw)
-    fileId = readFileId(payload)
-    if (fileId === undefined) {
-      throw new FilesApiError('rejected', describeRejection(payload, raw))
-    }
+    const fileId = readFileId(payload)
+    if (fileId === undefined) throw new FilesApiError('rejected', describeRejection(payload, raw))
+    return fileId
   } catch (error) {
     if (error instanceof FilesApiError) throw error
-    // A cancellation is not an upload failure: turning it into a silent
-    // fallback would keep spending the turn after the caller stopped it.
-    if (isAbort(error, request.signal)) throw error
+    if (isAbort(error, controller.signal)) throw error
     throw new FilesApiError(
       'network',
       'the Files API upload did not complete: ' + (error instanceof Error ? error.message : String(error)),
     )
   } finally {
     clearTimeout(timer)
-    request.signal?.removeEventListener('abort', abortForTurn)
   }
-
-  await store.write({
-    ...cache,
-    [key]: { fileId, expiresAtMs: nowMs() + DEFAULT_FILE_ID_TTL_SEC * 1_000 },
-  }).catch(() => undefined)
-  return fileId
 }
 
 /** Whether one failure is a cancellation rather than a real upload failure. */

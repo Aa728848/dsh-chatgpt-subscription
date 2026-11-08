@@ -71,6 +71,7 @@ function harness(options: {
   warmup?: boolean | (() => boolean)
   totalTokens?: number
   provider?: string
+  enablePolicy?: boolean
   steerError?: Error
 } = {}) {
   const clock = new ManualClock()
@@ -90,6 +91,9 @@ function harness(options: {
     warmup: options.warmup,
     agents: { get: id => id === PARENT ? agent : undefined },
     activity: () => activity,
+    ...(options.enablePolicy === true && options.provider !== undefined
+      ? { overrides: { [options.provider]: { waitWarmup: true, ttlMs: 1_000 } } }
+      : {}),
   })
   const parent = session(PARENT, options.provider ?? 'kimi-code')
   return { clock, activity, agent, controller, parent }
@@ -216,6 +220,16 @@ describe('KimiCacheWaitController', () => {
     other.controller.observe(other.parent, catalog())
     other.controller.observe(other.parent, turn('turn/end'))
     expect(other.clock.pending).toBe(0)
+  })
+
+  it('warms another provider only after an explicit TTL and waitWarmup policy', () => {
+    const h = harness({ provider: 'step-code', enablePolicy: true })
+    h.controller.observe(h.parent, catalog())
+    h.controller.observe(h.parent, turn('turn/end'))
+    expect(h.clock.nextAt).toBe(800)
+    h.clock.advance(800)
+    expect(h.agent.steer).toHaveBeenCalledTimes(1)
+    expect(h.controller.snapshot(PARENT).lastDecision).toBe('warmup')
   })
 
   it('cancels waiting when the child settles, including a durable settlement notice', () => {

@@ -97,6 +97,9 @@
 - **双阶段流式空闲看门狗（`idle-watchdog.ts`）**：默认 120 秒阈值（严格小于底层 `undici` HTTP/2 的 300 秒断连阈值；Ollama 本地算力场景例外设为 300 秒），并在**收到响应头时脉冲重置一次**，从而将「慢首包预填充」与「流中途卡死」解耦，卡死后立即进入有界重试。
 - **上下文溢出与输出预留（`context-overflow.ts` + `output-reservation.ts`）**：统一识别各网关的 token 超限报错并转为 `CONTEXT_WINDOW_EXCEEDED` 交由宿主压缩恢复；对「输入能放下但输入 + 输出预留超限」的 HTTP 400/422 自动下调单次输出上限重试一次。
 - **实际载荷图片预算（`request-images.ts`）**：遵循 `normalize → resolveRequestImages → offloadOldestRequestImages` 顺序，按实际上线 base64 体积计量并按最旧优先替换为明确文字占位，但每条线路保留各自经实测验证的字节上限。
+- **缓存策略与请求协调（`prompt-cache-policy.ts` + `prefix-request-coordinator.ts`）**：线路显式声明 TTL、账号作用域与可用机制；冷启动协调支持 in-flight-only，未知 TTL 不得宣称 warm。亲和、续热与提示都受策略门控。
+- **共享运行时护栏（`tool-runaway.ts` + `cache-warmup/`）**：规范工具调用键、分级提醒与 `ref://` 结果预览不再绑死 Kimi；Kimi 强停、MiniMax 官方失控信号与各线路协议文案仍由自己的 profile 保留。
+- **媒体与诊断复用（`hosted-media.ts` + `session-cache-state.ts`）**：上传缓存/调用方感知单飞、粘性图片身份与活动记录使用共享内核；Kimi/MiniMax 的上传协议、TTL 和持久化格式不互相覆盖。
 
 ---
 

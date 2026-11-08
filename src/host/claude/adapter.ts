@@ -125,6 +125,9 @@ import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.t
 import { localizedProviderName } from '../common/i18n/index.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import { outputReservation } from '../common/output-reservation.ts'
+import { sharedPrefixGroupKey, withStaticPrefixOrdering } from '../common/prefix-stability.ts'
+import { promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-cache-policy.ts'
+import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from '../common/prefix-request-coordinator.ts'
 import {
   LlmAdapter,
   LlmError,
@@ -198,6 +201,12 @@ import {
 import { ClaudeUnauthorizedError, ensureAccessToken, type ClaudeTokenStore } from './oauth.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
+import {
+  MAX_REQUEST_IMAGE_BYTES,
+  offloadRequestImagesWithStickyBudget,
+  type ResolvedRequestImages,
+} from '../common/request-images.ts'
+import { StickyImageBudgetStore } from '../common/sticky-image-budget.ts'
 
 /**
  * Transient-failure retry policy for the `claude-subscription` route.
@@ -336,7 +345,12 @@ export interface ClaudeAdapterOptions {
    * headless test and any caller that predates the pool use.
    */
   accountPool?: ClaudeAccountPoolLike
+  /** Optional deployment override for cache-prefix behaviour. */
+  promptCache?: PromptCacheOverride
 }
+
+const claudePrefixRequests = new PrefixRequestCoordinator()
+const claudeStickyImages = new StickyImageBudgetStore('claude')
 
 /**
  * The immutable id of the account a token came from, presented as the two-method
@@ -696,27 +710,38 @@ export class ClaudeAdapter extends LlmAdapter {
       cacheTtl,
     })
     try {
-      return await fetchWithContextBudgetRecovery(fetchFn)(API_BASE + MESSAGES_PATH, {
-        method: 'POST',
-        // The REAL model, never a default: the haiku rule changes the beta set,
-        // so a hardcoded id would send the wrong headers for every haiku call
-        // and for every non-haiku one alike.
-        headers: buildClaudeHeaders(credentials.accessToken, {
-          model: requestOptions.model,
-          thinking,
-          // Read off the body just built: the vendor documents block_binding
-          // without its beta as a 400 on every request.
-          thinkingBinding: claudeBodyBindsThinking(payload),
-          // Read off the body too: the blocks and the beta that licenses them
-          // must come from the same request or neither is trustworthy.
-          toolChanges: claudeBodyHasToolChanges(payload),
-          // The header follows the tier the body just asked for.
-          cacheTtl,
+      const cachePolicy = promptCachePolicyOf('claude', this.options.promptCache)
+      const groupKey = cachePolicy.coldStart === 'off'
+        ? undefined
+        : sharedPrefixGroupKey('claude', requestOptions, 'subscription', credentials.account?.uuid ?? 'legacy')
+      return await fetchWithPrefixCoordination(
+        fetchWithContextBudgetRecovery(fetchFn),
+        claudePrefixRequests,
+        groupKey,
+        cachePolicy.coldStart === 'warm' ? cachePolicy.ttlMs : undefined,
+        API_BASE + MESSAGES_PATH,
+        {
           method: 'POST',
-        }),
-        body: JSON.stringify(payload),
-        signal,
-      })
+          // The REAL model, never a default: the haiku rule changes the beta set,
+          // so a hardcoded id would send the wrong headers for every haiku call
+          // and for every non-haiku one alike.
+          headers: buildClaudeHeaders(credentials.accessToken, {
+            model: requestOptions.model,
+            thinking,
+            // Read off the body just built: the vendor documents block_binding
+            // without its beta as a 400 on every request.
+            thinkingBinding: claudeBodyBindsThinking(payload),
+            // Read off the body too: the blocks and the beta that licenses them
+            // must come from the same request or neither is trustworthy.
+            toolChanges: claudeBodyHasToolChanges(payload),
+            // The header follows the tier the body just asked for.
+            cacheTtl,
+            method: 'POST',
+          }),
+          body: JSON.stringify(payload),
+          signal,
+        },
+      )
     } catch (error) {
       if (signal.aborted) throw new LlmError('Claude request aborted', 'ABORTED', { cause: error })
       throw toLlmError(networkFailure(error))
@@ -738,9 +763,25 @@ export class ClaudeAdapter extends LlmAdapter {
     // Measuring the resolved payloads instead means the budget is met by what
     // is really sent, and it also lets the budget see that an image which
     // resolved to 'unavailable' or 'oversized' carries no bytes at all.
-    const normalized = normalizeGenerateOptions(options)
+    const normalized = withStaticPrefixOrdering('claude', normalizeGenerateOptions(options), this.options.promptCache)
     const images = await resolveRequestImages(normalized, this.options.attachments, signal)
-    const requestOptions = offloadOldestRequestImages(normalized, images)
+    const stickyImages: ResolvedRequestImages = new Map([...images].map(([id, image]) => [
+      id,
+      image.kind === 'oversized' ? { kind: 'unavailable' } : image,
+    ] as const))
+    const sticky = promptCachePolicyOf('claude', this.options.promptCache).stickyImages
+      ? offloadRequestImagesWithStickyBudget(
+          normalized,
+          MAX_REQUEST_IMAGE_BYTES,
+          Math.max(1, Math.floor(MAX_REQUEST_IMAGE_BYTES / 2)),
+          stickyImages,
+          claudeStickyImages.priorDroppedKeys(normalized.sessionId),
+        )
+      : undefined
+    const requestOptions = sticky?.options ?? offloadOldestRequestImages(normalized, images)
+    if (sticky !== undefined && sticky.newlyDroppedKeys.length > 0) {
+      claudeStickyImages.record(normalized.sessionId, sticky.allDroppedKeys)
+    }
     // One table for both directions of this request — see module note 2.
     const toolNames = claudeToolNames(requestOptions.tools)
     // The version floor is checked here, BEFORE the credential is resolved and

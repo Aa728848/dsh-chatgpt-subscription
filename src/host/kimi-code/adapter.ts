@@ -1,5 +1,10 @@
 import { recordCacheWarmupUsage } from '../cache-warmup/index.ts'
 import { localizedProviderName } from '../common/i18n/index.ts'
+import {
+  cooldownFromReset,
+  SINGLE_REFRESH_ATTEMPT,
+  type ProviderFailureClassification,
+} from '../common/failure-classification.ts'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import {
@@ -178,6 +183,11 @@ function countOmitted(
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import {
+  isAuxiliaryRequest,
+  PrefixRequestCoordinator,
+  type PrefixRequestLease,
+} from '../common/prefix-request-coordinator.ts'
+import {
   inBandAnthropicStatus,
   reclassifyInBandError,
   reclassifyInBandResponsesError,
@@ -264,7 +274,7 @@ const RETRY_POLICY = resolveRetryPolicy(KIMI_CODE_RETRY_POLICY_CONFIG, 'dsh-chat
  * Every other OAuth flow in this plugin keeps the provider's own default of
  * three attempts, because nothing else retries them.
  */
-const MODEL_REFRESH_MAX_ATTEMPTS = 1
+const MODEL_REFRESH_MAX_ATTEMPTS = SINGLE_REFRESH_ATTEMPT
 
 /** Configured effort when the model supports it, else the adapter's preference order. */
 export function resolveDefaultReasoningEffort(
@@ -286,7 +296,7 @@ export function resolveDefaultReasoningEffort(
  * retried. The body text is what separates them, so the classification reads
  * it rather than trusting the status alone.
  */
-export interface KimiFailureClassification {
+export interface KimiFailureClassification extends ProviderFailureClassification {
   /** DSH error code; decides whether the route retries. */
   code: string
   /** Message shown to the user, with the provider's own text appended. */
@@ -791,12 +801,13 @@ export function accountLimitCooldownMs(bodyText: string, now: number = Date.now(
     : instant !== null
       ? Date.parse(instant[0].replace(' ', 'T'))
       : null
-  if (resetsAt !== null && Number.isFinite(resetsAt) && resetsAt > now) {
-    return Math.min(Math.max(resetsAt - now, POOL_COOLDOWN_MS), MAX_ACCOUNT_LIMIT_COOLDOWN_MS)
-  }
-  return BILLING_CYCLE_PATTERN.test(bodyText)
-    ? BILLING_CYCLE_COOLDOWN_MS
-    : ACCOUNT_LIMIT_COOLDOWN_MS
+  return cooldownFromReset({
+    resetAtMs: resetsAt,
+    now,
+    fallbackMs: BILLING_CYCLE_PATTERN.test(bodyText) ? BILLING_CYCLE_COOLDOWN_MS : ACCOUNT_LIMIT_COOLDOWN_MS,
+    minimumMs: POOL_COOLDOWN_MS,
+    maximumMs: MAX_ACCOUNT_LIMIT_COOLDOWN_MS,
+  })
 }
 
 export interface KimiCodeAdapterOptions {
@@ -920,155 +931,26 @@ export function toolUpdateMode(
 // Cold-start singleflight
 // ---------------------------------------------------------------------------
 
-/**
- * How long a cold-start follower waits for the leader warming the same prefix.
- *
- * The leader only has to reach the response headers: past that the service is
- * already processing the prefix, and a follower that waited out the whole
- * budget would have lost more than the shared warm-up was worth.
- */
+/** How long a cold-start follower waits for the leader warming the same prefix. */
 export const COLD_START_WARMUP_WAIT_MS = 2_500
 
-/** How many prefix groups are remembered as warm. */
-const MAX_WARM_PREFIX_GROUPS = 256
+const prefixRequests = new PrefixRequestCoordinator({ waitMs: COLD_START_WARMUP_WAIT_MS })
 
-/**
- * When each prefix group was last warmed.
- *
- * An entry older than the cache lifetime is treated as cold, because the
- * service's own entry is gone by then too. Bounded, so a long-lived process
- * cannot accumulate one entry per distinct prefix forever.
- */
-const warmPrefixTimestamps = new Map<string, number>()
-
-/**
- * The request currently warming each prefix group.
- *
- * The promise is resolved when that leader reaches the response headers, which
- * is what releases the followers waiting behind it.
- */
-const inFlightColdLeaders = new Map<string, Promise<void>>()
-
-/** When each leader started, so a hung leader does not own its group forever. */
-const inFlightColdLeaderStartedAt = new Map<string, number>()
-
-/**
- * The resolver belonging to each in-flight leader.
- *
- * Kept beside the promise it settles, because a promise cannot be resolved
- * from the outside.
- */
-const coldLeaderReleases = new Map<string, () => void>()
-
-/**
- * In-flight main-session requests waiting for their HTTP response headers,
- * keyed by sessionId. Used so a concurrent `session-title-first-prompt-llm`
- * side-channel request yields to the main turn's prefill instead of competing
- * on the same account during cold start.
- */
-const inFlightMainSessionHeaders = new Map<string, Promise<void>>()
-const mainSessionHeaderReleases = new Map<string, () => void>()
-
-/**
- * Per-account/model first-turn prefill pacing chain for concurrent subagent bursts.
- */
-const inFlightSubagentBurstLeaders = new Map<string, Promise<void>>()
-const subagentBurstReleases = new Map<string, () => void>()
-
-/**
- * Forget every remembered prefix and release every waiting follower.
- *
- * Test seam only: these maps are process-wide, and a test that asserts on the
- * cold-start gate must start from a clean slate.
- */
+/** Forget every remembered prefix and release every waiting follower. */
 export function resetColdStartSingleflightForTests(): void {
-  for (const release of [...coldLeaderReleases.values()]) release()
-  for (const release of [...mainSessionHeaderReleases.values()]) release()
-  for (const release of [...subagentBurstReleases.values()]) release()
-  warmPrefixTimestamps.clear()
-  inFlightColdLeaders.clear()
-  inFlightColdLeaderStartedAt.clear()
-  coldLeaderReleases.clear()
-  inFlightMainSessionHeaders.clear()
-  mainSessionHeaderReleases.clear()
-  inFlightSubagentBurstLeaders.clear()
-  subagentBurstReleases.clear()
+  prefixRequests.reset()
 }
 
-/**
- * One request's place in the cold-start singleflight.
- */
-interface ColdStartGate {
-  /** Whether this request is the one warming the prefix. */
-  readonly isLeader: boolean
-  /**
-   * Releases the followers waiting behind this leader.
-   *
-   * Idempotent: the leader releases on the response headers and again from the
-   * failure path, and the second call must be harmless.
-   */
-  release(): void
-  /** Records the prefix as warm, so later requests skip the gate entirely. */
-  markWarm(): void
-}
-
-/** The gate of a request that neither waits for nor leads a cold start. */
-const NO_COLD_START_GATE: ColdStartGate = {
-  isLeader: false,
-  release: () => undefined,
-  markWarm: () => undefined,
-}
-
-/**
- * The prefix identity shared by every account that could answer this request.
- *
- * The service derives its cache from the request content, so two requests with
- * the same model, the same system prompt, the same tool list and the same
- * leading static bootstrap reminders address the same prefix. The region is part
- * of the identity because each region is a separate service with a cache of its
- * own.
- *
- * This is deliberately NOT the whole story: the cache itself is per ACCOUNT, so
- * {@link coldStartGroupKey} adds the account that holds it. Keeping the two
- * apart lets the affinity routing ask "is this prefix warm on that account"
- * without either side parsing the other's key.
- *
- * A request with no system prompt has no prefix worth warming, and gets no
- * group at all.
- *
- * @param region - The region the request will be answered from.
- * @param options - The request about to be sent.
- * @returns The prefix key, or undefined when the request has no prefix.
- */
+/** The prefix identity shared by requests on one region/model. */
 export function prefixGroupKey(region: string, options: NormalizedGenerateOptions): string | undefined {
   const { systemPromptHash, toolsHash, staticPrefixHash } = prefixFingerprints(options)
   if (systemPromptHash === null) return undefined
   return `${region}:${options.model}:${systemPromptHash}:${toolsHash ?? 'none'}${staticPrefixHash ? ':' + staticPrefixHash : ''}`
 }
 
-/**
- * Separates a prefix key from the account holding it.
- *
- * A character no account scope can contain: pool ids are ids and the legacy
- * single-credential scope is a user id or a constant, so `|` keeps the two
- * halves unambiguous without escaping.
- */
 const GROUP_ACCOUNT_SEPARATOR = '|'
 
-/**
- * The group of requests that address the same cached prefix ON ONE ACCOUNT.
- *
- * The prefix identity comes from {@link prefixGroupKey}; the account is part of
- * the group because the service keeps one cache per account. Leaving it out made
- * the plugin claim "this prefix is warm" after an account other than the one
- * about to be used had warmed it — the followers then waited out the cold-start
- * budget for a request that was never going to hit.
- *
- * @param region - The region the request will be answered from.
- * @param options - The request about to be sent.
- * @param accountScope - The account that holds the cache this request addresses.
- * @returns The group key, or undefined when the request has no prefix.
- */
+/** The cache group on one account; cross-account warmth is never inferred. */
 export function coldStartGroupKey(
   region: string,
   options: NormalizedGenerateOptions,
@@ -1078,18 +960,7 @@ export function coldStartGroupKey(
   return prefix === undefined ? undefined : `${prefix}${GROUP_ACCOUNT_SEPARATOR}${accountScope}`
 }
 
-/**
- * Whether one account's cache for this prefix is still warm.
- *
- * The same fact the cold-start gate uses, exposed to the affinity routing so
- * both act on one definition of "warm" instead of two that can drift.
- *
- * @param region - Region that account's request would be answered from.
- * @param options - The request about to be sent.
- * @param accountScope - The account being considered.
- * @param now - Current time, epoch ms (test seam).
- * @returns whether that account's entry for this prefix can still be read back.
- */
+/** Whether this account's prefix is still warm under the measured Kimi TTL. */
 export function isWarmPrefixGroup(
   region: string,
   options: NormalizedGenerateOptions,
@@ -1097,55 +968,16 @@ export function isWarmPrefixGroup(
   now: number = Date.now(),
 ): boolean {
   const groupKey = coldStartGroupKey(region, options, accountScope)
-  if (groupKey === undefined) return false
-  const warmedAt = warmPrefixTimestamps.get(groupKey)
-  return warmedAt !== undefined && now - warmedAt < CACHE_TTL_MS
+  return groupKey !== undefined && prefixRequests.isWarm(groupKey, CACHE_TTL_MS, now)
 }
 
-/**
- * Remember that a prefix group is warm.
- *
- * @param groupKey - The group that was just warmed.
- */
-function rememberWarmPrefix(groupKey: string, now: number = Date.now()): void {
-  // Re-inserted so iteration order stays least-recently-written first.
-  warmPrefixTimestamps.delete(groupKey)
-  warmPrefixTimestamps.set(groupKey, now)
-  while (warmPrefixTimestamps.size > MAX_WARM_PREFIX_GROUPS) {
-    const oldest = warmPrefixTimestamps.keys().next()
-    if (oldest.done === true) break
-    warmPrefixTimestamps.delete(oldest.value)
-  }
-}
-
-/**
- * Register an in-flight main-session request until its HTTP response headers arrive.
- */
+/** Register a main request until response headers arrive. */
 function registerInFlightMainSessionHeader(sessionId: string): () => void {
-  const key = sessionId.trim()
-  if (key === '') return () => undefined
-  mainSessionHeaderReleases.get(key)?.()
-  let resolveHeader!: () => void
-  const promise = new Promise<void>((resolve) => { resolveHeader = resolve })
-  inFlightMainSessionHeaders.set(key, promise)
-  let released = false
-  const release = (): void => {
-    if (released) return
-    released = true
-    resolveHeader()
-    if (mainSessionHeaderReleases.get(key) === release) {
-      mainSessionHeaderReleases.delete(key)
-      inFlightMainSessionHeaders.delete(key)
-    }
-  }
-  mainSessionHeaderReleases.set(key, release)
-  return release
+  const lease = prefixRequests.registerMainSession(sessionId)
+  return () => lease.release()
 }
 
-/**
- * Whether a first-turn request carries a subagent mandate or large uncached
- * dynamic payload that should stagger behind an already in-flight sibling burst.
- */
+/** Whether a first-turn request carries a mandate or a large dynamic payload. */
 function isSubagentBurstCandidate(options: NormalizedGenerateOptions): boolean {
   let dynamicChars = 0
   for (const message of options.messages) {
@@ -1164,125 +996,21 @@ function isSubagentBurstCandidate(options: NormalizedGenerateOptions): boolean {
   return dynamicChars >= 1_200
 }
 
-/**
- * Stagger concurrent subagent first-turn requests on the same account/model
- * so they do not stampede prefill in the same millisecond.
- */
+/** Serialize concurrent subagent first turns on one account/model. */
 async function acquireSubagentBurstPacing(
   pacingKey: string,
   signal: AbortSignal,
 ): Promise<() => void> {
-  while (true) {
-    const existing = inFlightSubagentBurstLeaders.get(pacingKey)
-    if (existing === undefined) break
-    await raceColdStartLeader(existing, signal)
-    if (signal.aborted) return () => undefined
-    if (inFlightSubagentBurstLeaders.get(pacingKey) === existing) {
-      subagentBurstReleases.get(pacingKey)?.()
-      break
-    }
-  }
-  let resolvePacing!: () => void
-  const promise = new Promise<void>((resolve) => { resolvePacing = resolve })
-  inFlightSubagentBurstLeaders.set(pacingKey, promise)
-  let settled = false
-  const release = (): void => {
-    if (settled) return
-    settled = true
-    resolvePacing()
-    if (subagentBurstReleases.get(pacingKey) === release) {
-      subagentBurstReleases.delete(pacingKey)
-      inFlightSubagentBurstLeaders.delete(pacingKey)
-    }
-  }
-  subagentBurstReleases.set(pacingKey, release)
-  return release
+  const lease = await prefixRequests.acquireBurst(pacingKey, signal)
+  return () => lease.release()
 }
 
-/**
- * Wait for the leader of a prefix group, for the wait budget, or for an abort.
- *
- * The timer and the abort listener are removed whichever way the race ends, so
- * a follower that proceeds leaves neither behind.
- *
- * @param leader - The promise the in-flight leader settles.
- * @param signal - The caller's abort signal; an abort ends the wait.
- */
-function raceColdStartLeader(leader: Promise<void>, signal: AbortSignal): Promise<void> {
-  const cleanups: Array<() => void> = []
-  const budget = new Promise<void>((resolve) => {
-    const timer = setTimeout(() => resolve(), COLD_START_WARMUP_WAIT_MS)
-    cleanups.push(() => clearTimeout(timer))
-  })
-  const aborted = new Promise<void>((resolve) => {
-    if (signal.aborted) {
-      resolve()
-      return
-    }
-    const onAbort = (): void => resolve()
-    signal.addEventListener('abort', onAbort, { once: true })
-    cleanups.push(() => signal.removeEventListener('abort', onAbort))
-  })
-  return Promise.race([leader, budget, aborted]).finally(() => {
-    for (const cleanup of cleanups) cleanup()
-  })
-}
-
-/**
- * Join the cold-start singleflight for one prefix group.
- *
- * A warm group returns at once. A cold group that already has a leader waits
- * for that leader — but never longer than {@link COLD_START_WARMUP_WAIT_MS}.
- * A cold group with no leader becomes the leader itself.
- *
- * @param groupKey - The prefix group this request belongs to.
- * @param signal - The caller's abort signal; an abort ends the wait.
- * @returns The gate this request holds.
- */
+/** Join the shared cold-start coordinator with Kimi's measured warm TTL. */
 async function acquireColdStartWarmup(
   groupKey: string,
   signal: AbortSignal,
-): Promise<ColdStartGate> {
-  const warmedAt = warmPrefixTimestamps.get(groupKey)
-  if (warmedAt !== undefined && Date.now() - warmedAt < CACHE_TTL_MS) {
-    // Already warm: no wait at all.
-    return NO_COLD_START_GATE
-  }
-  const existing = inFlightColdLeaders.get(groupKey)
-  if (existing !== undefined) {
-    const startedAt = inFlightColdLeaderStartedAt.get(groupKey)
-    if (startedAt !== undefined && Date.now() - startedAt >= COLD_START_WARMUP_WAIT_MS) {
-      // The original request is allowed to finish, but it no longer owns the
-      // group. Releasing here wakes its followers and lets this request become
-      // a fresh leader instead of paying the follower timeout on every turn.
-      // The old release's identity guard below prevents it deleting this new
-      // leader when the old request eventually settles.
-      coldLeaderReleases.get(groupKey)?.()
-    }
-  }
-  const leader = inFlightColdLeaders.get(groupKey)
-  if (leader !== undefined) {
-    await raceColdStartLeader(leader, signal)
-    return NO_COLD_START_GATE
-  }
-  let resolveLeader!: () => void
-  const promise = new Promise<void>((resolve) => { resolveLeader = resolve })
-  inFlightColdLeaders.set(groupKey, promise)
-  inFlightColdLeaderStartedAt.set(groupKey, Date.now())
-  const release = (): void => {
-    resolveLeader()
-    // A later leader for the same group must not be released by this one.
-    if (coldLeaderReleases.get(groupKey) !== release) return
-    coldLeaderReleases.delete(groupKey)
-    inFlightColdLeaders.delete(groupKey)
-    inFlightColdLeaderStartedAt.delete(groupKey)
-  }
-  coldLeaderReleases.set(groupKey, release)
-  return {
-    isLeader: true,
-    release,
-    markWarm: () => rememberWarmPrefix(groupKey),
-  }
+): Promise<PrefixRequestLease> {
+  return prefixRequests.acquire(groupKey, signal, CACHE_TTL_MS)
 }
 
 /** Sessions already told that their prefix broke, so the log stays readable. */
@@ -1369,6 +1097,7 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
   // the drift cause passes through unclassified rather than being re-derived.
   const warmupState = recordCacheWarmupUsage({
     sessionId,
+    provider: PROVIDER_ID,
     inputTokens: state.inputTokens,
     cacheReadTokens: state.cacheReadTokens,
     outputTokens: state.outputTokens,
@@ -1743,7 +1472,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     // prefix have nothing to do with the session's. Everything that files state
     // under the session has to know about it, or the title request would be
     // read as the session's own turn.
-    const sideChannel = isSideChannelTitleRequest(normalized)
+    const sideChannel = isAuxiliaryRequest(normalized) || isSideChannelTitleRequest(normalized)
     const sessionKey = typeof options.sessionId === 'string' ? options.sessionId.trim() : ''
     const mainHeaderRelease = !sideChannel && sessionKey !== ''
       ? registerInFlightMainSessionHeader(sessionKey)
@@ -2128,11 +1857,8 @@ export class KimiCodeAdapter extends LlmAdapter {
       // yields until those headers arrive so it does not compete on the same
       // account during Step 1 cold prefill.
       if (sideChannel && sessionKey !== '') {
-        const pendingMain = inFlightMainSessionHeaders.get(sessionKey)
-        if (pendingMain !== undefined) {
-          await raceColdStartLeader(pendingMain, signal)
-          if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED')
-        }
+        await prefixRequests.waitForMainSession(sessionKey, signal)
+        if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED')
       }
       const coldGroupKey = sideChannel ? undefined : coldStartGroupKey(region, requestOptions, accountScope)
       const coldGate = coldGroupKey === undefined

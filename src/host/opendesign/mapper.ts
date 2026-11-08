@@ -27,6 +27,9 @@ import {
 import { isRecord } from './client.ts'
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import { PROVIDER_NAME } from './types.ts'
+import { ReasoningKeyDialect } from '../common/reasoning-dialect.ts'
+
+const openDesignReasoningDialect = new ReasoningKeyDialect()
 
 /** The sentence a no-content finish carries, shared with the sibling lines. */
 export const NO_ANSWER_PHRASE = 'ended the turn without an answer or a tool call'
@@ -93,7 +96,7 @@ function serializeAssistant(message: Message): OpenDesignWireMessage {
   return {
     role: 'assistant',
     content: text,
-    ...(reasoning.length > 0 ? { reasoning_content: reasoning } : {}),
+    ...(reasoning.length > 0 ? { [openDesignReasoningDialect.outboundKey()]: reasoning } : {}),
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
   }
 }
@@ -451,6 +454,7 @@ function acceptIdentity(current: string | undefined, incoming: unknown): string 
  * parts, which is where a gateway that omits the flat field puts the same text.
  */
 export function reasoningOf(delta: Record<string, unknown>): string | undefined {
+  openDesignReasoningDialect.observe(delta)
   for (const field of ['reasoning', 'reasoning_content']) {
     const value = delta[field]
     if (typeof value === 'string' && value.length > 0) return value

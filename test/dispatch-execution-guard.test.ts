@@ -342,6 +342,15 @@ describe('调度执行守卫：volatile 开关与零缓存漂移', () => {
     expect(Config({}).dispatchExecutionGuard?.get()).toBe(true)
     expect(Config({ dispatchExecutionGuard: false }).dispatchExecutionGuard?.get()).toBe(false)
   })
+
+  it('Config 解析共享治理、预览线路与缓存策略覆盖', () => {
+    expect(Config({}).toolRunawayGuard?.get()).toBe(true)
+    expect(Config({ toolRunawayGuard: false }).toolRunawayGuard?.get()).toBe(false)
+    expect(Config({ cacheWarmupProviders: ['kimi-code'] }).cacheWarmupProviders?.get()).toEqual(['kimi-code'])
+    expect(Config({
+      promptCacheOverrides: { 'step-code': { scope: 'account', affinity: true, ttlMs: 300_000 } },
+    }).promptCacheOverrides).toEqual({ 'step-code': { scope: 'account', affinity: true, ttlMs: 300_000 } })
+  })
 })
 
 /** 一道结构规整的候选方案题。 */

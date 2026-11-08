@@ -54,10 +54,11 @@ export function cacheWarmupBudget(
   sessionId?: string,
   now: number = Date.now(),
   durable?: CacheWarmupDurableHint,
+  provider?: string,
 ): PreviewBudget {
   try {
     if (typeof sessionId !== 'string' || sessionId.trim() === '') return { ...WARMUP_BUDGET }
-    const reports = cacheWarmupUsageReports(sessionId)
+    const reports = cacheWarmupUsageReports(sessionId, provider)
     if (reports.length === 0) {
       if (durable !== undefined && durable !== null && typeof durable === 'object') {
         const lastAt = durable.lastActiveAt
@@ -148,7 +149,7 @@ export interface CacheWarmupSnapshot {
  * @param now - 当前时间戳（毫秒），默认 `Date.now()`。
  * @returns 快照。
  */
-export function cacheWarmupSnapshot(sessionId?: string, now: number = Date.now()): CacheWarmupSnapshot {
+export function cacheWarmupSnapshot(sessionId?: string, now: number = Date.now(), provider?: string): CacheWarmupSnapshot {
   const fallback: CacheWarmupSnapshot = {
     budget: { ...WARMUP_BUDGET },
     defaults: CACHE_WARMUP_DEFAULTS,
@@ -161,7 +162,7 @@ export function cacheWarmupSnapshot(sessionId?: string, now: number = Date.now()
     sessions: 0,
   }
   try {
-    const budget = cacheWarmupBudget(sessionId, now)
+    const budget = cacheWarmupBudget(sessionId, now, undefined, provider)
     const reports = typeof sessionId === 'string' && sessionId.trim() !== ''
       ? cacheWarmupUsageReports(sessionId)
       : []

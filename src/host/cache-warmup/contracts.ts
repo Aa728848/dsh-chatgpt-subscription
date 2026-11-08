@@ -72,6 +72,8 @@ export interface PreviewBudget {
 export interface CacheWarmupUsage {
   /** 会话 id。 */
   sessionId: string
+  /** 产生报告的线路；省略时按历史 Kimi 记录读取。 */
+  provider?: string
   /** 本次请求的输入 token 总数。 */
   inputTokens: number
   /** 其中命中缓存的 token 数。 */

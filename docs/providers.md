@@ -180,6 +180,7 @@
   - **粘性双水位图片预算**：默认 20 MiB 高水位 / 10 MiB 低水位（`DSH_KIMI_CODE_MAX_IMAGE_BYTES` 可覆盖），已淘汰旧图持久化记录，避免后续轮次反复重算打断前缀缓存；
   - **请求体守卫与自动压缩衔接**：1M 档模型默认上限 **24 MiB**、256K 档默认 **2 MiB**（`DSH_KIMI_CODE_MAX_BODY_BYTES` 可覆盖），超限抛出 `CONTEXT_WINDOW_EXCEEDED` 交由 DSH 自动压缩重试；另支持 `DSH_KIMI_CODE_BYTES_PER_TOKEN` 提前压缩折算；
   - **缓存预热与等待策略**：自动监测约 25 分钟前缀缓存存活窗口，配合 `cache-warmup` 子系统（大结果 `ref://` 预览 + `cache_warmup_result` 精确分页补读）、主代理等待子代理期间的可选轻量续热，以及四段式重复工具调用刹车（`KIMI_CODE_REPEAT_BREAKER`）。
+  - **共享化边界**：结果预览与分级重复提醒可覆盖其他受控线路；静态前缀排序和 in-flight 冷启动协调已复用到 Codex、Antigravity、Step、Claude、MiniMax。账号亲和、warm 跳过、等待续热和 hosted media 仍按各线路证据与 `promptCacheOverrides` 启用，Kimi 的 TTL、协议字段和错误词表不向外复制。
 - **额度窗口**：展示 5 小时、7 天、月度会员共享池、月度 Kimi Code 池四个窗口与加油包余额。
 
 ### 宿主路由（`/kimi-code/api`）

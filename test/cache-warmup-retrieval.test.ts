@@ -215,6 +215,14 @@ describe('cache warmup settings', () => {
     expect(resolveCacheWarmupSettings({ cacheWarmupRetrieval: false }).retrievalEnabled).toBe(false)
     expect(resolveCacheWarmupSettings({ cacheWarmupRetrieval: { get: () => false } }).retrievalEnabled).toBe(false)
   })
+
+  it('resolves provider admission as a live, deduplicated list', () => {
+    expect(resolveCacheWarmupSettings().providers).toEqual(['kimi-code'])
+    expect(resolveCacheWarmupSettings({
+      cacheWarmupProviders: { get: () => [' codex-chatgpt ', 'kimi-code', 'codex-chatgpt', ''] },
+    }).providers).toEqual(['codex-chatgpt', 'kimi-code'])
+    expect(resolveCacheWarmupSettings({ cacheWarmupProviders: [] }).providers).toEqual([])
+  })
 })
 
 describe('navigation intent', () => {

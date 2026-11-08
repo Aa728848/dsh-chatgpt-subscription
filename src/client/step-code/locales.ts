@@ -202,6 +202,7 @@ export const zh = {
   cacheRequestParamsOnHint: '已打开能力位：请求会带上缓存参数。该字段未在 Step 文档中说明，官方对 Step 端点默认也不发。',
   cachePricingNote: '单价未文档化（官方模型表里四个 cost 键全是 0），因此本页只展示 token 维度，不展示任何金额。',
   cacheEmpty: '本进程还没有任何请求回报过用量，跑一次对话后再看。',
+  cacheExpiredHint: '缓存可能已过期：距上次请求约 {minutes} 分钟，下次会重新处理前缀。',
   cacheHitRatioUnavailable: '—',
 } as const
 
@@ -388,6 +389,7 @@ export const en: Record<keyof typeof zh, string> = {
   cacheRequestParamsOnHint: 'The capability is on: requests carry cache parameters. Step does not document them, and the official client does not send them to Step either.',
   cachePricingNote: 'Unit prices are undocumented (all four cost keys are 0 in the official model table), so this page shows TOKENS ONLY and no money figure at all.',
   cacheEmpty: 'No request on this machine has reported usage yet — run a conversation and look again.',
+  cacheExpiredHint: 'The cache has likely expired: about {minutes} minutes since the last request, so the next turn will reprocess the prefix.',
   cacheHitRatioUnavailable: '—',
 }
 

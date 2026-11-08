@@ -87,6 +87,12 @@ import { agentBaseUrl } from './types.ts'
 import { fileRef, uploadMediaFile } from './files-api.ts'
 import type { MinimaxCodeAccountPool } from './account-pool.ts'
 import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
+import { sharedPrefixGroupKey, withStaticPrefixOrdering } from '../common/prefix-stability.ts'
+import { promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-cache-policy.ts'
+import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from '../common/prefix-request-coordinator.ts'
+import { offloadRequestImagesWithStickyBudget } from '../common/request-images.ts'
+import { StickyImageBudgetStore } from '../common/sticky-image-budget.ts'
+import type { ProviderFailureClassification } from '../common/failure-classification.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { orderReasoningEfforts } from '../common/reasoning-efforts.ts'
 import { requestImageTargetOrOriginal } from '../common/request-images.ts'
@@ -123,7 +129,7 @@ const RETRY_POLICY = resolveRetryPolicy(
 )
 
 /** What one failed response means for the retry policy. */
-export interface MinimaxFailureClassification {
+export interface MinimaxFailureClassification extends ProviderFailureClassification {
   /** DSH error code; decides whether the route retries. */
   code: string
   /** Message shown to the user, with the service's own text appended. */
@@ -500,7 +506,12 @@ export interface MinimaxCodeAdapterOptions {
    * the route unusable.
    */
   accountPool?: MinimaxCodeAccountPool
+  /** Optional deployment override for cache-prefix behaviour. */
+  promptCache?: PromptCacheOverride
 }
+
+const minimaxPrefixRequests = new PrefixRequestCoordinator()
+const minimaxStickyImages = new StickyImageBudgetStore('minimax-code')
 
 /** The reasoning levels one model advertises, from the hardcoded directory. */
 function effortsForModel(modelId: string): string[] {
@@ -1001,10 +1012,24 @@ export class MinimaxCodeAdapter extends LlmAdapter {
     // before the image one: a single clip dwarfs the whole image allowance, and
     // dropping clips and images in the same pass would make which one survived
     // depend on the order of two unrelated ceilings.
+    const normalized = withStaticPrefixOrdering('minimax-code', normalizeGenerateOptions(options), this.options.promptCache)
+    const imageBudget = maxRequestImageBytes()
+    const sticky = promptCachePolicyOf('minimax-code', this.options.promptCache).stickyImages
+      ? offloadRequestImagesWithStickyBudget(
+          normalized,
+          imageBudget,
+          Math.max(1, Math.floor(imageBudget / 2)),
+          undefined,
+          minimaxStickyImages.priorDroppedKeys(normalized.sessionId),
+        )
+      : undefined
     const requestOptions = offloadOldestRequestVideos(
-      offloadOldestRequestImages(normalizeGenerateOptions(options), maxRequestImageBytes()),
+      sticky?.options ?? offloadOldestRequestImages(normalized, imageBudget),
       MAX_REQUEST_VIDEO_BYTES,
     ) as NormalizedGenerateOptions
+    if (sticky !== undefined && sticky.newlyDroppedKeys.length > 0) {
+      minimaxStickyImages.record(normalized.sessionId, sticky.allDroppedKeys)
+    }
     const [images, videos] = await Promise.all([
       resolveRequestImages(requestOptions, this.options.attachments, signal),
       resolveRequestVideos(requestOptions, this.options.videos, signal),
@@ -1203,12 +1228,23 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       let refusedBody: string | undefined
       for (let attempt = 0; ; attempt += 1) {
         try {
-          response = await fetchWithContextBudgetRecovery(fetchFn)(messagesUrl(credentials.region), {
-            method: 'POST',
-            headers: modelRequestHeaders(credentials.accessToken, requestContext),
-            body,
-            signal,
-          })
+          const cachePolicy = promptCachePolicyOf('minimax-code', this.options.promptCache)
+          const groupKey = cachePolicy.coldStart === 'off'
+            ? undefined
+            : sharedPrefixGroupKey('minimax-code', requestOptions, credentials.region, accountId ?? 'legacy')
+          response = await fetchWithPrefixCoordination(
+            fetchWithContextBudgetRecovery(fetchFn),
+            minimaxPrefixRequests,
+            groupKey,
+            cachePolicy.coldStart === 'warm' ? cachePolicy.ttlMs : undefined,
+            messagesUrl(credentials.region),
+            {
+              method: 'POST',
+              headers: modelRequestHeaders(credentials.accessToken, requestContext),
+              body,
+              signal,
+            },
+          )
           // Headers are transport activity: the streaming idle budget starts at
           // the hand-off, so a slow prefill is not spent from it.
           activity?.pulse()

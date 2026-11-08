@@ -87,8 +87,10 @@ export interface CacheWarmupResultValue {
 
 /** 工具依赖。 */
 export interface CacheWarmupResultToolDeps {
-  /** 本工具只为这一条线路服务（由安装方注入，工具自己不认识 provider 名字）。 */
+  /** 兼容旧调用方的单线路白名单。 */
   readonly provider: string
+  /** 多线路安装时按当前路由判定；与“是否产生新预览”的设置无关。 */
+  readonly allowProvider?: (provider: string) => boolean
   /** 读一次执行所属的线路；每次执行重读，不缓存。 */
   readonly routeOf: (exec: unknown) => CacheWarmupRoute
   /** 结果引用存储；缺席时工具照常存在，只是每次都返回结构化错误。 */
@@ -329,14 +331,17 @@ export function createCacheWarmupResultTool(deps: CacheWarmupResultToolDeps): To
       const refId = args.refId
       const action: CacheWarmupResultAction = args.action
 
-      // 1. 线路校验：这个引用只属于本线路的会话。换了线路就不再问存储。
-      if (route.provider !== deps.provider) {
+      // 1. 路由校验只回答“这是不是一个受支持的宿主线路”。是否产生新预览
+      //    由另一份设置决定；已有 ref 不因线路切换或投影开关而失去补读能力。
+      const providerAllowed = route.provider !== undefined
+        && (deps.allowProvider?.(route.provider) ?? route.provider === deps.provider)
+      if (!providerAllowed) {
         return failure(
           action,
           refId,
           route.sessionId ?? '',
           'WRONG_PROVIDER',
-          'ref handles belong to the ' + deps.provider + ' line; this session is routed to "' + (route.provider ?? 'unknown') + '"',
+          'ref handles are not available on this session route: "' + (route.provider ?? 'unknown') + '"',
         )
       }
       // 2. 会话校验：拿不到会话时**不猜**。refId 里的会话归属是唯一的越权边界，

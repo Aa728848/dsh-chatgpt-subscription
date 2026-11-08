@@ -510,6 +510,8 @@ export interface StepCodeStatusDto extends Partial<AccountPoolStatusDto> {
    * 所以这里刻意是可选的：缺失表达的是「还不知道」，不是「没有命中」。
    */
   cacheStats?: StepCodeCacheStatsDto
+  /** 基于官方 5 分钟 TTL 与本地活动记录的过期提示；无证据时不出现。 */
+  cacheHint?: { idleMs: number; totalTokens: number }
   /** 本插件是否正在服务该 Provider 路由。 */
   serving: boolean
   /** 路由被别的适配器占用时的诊断文案。 */

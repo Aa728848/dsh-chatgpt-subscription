@@ -49,9 +49,11 @@
     progressUpdatesLanguage: auto         # auto | zh | en | ru（热生效）
     planModePipeline: true                # 启用调度模式 enter_plan_mode / leave_plan_mode（热生效）
     dispatchExecutionGuard: true          # 启用调度执行守卫与 Mandate v2 账本守卫（热生效）
-    cacheWarmup: true                     # Kimi Code 大日志/命令结果 ref:// 预览投影（热生效）
-    cacheWarmupRetrieval: true            # Kimi Code 导航检索大纲投影（热生效）
-    cacheWaitWarmup: true                 # Kimi Code 等待子代理期间的空闲缓存续热（热生效）
+    toolRunawayGuard: true                # 工具重复调用分级提醒；Kimi 保留强停（热生效）
+    cacheWarmup: true                     # 受控线路的大结果 ref:// 预览（热生效）
+    cacheWarmupRetrieval: true            # 受控线路的导航检索大纲投影（热生效）
+    cacheWaitWarmup: true                 # 默认 Kimi 的等待续热；其他线路需显式策略（热生效）
+    promptCacheOverrides: {}              # 部署级缓存语义覆盖；修改后重载插件
 ```
 
 ### 字段速查表
@@ -76,9 +78,26 @@
 | `planModePipeline` | `boolean` | `true` | **热生效（volatile）** | 是否在 `dispatch` 预设下开放 `enter_plan_mode` / `leave_plan_mode` |
 | `dispatchExecutionGuard` | `boolean` | `true` | **热生效（volatile）** | 执行期拦截子代理越权调用主控专用工具、拦截空 `sleep` 及校验 Mandate v2 账本 |
 | `teamPolicyCacheGuard` | `boolean` | `true` | **热生效（volatile）** | 把内置 Agent Teams 的 `team:policy` 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作刷掉整段前缀缓存 |
-| `cacheWarmup` | `boolean` | `true` | **热生效（volatile）** | Kimi Code 命令/日志大结果 `ref://` 预览与 `cache_warmup_result` 补读 |
-| `cacheWarmupRetrieval` | `boolean` | `true` | **热生效（volatile）** | Kimi Code 明确导航意图下的文件/网页检索结果大纲投影 |
-| `cacheWaitWarmup` | `boolean` | `true` | **热生效（volatile）** | Kimi Code 主会话空闲等待子代理期间的缓存保活 |
+| `toolRunawayGuard` | `boolean` | `true` | **热生效（volatile）** | 各线路重复工具调用分级提醒；只有 Kimi 保留第 12 次强停，MiniMax 保留自己的官方失控规则 |
+| `cacheWarmup` | `boolean` | `true` | **热生效（volatile）** | 受控线路的命令/日志大结果 `ref://` 预览与 `cache_warmup_result` 补读 |
+| `cacheWarmupProviders` | `string[]` | 全部 controlled providers | **热生效（volatile）** | 允许产生新预览的线路；`[]` 关闭所有新投影，已有 ref 不受影响 |
+| `cacheWarmupRetrieval` | `boolean` | `true` | **热生效（volatile）** | 受控线路明确导航意图下的文件/网页检索结果大纲投影 |
+| `cacheWaitWarmup` | `boolean` | `true` | **热生效（volatile）** | 默认用于 Kimi 的等待期缓存保活；其他线路需 TTL 与显式策略 |
+| `promptCacheOverrides` | `Record<string, object>` | `{}` | **重载插件** | 覆盖线路缓存 TTL、账号作用域、冷启动、亲和、续热与提示；未知证据默认关闭 |
+
+#### `promptCacheOverrides` 示例
+
+```yaml
+promptCacheOverrides:
+  step-code:
+    scope: account       # 只有确认上游按账号隔离缓存时才这样声明
+    affinity: true
+    coldStart: warm      # warm 必须同时给出实测 ttlMs；in-flight 不需要 TTL
+    ttlMs: 300000
+    waitWarmup: false    # 不因有 TTL 就自动产生额外模型请求
+```
+
+`mode: none` 会强制关闭该线路的全部缓存优化；`affinity` 需要 `scope: account`；`coldStart: warm`、`waitWarmup`、`hint` 都要求正整数 `ttlMs`。未知字段、非法数值和矛盾组合会在启动时报错，而不是静默开启。
 
 #### `reasoningCollapseGuard` 可选调参字段
 

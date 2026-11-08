@@ -35,6 +35,7 @@ function usage(input: {
   inputTokens?: number
   at?: number
   driftCause?: string
+  provider?: string
 }): CacheWarmupUsage {
   const inputTokens = input.inputTokens ?? 2
   const report: CacheWarmupUsage = {
@@ -46,6 +47,7 @@ function usage(input: {
     at: input.at ?? Date.now(),
   }
   if (input.driftCause !== undefined) report.driftCause = input.driftCause
+  if (input.provider !== undefined) report.provider = input.provider
   return report
 }
 
@@ -63,6 +65,21 @@ describe('cacheWarmupHitRatio 定义', () => {
     expect(cacheWarmupHitRatio({ inputTokens: -1, cacheReadTokens: -1 })).toBe(0)
     expect(cacheWarmupHitRatio({ inputTokens: Number.NaN, cacheReadTokens: 5 })).toBe(1)
     expect(cacheWarmupHitRatio({ inputTokens: 1, cacheReadTokens: 99 })).toBeLessThanOrEqual(1)
+  })
+})
+
+describe('provider 作用域', () => {
+  it('同一会话切换线路时不共享用量或稳态预算', () => {
+    recordCacheWarmupUsage(usage({ sessionId: 'shared', cached: 98, provider: 'kimi-code' }))
+    recordCacheWarmupUsage(usage({ sessionId: 'shared', cached: 98, provider: 'kimi-code' }))
+    recordCacheWarmupUsage(usage({ sessionId: 'shared', cached: 0, inputTokens: 100, provider: 'codex-chatgpt' }))
+
+    expect(cacheWarmupUsageReports('shared', 'kimi-code')).toHaveLength(2)
+    expect(cacheWarmupUsageReports('shared', 'codex-chatgpt')).toHaveLength(1)
+    expect(cacheWarmupUsageReports('shared', 'kimi-code')[0]?.cacheReadTokens).toBe(98)
+    expect(cacheWarmupUsageReports('shared', 'codex-chatgpt')[0]?.cacheReadTokens).toBe(0)
+    expect(cacheWarmupBudget('shared', Date.now(), undefined, 'kimi-code').warmup).toBe(false)
+    expect(cacheWarmupBudget('shared', Date.now(), undefined, 'codex-chatgpt').warmup).toBe(true)
   })
 })
 

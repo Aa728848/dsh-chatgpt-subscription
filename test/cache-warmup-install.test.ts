@@ -102,7 +102,7 @@ type PostExecuteListener = (
 let disposers: Array<() => void> = []
 
 /** 当前设置；对象本身可变，用来模拟 volatile 活引用在会话中途被改写。 */
-let settings: { enabled: boolean, retrievalEnabled?: boolean }
+let settings: { enabled: boolean, retrievalEnabled?: boolean, providers?: readonly string[] }
 
 /** 断言"投影没有被调用"用的计数。 */
 const projectionCalls = (): number => core.calls.length
@@ -434,12 +434,23 @@ describe('cache warmup host integration', () => {
     expect(JSON.stringify(returned)).not.toContain('ORIGINAL')
   })
 
-  it('leaves a code_run result on another provider untouched', async () => {
+  it('leaves a code_run result on an excluded provider untouched', async () => {
+    settings = { enabled: true, retrievalEnabled: false, providers: ['kimi-code'] }
     const { listener } = install()
     const decision: PostToolDecision = { kind: 'accept' }
     const returned = await listener(codeRunExec('codex-chatgpt'), fullResult(), acceptAll(decision))
     expect(returned).toBe(decision)
     expect(projectionCalls()).toBe(0)
+  })
+
+  it('projects a code_run result on an explicitly admitted provider', async () => {
+    settings = { enabled: true, retrievalEnabled: false, providers: ['kimi-code', 'codex-chatgpt'] }
+    const { listener } = install()
+    const original: PostToolDecision = { kind: 'accept', content: [{ type: 'text', text: 'ORIGINAL' }] }
+    const returned = await listener(codeRunExec('codex-chatgpt'), fullResult(), acceptAll(original))
+    expect(projectionCalls()).toBe(1)
+    expect((core.calls[0] as { provider?: string }).provider).toBe('codex-chatgpt')
+    expect(JSON.stringify(returned)).toContain('PREVIEW')
   })
 
   it('leaves near-miss tool names untouched', async () => {

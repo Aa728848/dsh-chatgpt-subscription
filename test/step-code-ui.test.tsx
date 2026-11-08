@@ -301,6 +301,17 @@ describe('Step Code 设置卡片', () => {
     // 正确但无用，拿编的费率算出「省了 N 元」是撒谎。
     expect(text).not.toMatch(/[¥￥$€]|\b(?:USD|CNY|RMB)\b|元/)
     expect(text).toContain(zh.cachePricingNote)
+    expect(cacheGroup.querySelector('[data-dsh-part="step-cache-hint"]')).toBeNull()
+  })
+
+  it('只在 host 给出 TTL 证据时显示缓存过期提示', async () => {
+    const { node } = await mountSection(status({
+      cacheHint: { idleMs: 6 * 60_000, totalTokens: 2_048 },
+    }))
+    const cacheGroup = groupOf(node, zh.cacheSection)
+    const hint = cacheGroup.querySelector('[data-dsh-part="step-cache-hint"]')
+    expect(hint).not.toBeNull()
+    expect(hint?.textContent).toBe(zh.cacheExpiredHint.replace('{minutes}', '6'))
   })
 
   it('认不出套餐形状时只说「认不出」，一个进度条都不画', async () => {

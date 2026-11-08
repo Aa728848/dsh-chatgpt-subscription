@@ -20,6 +20,9 @@ import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, withoutCodexToolChanges, type LocalRawImageOptions } from './responses-mapper.ts'
 import { disableCodexToolUpdate } from './model-catalog.ts'
 import { normalizeGenerateOptions } from './common/llm-compat.ts'
+import { withStaticPrefixOrdering } from './common/prefix-stability.ts'
+import { promptCachePolicyOf, type PromptCacheOverride } from './common/prompt-cache-policy.ts'
+import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from './common/prefix-request-coordinator.ts'
 import { CODEX_RESPONSES_LITE_HEADER, CODEX_ROUTING_HINT_HEADER, CODEX_TURN_STATE_HEADER, authOwnerKey, codexHeaders, codexRoutingHint, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
@@ -70,6 +73,8 @@ export interface ResponsesClientOptions {
    * states a protocol for.
    */
   capabilities?: CodexWireCapabilityResolver
+  /** Optional deployment override for cache-prefix behaviour. */
+  promptCache?: PromptCacheOverride
 }
 
 /**
@@ -79,6 +84,22 @@ export interface ResponsesClientOptions {
  * to a DIFFERENT model, and that model may speak a different protocol.
  */
 export type CodexWireCapabilityResolver = (model: string) => CodexWireCapabilities
+
+const codexPrefixRequests = new PrefixRequestCoordinator()
+
+function codexColdGroupKey(
+  payload: Record<string, unknown>,
+  credentials: Awaited<ReturnType<OAuthService['credentials']>>,
+): string | undefined {
+  const instructions = typeof payload.instructions === 'string' ? payload.instructions : ''
+  if (instructions === '') return undefined
+  const digest = createHash('sha256')
+    .update(instructions)
+    .update('\0')
+    .update(JSON.stringify(Array.isArray(payload.tools) ? payload.tools : []))
+    .digest('hex')
+  return `${String(payload.model ?? '')}:${digest}:${authOwnerKey(credentials)}`
+}
 
 export class ResponsesClient {
   private readonly fetchFn: FetchLike
@@ -109,7 +130,7 @@ export class ResponsesClient {
   constructor(
     private readonly oauth: OAuthService,
     private readonly attachments: Pick<AttachmentStore, 'readImage'> & Partial<Pick<AttachmentStore, 'imageLimits'>>,
-    options: ResponsesClientOptions = {},
+    private readonly options: ResponsesClientOptions = {},
   ) {
     this.fetchFn = options.fetchFn ?? fetch
     this.localRawImages = options.localRawImages ?? {}
@@ -128,7 +149,7 @@ export class ResponsesClient {
     rawOptions: GenerateOptions,
     capabilities?: CodexWireCapabilityResolver,
   ): AsyncIterable<StreamChunk> {
-    const options = normalizeGenerateOptions(rawOptions)
+    const options = withStaticPrefixOrdering('codex-chatgpt', normalizeGenerateOptions(rawOptions), this.options.promptCache)
     const sessionId = stableSessionId(options.sessionId)
     const resolveCapabilities = capabilities ?? this.capabilities ?? defaultWireCapabilities
     // No reliable host turn identity is available: do not infer it from history.
@@ -388,7 +409,15 @@ export class ResponsesClient {
   ): Promise<Response> {
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await this.fetchFn(CODEX_RESPONSES_URL, {
+        const cachePolicy = promptCachePolicyOf('codex-chatgpt', this.options.promptCache)
+        const groupKey = cachePolicy.coldStart === 'off' ? undefined : codexColdGroupKey(payload, credentials)
+        return await fetchWithPrefixCoordination(
+          this.fetchFn,
+          codexPrefixRequests,
+          groupKey,
+          cachePolicy.coldStart === 'warm' ? cachePolicy.ttlMs : undefined,
+          CODEX_RESPONSES_URL,
+          {
           method: 'POST',
           headers: {
             ...codexHeaders(credentials, sessionId, { turnState: this.turnStateFor(turnKey, credentials) }),

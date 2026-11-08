@@ -28,6 +28,9 @@ import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
 import { ProxyManager } from './host/proxy-manager.ts'
 import { CONTROLLED_PROVIDERS, createControlledModelFetch, readModelRequestLimits, type ControlledProvider } from './host/common/model-request-control.ts'
+import { resolveToolRunawayGuardEnabled } from './host/common/tool-runaway.ts'
+import { parsePromptCacheOverrides } from './host/common/prompt-cache-policy.ts'
+import type { PromptCacheOverride } from './host/common/prompt-cache-policy.ts'
 import { claimProviderRoute } from './host/common/provider-route.ts'
 import { catalogTotal } from './host/common/catalog-snapshot.ts'
 import { createDiagnosticFetch } from './host/common/request-diagnostics.ts'
@@ -308,6 +311,8 @@ export interface Config {
    * 的 `tools:sdk` 段与顶层工具 schema）保持逐字节恒定，前缀缓存零漂移。
    */
   dispatchExecutionGuard?: Volatile<boolean>
+  /** 工具失控治理总开关：各线路提醒重复调用；只有 Kimi 保留第 12 次强停。 */
+  toolRunawayGuard?: Volatile<boolean>
   /**
    * 「Agent Teams 策略段」缓存守卫：默认开启。
    *
@@ -324,18 +329,19 @@ export interface Config {
    * 「结果预览」总开关：Kimi 线路上超大的 `run_code` 结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
    *
-   * **只对 Kimi Code 线路生效**（见 `cache-warmup/install.ts` 的
-   * `CACHE_WARMUP_PROVIDER`）：别的线路上这个开关开着关着都一样。
+   * 线路范围由 `cacheWarmupProviders` 控制；缺省兼容回退仍是 Kimi。
    *
    * 声明成 {@link Volatile} 是因为 schema 里标了 `volatile()`：设置一保存就地写
    * 新值、不重挂插件行。语义上它**只影响之后产生的新结果**——已经进入历史的
    * preview 与 refId 是历史的一部分，不随开关变化。
    */
   cacheWarmup?: Volatile<boolean>
+  /** 允许产生新结果预览的线路；默认覆盖 controlled providers，空数组表示全部关闭。 */
+  cacheWarmupProviders?: Volatile<readonly string[]>
   /**
    * 检索型结果投影独立开关：默认开启，只影响明确导航任务之后的新结果。
    *
-   * 与总开关一样**只对 Kimi Code 线路生效**，其他线路不受影响。
+   * 与总开关共用 `cacheWarmupProviders` 的线路范围。
    */
   cacheWarmupRetrieval?: Volatile<boolean>
   /**
@@ -349,6 +355,8 @@ export interface Config {
    * 的账号，前提是该账号剩余额度不低于 20%。默认开启；关闭后完全按原轮换策略。
    */
   cacheAffinity?: Volatile<boolean>
+  /** 部署级缓存语义覆盖；非 volatile，修改后重载插件。 */
+  promptCacheOverrides?: Record<string, PromptCacheOverride>
   /** Independent web fetch selection; auto preserves proxy/search-driven selection.
    * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
   fetchProvider?: 'auto' | 'plugin' | 'dsh'
@@ -463,16 +471,22 @@ export interface ConfigInput {
   planModePipeline?: boolean
   /** 「调度执行守卫」总开关（默认开启）：执行期拦截子代理越权调用与等待期空等。 */
   dispatchExecutionGuard?: boolean
+  /** 工具失控治理总开关（默认开启）；非 Kimi 线路只提醒，不继承强停。 */
+  toolRunawayGuard?: boolean
   /** 「Agent Teams 策略段」缓存守卫（默认开启）：摘段并改为尾部投递。 */
   teamPolicyCacheGuard?: boolean
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmup?: boolean
+  /** 允许产生新结果预览的线路；默认覆盖 controlled providers。 */
+  cacheWarmupProviders?: string[]
   /** 检索型结果投影独立开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmupRetrieval?: boolean
   /** 「等待缓存续热」开关（默认开启；等待子代理期间每 20 分钟持续触发续热）。 */
   cacheWaitWarmup?: boolean
   /** 「账号缓存亲和」开关（默认开启；轮换优先选前缀缓存还热的账号）。 */
   cacheAffinity?: boolean
+  /** 部署级缓存语义覆盖；非 volatile，修改后重载插件。 */
+  promptCacheOverrides?: Record<string, PromptCacheOverride>
   /** Idle budget for one Codex Responses stream, in milliseconds. */
   codexStreamIdleTimeoutMs?: number
   /**
@@ -521,6 +535,8 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 纯 sleep 空等。volatile 让设置保存后就地写新值，下一步就生效、不重挂任何行。
   dispatchExecutionGuard: z.boolean().default(true).volatile()
     .description('启用调度执行守卫：在执行期拦截子代理越权调用主控专用工具，并拦截等待子代理期间的纯 sleep 空等命令；不修改工具声明面，零损耗保护 Kimi 缓存。'),
+  toolRunawayGuard: z.boolean().default(true).volatile()
+    .description('启用工具失控治理：重复调用同一工具与参数时分级提醒；Kimi 保留第 12 次强停，其他线路只提醒。'),
 
   // Agent Teams 策略段守卫：把内置 `team:policy` 段从 system 里摘掉，改成切开关时
   // 尾部投递一次，避免中途开团队协作时整段前缀重建。默认开启——它不增加任何工具
@@ -533,6 +549,8 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 正在运行的实例，不重挂任何行。
   cacheWarmup: z.boolean().default(true).volatile()
     .description(CACHE_WARMUP_SETTING_DESCRIPTION),
+  cacheWarmupProviders: z.array(z.string()).default(CONTROLLED_PROVIDERS as unknown as string[]).volatile()
+    .description('允许产生新结果预览的线路；默认覆盖全部受控线路，空数组表示关闭所有新投影。'),
   cacheWarmupRetrieval: z.boolean().default(true).volatile()
     .description(CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION),
   cacheWaitWarmup: z.boolean().default(true).volatile()
@@ -542,6 +560,8 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 打穿」这条路堵住；volatile，设置保存即生效，无需重挂。
   cacheAffinity: z.boolean().default(true).volatile()
     .description(CACHE_AFFINITY_SETTING_DESCRIPTION),
+  promptCacheOverrides: z.object({}).default({})
+    .description('按线路覆盖缓存语义（ttlMs、scope、coldStart、affinity、waitWarmup 等）；仅用于已有证据的部署，修改后重载插件。'),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
@@ -556,6 +576,7 @@ export const Config: z<ConfigInput, Config> = z.object({
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
 
 export function apply(ctx: Context, pluginConfig: Config = {}): void {
+  const promptCacheOverrides = parsePromptCacheOverrides(pluginConfig.promptCacheOverrides)
   // The language every Host-side composer answers in. Created once per apply and
   // published to the module-level slot, because thirteen adapters and the route
   // table all speak without sharing a constructor: they read the language at the
@@ -724,8 +745,13 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // 接管这一轮。线路判定走结构探测，只对 Kimi Code 这条线路生效，不碰工具
   // 声明面。
   ctx.effect(
-    () => installKimiRepeatBreaker(ctx as unknown as KimiRepeatBreakerContext),
-    'dsh-chatgpt-subscription: Kimi repeat breaker',
+    () => installKimiRepeatBreaker(ctx as unknown as KimiRepeatBreakerContext, {
+      // MiniMax keeps its richer official runaway profile in its own installer;
+      // every other line shares graduated reminders without inheriting Kimi's veto.
+      providers: CONTROLLED_PROVIDERS.filter(provider => provider !== 'minimax-code'),
+      globalEnabled: () => resolveToolRunawayGuardEnabled(pluginConfig),
+    }),
+    'dsh-chatgpt-subscription: shared tool runaway guard',
   )
 
   // 调度执行守卫：执行期拦截子代理越权调用主控专用工具，以及等待子代理期间的纯
@@ -928,7 +954,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => installCacheWarmup(ctx as unknown as CacheWarmupContext, {
     // 函数而不是快照：设置卡保存后就地写新值，不重挂插件行。
     settings: () => resolveCacheWarmupSettings(pluginConfig),
-    durableHint: (sessionId) => {
+    durableHint: (sessionId, provider) => {
+      if (provider !== undefined && provider !== KIMI_CODE_PROVIDER_ID) return undefined
       const record = sessionCacheState.read(sessionId)
       if (record === undefined) return undefined
       const total = record.cachedTokens + record.freshTokens
@@ -946,6 +973,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => {
     const dispose = installKimiCacheWait(ctx as unknown as KimiCacheWaitContext, {
       warmup: () => resolveCacheWaitWarmupEnabled(pluginConfig, process.env),
+      overrides: promptCacheOverrides,
     })
     if (dispose === undefined) {
       ctx.logger.warn('[dsh-chatgpt-subscription] Kimi cache wait skipped: this harness exposes no event bus')
@@ -1010,7 +1038,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       antigravityPreferences,
       // The route declares image input, so DSH hands it durable image blocks
       // that only the attachment service can turn into wire bytes.
-      { fetchFn: modelFetch.antigravity, attachments: ctx.attachments },
+      { fetchFn: modelFetch.antigravity, attachments: ctx.attachments, promptCache: promptCacheOverrides.antigravity },
       antigravityAccountPool,
     )
     const antigravityClaim = claimProviderRoute(ctx, {
@@ -1153,7 +1181,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
 
     const minimaxCodeAdapter = new MinimaxCodeAdapter(
       minimaxCodeStore,
-      { fetchFn: modelFetch['minimax-code'], attachments: ctx.attachments, accountPool: minimaxCodeAccountPool },
+      { fetchFn: modelFetch['minimax-code'], attachments: ctx.attachments, accountPool: minimaxCodeAccountPool, promptCache: promptCacheOverrides['minimax-code'] },
       minimaxCodeModelSettings,
       minimaxCodePreferences,
     )
@@ -1204,7 +1232,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       claudeStore,
       claudeModelSettings,
       claudePreferences,
-      { fetchFn: modelFetch.claude, attachments: ctx.attachments, accountPool: claudeAccountPool },
+      { fetchFn: modelFetch.claude, attachments: ctx.attachments, accountPool: claudeAccountPool, promptCache: promptCacheOverrides.claude },
     )
     // Registered unconditionally: there is no acknowledgement, flag or other
     // prior state that can hold this line back. The only thing that can keep the
@@ -1237,6 +1265,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         fetchFn: modelFetch[STEP_CODE_PROVIDER_ID],
         attachments: ctx.attachments,
         accountPool: stepCodeAccountPool,
+        promptCache: promptCacheOverrides['step-code'],
       },
     )
     const stepCodeClaim = claimProviderRoute(ctx, {
@@ -1255,6 +1284,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         serving: () => stepCodeClaim.serving(),
         conflict: () => stepCodeClaim.conflict(),
         accountPool: stepCodeAccountPool,
+        promptCache: promptCacheOverrides['step-code'],
       },
     )
 
@@ -1469,6 +1499,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       fastMode: () => preferences.status().fastMode,
       reasoningSummary: () => preferences.status().reasoningSummary,
       codexStreamIdleTimeoutMs: pluginConfig.codexStreamIdleTimeoutMs,
+      promptCache: promptCacheOverrides['codex-chatgpt'],
     })
     // The live listing is the authority on what this plan serves; without a
     // credential the loader reports none and the shipped table stands in.

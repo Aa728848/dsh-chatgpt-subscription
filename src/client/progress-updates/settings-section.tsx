@@ -1,6 +1,6 @@
 /**
- * 设置页里的「进展更新」分区：说明 + 十行卡片（进展 / 三个缓存开关 / 计划模式管线 /
- * 调度执行守卫 / Agent Teams 策略段 / 阈值 / 语言 / 面板）。
+ * 设置页里的「进展更新」分区：说明 + 缓存、计划、执行守卫、工具失控治理、
+ * 阈值、语言与面板等卡片行。
  *
  * ## 视觉来源
  *
@@ -273,7 +273,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'teamPolicyCacheGuard', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'teamPolicyCacheGuard', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -291,6 +291,8 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   // 缺键 = 开：宿主 schema 上是 default(true)，老配置没有这个键时界面必须同样读成开，
   // 否则用户看到的是关着、而守卫其实照旧生效。
   const dispatchExecutionGuard = value.dispatchExecutionGuard !== false
+  // 缺键 = 开：所有线路获得提醒，只有 Kimi 的既有强停配置保持不变。
+  const toolRunawayGuard = value.toolRunawayGuard !== false
   // 缺键 = 开：宿主 schema 上是 default(true)，缺键时界面必须同样读成开。
   const teamPolicyCacheGuard = value.teamPolicyCacheGuard !== false
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
@@ -314,7 +316,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'teamPolicyCacheGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'teamPolicyCacheGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -518,6 +520,27 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             data-dsh-part="settings-dispatch-execution-guard-switch"
             disabled={!writable}
             onClick={() => { write('dispatchExecutionGuard', 'dispatchExecutionGuard', !dispatchExecutionGuard) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-tool-runaway-guard"
+          brand="#a15c34"
+          mark={<DispatchGuardMark />}
+          name={translate('settingsToolRunawayGuardName')}
+          note={failure?.row === 'toolRunawayGuard' ? failure.text : translate('settingsToolRunawayGuardNote')}
+          danger={failure?.row === 'toolRunawayGuard'}
+          enabled={toolRunawayGuard}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={toolRunawayGuard}
+            aria-label={translate('settingsToolRunawayGuardName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-tool-runaway-guard-switch"
+            disabled={!writable}
+            onClick={() => { write('toolRunawayGuard', 'toolRunawayGuard', !toolRunawayGuard) }}
           />
         </CardRow>
 

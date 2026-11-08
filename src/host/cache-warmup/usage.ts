@@ -43,6 +43,12 @@ export interface CacheWarmupUsageSessionSummary {
 
 /** 有界登记表：Map 的插入顺序同时是 LRU 顺序（命中即重新插入到队尾）。 */
 const registry = new Map<string, readonly CacheWarmupUsage[]>()
+const DEFAULT_USAGE_PROVIDER = 'kimi-code'
+
+function usageScopeKey(sessionId: string, provider?: string): string {
+  const normalized = provider?.trim() || DEFAULT_USAGE_PROVIDER
+  return normalized + ':' + sessionId
+}
 
 /** 一个中性返回值，异常路径复用（不含任何容器操作）。 */
 function neutralState(sessionId: string): CacheWarmupUsageState {
@@ -160,6 +166,7 @@ function normalizeUsage(input: CacheWarmupUsage | null | undefined): CacheWarmup
   const at = typeof input.at === 'number' && Number.isFinite(input.at) ? input.at : Date.now()
   const normalized: CacheWarmupUsage = {
     sessionId,
+    provider: typeof input.provider === 'string' && input.provider.trim() !== '' ? input.provider.trim() : DEFAULT_USAGE_PROVIDER,
     inputTokens: finiteCount(input.inputTokens),
     cacheReadTokens: finiteCount(input.cacheReadTokens),
     outputTokens: finiteCount(input.outputTokens),
@@ -192,17 +199,20 @@ function stateOf(sessionId: string, reports: readonly CacheWarmupUsage[]): Cache
  */
 export function recordCacheWarmupUsage(input: CacheWarmupUsage): CacheWarmupUsageState {
   let sessionId = ''
+  let provider: string | undefined
   try {
     const usage = normalizeUsage(input)
     if (usage === undefined) return neutralState('')
     sessionId = usage.sessionId
-    const previous = registry.get(usage.sessionId)
+    provider = usage.provider
+    const scope = usageScopeKey(usage.sessionId, usage.provider)
+    const previous = registry.get(scope)
     const kept = previous === undefined ? [] : [...previous]
     kept.push(Object.freeze({ ...usage }) as CacheWarmupUsage)
     while (kept.length > CACHE_WARMUP_DEFAULTS.maxUsageReportsPerSession) kept.shift()
     // 命中即移到队尾，保持 Map 的插入顺序就是 LRU 顺序。
-    if (previous !== undefined) registry.delete(usage.sessionId)
-    registry.set(usage.sessionId, Object.freeze(kept))
+    if (previous !== undefined) registry.delete(scope)
+    registry.set(scope, Object.freeze(kept))
     while (registry.size > CACHE_WARMUP_DEFAULTS.maxUsageSessions) {
       const oldest = registry.keys().next()
       if (oldest.done === true) break
@@ -211,7 +221,7 @@ export function recordCacheWarmupUsage(input: CacheWarmupUsage): CacheWarmupUsag
     return stateOf(usage.sessionId, kept)
   } catch {
     try {
-      if (sessionId !== '') registry.delete(sessionId)
+      if (sessionId !== '') registry.delete(usageScopeKey(sessionId, provider))
     } catch {
       // 登记表本身不可用：放弃这次状态更新，绝不影响请求路径。
     }
@@ -224,10 +234,10 @@ export function recordCacheWarmupUsage(input: CacheWarmupUsage): CacheWarmupUsag
  * @param sessionId - 会话 id。
  * @returns 报告副本；没有或读不到时为空数组。
  */
-export function cacheWarmupUsageReports(sessionId: string): readonly CacheWarmupUsage[] {
+export function cacheWarmupUsageReports(sessionId: string, provider?: string): readonly CacheWarmupUsage[] {
   try {
     if (typeof sessionId !== 'string' || sessionId === '') return []
-    const reports = registry.get(sessionId)
+    const reports = registry.get(usageScopeKey(sessionId, provider))
     return reports === undefined ? [] : [...reports]
   } catch {
     return []
@@ -241,10 +251,11 @@ export function cacheWarmupUsageReports(sessionId: string): readonly CacheWarmup
 export function cacheWarmupUsageSessions(): CacheWarmupUsageSessionSummary[] {
   try {
     const summaries: CacheWarmupUsageSessionSummary[] = []
-    for (const [sessionId, reports] of registry.entries()) {
-      if (reports.length === 0) continue
+    for (const reports of registry.values()) {
+      const sample = reports[0]
+      if (sample === undefined) continue
       const last = reports[reports.length - 1]!
-      summaries.push({ sessionId, reports: reports.length, lastAt: last.at, hitRatio: cacheWarmupHitRatio(last) })
+      summaries.push({ sessionId: sample.sessionId, reports: reports.length, lastAt: last.at, hitRatio: cacheWarmupHitRatio(last) })
     }
     summaries.sort((left, right) => right.lastAt - left.lastAt)
     return summaries

@@ -504,6 +504,11 @@ export function StepCodeSection({ onModelChange }: StepCodeSectionProps = {}): R
             <p className="dsha-muted">{t.cacheWriteNoteHint}</p>
           </div>
         )}
+        {status?.cacheHint !== undefined && (
+          <p className="dsha-muted" data-dsh-part="step-cache-hint">
+            {t.cacheExpiredHint.replace('{minutes}', String(Math.floor(status.cacheHint.idleMs / 60_000)))}
+          </p>
+        )}
         {/* 请求侧能力位：默认关（与官方一致）。关着的时候把这件事说出来，比让用户去猜
             为什么没有缓存参数更诚实。 */}
         <div className="dsha-pref-row">

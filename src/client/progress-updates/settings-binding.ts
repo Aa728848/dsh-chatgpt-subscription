@@ -88,6 +88,8 @@ export interface ProgressUpdatesSettingsValues {
    * 关着」与「实际是开着的」会同时成立。
    */
   dispatchExecutionGuard?: boolean
+  /** 工具失控治理开关（缺键 = 开）；非 Kimi 线路只提醒，不强停。 */
+  toolRunawayGuard?: boolean
   /**
    * Agent Teams 策略段缓存守卫开关（缺键 = 开）。
    *
@@ -111,6 +113,7 @@ export type ProgressUpdatesField =
   | 'cacheAffinity'
   | 'planModePipeline'
   | 'dispatchExecutionGuard'
+  | 'toolRunawayGuard'
   | 'teamPolicyCacheGuard'
 
 /**

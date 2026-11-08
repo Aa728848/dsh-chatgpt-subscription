@@ -45,6 +45,15 @@ import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 // Kimi preferences; they are shared with the other lines that send inline media.
 import { normalizeKimiToolSchema, stripMetaSchema } from '../common/tool-schema.ts'
 import { estimatedInputTokens } from '../common/prompt-estimate.ts'
+import {
+  classifyBootstrapUserMessage as classifySharedBootstrapUserMessage,
+  classifyPrefixDrift,
+  orderStaticPrefixMessages as orderSharedStaticPrefixMessages,
+} from '../common/prefix-stability.ts'
+import {
+  KNOWN_REASONING_KEYS as SHARED_REASONING_KEYS,
+  ReasoningKeyDialect as SharedReasoningKeyDialect,
+} from '../common/reasoning-dialect.ts'
 
 export { estimatedInputTokens, normalizeKimiToolSchema }
 import {
@@ -163,7 +172,7 @@ function isAbort(error: unknown, signal?: AbortSignal): boolean {
  * `reasoning_details`. The first entry doubles as the default for a request
  * made before any response has been seen.
  */
-export const KNOWN_REASONING_KEYS = ['reasoning_content', 'reasoning_details', 'reasoning'] as const
+export const KNOWN_REASONING_KEYS = SHARED_REASONING_KEYS
 
 /** Default outbound reasoning key, used until a response proves otherwise. */
 export const DEFAULT_REASONING_KEY: string = KNOWN_REASONING_KEYS[0]
@@ -320,9 +329,7 @@ export function reasoningFragmentsOf(source: unknown): ReasoningFragment[] {
  * turn. Detection never clears: a response with no reasoning keeps the last
  * known dialect, and an endpoint that switches is adapted on its next reply.
  */
-export class ReasoningKeyDialect {
-  private detected: string | undefined
-
+export class ReasoningKeyDialect extends SharedReasoningKeyDialect {
   /**
    * Every reasoning fragment one inbound delta carries, remembering the dialect.
    *
@@ -342,7 +349,7 @@ export class ReasoningKeyDialect {
     const fragments = reasoningFragmentsOf(source)
     const teaching = fragments.find((fragment) => fragment.form === undefined || fragment.form === 'string')
     if (teaching !== undefined) {
-      this.detected = teaching.key
+      this.learn(teaching.key)
       return fragments
     }
     // An empty string is still evidence of the field this endpoint uses, so the
@@ -354,7 +361,7 @@ export class ReasoningKeyDialect {
       const record = source as Record<string, unknown>
       for (const key of KNOWN_REASONING_KEYS) {
         if (typeof record[key] === 'string') {
-          this.detected = key
+          this.learn(key)
           break
         }
       }
@@ -365,16 +372,6 @@ export class ReasoningKeyDialect {
   /** First reasoning fragment on an inbound message or delta, remembering its key. */
   observe(source: unknown): string | undefined {
     return this.observeAll(source)[0]?.text
-  }
-
-  /** The key to serialize thinking into on an outbound assistant message. */
-  outboundKey(): string {
-    return this.detected ?? DEFAULT_REASONING_KEY
-  }
-
-  /** Forget the detected key, returning to the default. Test seam only. */
-  reset(): void {
-    this.detected = undefined
   }
 }
 
@@ -844,92 +841,7 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
  * arrived (append-only in-history).
  */
 export function classifyBootstrapUserMessage(message: Message): 1 | 2 | 3 | 4 | null {
-  if (message.role !== 'user' || isToolResultMessage(message)) return null
-  const source = isRecord(message.source) ? message.source : undefined
-  const kind = source !== undefined ? asString(source.kind) : undefined
-  const text = firstTextOf(message.content)?.trimStart() ?? ''
-
-  if (
-    kind === 'progress-updates-language'
-    || text.startsWith('Progress update output language override:')
-  ) {
-    return 1
-  }
-
-  if (
-    text.startsWith('<system-reminder>\nThe following workspace instructions')
-    || (
-      kind === 'agent-instructions'
-      && !text.startsWith('<system-reminder>\nUpdated instructions')
-      && !text.startsWith('<system-reminder>\nAdditional instructions')
-      && !text.startsWith('<system-reminder>\nInstructions removed')
-    )
-  ) {
-    return 2
-  }
-
-  if (
-    text.startsWith('<system-reminder>\nA skill is a reusable set of task-specific instructions.')
-    || (
-      kind === 'skill-catalog'
-      && !text.startsWith('<system-reminder>\nThe available skill catalog changed.')
-    )
-  ) {
-    return 3
-  }
-
-  if (
-    kind === 'runtime-context'
-    || text.startsWith('Current runtime context. This snapshot supersedes')
-  ) {
-    return 4
-  }
-
-  return null
-}
-
-function isCompactCheckpointMessage(message: Message | undefined): boolean {
-  if (message === undefined || message.role !== 'user' || isToolResultMessage(message)) return false
-  const source = isRecord(message.source) ? message.source : undefined
-  if (source !== undefined && asString(source.kind) === 'compact-checkpoint') return true
-  const text = firstTextOf(message.content)?.trimStart() ?? ''
-  return text.startsWith('This is an automatically generated checkpoint condensing')
-}
-
-/**
- * Normalize `agent-instructions` text so global `~/.dsh/` instructions precede
- * workspace-local `AGENTS.md` instructions when both appear in the same block.
- */
-function normalizeAgentInstructionsMessage(message: Message): Message {
-  if (!Array.isArray(message.content) || message.content.length !== 1) return message
-  const first = message.content[0]
-  if (!isRecord(first) || first.type !== 'text' || typeof first.text !== 'string') return message
-  const raw = first.text
-  const marker = '\n\nInstructions from: '
-  const firstIdx = raw.indexOf(marker)
-  if (firstIdx < 0) return message
-  const closeTag = '\n</system-reminder>'
-  const closeIdx = raw.lastIndexOf(closeTag)
-  if (closeIdx <= firstIdx) return message
-  const header = raw.slice(0, firstIdx)
-  const body = raw.slice(firstIdx + 2, closeIdx)
-  const tail = raw.slice(closeIdx)
-  const sections = body.split('\n\nInstructions from: ')
-  if (sections.length < 2) return message
-  const tagged = sections.map((sec, idx) => {
-    const firstLineEnd = sec.indexOf('\n')
-    const sourcePath = (firstLineEnd < 0 ? sec : sec.slice(0, firstLineEnd)).trim()
-    const isGlobal = sourcePath.startsWith('~/') || sourcePath.startsWith('~\\') || sourcePath.includes('/.dsh/') || sourcePath.includes('\\.dsh\\')
-    return { sec, idx, rank: isGlobal ? 0 : 1 }
-  })
-  const needsSort = tagged.some((item, i) => i > 0 && item.rank < tagged[i - 1]!.rank)
-  if (!needsSort) return message
-  tagged.sort((a, b) => a.rank - b.rank || a.idx - b.idx)
-  const rebuilt = `${header}\n\nInstructions from: ${tagged.map((t) => t.sec).join('\n\nInstructions from: ')}${tail}`
-  return {
-    ...message,
-    content: [{ ...first, text: rebuilt }] as unknown as Message['content'],
-  }
+  return classifySharedBootstrapUserMessage(message)
 }
 
 /**
@@ -946,91 +858,7 @@ function normalizeAgentInstructionsMessage(message: Message): Message {
  *    compaction boundaries and every step after compaction.
  */
 export function orderStaticPrefixMessages(messages: readonly Message[]): Message[] {
-  try {
-    if (messages.length <= 1) return [...messages]
-
-    let leadEnd = 0
-    while (
-      leadEnd < messages.length
-      && messages[leadEnd]!.role === 'user'
-      && !isToolResultMessage(messages[leadEnd]!)
-    ) {
-      leadEnd += 1
-    }
-
-    // Compaction recovery: `messages[0]` is `compact-checkpoint`, and the
-    // re-injected bootstrap reminders sit after the retained tail.
-    if (leadEnd > 0 && isCompactCheckpointMessage(messages[0])) {
-      const seenInLead = new Set<number>()
-      for (let i = 0; i < leadEnd; i++) {
-        const tier = classifyBootstrapUserMessage(messages[i]!)
-        if (tier !== null) seenInLead.add(tier)
-      }
-      if (!seenInLead.has(1) && !seenInLead.has(2)) {
-        const hoistedByTier = new Map<1 | 2 | 3, { index: number; message: Message }>()
-        for (let i = leadEnd; i < messages.length; i++) {
-          const msg = messages[i]!
-          const tier = classifyBootstrapUserMessage(msg)
-          if ((tier === 1 || tier === 2 || tier === 3) && !hoistedByTier.has(tier)) {
-            hoistedByTier.set(tier, {
-              index: i,
-              message: tier === 2 ? normalizeAgentInstructionsMessage(msg) : msg,
-            })
-          }
-        }
-        if (hoistedByTier.size > 0) {
-          const hoistedIndices = new Set<number>()
-          const prefix: Message[] = []
-          for (const tier of [1, 2, 3] as const) {
-            const entry = hoistedByTier.get(tier)
-            if (entry !== undefined) {
-              hoistedIndices.add(entry.index)
-              prefix.push(entry.message)
-            }
-          }
-          const rest = messages.filter((_, idx) => !hoistedIndices.has(idx))
-          return [...prefix, ...rest]
-        }
-      }
-    }
-
-    if (leadEnd <= 1) return [...messages]
-
-    const seenTiers = new Set<number>()
-    const leadTagged: Array<{ message: Message; rank: number; index: number }> = []
-    let hasBootstrap = false
-    for (let i = 0; i < leadEnd; i++) {
-      const rawMsg = messages[i]!
-      const tier = classifyBootstrapUserMessage(rawMsg)
-      if (tier !== null && !seenTiers.has(tier)) {
-        seenTiers.add(tier)
-        hasBootstrap = true
-        leadTagged.push({
-          message: tier === 2 ? normalizeAgentInstructionsMessage(rawMsg) : rawMsg,
-          rank: tier,
-          index: i,
-        })
-      } else {
-        leadTagged.push({ message: rawMsg, rank: 5, index: i })
-      }
-    }
-
-    if (!hasBootstrap) return [...messages]
-
-    const needsReorder = leadTagged.some((item, i) => (
-      (i > 0 && item.rank < leadTagged[i - 1]!.rank)
-      || item.message !== messages[i]
-    ))
-    if (!needsReorder) return [...messages]
-
-    leadTagged.sort((a, b) => a.rank - b.rank || a.index - b.index)
-    return [
-      ...leadTagged.map((item) => item.message),
-      ...messages.slice(leadEnd),
-    ]
-  } catch {
-    return [...messages]
-  }
+  return orderSharedStaticPrefixMessages(messages)
 }
 
 
@@ -3333,17 +3161,7 @@ export function trackPrefixStability(options: GenerateOptions): PrefixDriftCause
   const previous = prefixSnapshots.get(scope)
   rememberScoped(prefixSnapshots, scope, { systemPromptHash, toolsHash, cacheKey })
 
-  if (
-    previous === undefined
-    || (previous.systemPromptHash === null && previous.toolsHash === null && previous.cacheKey === null)
-  ) {
-    return 'first-request'
-  }
-  if (cacheKey === null) return 'cold-key'
-  if (previous.cacheKey !== cacheKey) return 'cache-key'
-  if (previous.systemPromptHash !== systemPromptHash) return 'system-prompt'
-  if (previous.toolsHash !== toolsHash) return 'tools'
-  return 'stable'
+  return classifyPrefixDrift(previous, { systemPromptHash, toolsHash, cacheKey })
 }
 
 /** Drift cause recorded for each session. */

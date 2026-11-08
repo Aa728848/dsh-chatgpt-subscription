@@ -1,3 +1,9 @@
+import {
+  evaluateCacheHint as evaluateSharedCacheHint,
+  type CacheHintDecision,
+  type CacheHintInput,
+} from '../common/cache-hint.ts'
+
 /**
  * When it is worth telling the user their prompt cache has gone cold.
  *
@@ -94,41 +100,13 @@ export function resetSessionActivity(sessionId?: string): void {
   lastActiveBySession.delete(sessionId.trim())
 }
 
-export interface CacheHintInput {
-  /** Current time, epoch ms. */
-  readonly now: number
-  /**
-   * When the conversation last did anything, epoch ms.
-   *
-   * Absent means nothing is known, and the hint is skipped: a client that
-   * cannot say how long the session was idle cannot claim the entry expired.
-   */
-  readonly lastActiveAt?: number
-  /** Context currently loaded, in tokens. Absent means no local estimate. */
-  readonly totalTokens?: number
-}
+export type { CacheHintDecision, CacheHintInput } from '../common/cache-hint.ts'
 
-export type CacheHintDecision =
-  | { readonly kind: 'skip' }
-  | { readonly kind: 'hint'; readonly idleMs: number; readonly totalTokens: number }
-
-/**
- * Whether one conversation should be warned about a cold cache.
- *
- * Every missing-data branch skips. That asymmetry is deliberate and matches
- * the official client: a false negative costs one turn nobody noticed, while a
- * false positive teaches the user the notice is noise and stops them reading
- * the one that mattered.
- */
+/** Kimi supplies its measured defaults; other providers call the common pure function directly. */
 export function evaluateCacheHint(input: CacheHintInput): CacheHintDecision {
-  const { now, lastActiveAt, totalTokens } = input
-  if (lastActiveAt === undefined || totalTokens === undefined) return { kind: 'skip' }
-  if (!Number.isFinite(lastActiveAt) || !Number.isFinite(totalTokens)) return { kind: 'skip' }
-  if (totalTokens < MIN_TOKENS_TO_HINT) return { kind: 'skip' }
-
-  const idleMs = now - lastActiveAt
-  // Strictly greater: an entry alive exactly to its TTL has not expired, and
-  // rounding must not turn that into a warning.
-  if (idleMs <= CACHE_TTL_MS) return { kind: 'skip' }
-  return { kind: 'hint', idleMs, totalTokens }
+  return evaluateSharedCacheHint({
+    ...input,
+    ttlMs: input.ttlMs ?? CACHE_TTL_MS,
+    minTokensToHint: input.minTokensToHint ?? MIN_TOKENS_TO_HINT,
+  })
 }

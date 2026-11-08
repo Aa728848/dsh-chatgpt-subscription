@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.66.0 - 2026-11-09
+
+- **[shared / cache] Kimi Code 的缓存与运行时优化沉淀为跨线路共享能力，并按上游证据启用**
+  - **共享机制**：新增缓存策略注册表、静态前缀稳定化、冷启动请求协调、账号缓存亲和、持久化活动/图片状态、推理方言学习、失败冷却边界与 hosted-media 单飞内核。Codex、Antigravity、Step、Claude、MiniMax 获得静态前缀与 in-flight 冷启动协调；Cline、OpenDesign、Qoder 可学习并回放实际 reasoning 字段；Claude/MiniMax 的粘性图片状态可跨重启恢复。
+  - **全线低风险收益**：重复工具调用检测与分级提醒覆盖受控线路；大工具结果 `ref://` 预览及 `cache_warmup_result` 精确补读不再绑死 Kimi。只有 Kimi 保留第 12 次强停，MiniMax 保留官方错误族、ABAB 与轮询规则，其他线路不继承强停。
+  - **证据门控**：新增 `toolRunawayGuard`、`cacheWarmupProviders` 与非 volatile 的 `promptCacheOverrides`。Kimi 的 25 分钟 TTL、等待续热、账号级亲和与 `ms://` 协议保持原语义；其他线路只有在明确 TTL、账号隔离或上传协议证据时才开启对应行为。Step 另获官方 5 分钟 TTL 的缓存过期提示与可选亲和选号。
+  - **回归与界面**：新增策略、前缀、协调、活动、推理、媒体和 UI 测试；设置区新增工具失控治理开关，中英俄三语同步，并在原 GUI 同视口/主题完成 Before/After 复核。强制类型检查、构建、打包检查与全量 Vitest 均通过（6952 例通过 / 9 跳过 / 0 失败）。
+
 - **[kimi-code / 号池] 多账号轮换按「前缀缓存还热着」选账号；冷启动组键补上账号维度**
   - **问题**：服务端的前缀缓存是**按账号**各存一份，而内核 `selectAccount` 只看冷却、令牌与最近使用，永远看不到「这条前缀在哪个账号上还热着」——于是轮换可能把请求发给一个从没见过这段前缀的账号。更糟的是冷启动组键 `region:model:systemPromptHash:toolsHash[:staticPrefixHash]` **不含账号**，插件会在另一个账号烤热之后误判「这组是热的」，跟随者白等 2.5 秒预算，而它那条请求本来就不会命中。
   - **改法**（`src/host/common/account-pool.ts`、`src/host/kimi-code/{account-pool,adapter,cache-affinity}.ts`、`src/index.ts`）：内核新增 `AccountSelectionHint` 与 `getEffectiveAccount(..., selection)`——顺序是**钉住账号 > 请求偏好 > 轮换策略**，偏好里不可用/已尝试的 id 直接跳过，全跳过则回落策略（辅助工具的 `getCredentialAccount` 不消费偏好，读凭据不动轮换）；`coldStartGroupKey` 追加 `|accountScope`，并新增 `prefixGroupKey` / `isWarmPrefixGroup` 让两处共用同一个「热」定义；新模块 `cache-affinity.ts` 把取舍写成纯函数（剩余额度取**最紧窗口**、`=20%` 仍可用、配额未知按「没证明不足」处理、同份额保持池序）；适配器在取凭据之前算一次偏好，只对真的热着的账号读配额。新增默认开启的 volatile 开关 `cacheAffinity`，设置页「进展更新」一格加一行，三语齐备，`DSH_KIMI_CODE_CACHE_AFFINITY` 可覆盖。

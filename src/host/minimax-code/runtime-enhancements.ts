@@ -36,6 +36,7 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PostToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
+import { canonicalToolCallKey, createExactRepeatTracker } from '../common/tool-runaway.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -590,29 +591,6 @@ function errorFamilyOf(text: string | undefined): string {
   return firstLine.replace(/\d+/g, '#').slice(0, 200)
 }
 
-/**
- * 把参数规范化成可比较的字符串（键排序）。
- * @param value - 参数值。
- * @returns 规范化后的 JSON 文本。
- */
-function canonicalize(value: unknown): string {
-  return JSON.stringify(sortJsonValue(value))
-}
-
-/**
- * 深拷贝一份键排序后的 JSON 值。
- * @param value - 任意值。
- * @returns 排序后的副本。
- */
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJsonValue)
-  if (isPlainRecord(value)) {
-    const sorted: Record<string, unknown> = {}
-    for (const key of Object.keys(value).sort()) sorted[key] = sortJsonValue(value[key])
-    return sorted
-  }
-  return value
-}
 
 /**
  * 造一台工具级失控守卫。
@@ -636,8 +614,8 @@ export function createMinimaxRunawayGuard(
 ): MinimaxRunawayGuard {
   const threshold = options.remindAfterOccurrences ?? DEFAULT_REMIND_AFTER_OCCURRENCES
 
-  /** 同一次动作的连击。 */
-  let actionStreak: { key: string; count: number } | undefined
+  /** 同一次动作的连击，由所有线路共享的规范键与跟踪器计算。 */
+  const exactActionRepeats = createExactRepeatTracker()
   /** 同一族错误的连击（键是工具名 + 错误族）。 */
   const errorStreaks = new Map<string, { toolName: string; count: number }>()
   /** 轮询连击（键是工具名）。 */
@@ -676,7 +654,7 @@ export function createMinimaxRunawayGuard(
   return {
     observe(observation: MinimaxRunawayObservation): MinimaxRunawayReminder | undefined {
       const toolName = observation.toolName
-      const actionKey = `${toolName}\u0000${canonicalize(observation.arguments)}`
+      const actionKey = canonicalToolCallKey(toolName, observation.arguments)
       // 轮询类工具**不**计入「同一次动作重复」：官方给轮询工具单开一条策略，
       // 它们只由 polling_repeat 计数。否则「等一个后台任务」会被说成「同一个
       // 动作立刻重复」，而那正是模型该做的事。
@@ -684,9 +662,8 @@ export function createMinimaxRunawayGuard(
 
       // 1) 同一次动作立刻重复。
       if (countsAsAction) {
-        if (actionStreak?.key === actionKey) actionStreak = { key: actionKey, count: actionStreak.count + 1 }
-        else actionStreak = { key: actionKey, count: 1 }
-        record('exact_action_repeat', actionStreak.count, toolName)
+        const action = exactActionRepeats.observe(toolName, observation.arguments)
+        record('exact_action_repeat', action.count, toolName)
       }
 
       // 2) A B A B 的循环：只记，不提醒。
@@ -725,7 +702,7 @@ export function createMinimaxRunawayGuard(
       // 4) 轮询连击。
       if (isPolling(observation)) {
         // 「原地不动」= 同一个任务 + 同一份输出。任务变了或者输出变了，计数归零。
-        const key = `${toolName}\u0000${canonicalize(observation.arguments)}\u0000${observation.resultText ?? ''}`
+        const key = `${canonicalToolCallKey(toolName, observation.arguments)}\u0000${observation.resultText ?? ''}`
         const previous = pollingStreaks.get(toolName)
         const count = previous !== undefined && previous.key === key ? previous.count + 1 : 1
         pollingStreaks.set(toolName, { key, count })
@@ -746,6 +723,7 @@ export function createMinimaxRunawayGuard(
           text: renderSameErrorFamilyReminder(errorCandidate.count),
         }
       }
+      const actionStreak = exactActionRepeats.current()
       if (countsAsAction && actionStreak !== undefined && actionStreak.count >= threshold) {
         reminderAttempted = true
         return {
@@ -766,7 +744,7 @@ export function createMinimaxRunawayGuard(
       return undefined
     },
     reset(): void {
-      actionStreak = undefined
+      exactActionRepeats.reset()
       errorStreaks.clear()
       pollingStreaks.clear()
       recentActions.length = 0

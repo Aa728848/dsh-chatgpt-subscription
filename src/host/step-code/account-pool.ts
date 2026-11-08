@@ -28,6 +28,7 @@ import {
   AccountPoolCore,
   normalizeRotationStrategy,
   type AccountPoolHooks,
+  type AccountSelectionHint,
   type PoolAccountShape,
   type PoolData,
 } from '../common/account-pool.ts'
@@ -398,8 +399,9 @@ export class StepCodeAccountPool extends AccountPoolCore<
   async getEffectiveCredential(
     excludeIds?: ReadonlySet<string>,
     fetchFn: typeof fetch = fetch,
+    selection?: AccountSelectionHint,
   ): Promise<{ account: StepCodePoolAccount; credentials: StepCodeCredentials }> {
-    return this.getEffectiveAccount(excludeIds, fetchFn)
+    return this.getEffectiveAccount(excludeIds, fetchFn, false, undefined, selection)
   }
 
   /**

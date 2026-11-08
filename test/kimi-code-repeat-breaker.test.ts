@@ -13,6 +13,7 @@ import {
   kimiSessionRouteOf,
   makeReminderText2,
   type KimiRepeatBreakerContext,
+  type KimiRepeatBreakerOptions,
 } from '../src/host/kimi-code/repeat-breaker.ts'
 
 /** 一条 post-execute 决策。 */
@@ -52,17 +53,21 @@ function kimiAgent(id = 'kimi-session-1'): Record<string, unknown> {
 
 /** 造一条别的线路的 agent。 */
 function otherAgent(id = 'other-session-1'): Record<string, unknown> {
+  return providerAgent('minimax-code', id)
+}
+
+function providerAgent(provider: string, id = provider + '-session'): Record<string, unknown> {
   return {
     id,
     session: {
       header: { id },
-      requestHeader: () => ({ config: { provider: 'minimax-code' } }),
+      requestHeader: () => ({ config: { provider } }),
     },
   }
 }
 
 /** 假宿主：记录守卫与事件监听器。 */
-function fakeHost() {
+function fakeHost(options: KimiRepeatBreakerOptions = {}) {
   const listeners = new Map<string, Listener[]>()
   const guards: Guard[] = []
   const tools = {
@@ -91,7 +96,7 @@ function fakeHost() {
     get: (name: string) => (name === 'tools' ? tools : undefined),
     tools,
   } as unknown as KimiRepeatBreakerContext
-  const dispose = installKimiRepeatBreaker(ctx)
+  const dispose = installKimiRepeatBreaker(ctx, options)
   disposers.push(dispose)
   return {
     ctx,
@@ -443,5 +448,41 @@ describe('Kimi 重复刹车：宿主接线', () => {
     host.dispose()
 
     expect(guardReason(host, toolExec(agent, 'read', args))).toBeUndefined()
+  })
+})
+
+describe('共享工具失控治理', () => {
+  it('其他线路获得递进提醒，但永远不会继承 Kimi 强停', async () => {
+    const host = fakeHost({ providers: ['kimi-code', 'codex-chatgpt'] })
+    const agent = providerAgent('codex-chatgpt')
+    const args = { path: 'same.txt' }
+    for (let index = 0; index < REPEAT_FORCE_STOP_STREAK + 3; index += 1) {
+      expect(guardReason(host, toolExec(agent, 'read', args))).toBeUndefined()
+      const decision = await runPostExecute(host, toolExec(agent, 'read', args))
+      if (index < 2) expect(contextTexts(decision)).toHaveLength(0)
+      else expect(contextTexts(decision).length).toBeGreaterThan(0)
+    }
+  })
+
+  it('同一线路接入时 Kimi 仍保留第 12 次强停', async () => {
+    const host = fakeHost({ providers: ['kimi-code', 'codex-chatgpt'] })
+    const agent = kimiAgent('shared-kimi')
+    const exec = toolExec(agent, 'read', { path: 'same.txt' })
+    for (let index = 0; index < REPEAT_FORCE_STOP_STREAK - 1; index += 1) {
+      expect(guardReason(host, exec)).toBeUndefined()
+      await runPostExecute(host, exec)
+    }
+    expect(guardReason(host, exec)).toBe(HANDOFF_VETO_TEXT)
+  })
+
+  it('全局开关关闭时所有 profile 都旁路', async () => {
+    const host = fakeHost({ providers: ['kimi-code', 'codex-chatgpt'], globalEnabled: () => false })
+    for (const agent of [kimiAgent('off-kimi'), providerAgent('codex-chatgpt', 'off-codex')]) {
+      const exec = toolExec(agent, 'read', { path: 'same.txt' })
+      for (let index = 0; index < REPEAT_FORCE_STOP_STREAK + 1; index += 1) {
+        expect(guardReason(host, exec)).toBeUndefined()
+        expect(contextTexts(await runPostExecute(host, exec))).toHaveLength(0)
+      }
+    }
   })
 })

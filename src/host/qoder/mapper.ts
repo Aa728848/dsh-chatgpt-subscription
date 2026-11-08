@@ -53,6 +53,9 @@ import {
   type ResolvedRequestImage,
   type ResolvedRequestImages,
 } from '../common/request-images.ts'
+import { ReasoningKeyDialect } from '../common/reasoning-dialect.ts'
+
+const qoderReasoningDialect = new ReasoningKeyDialect()
 
 export { resolveRequestImages }
 export type { AttachmentImageReader, ResolvedRequestImage, ResolvedRequestImages }
@@ -517,7 +520,7 @@ export function buildQoderChatRequest(
         role: 'assistant',
         content: content !== '' ? content : (toolCalls.length > 0 || reasoning !== '' ? ' ' : null),
       }
-      if (reasoning !== '') entry.reasoning_content = reasoning
+      if (reasoning !== '') Object.assign(entry, { [qoderReasoningDialect.outboundKey()]: reasoning })
       if (toolCalls.length > 0) entry.tool_calls = toolCalls
       if (entry.content !== null) messages.push(entry)
       continue
@@ -951,6 +954,7 @@ export function processQoderStreamLine(line: string, state: QoderStreamState): S
   const delta = choice !== undefined && isRecord(choice.delta) ? choice.delta : undefined
 
   if (delta !== undefined) {
+    qoderReasoningDialect.observe(delta)
     const reasoning = asString(delta.reasoning_content) ?? asString(delta.reasoning)
     if (reasoning !== undefined && reasoning !== '') {
       out.push(...appendTextDelta(state, 'reasoning', sanitizeText(reasoning)))

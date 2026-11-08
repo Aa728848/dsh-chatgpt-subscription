@@ -371,6 +371,7 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.querySelector('[data-dsh-part="settings-row-cache-affinity"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-plan-mode-pipeline"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-dispatch-execution-guard"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-tool-runaway-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-team-policy-cache-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-language"]')).not.toBeNull()
@@ -383,13 +384,14 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.textContent).toContain(zh.settingsCacheAffinityName)
     expect(container.textContent).toContain(zh.settingsPlanModePipelineName)
     expect(container.textContent).toContain(zh.settingsDispatchExecutionGuardName)
+    expect(container.textContent).toContain(zh.settingsToolRunawayGuardName)
     expect(container.textContent).toContain(zh.settingsTeamPolicyCacheGuardName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
     expect(container.textContent).toContain(zh.settingsLanguageName)
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(11)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(12)
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {
@@ -506,6 +508,17 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     await act(async () => { toggle.click() })
     // 缺键读成开，所以点一下写的是 false。
     expect(form.writes).toEqual([['dispatchExecutionGuard', false]])
+  })
+
+  it('工具失控治理开关写回 toolRunawayGuard，且缺键读成开', async () => {
+    const form = fakeForm({})
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    const toggle = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-tool-runaway-guard-switch"]')!
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    await act(async () => { toggle.click() })
+    expect(form.writes).toEqual([['toolRunawayGuard', false]])
   })
 
   it('没有设置服务时调度执行守卫开关是禁用的', async () => {

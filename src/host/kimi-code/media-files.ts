@@ -32,6 +32,7 @@
 
 import { createHash } from 'node:crypto'
 import { kimiIdentityHeaders } from './oauth.ts'
+import { HostedMediaUploadCoordinator } from '../common/hosted-media.ts'
 
 /** Upload route, relative to a base URL that may already carry `/v1`. */
 export const FILES_UPLOAD_PATH = '/v1/files'
@@ -155,16 +156,6 @@ interface ResolvedUpload {
   readonly fetchFn: typeof fetch
   readonly timeoutMs: number
   readonly key: string
-}
-
-/** One in-flight upload, joined by every concurrent caller with the same key. */
-interface UploadFlight {
-  readonly promise: Promise<string>
-  readonly controller: AbortController
-  /** Callers still waiting; the transport is cancelled when this reaches 0. */
-  waiters: number
-  /** Set by the local timer, so an abort can be classified as a timeout. */
-  readonly state: { timedOut: boolean }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,87 +434,46 @@ function abortError(signal?: AbortSignal): Error {
  */
 export class KimiMediaFilesUploader {
   private readonly fetchFn: typeof fetch
-  private readonly maxCacheEntries: number
   private readonly timeoutMs: number
-  /** key -> `ms://<id>`, in least-recently-used order. */
-  private readonly cache = new Map<string, string>()
-  private readonly flights = new Map<string, UploadFlight>()
+  private readonly coordinator: HostedMediaUploadCoordinator<string>
 
   constructor(options: KimiMediaUploadOptions = {}) {
     this.fetchFn = options.fetchFn ?? fetch
-    const cap = options.maxCacheEntries
-    this.maxCacheEntries = cap !== undefined && Number.isFinite(cap) && cap > 0
-      ? Math.floor(cap)
-      : DEFAULT_MEDIA_FILE_CACHE_ENTRIES
+    this.coordinator = new HostedMediaUploadCoordinator<string>({ maxCacheEntries: options.maxCacheEntries })
     const timeout = options.timeoutMs
     this.timeoutMs = timeout !== undefined && Number.isFinite(timeout) ? timeout : MEDIA_UPLOAD_TIMEOUT_MS
   }
 
-  /** Cached references currently held, for a settings surface or a test. */
-  get size(): number {
-    return this.cache.size
-  }
+  get size(): number { return this.coordinator.size }
 
-  /** Uploads one file and returns the `ms://<id>` reference a request cites. */
   async upload(request: KimiMediaUploadRequest): Promise<string> {
     const resolved = this.resolve(request)
-    // A caller cancelled BEFORE it asked starts nothing: no request, no cache
-    // entry, and — the part that is easy to miss — no flight either. Opening a
-    // flight here would begin an upload nobody wants and briefly hold the key
-    // against the next real caller, which would then join a doomed flight.
-    if (resolved.signal?.aborted === true) throw abortError(resolved.signal)
-    const cached = this.readCache(resolved.key)
-    if (cached !== undefined) return cached
-
-    let flight = this.flights.get(resolved.key)
-    if (flight === undefined) {
-      flight = this.startFlight(resolved)
-      this.flights.set(resolved.key, flight)
-    }
-    return this.join(flight, resolved)
+    return this.coordinator.upload(resolved.key, resolved.signal, controller =>
+      this.performUpload(controller, { timedOut: false }, resolved))
   }
 
-  /**
-   * Drop the reference one upload would use.
-   *
-   * The caller that sees a stored id REJECTED on the wire calls this so the next
-   * attempt uploads again instead of replaying the same dead reference.
-   */
+  /** Drop a dead reference so the next attempt uploads again. */
   forget(request: Omit<KimiMediaUploadRequest, 'accessToken'>): boolean {
-    let key: string
     try {
-      key = mediaFileCacheKey({
+      const key = mediaFileCacheKey({
         accountScope: request.accountScope,
         baseUrl: request.baseUrl,
         mediaType: request.mediaType,
         data: request.data,
       })
+      return this.coordinator.forget(key) as boolean
     } catch {
       return false
     }
-    return this.cache.delete(key)
   }
 
-  /** Forget everything; a sign-out or a test starting over. */
-  clear(): void {
-    this.cache.clear()
-  }
+  clear(): void { void this.coordinator.clear() }
 
-  // -- internals ------------------------------------------------------------
-
-  /** Validate and normalize one request, or throw before anything is sent. */
   private resolve(request: KimiMediaUploadRequest): ResolvedUpload {
     const accessToken = request.accessToken.trim()
-    if (accessToken === '') {
-      throw new KimiMediaUploadError('invalid-request', 'the media upload needs an access token')
-    }
+    if (accessToken === '') throw new KimiMediaUploadError('invalid-request', 'the media upload needs an access token')
     const accountScope = request.accountScope.trim()
-    if (accountScope === '') {
-      throw new KimiMediaUploadError('invalid-request', 'the media upload needs an account scope for its cache key')
-    }
-    // The scope is the only caller-supplied string that reaches the key, and a
-    // token there would put a credential exactly where this module promised it
-    // would never be. Refuse it loudly instead of sanitizing it silently.
+    if (accountScope === '') throw new KimiMediaUploadError('invalid-request', 'the media upload needs an account scope for its cache key')
     if (accountScope === request.accessToken) {
       throw new KimiMediaUploadError('invalid-request', 'the media upload cache scope must not be the access token')
     }
@@ -535,10 +485,7 @@ export class KimiMediaFilesUploader {
         'the media upload accepts image/* or video/* only, not "' + mediaType + '"',
       )
     }
-    if (request.data.byteLength === 0) {
-      throw new KimiMediaUploadError('invalid-request', 'the media upload was given no bytes')
-    }
-    // Built before the request so an unusable base URL fails without a flight.
+    if (request.data.byteLength === 0) throw new KimiMediaUploadError('invalid-request', 'the media upload was given no bytes')
     filesUploadUrl(request.baseUrl)
     return {
       accessToken,
@@ -555,111 +502,18 @@ export class KimiMediaFilesUploader {
     }
   }
 
-  private readCache(key: string): string | undefined {
-    const ref = this.cache.get(key)
-    if (ref === undefined) return undefined
-    // Re-insert so the entry becomes the most recently used one.
-    this.cache.delete(key)
-    this.cache.set(key, ref)
-    return ref
-  }
-
-  private writeCache(key: string, ref: string): void {
-    this.cache.delete(key)
-    this.cache.set(key, ref)
-    while (this.cache.size > this.maxCacheEntries) {
-      const oldest = this.cache.keys().next()
-      if (oldest.done === true) break
-      this.cache.delete(oldest.value)
-    }
-  }
-
-  /** Open one flight and run it; the map entry is dropped as it settles. */
-  private startFlight(request: ResolvedUpload): UploadFlight {
-    const controller = new AbortController()
-    const state: { timedOut: boolean } = { timedOut: false }
-    const promise = this.performUpload(controller, state, request).finally(() => {
-      if (this.flights.get(request.key)?.promise === promise) this.flights.delete(request.key)
-    })
-    // A flight whose every waiter aborted settles with nobody awaiting it; that
-    // rejection is already recorded through the race below, so mark it handled
-    // here rather than leaving it to surface as an unhandled rejection.
-    void promise.catch(() => undefined)
-    return { promise, controller, waiters: 0, state }
-  }
-
-  /**
-   * Wait for one flight, respecting THIS caller's abort.
-   *
-   * The flight is not bound to the caller's signal: a caller that aborts
-   * detaches, and the transport is cancelled only when the last waiter has gone.
-   */
-  private async join(flight: UploadFlight, request: ResolvedUpload): Promise<string> {
-    const signal = request.signal
-    if (signal?.aborted === true) throw abortError(signal)
-
-    flight.waiters += 1
-    let released = false
-    const release = (): void => {
-      if (released) return
-      released = true
-      flight.waiters -= 1
-      if (flight.waiters <= 0) {
-        // Nobody is waiting any more. Drop the key FIRST, so a caller that arrives
-        // in the window between the cancellation and the flight's settlement starts
-        // a fresh upload instead of joining this doomed one, then stop the upload.
-        if (this.flights.get(request.key) === flight) this.flights.delete(request.key)
-        flight.controller.abort()
-      }
-    }
-
-    if (signal === undefined) {
-      try {
-        return await flight.promise
-      } finally {
-        release()
-      }
-    }
-
-    // This caller's own cancellation, independent of the shared request: it fires
-    // immediately even when the transport ignores the signal, which is what keeps
-    // an abort from turning into a slow network failure.
-    const callerSignal: AbortSignal = signal
-    let detach: (() => void) | undefined
-    const cancelled = new Promise<never>((_resolve, reject) => {
-      const onAbort = (): void => reject(abortError(callerSignal))
-      detach = (): void => callerSignal.removeEventListener('abort', onAbort)
-      callerSignal.addEventListener('abort', onAbort, { once: true })
-    })
-    try {
-      return await Promise.race([flight.promise, cancelled])
-    } finally {
-      detach?.()
-      release()
-    }
-  }
-
-  /** The one request a flight performs. */
   private async performUpload(
     controller: AbortController,
     state: { timedOut: boolean },
     request: ResolvedUpload,
   ): Promise<string> {
     const form = new FormData()
-    // `file` then `purpose`: this exact order is what the live probe sent and the
-    // gateway accepted. The MiniMax line needs the opposite order, so the order
-    // here is a measured fact rather than a habit.
     form.append('file', new Blob([request.data], { type: request.mediaType }), request.filename)
     form.append('purpose', request.kind)
-
-    // Identity headers plus the bearer token the caller obtained. `content-type`
-    // is deliberately absent: the runtime writes the multipart boundary itself,
-    // and a hand-written value would produce a body the server cannot parse.
     const headers = await kimiIdentityHeaders({
       authorization: 'Bearer ' + request.accessToken,
       accept: 'application/json',
     })
-
     const timer = request.timeoutMs > 0
       ? setTimeout(() => {
           state.timedOut = true
@@ -667,13 +521,7 @@ export class KimiMediaFilesUploader {
         }, request.timeoutMs)
       : undefined
     timer?.unref()
-
     try {
-      // ONLY the flight's own controller reaches the transport. It fires when the
-      // last waiter leaves (see join) or when the local timer expires. A single
-      // caller's signal is deliberately NOT merged in here: it governs that
-      // caller's own wait, and merging it would let one cancelled caller kill an
-      // upload another caller is still waiting for.
       let response: Response
       try {
         response = await request.fetchFn(filesUploadUrl(request.baseUrl), {
@@ -685,7 +533,6 @@ export class KimiMediaFilesUploader {
       } catch (error) {
         throw this.transportFailure(error, state, request)
       }
-
       let raw = ''
       try {
         raw = await response.text()
@@ -698,18 +545,12 @@ export class KimiMediaFilesUploader {
     }
   }
 
-  /** Turn a transport rejection into the error the caller must see. */
   private transportFailure(
     error: unknown,
     state: { timedOut: boolean },
     request: ResolvedUpload,
   ): unknown {
     if (looksAborted(error)) {
-      // Only the flight's controller can abort the transport, and it has exactly
-      // two causes: the local timer (a timeout, which IS a failure) and the last
-      // waiter leaving (a cancellation, which stays one instead of being dressed
-      // up as a network failure). A caller's own abort never reaches here — it
-      // rejects that caller's promise in join.
       if (state.timedOut) {
         return new KimiMediaUploadError(
           'timeout',
@@ -725,7 +566,6 @@ export class KimiMediaFilesUploader {
     )
   }
 
-  /** Read one response into a reference, or into a typed failure. */
   private settle(response: Response, raw: string, request: ResolvedUpload): string {
     const status = response.status
     if (response.ok !== true) {
@@ -738,8 +578,6 @@ export class KimiMediaFilesUploader {
         )
       }
       if (status === 404 || status === 405) {
-        // A missing route is not a transient: retrying the same base URL answers
-        // the same 404. The caller falls back to inline media.
         throw new KimiMediaUploadError(
           'not-found',
           'the Kimi Code hosted-file endpoint is not available on this base URL (HTTP ' + status + ')',
@@ -749,7 +587,7 @@ export class KimiMediaFilesUploader {
       if (status === 413) {
         throw new KimiMediaUploadError(
           'too-large',
-          'the Kimi Code hosted-file endpoint refused the upload as too large (HTTP 413)',
+          'the Kimi Code hosted-file endpoint refused the upload as too large (HTTP ' + status + ')',
           { status, detail },
         )
       }
@@ -762,11 +600,10 @@ export class KimiMediaFilesUploader {
       }
       throw new KimiMediaUploadError(
         'rejected',
-        'the Kimi Code hosted-file endpoint refused the upload (HTTP ' + status + ')',
+        'the Kimi Code hosted-file endpoint rejected the upload (HTTP ' + status + ')',
         { status, detail },
       )
     }
-
     const parsed = parseJson(raw)
     if (!parsed.ok) {
       throw new KimiMediaUploadError(
@@ -779,13 +616,11 @@ export class KimiMediaFilesUploader {
     if (id === undefined) {
       throw new KimiMediaUploadError(
         'no-id',
-        'the media upload answered HTTP ' + status + ' without a usable file id',
+        'the media upload answered HTTP ' + status + ' without a usable id',
         { status, detail: redact(raw, request.accessToken) },
       )
     }
-    const ref = fileReference(id)
-    this.writeCache(request.key, ref)
-    return ref
+    return fileReference(id)
   }
 }
 

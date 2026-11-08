@@ -40,6 +40,12 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PostToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
+import {
+  canonicalToolCallKey,
+  createExactRepeatBreaker,
+  isToolRunawayExemptTool,
+  TOOL_RUNAWAY_EXEMPT_TOOLS,
+} from '../common/tool-runaway.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -48,7 +54,7 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-/** 本模块只对 Kimi Code 这条线路生效。 */
+/** Kimi profile 保留强停；其他受控线路只复用分级提醒。 */
 export const KIMI_CODE_PROVIDER = 'kimi-code'
 
 /** 官方重复刹车的开关环境变量。 */
@@ -112,19 +118,7 @@ export const HANDOFF_VETO_TEXT = 'This turn was ended by the repeat breaker afte
  * 这些工具**本来就会**被反复调用：报一次进展、更新一次待办、问一次用户。把它们
  * 算进连击等于让刹车对着正常的心跳乱响。
  */
-export const REPEAT_BREAKER_EXEMPT_TOOLS: readonly string[] = Object.freeze([
-  'progress_update',
-  'todo_write',
-  'ask_user_question',
-  'enter_plan_mode',
-  'exit_plan_mode',
-  'leave_plan_mode',
-  'create_goal',
-  'update_goal',
-  'get_goal',
-  'dispatch_ledger',
-  'present',
-])
+export const REPEAT_BREAKER_EXEMPT_TOOLS: readonly string[] = TOOL_RUNAWAY_EXEMPT_TOOLS
 
 /**
  * 判断一个工具是不是不计入连击的协调类工具。
@@ -133,7 +127,7 @@ export const REPEAT_BREAKER_EXEMPT_TOOLS: readonly string[] = Object.freeze([
  * @returns 豁免时为 true。
  */
 export function isRepeatBreakerExemptTool(toolName: string): boolean {
-  return REPEAT_BREAKER_EXEMPT_TOOLS.includes(toolName)
+  return isToolRunawayExemptTool(toolName)
 }
 
 /** 读得到的环境变量视图。 */
@@ -155,18 +149,6 @@ export function isKimiRepeatBreakerEnabled(env: KimiRepeatBreakerEnv = process.e
   const raw = env[REPEAT_BREAKER_ENV]
   if (typeof raw !== 'string') return true
   return !DISABLED_ENV_VALUES.has(raw.trim().toLowerCase())
-}
-
-/**
- * 判断一个值是不是普通对象（原型是 Object.prototype 或 null）。
- *
- * @param value - 任意值。
- * @returns 是普通对象时为 true。
- */
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
 }
 
 /**
@@ -273,36 +255,9 @@ export function isKimiSession(agent: unknown): boolean {
  * @param value - 当前值。
  * @returns 重排后的值。
  */
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJsonValue)
-  if (!isPlainRecord(value)) return value
-  const out: Record<string, unknown> = {}
-  for (const key of Object.keys(value).sort()) {
-    out[key] = sortJsonValue(value[key])
-  }
-  return out
-}
-
-/**
- * 造一次工具调用的**规范键**。
- *
- * 键 = 工具名 + 参数的规范 JSON。参数先递归重排键名再序列化，于是
- * { a: 1, b: 2 } 与 { b: 2, a: 1 } 得到**完全相同**的键 —— 否则模型只是把参数
- * 的书写顺序换了一下，刹车就看不见这是一个连击。
- *
- * @param toolName - 工具名。
- * @param args - 工具参数。
- * @returns 规范键。
- */
+/** 造一次工具调用的规范键；实现由所有线路共享。 */
 export function canonicalKimiToolCallKey(toolName: string, args: unknown): string {
-  let json: string | undefined
-  try {
-    json = JSON.stringify(sortJsonValue(args))
-  } catch {
-    // 循环引用之类的病态参数：退回字符串形态，至少还是确定的。
-    json = undefined
-  }
-  return toolName + ' ' + (json ?? String(args))
+  return canonicalToolCallKey(toolName, args)
 }
 
 /** 一个会话在重复刹车里的状态。 */
@@ -351,65 +306,25 @@ export interface KimiRepeatBreaker {
  *
  * @returns 一台重复刹车。
  */
+function repeatReminder(count: number): string | undefined {
+  if (count >= REPEAT_REMINDER_3_START) return REMINDER_TEXT_3
+  if (count >= REPEAT_REMINDER_2_START) return makeReminderText2(count)
+  if (count >= REPEAT_REMINDER_1_START) return REMINDER_TEXT_1
+  return undefined
+}
+
 export function createKimiRepeatBreaker(): KimiRepeatBreaker {
-  const sessions = new Map<string, KimiRepeatBreakerState>()
+  return createExactRepeatBreaker({
+    reminder: repeatReminder,
+    forceStopAt: REPEAT_FORCE_STOP_STREAK,
+    handoffReminder: REMINDER_TEXT_3,
+    handoffVeto: HANDOFF_VETO_TEXT,
+  })
+}
 
-  /** 取一个会话的状态；没有就新建一个。 */
-  const stateOf = (sessionId: string): KimiRepeatBreakerState => {
-    const existing = sessions.get(sessionId)
-    if (existing !== undefined) return existing
-    const created: KimiRepeatBreakerState = {
-      consecutiveKey: null,
-      consecutiveCount: 0,
-      handoffActive: false,
-    }
-    sessions.set(sessionId, created)
-    return created
-  }
-
-  return {
-    checkBeforeExecute(sessionId: string, toolName: string, args: unknown): string | undefined {
-      const state = stateOf(sessionId)
-      // 强停已经接管这一轮：这一次调用根本不该执行。
-      if (state.handoffActive) return HANDOFF_VETO_TEXT
-      const key = canonicalKimiToolCallKey(toolName, args)
-      // 这一场已经是同一次调用了，而且再叫一次就到强停线：拦下并接管这一轮。
-      if (state.consecutiveKey === key && state.consecutiveCount + 1 >= REPEAT_FORCE_STOP_STREAK) {
-        state.consecutiveCount += 1
-        state.handoffActive = true
-        return HANDOFF_VETO_TEXT
-      }
-      return undefined
-    },
-
-    recordAfterExecute(sessionId: string, toolName: string, args: unknown): string | undefined {
-      // 协调类工具不计入连击。
-      if (isRepeatBreakerExemptTool(toolName)) return undefined
-      const state = stateOf(sessionId)
-      // 强停已经接管：这一轮只准交文字结论。
-      if (state.handoffActive) return REMINDER_TEXT_3
-
-      const key = canonicalKimiToolCallKey(toolName, args)
-      if (state.consecutiveKey === key) state.consecutiveCount += 1
-      else {
-        state.consecutiveKey = key
-        state.consecutiveCount = 1
-      }
-
-      if (state.consecutiveCount >= REPEAT_FORCE_STOP_STREAK) {
-        state.handoffActive = true
-        return REMINDER_TEXT_3
-      }
-      if (state.consecutiveCount >= REPEAT_REMINDER_3_START) return REMINDER_TEXT_3
-      if (state.consecutiveCount >= REPEAT_REMINDER_2_START) return makeReminderText2(state.consecutiveCount)
-      if (state.consecutiveCount >= REPEAT_REMINDER_1_START) return REMINDER_TEXT_1
-      return undefined
-    },
-
-    resetSession(sessionId: string): void {
-      sessions.delete(sessionId)
-    },
-  }
+/** Other providers receive the graduated reminders, never Kimi's hard stop. */
+export function createReminderOnlyRepeatBreaker(): KimiRepeatBreaker {
+  return createExactRepeatBreaker({ reminder: repeatReminder })
 }
 
 /** 工具注册面（本模块用到的 guard 这一条接缝）。 */
@@ -437,6 +352,10 @@ export interface KimiRepeatBreakerOptions {
    * 这一行，也不必重挂插件行。
    */
   readonly enabled?: () => boolean
+  /** Global live switch for every provider profile. */
+  readonly globalEnabled?: () => boolean
+  /** Providers admitted by this install; default remains Kimi-only for compatibility. */
+  readonly providers?: readonly string[]
 }
 
 /**
@@ -563,42 +482,51 @@ export function installKimiRepeatBreaker(
   const releaseMount = claimMount(ctx)
   if (releaseMount === undefined) return () => undefined
 
-  const breaker = createKimiRepeatBreaker()
+  const kimiBreaker = createKimiRepeatBreaker()
+  const reminderBreaker = createReminderOnlyRepeatBreaker()
   const enabled = options.enabled ?? (() => isKimiRepeatBreakerEnabled())
+  const globalEnabled = options.globalEnabled ?? (() => true)
+  const providers = new Set(options.providers ?? [KIMI_CODE_PROVIDER])
 
-  /** 读一次开关。读失败按**开启**处理：保护不该因为一次读失败而失效。 */
-  const isEnabled = (): boolean => {
-    try {
-      return enabled() !== false
-    } catch {
-      return true
+  const readSwitch = (read: () => boolean): boolean => {
+    try { return read() !== false } catch { return true }
+  }
+
+  interface RepeatTarget {
+    readonly key: string
+    readonly breaker: KimiRepeatBreaker
+    readonly provider: string
+  }
+
+  const targetOf = (agent: unknown): RepeatTarget | undefined => {
+    const route = kimiSessionRouteOf(agent)
+    const provider = route.provider
+    if (provider === undefined || route.sessionId === undefined || !providers.has(provider)) return undefined
+    return {
+      provider,
+      key: provider + ':' + route.sessionId,
+      breaker: provider === KIMI_CODE_PROVIDER ? kimiBreaker : reminderBreaker,
     }
   }
 
-  /**
-   * 取一次执行所属的会话；不是 Kimi Code 这条线路时是 undefined。
-   *
-   * @param agent - 调用方 agent。
-   * @returns 会话标识；不该管时是 undefined。
-   */
-  const kimiSessionIdOf = (agent: unknown): string | undefined => {
-    const route = kimiSessionRouteOf(agent)
-    if (route.provider !== KIMI_CODE_PROVIDER) return undefined
-    return route.sessionId
+  const activeTargetOf = (agent: unknown): RepeatTarget | undefined => {
+    if (!readSwitch(globalEnabled)) return undefined
+    const target = targetOf(agent)
+    if (target === undefined) return undefined
+    if (target.provider === KIMI_CODE_PROVIDER && !readSwitch(enabled)) return undefined
+    return target
   }
 
   // 1) 强停：执行期拦下调用。
   const tools = toolsServiceOf(ctx)
   const disposeGuard = tools?.guard?.((execution: unknown) => {
     try {
-      if (!isEnabled()) return undefined
       const record = isRecord(execution) ? execution : undefined
-      const agent = record?.['agent']
-      const sessionId = kimiSessionIdOf(agent)
-      if (sessionId === undefined) return undefined
+      const target = activeTargetOf(record?.['agent'])
+      if (target === undefined) return undefined
       const toolName = stringOf(record?.['name'])
       if (toolName === undefined) return undefined
-      const veto = breaker.checkBeforeExecute(sessionId, toolName, record?.['arguments'])
+      const veto = target.breaker.checkBeforeExecute(target.key, toolName, record?.['arguments'])
       if (veto === HANDOFF_VETO_TEXT) return HANDOFF_VETO_TEXT
       return veto
     } catch {
@@ -615,13 +543,11 @@ export function installKimiRepeatBreaker(
   ): Promise<PostToolDecision> => {
     const decision = await next()
     try {
-      if (!isEnabled()) return decision
-      const agent = (exec as { agent?: unknown }).agent
-      const sessionId = kimiSessionIdOf(agent)
-      if (sessionId === undefined) return decision
+      const target = activeTargetOf((exec as { agent?: unknown }).agent)
+      if (target === undefined) return decision
       const toolName = stringOf((exec as { name?: unknown }).name)
       if (toolName === undefined) return decision
-      const reminder = breaker.recordAfterExecute(sessionId, toolName, (exec as { arguments?: unknown }).arguments)
+      const reminder = target.breaker.recordAfterExecute(target.key, toolName, (exec as { arguments?: unknown }).arguments)
       if (reminder === undefined) return decision
       return withAdditionalContexts(decision, [createRepeatBreakerReminder(reminder)])
     } catch {
@@ -640,9 +566,9 @@ export function installKimiRepeatBreaker(
       const messages = Array.isArray(payload?.messages) ? payload.messages : []
       const tail = messages.at(-1)
       if (!isRealUserTurn(tail)) return decision
-      const sessionId = kimiSessionIdOf(payload?.agent)
-      if (sessionId === undefined) return decision
-      breaker.resetSession(sessionId)
+      const target = activeTargetOf(payload?.agent)
+      if (target === undefined) return decision
+      target.breaker.resetSession(target.key)
     } catch {
       return decision
     }
@@ -652,9 +578,9 @@ export function installKimiRepeatBreaker(
   // 4) agent 拆除：这一场的连击计数一起走。
   const disposeDisposed = ctx.on?.('agent/disposed', ((payload: { agent?: unknown }) => {
     try {
-      const sessionId = kimiSessionIdOf(payload?.agent)
-      if (sessionId === undefined) return
-      breaker.resetSession(sessionId)
+      const target = targetOf(payload?.agent)
+      if (target === undefined) return
+      target.breaker.resetSession(target.key)
     } catch {
       // 拆除期的读取失败不值得再抛一次。
     }

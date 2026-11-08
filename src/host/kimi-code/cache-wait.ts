@@ -2,6 +2,8 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/mes
 import { PLUGIN_MESSAGE_SOURCE_KIND } from '../common/llm-compat.ts'
 import { CACHE_TTL_MS, sessionLastActiveAt } from './cache-hint.ts'
 import { sessionCacheState } from './session-cache-state.ts'
+import { promptCacheActivityStore } from '../common/cache-activity.ts'
+import { promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-cache-policy.ts'
 
 /** When an idle parent reaches its cache decision point (five minutes before TTL). */
 export const CACHE_WAIT_DECISION_MS = 20 * 60 * 1000
@@ -11,7 +13,7 @@ export const DEFAULT_MIN_WARMUP_TOKENS = 0
 export const CACHE_WAIT_WARMUP_ENV = 'DSH_KIMI_CODE_CACHE_WAIT_WARMUP'
 /** Settings description for the progress-updates / Kimi cache-wait switch. */
 export const CACHE_WAIT_WARMUP_SETTING_DESCRIPTION =
-  'Kimi Code 专用：等待子代理完成期间，主会话每空闲满 20 分钟自动触发一次轻量缓存续热，只要子代理仍在运行就持续续热以防 25 分钟缓存过期重建；非 Kimi 线路开关无影响。'
+  '等待子代理完成期间按线路缓存 TTL 轻量续热；默认用于 Kimi（20/25 分钟），其他线路需明确 TTL 并在 promptCacheOverrides 中显式启用。'
 const MAX_TRACKED_SESSIONS = 256
 
 export interface CacheWaitSession {
@@ -54,8 +56,10 @@ export interface CacheWaitOptions {
   readonly now?: () => number
   readonly timer?: CacheWaitTimer
   readonly agents?: CacheWaitAgents
-  readonly activity?: (sessionId: string) => CacheWaitActivity | undefined
+  readonly activity?: (sessionId: string, provider?: string) => CacheWaitActivity | undefined
   readonly kimiSession?: (session: CacheWaitSession) => boolean
+  /** Deployment policy overrides; unknown providers remain inert. */
+  readonly overrides?: Readonly<Record<string, PromptCacheOverride>>
   readonly logger?: CacheWaitLogger
   readonly decisionMs?: number
   readonly ttlMs?: number
@@ -186,7 +190,8 @@ function defaultTimer(): CacheWaitTimer {
   }
 }
 
-function defaultActivity(sessionId: string): CacheWaitActivity | undefined {
+function defaultActivity(sessionId: string, provider: string = 'kimi-code'): CacheWaitActivity | undefined {
+  if (provider !== 'kimi-code') return promptCacheActivityStore(provider).read(sessionId)
   const durable = sessionCacheState.read(sessionId)
   const lastActiveAt = sessionLastActiveAt(sessionId) ?? durable?.lastActiveAt
   if (lastActiveAt === undefined) return undefined
@@ -216,12 +221,11 @@ export class KimiCacheWaitController {
   private readonly now: () => number
   private readonly timer: CacheWaitTimer
   private readonly agents?: CacheWaitAgents
-  private readonly activity: (sessionId: string) => CacheWaitActivity | undefined
+  private readonly activity: (sessionId: string, provider?: string) => CacheWaitActivity | undefined
   private readonly kimiSession?: (session: CacheWaitSession) => boolean
   private readonly warmup: () => boolean
   private readonly logger?: CacheWaitLogger
   private readonly decisionMs: number
-  private readonly ttlMs: number
   private readonly minWarmupTokens: number
   private disposed = false
 
@@ -237,7 +241,6 @@ export class KimiCacheWaitController {
       : () => (warmupOption ?? true)
     this.logger = options.logger
     this.decisionMs = options.decisionMs ?? CACHE_WAIT_DECISION_MS
-    this.ttlMs = options.ttlMs ?? CACHE_TTL_MS
     this.minWarmupTokens = options.minWarmupTokens ?? DEFAULT_MIN_WARMUP_TOKENS
   }
 
@@ -382,17 +385,18 @@ export class KimiCacheWaitController {
     state.timer = undefined
   }
 
-  private isKimiSession(session: CacheWaitSession): boolean {
-    if (this.kimiSession !== undefined) return this.kimiSession(session)
+  private providerForSession(session: CacheWaitSession): string | undefined {
+    if (this.kimiSession !== undefined) return this.kimiSession(session) ? 'kimi-code' : undefined
     try {
       const current = text(session.requestHeader?.()?.config?.provider)
-      if (current !== undefined) return current === 'kimi-code'
+      if (current !== undefined) return current
     } catch {
       // Fall through to the latest durable header/activity evidence.
     }
     const latest = this.providerBySession.get(session.id)
-    if (latest !== undefined) return latest === 'kimi-code'
-    return this.activity(session.id)?.lastActiveAt !== undefined
+    if (latest !== undefined) return latest
+    // Backward-compatible fallback for a Kimi session whose header is already gone.
+    return this.activity(session.id, 'kimi-code')?.lastActiveAt !== undefined ? 'kimi-code' : undefined
   }
 
   private isWarmupEnabled(): boolean {
@@ -406,8 +410,11 @@ export class KimiCacheWaitController {
   private reconcile(session: CacheWaitSession, state: WaitState): void {
     this.clearTimer(state)
     if (this.disposed || !state.waiting || state.handled || state.children.size === 0) return
-    if (!this.isKimiSession(session)) return
-    const activity = this.activity(session.id)
+    const provider = this.providerForSession(session)
+    if (provider === undefined) return
+    const cachePolicy = promptCachePolicyOf(provider, this.options.overrides?.[provider])
+    if (!cachePolicy.waitWarmup || cachePolicy.ttlMs === undefined) return
+    const activity = this.activity(session.id, provider)
     if (activity === undefined && state.lastWarmupAt === undefined) return
     const effectiveLastActiveAt = Math.max(
       activity?.lastActiveAt ?? -Infinity,
@@ -423,8 +430,10 @@ export class KimiCacheWaitController {
       totalTokens: activity?.totalTokens,
       warmupEnabled: this.isWarmupEnabled(),
       warmupFailed: state.warmupFailed,
-      decisionMs: this.decisionMs,
-      ttlMs: this.ttlMs,
+      decisionMs: provider === 'kimi-code'
+        ? this.decisionMs
+        : Math.max(1, Math.floor(cachePolicy.ttlMs * 0.8)),
+      ttlMs: cachePolicy.ttlMs,
       minWarmupTokens: this.minWarmupTokens,
     })
     if (action.kind === 'none') return
