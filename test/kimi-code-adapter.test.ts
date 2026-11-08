@@ -9,9 +9,13 @@ import {
   KimiCodeAdapter,
   accountLimitCooldownMs,
   classifyKimiFailure,
+  coldStartGroupKey,
+  isWarmPrefixGroup,
+  prefixGroupKey,
   resetColdStartSingleflightForTests,
   resolveDefaultReasoningEffort,
 } from '../src/host/kimi-code/adapter.ts'
+import { normalizeGenerateOptions } from '../src/host/common/llm-compat.ts'
 import { sessionCacheState } from '../src/host/kimi-code/session-cache-state.ts'
 import {
   buildRequest,
@@ -61,6 +65,10 @@ async function buildAdapter(options: {
   fetchFn?: typeof fetch
   attachments?: AttachmentImageReader
   catalog?: KimiCodeCatalogModel[]
+  /** Account pool the adapter routes through; absent means the single-credential path. */
+  pool?: KimiCodeAccountPool
+  /** Override of the cache-affinity switch (default: enabled, as in production). */
+  cacheAffinity?: () => boolean
 } = {}) {
   const store = new FileCredentialStore(tmp('kc-cred'))
   vi.spyOn(store, 'read').mockResolvedValue(options.creds ?? credentials())
@@ -77,7 +85,8 @@ async function buildAdapter(options: {
     loadCatalog: async () => options.catalog ?? CATALOG,
     fetchFn: options.fetchFn,
     attachments: options.attachments,
-  })
+    ...(options.cacheAffinity === undefined ? {} : { cacheAffinity: options.cacheAffinity }),
+  }, options.pool)
   return { adapter, store, modelSettings }
 }
 
@@ -89,6 +98,15 @@ function sseResponse(frames: unknown[]): Response {
       controller.close()
     },
   }))
+}
+
+/** Wait until the predicate holds, or fail the test after `timeoutMs`. */
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for the condition')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
 }
 
 async function drain(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
@@ -981,6 +999,49 @@ describe('the Kimi Code side-channel title request', () => {
     resetCacheStats()
   })
 
+
+  it('records the opening inheritance once, from the conversation first request only', async () => {
+    let call = 0
+    const { adapter } = await buildAdapter({
+      fetchFn: (async () => {
+        call += 1
+        // The first request already reads 400 of its 1000 prompt tokens from
+        // cache (a prefix inherited from another conversation); the second reads
+        // far more, and must not overwrite the first number.
+        const cached = call === 1 ? 400 : 2_400
+        return sseResponse([
+          { choices: [{ delta: { content: 'hello' } }] },
+          {
+            choices: [{ delta: {}, finish_reason: 'stop' }],
+            usage: {
+              prompt_tokens: 1_000,
+              completion_tokens: 4,
+              prompt_tokens_details: { cached_tokens: cached },
+            },
+          },
+        ])
+      }) as typeof fetch,
+    })
+    const sessionId = 'kc-opening-inheritance'
+    const options = generateOptions('k3', { sessionId: sessionId as never, system: 'opening inheritance prefix' })
+
+    await drain(adapter.stream(options))
+    const afterFirst = sessionCacheState.read(sessionId)
+    expect(afterFirst?.firstRequestCachedTokens).toBe(400)
+    expect(afterFirst?.firstRequestPromptTokens).toBe(1_000)
+
+    await drain(adapter.stream(generateOptions('k3', {
+      sessionId: sessionId as never,
+      system: 'opening inheritance prefix',
+      messages: [{ role: 'user', content: 'second turn' } as never],
+    })))
+    const afterSecond = sessionCacheState.read(sessionId)
+    // The rolling totals moved, the opening measurement did not.
+    expect(afterSecond?.requests).toBe(2)
+    expect(afterSecond?.firstRequestCachedTokens).toBe(400)
+    expect(afterSecond?.firstRequestPromptTokens).toBe(1_000)
+  })
+
   it('files nothing under the conversation it titles', async () => {
     const { adapter } = await buildAdapter({
       fetchFn: (async () => sseResponse([
@@ -1309,3 +1370,129 @@ describe('the Kimi Code cold-start singleflight', () => {
     expect(calls).toBe(3)
   })
 })
+
+/**
+ * A pool that hands out the account this request prefers, falling back to its
+ * default: the routing surface the adapter actually uses, and nothing else.
+ */
+function fakePool(input: { ids: string[]; defaultId: string; region?: string }): {
+  pool: KimiCodeAccountPool
+  setDefault: (id: string) => void
+} {
+  let defaultId = input.defaultId
+  const region = input.region ?? 'mainland-cn'
+  const credentialsFor = (id: string) => credentials({ accessToken: `at-${id}` })
+  const pool = {
+    async getEffectiveCredential(
+      _exclude?: ReadonlySet<string>,
+      _fetchFn?: typeof fetch,
+      _options?: unknown,
+      selection?: { preferAccountIds?: readonly string[] },
+    ) {
+      const chosen = selection?.preferAccountIds?.find((id) => input.ids.includes(id)) ?? defaultId
+      return { account: { id: chosen }, credentials: credentialsFor(chosen) }
+    },
+    async accountScopes() {
+      return input.ids.map((id) => ({ id, region }))
+    },
+    async markCooldown(): Promise<void> {},
+    async markAuthFailed(): Promise<void> {},
+    async hasAnotherAvailableAccount(): Promise<boolean> { return false },
+    async getFreshCredential() { return credentialsFor(defaultId) },
+  } as unknown as KimiCodeAccountPool
+  return { pool, setDefault: (id: string) => { defaultId = id } }
+}
+
+/** The bearer token a request went out with, however its headers were shaped. */
+function authTokenOf(init: RequestInit | undefined): string {
+  const headers = init?.headers as unknown
+  if (headers === undefined || headers === null) return ''
+  if (typeof (headers as Headers).get === 'function') return String((headers as Headers).get('authorization') ?? '')
+  const record = headers as Record<string, string>
+  const key = Object.keys(record).find((name) => name.toLowerCase() === 'authorization')
+  return key === undefined ? '' : String(record[key])
+}
+
+describe('KimiCodeAdapter cache affinity', () => {
+  afterEach(() => {
+    resetColdStartSingleflightForTests()
+    vi.restoreAllMocks()
+  })
+
+  it('scopes a warm prefix by account, because the service caches per account', () => {
+    const normalized = normalizeGenerateOptions(generateOptions('k3', { system: 'affinity shared prefix' }))
+    const prefix = prefixGroupKey('mainland-cn', normalized)
+    expect(prefix).toBeTruthy()
+
+    const first = coldStartGroupKey('mainland-cn', normalized, 'acc-1')
+    const second = coldStartGroupKey('mainland-cn', normalized, 'acc-2')
+    // Same prefix, different accounts: two different groups on purpose. Sharing
+    // one made the plugin claim a prefix was warm when the account about to be
+    // used had never seen it.
+    expect(first).not.toBe(second)
+    expect(first?.startsWith(prefix ?? '')).toBe(true)
+    expect(isWarmPrefixGroup('mainland-cn', normalized, 'acc-1')).toBe(false)
+  })
+
+  it('does not hold one account behind another account cold start', async () => {
+    const { pool, setDefault } = fakePool({ ids: ['acc-1', 'acc-2'], defaultId: 'acc-1' })
+    const gates: Array<Promise<void>> = []
+    let calls = 0
+    const fetchFn = vi.fn(async () => {
+      const index = calls
+      calls += 1
+      const gate = gates[index]
+      if (gate !== undefined) await gate
+      return sseResponse([
+        { choices: [{ delta: { content: 'hi' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { adapter } = await buildAdapter({ fetchFn, pool })
+
+    const system = 'affinity per-account prefix'
+    let releaseLeader: (() => void) | undefined
+    gates[0] = new Promise<void>((resolve) => { releaseLeader = resolve })
+    const leader = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-acc-a' as never, system })))
+    await waitUntil(() => calls === 1)
+
+    // The same prefix, but this request will be answered by another account:
+    // that account's cache is not warm, so it must not wait behind the leader.
+    setDefault('acc-2')
+    const other = drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-acc-b' as never, system })))
+    await waitUntil(() => calls === 2, 1_000)
+
+    releaseLeader!()
+    await Promise.all([leader, other])
+    expect(calls).toBe(2)
+  })
+
+  it('prefers the account whose prefix is still warm, and goes back to the strategy when switched off', async () => {
+    const tokens: string[] = []
+    const fetchFn = vi.fn(async (_url: unknown, init: RequestInit) => {
+      tokens.push(authTokenOf(init))
+      return sseResponse([
+        { choices: [{ delta: { content: 'hi' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { pool, setDefault } = fakePool({ ids: ['acc-1', 'acc-2'], defaultId: 'acc-1' })
+    const { adapter } = await buildAdapter({ fetchFn, pool })
+    const system = 'affinity warm prefix'
+
+    // First conversation warms acc-1 for this prefix.
+    await drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-aff-a' as never, system })))
+    expect(tokens[0]).toContain('at-acc-1')
+
+    // The strategy would now serve acc-2, but acc-1 still holds the warm prefix.
+    setDefault('acc-2')
+    await drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-aff-b' as never, system })))
+    expect(tokens[1]).toContain('at-acc-1')
+
+    // Switched off: the same request follows the pool's own choice again.
+    const off = await buildAdapter({ fetchFn, pool, cacheAffinity: () => false })
+    await drain(off.adapter.stream(generateOptions('k3', { sessionId: 'kc-aff-c' as never, system })))
+    expect(tokens[2]).toContain('at-acc-2')
+  })
+})
+

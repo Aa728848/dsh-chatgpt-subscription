@@ -65,6 +65,14 @@ export interface ProgressUpdatesSettingsValues {
   /** 等待子代理期间的缓存持续续热开关（缺键 = 开）。 */
   cacheWaitWarmup?: boolean
   /**
+   * 号池的账号缓存亲和开关（缺键 = 开）。
+   *
+   * 与宿主 src/index.ts 的 Config 同名同义：轮换时优先选「这条前缀的缓存还热着」
+   * 的账号，前提是它剩余额度不低于 20%。宿主那边是 default(true)，所以缺键时
+   * 界面必须同样读成开。
+   */
+  cacheAffinity?: boolean
+  /**
    * 计划模式管线开关（缺键 = 开）。
    *
    * 与宿主 `src/index.ts` 的 `Config` 同一个对象里的字段、名字逐字一致；
@@ -100,6 +108,7 @@ export type ProgressUpdatesField =
   | 'cacheWarmup'
   | 'cacheWarmupRetrieval'
   | 'cacheWaitWarmup'
+  | 'cacheAffinity'
   | 'planModePipeline'
   | 'dispatchExecutionGuard'
   | 'teamPolicyCacheGuard'

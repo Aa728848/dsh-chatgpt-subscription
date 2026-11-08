@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **[kimi-code / 号池] 多账号轮换按「前缀缓存还热着」选账号；冷启动组键补上账号维度**
+  - **问题**：服务端的前缀缓存是**按账号**各存一份，而内核 `selectAccount` 只看冷却、令牌与最近使用，永远看不到「这条前缀在哪个账号上还热着」——于是轮换可能把请求发给一个从没见过这段前缀的账号。更糟的是冷启动组键 `region:model:systemPromptHash:toolsHash[:staticPrefixHash]` **不含账号**，插件会在另一个账号烤热之后误判「这组是热的」，跟随者白等 2.5 秒预算，而它那条请求本来就不会命中。
+  - **改法**（`src/host/common/account-pool.ts`、`src/host/kimi-code/{account-pool,adapter,cache-affinity}.ts`、`src/index.ts`）：内核新增 `AccountSelectionHint` 与 `getEffectiveAccount(..., selection)`——顺序是**钉住账号 > 请求偏好 > 轮换策略**，偏好里不可用/已尝试的 id 直接跳过，全跳过则回落策略（辅助工具的 `getCredentialAccount` 不消费偏好，读凭据不动轮换）；`coldStartGroupKey` 追加 `|accountScope`，并新增 `prefixGroupKey` / `isWarmPrefixGroup` 让两处共用同一个「热」定义；新模块 `cache-affinity.ts` 把取舍写成纯函数（剩余额度取**最紧窗口**、`=20%` 仍可用、配额未知按「没证明不足」处理、同份额保持池序）；适配器在取凭据之前算一次偏好，只对真的热着的账号读配额。新增默认开启的 volatile 开关 `cacheAffinity`，设置页「进展更新」一格加一行，三语齐备，`DSH_KIMI_CODE_CACHE_AFFINITY` 可覆盖。
+  - **刻意不做**：不把亲和做成第四种轮换策略（用户不必为了收益改策略）；不因亲和失败而报错（热账号不可用就照旧回落）；组键变更会让现存会话各自冷启动一次，这是一次性成本。
+  - **回归**：新增 `test/kimi-code-cache-affinity.test.ts` 15 例（最紧窗口、20% 边界、未知配额、冷账号永不入列、稳定排序、开关解析与环境变量）；`test/account-pool-core.test.ts` 3 例（偏好压过策略、钉住压过偏好、偏好不可用时回落）；`test/kimi-code-adapter.test.ts` 3 例（组键按账号区分、跨账号不再共享冷启动闸门、热账号被优先选中且开关关闭后回到池的选择）——其中「跨账号不再共享闸门」做了反向验证：把组键改回不带账号，该用例立刻失败。
+
+- **[kimi-code / 诊断] 卡片显示「开局继承」：这个会话的第一条请求有多少 token 是继承来的**
+  - **背景**：跨会话前缀继承是真实存在的（同账号的另一个会话写下的头段，25 分钟内可被新会话读回），但它此前只体现在滚动命中率里，看不出「开局那一两千到上万 token 是谁付的」。同一台机器上的实测：新会话在另一会话结束 3 分钟后开工，首轮读到 14,080 / 21,527（65%）；隔 5 小时续跑则只剩 2,304（14%）。
+  - **改法**（`src/host/kimi-code/{session-cache-state,adapter,routes}.ts`、`src/shared/kimi-code-contracts.ts`、`src/client/kimi-code/`）：持久记录新增 `firstRequestCachedTokens` / `firstRequestPromptTokens`，只在会话首轮写入且之后原样保留（滚动合计会淹没这个数字）；DTO 增 `opening`，卡片在「最近前缀状态」下方显示 `开局继承 14,080 / 21,527 tok（65.4%）`，无数据时不画这一行（旧记录与单账号首轮冷启动都属于「没有可说的」）。
+  - **回归**：`test/kimi-code-adapter.test.ts` 1 例（首轮写入、次轮不覆盖）；`test/kimi-code-k31-card-ui.test.tsx` 2 例（有数据时的三个数字、无数据时不画该行）。
+
+- **[kimi-code / 结论归档] 「把全局与工作区 AGENTS.md 拆成两条以提高跨工作区继承」经证伪，不实施**
+  - **依据**：宿主 `@deepseek-ai/dsh-agent-instructions` 的 `render.ts` 把每个指令文件渲染成 `Instructions from: <path>\n\n<content>`，全部 section 拼进**同一条** `<system-reminder>`，且 `USER_GLOBAL_DIRECTORIES` 决定全局段本来就在前；本仓库 mapper 的 `orderStaticPrefixMessages` 只按 tier 重排，不改变块内字节顺序。因此拆成两条消息后，跨工作区能匹配到的前缀长度**一个字节都不会变**。
+  - **还有一个反效果**：现有重排按 tier 只提升**首次出现**（`seenTiers` / `hoistedByTier`），第二条 tier-2 会被当成 rank 5 挤到用户消息之后——照原方案做会实实在在变差。
+  - **仍成立的部分**：工具说明与 `code_run` 恒定说明段本来就在 system prompt 里、已包含在共享的约 14k 头段内；要扩大共享头段只能让更多「全工作区相同」的内容排在第一个工作区相关字节之前，而目前除了语言覆盖已没有这类内容。
+
 ## 0.65.0 - 2026-11-08
 
 - **[antigravity] 出站请求身份、版本清单跟随与控制面契约对齐官方客户端**

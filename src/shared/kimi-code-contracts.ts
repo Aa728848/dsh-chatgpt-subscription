@@ -307,6 +307,22 @@ export interface KimiCodeCacheStatsDto {
     requiredHits: number
   }
   /**
+   * How much of this conversation's FIRST prompt came out of cache.
+   *
+   * The only observable trace of cross-session inheritance: a conversation that
+   * starts minutes after another one on the same account can read back the
+   * byte-identical head, and this is what that looked like. Absent for a
+   * conversation whose first request this machine never recorded.
+   */
+  opening?: {
+    /** Prompt tokens the first request was served from cache. */
+    cachedTokens: number
+    /** Total prompt tokens that request carried (cache read + fresh input). */
+    promptTokens: number
+    /** cachedTokens / promptTokens, in [0, 1]. */
+    hitRatio: number
+  }
+  /**
    * Per-request image payload budget and the latest turn's image usage, when known.
    */
   imageBudget?: {

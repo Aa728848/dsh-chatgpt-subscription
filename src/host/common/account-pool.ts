@@ -91,6 +91,30 @@ export interface AccountPoolRefreshOptions {
 }
 
 /**
+ * Routing preference a caller states for ONE request, ahead of the strategy.
+ *
+ * Rotation is a pool-wide decision, but some reasons to prefer an account
+ * belong to a single request: a provider that caches prompt prefixes keeps one
+ * cache per account, so the account that already answered this exact prefix
+ * answers it cheaper than one that has never seen it. The core cannot know
+ * that — it never sees prompt content — so the caller names the accounts it
+ * would rather use and the core honours the order while they stay eligible.
+ *
+ * Absent, empty, or entirely ineligible: the rotation strategy runs exactly as
+ * it did before, so a line that never passes a hint behaves identically.
+ */
+export interface AccountSelectionHint {
+  /**
+   * Account ids to try first, in order of preference.
+   *
+   * Order expresses preference, not permission: an id that is not in the pool,
+   * is cooling down, has a rejected credential or was already tried in this
+   * request is skipped, and when every id is skipped the strategy decides.
+   */
+  readonly preferAccountIds?: readonly string[]
+}
+
+/**
  * Provider-specific behaviour of one account pool.
  *
  * The storage, serialization, eligibility, rotation and cooldown rules live in
@@ -1069,13 +1093,33 @@ export class AccountPoolCore<
   }
 
   /** The account a rotation strategy picks out of an already-eligible set. */
-  private selectAccount(eligible: TAccount[], data: PoolData<TAccount>): TAccount {
+  private selectAccount(
+    eligible: TAccount[],
+    data: PoolData<TAccount>,
+    hint?: AccountSelectionHint,
+  ): TAccount {
     // A pinned account wins while it is eligible; otherwise the strategy below
     // decides, so a pinned account that is cooling down degrades to automatic
     // selection instead of failing the turn.
     const pinned = this.hooks.preferAccountId?.() ?? null
     const pinnedAccount = pinned === null ? undefined : eligible.find((account) => account.id === pinned)
     if (pinnedAccount !== undefined) return pinnedAccount
+    // A request-scoped preference outranks the pool-wide strategy but never a
+    // pin: the pin is a standing user decision about which account may be
+    // spent, while the hint only says which account would answer THIS request
+    // more cheaply. Honouring the hint ahead of the strategy is the whole point
+    // of passing it — a strategy that overrode it could never produce a warm
+    // prefix. An id missing from `eligible` is skipped, so a hinted account
+    // that is cooling down, rejected, or already tried falls through to the
+    // strategy instead of failing the request.
+    const preferred = hint?.preferAccountIds
+    if (preferred !== undefined && preferred.length > 0) {
+      const eligibleById = new Map(eligible.map((account) => [account.id, account]))
+      for (const id of preferred) {
+        const account = eligibleById.get(id)
+        if (account !== undefined) return account
+      }
+    }
     if (data.rotationStrategy === 'round-robin') {
       // Least recently used first, so a burst spreads over the whole pool.
       return [...eligible].sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0))[0]!
@@ -1161,6 +1205,9 @@ export class AccountPoolCore<
    * @param forceRefresh - renew even when the stored token still looks usable.
    * @param options - what the refresh may spend, passed down to the provider's
    *   refresh hook. Absent means the provider's own default budget.
+   * @param selection - this request's own account preference, when the caller
+   *   has one (a warm prefix cache, for instance). Absent means the rotation
+   *   strategy decides alone, exactly as before.
    * @throws LlmError with `RATE_LIMIT` when every account is cooling down.
    */
   async getEffectiveAccount(
@@ -1168,6 +1215,7 @@ export class AccountPoolCore<
     fetchFn: typeof fetch = fetch,
     forceRefresh = false,
     options?: AccountPoolRefreshOptions,
+    selection?: AccountSelectionHint,
   ): Promise<{ account: TAccount; credentials: TCredentials }> {
     const data = await this.read()
     if (data.accounts.length === 0) {
@@ -1178,7 +1226,7 @@ export class AccountPoolCore<
     const eligible = data.accounts.filter((account) => this.isEligible(account, now, excludeIds))
     if (eligible.length === 0) throw this.allUnavailableError(data, now)
 
-    const selected = this.selectAccount(eligible, data)
+    const selected = this.selectAccount(eligible, data, selection)
 
     let refreshed: TAccount
     try {
@@ -1194,7 +1242,9 @@ export class AccountPoolCore<
       // row deleted mid-request is nobody's problem: either way, another account
       // may still be able to serve this request.
       if (await this.hasAnotherAvailableAccount(nextExclude)) {
-        return this.getEffectiveAccount(nextExclude, fetchFn, forceRefresh, options)
+        // The same preference travels with the retry: falling back to another
+        // account must still prefer the next warm one over a cold one.
+        return this.getEffectiveAccount(nextExclude, fetchFn, forceRefresh, options, selection)
       }
       throw error
     }

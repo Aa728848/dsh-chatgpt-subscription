@@ -51,6 +51,19 @@ export interface KimiCodeSessionCacheRecord {
   /** Cause attributed to the most recent request's prefix break, when there was one. */
   lastDrift?: string
   /**
+   * Prompt tokens of this conversation's FIRST request that came from cache.
+   *
+   * The only measurement of cross-session inheritance: a brand-new conversation
+   * can read a prefix another conversation wrote minutes earlier, because the
+   * service matches the cache by content rather than by conversation. Written
+   * once, when the first request closes, and never rewritten — later turns pile
+   * up their own reads and would drown the one number that answers "did this
+   * conversation start warm".
+   */
+  firstRequestCachedTokens?: number
+  /** Total prompt tokens that first request carried (cache read + fresh input). */
+  firstRequestPromptTokens?: number
+  /**
    * Consecutive warmup-qualified hits recorded for this session, when non-zero.
    *
    * Optional and only persisted on secondary/explicit state updates so the
@@ -272,6 +285,8 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
   const updatedAt = finite(value.updatedAt)
   if (lastActiveAt === undefined || updatedAt === undefined) return undefined
   const drift = typeof value.lastDrift === 'string' && value.lastDrift !== '' ? value.lastDrift : undefined
+  const firstRequestCachedTokens = nonNegative(value.firstRequestCachedTokens)
+  const firstRequestPromptTokens = nonNegative(value.firstRequestPromptTokens)
   const warmupStreak = count(value.warmupConsecutiveHits)
   const budgetDropped = droppedImageKeys(value.budgetDropped)
   const lastRequestImageBytes = nonNegative(value.lastRequestImageBytes)
@@ -288,6 +303,8 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
     cacheWrite5mTokens: count(value.cacheWrite5mTokens),
     cacheWrite1hTokens: count(value.cacheWrite1hTokens),
     ...(drift === undefined ? {} : { lastDrift: drift }),
+    ...(firstRequestCachedTokens === undefined ? {} : { firstRequestCachedTokens }),
+    ...(firstRequestPromptTokens === undefined ? {} : { firstRequestPromptTokens }),
     ...(warmupStreak > 0 ? { warmupConsecutiveHits: warmupStreak } : {}),
     ...(budgetDropped.length > 0 ? { budgetDropped } : {}),
     ...(lastRequestImageBytes === undefined ? {} : { lastRequestImageBytes }),

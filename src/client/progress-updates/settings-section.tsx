@@ -152,6 +152,17 @@ function CacheWaitWarmupMark(): ReactNode {
   )
 }
 
+/** 账号缓存亲和那一行的标记：号池两层里靠上的那层带勾（优先用缓存还热的账号）。 */
+function CacheAffinityMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="3.8" width="13" height="5" rx="1.6" />
+      <rect x="3.5" y="11.2" width="13" height="5" rx="1.6" />
+      <path d="m6.2 6.3 1.2 1.2 2.1-2.3" />
+    </svg>
+  )
+}
+
 /** 计划模式管线那一行的标记：一份带勾的计划（计划先出、再交审批）。 */
 function PlanModeMark(): ReactNode {
   return (
@@ -262,7 +273,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'planModePipeline' | 'dispatchExecutionGuard' | 'teamPolicyCacheGuard', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'teamPolicyCacheGuard', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -271,6 +282,9 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   const cacheWarmup = value.cacheWarmup !== false
   const retrieval = value.cacheWarmupRetrieval !== false
   const cacheWaitWarmup = value.cacheWaitWarmup !== false
+  // 缺键 = 开：宿主 schema 上是 default(true)，老配置没有这个键时界面必须同样读成开，
+  // 否则用户看到的是关着、而号池其实照旧按缓存亲和选账号。
+  const cacheAffinity = value.cacheAffinity !== false
   // 缺键 = 开：宿主 schema 上是 `default(true)`，老配置没有这个键时界面必须同样
   // 读成开，否则用户看到的是关着、而调度模式其实照旧自动进计划模式。
   const planModePipeline = value.planModePipeline !== false
@@ -300,7 +314,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'planModePipeline' | 'dispatchExecutionGuard' | 'teamPolicyCacheGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'teamPolicyCacheGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -441,6 +455,27 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             data-dsh-part="settings-cache-wait-warmup-switch"
             disabled={!writable}
             onClick={() => { write('cacheWaitWarmup', 'cacheWaitWarmup', !cacheWaitWarmup) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-cache-affinity"
+          brand="#1f7a52"
+          mark={<CacheAffinityMark />}
+          name={translate('settingsCacheAffinityName')}
+          note={failure?.row === 'cacheAffinity' ? failure.text : translate('settingsCacheAffinityNote')}
+          danger={failure?.row === 'cacheAffinity'}
+          enabled={cacheAffinity}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={cacheAffinity}
+            aria-label={translate('settingsCacheAffinityName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-cache-affinity-switch"
+            disabled={!writable}
+            onClick={() => { write('cacheAffinity', 'cacheAffinity', !cacheAffinity) }}
           />
         </CardRow>
 

@@ -46,6 +46,7 @@ import { kimiCodeModelDef } from './model-catalog.ts'
 import { CACHE_TTL_MS, markSessionActive } from './cache-hint.ts'
 import {
   buildModelOptions,
+  cachedQuotaFor,
   clearCachedCatalog,
   dynamicToolsForEntry,
   inputModalitiesForEntry,
@@ -182,6 +183,12 @@ import {
   reclassifyInBandResponsesError,
 } from '../common/stream-error.ts'
 import { KimiCodeAccountPool } from './account-pool.ts'
+import type { AccountSelectionHint } from '../common/account-pool.ts'
+import {
+  orderAffinityCandidates,
+  remainingQuotaShare,
+  type AffinityCandidate,
+} from './cache-affinity.ts'
 import { ensureAccessToken, KimiCodeOAuthError, KimiCodeRetryableError, KimiCodeUnauthorizedError } from './oauth.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import type { KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
@@ -818,6 +825,15 @@ export interface KimiCodeAdapterOptions {
    * per account rather than once per turn.
    */
   mediaFiles?: KimiMediaFilesUploader
+  /**
+   * Whether a request may state an account preference from the prefix cache.
+   *
+   * A live getter rather than a captured boolean: the switch is volatile in
+   * settings, and a captured value would keep routing by an answer the user has
+   * already changed. Absent means enabled — the behaviour the routing has when
+   * nothing turns it off.
+   */
+  cacheAffinity?: () => boolean
 }
 
 /**
@@ -1004,24 +1020,86 @@ const NO_COLD_START_GATE: ColdStartGate = {
 }
 
 /**
- * The group of requests that address the same cached prefix.
+ * The prefix identity shared by every account that could answer this request.
  *
  * The service derives its cache from the request content, so two requests with
  * the same model, the same system prompt, the same tool list and the same
- * leading static bootstrap reminders hit the same entry. The region is part of
- * the key because each region is a separate service with a cache of its own.
+ * leading static bootstrap reminders address the same prefix. The region is part
+ * of the identity because each region is a separate service with a cache of its
+ * own.
+ *
+ * This is deliberately NOT the whole story: the cache itself is per ACCOUNT, so
+ * {@link coldStartGroupKey} adds the account that holds it. Keeping the two
+ * apart lets the affinity routing ask "is this prefix warm on that account"
+ * without either side parsing the other's key.
  *
  * A request with no system prompt has no prefix worth warming, and gets no
  * group at all.
  *
  * @param region - The region the request will be answered from.
  * @param options - The request about to be sent.
- * @returns The group key, or undefined when the request has no prefix.
+ * @returns The prefix key, or undefined when the request has no prefix.
  */
-export function coldStartGroupKey(region: string, options: NormalizedGenerateOptions): string | undefined {
+export function prefixGroupKey(region: string, options: NormalizedGenerateOptions): string | undefined {
   const { systemPromptHash, toolsHash, staticPrefixHash } = prefixFingerprints(options)
   if (systemPromptHash === null) return undefined
   return `${region}:${options.model}:${systemPromptHash}:${toolsHash ?? 'none'}${staticPrefixHash ? ':' + staticPrefixHash : ''}`
+}
+
+/**
+ * Separates a prefix key from the account holding it.
+ *
+ * A character no account scope can contain: pool ids are ids and the legacy
+ * single-credential scope is a user id or a constant, so `|` keeps the two
+ * halves unambiguous without escaping.
+ */
+const GROUP_ACCOUNT_SEPARATOR = '|'
+
+/**
+ * The group of requests that address the same cached prefix ON ONE ACCOUNT.
+ *
+ * The prefix identity comes from {@link prefixGroupKey}; the account is part of
+ * the group because the service keeps one cache per account. Leaving it out made
+ * the plugin claim "this prefix is warm" after an account other than the one
+ * about to be used had warmed it — the followers then waited out the cold-start
+ * budget for a request that was never going to hit.
+ *
+ * @param region - The region the request will be answered from.
+ * @param options - The request about to be sent.
+ * @param accountScope - The account that holds the cache this request addresses.
+ * @returns The group key, or undefined when the request has no prefix.
+ */
+export function coldStartGroupKey(
+  region: string,
+  options: NormalizedGenerateOptions,
+  accountScope: string,
+): string | undefined {
+  const prefix = prefixGroupKey(region, options)
+  return prefix === undefined ? undefined : `${prefix}${GROUP_ACCOUNT_SEPARATOR}${accountScope}`
+}
+
+/**
+ * Whether one account's cache for this prefix is still warm.
+ *
+ * The same fact the cold-start gate uses, exposed to the affinity routing so
+ * both act on one definition of "warm" instead of two that can drift.
+ *
+ * @param region - Region that account's request would be answered from.
+ * @param options - The request about to be sent.
+ * @param accountScope - The account being considered.
+ * @param now - Current time, epoch ms (test seam).
+ * @returns whether that account's entry for this prefix can still be read back.
+ */
+export function isWarmPrefixGroup(
+  region: string,
+  options: NormalizedGenerateOptions,
+  accountScope: string,
+  now: number = Date.now(),
+): boolean {
+  const groupKey = coldStartGroupKey(region, options, accountScope)
+  if (groupKey === undefined) return false
+  const warmedAt = warmPrefixTimestamps.get(groupKey)
+  return warmedAt !== undefined && now - warmedAt < CACHE_TTL_MS
 }
 
 /**
@@ -1253,6 +1331,22 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
   const liveDropped = imageBudget?.droppedImages ?? 0
   const lastRequestImageBytes = liveBytes > 0 ? liveBytes : priorRecord?.lastRequestImageBytes
   const lastDroppedImages = liveDropped > 0 ? liveDropped : priorRecord?.lastDroppedImages
+  // The opening inheritance is measured exactly once, on the turn whose request
+  // was the conversation's first: it answers "did this conversation start warm",
+  // and a later turn copying its own numbers over it would erase the only answer.
+  const firstRequest = stats.requests === 1
+    ? {
+        firstRequestCachedTokens: state.cacheReadTokens,
+        firstRequestPromptTokens: state.cacheReadTokens + state.inputTokens,
+      }
+    : {
+        ...(priorRecord?.firstRequestCachedTokens === undefined
+          ? {}
+          : { firstRequestCachedTokens: priorRecord.firstRequestCachedTokens }),
+        ...(priorRecord?.firstRequestPromptTokens === undefined
+          ? {}
+          : { firstRequestPromptTokens: priorRecord.firstRequestPromptTokens }),
+      }
   sessionCacheState.write(sessionId, {
     lastActiveAt: now,
     totalTokens: state.cacheReadTokens + state.inputTokens,
@@ -1267,6 +1361,7 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
     ...(budgetDropped === undefined ? {} : { budgetDropped }),
     ...(lastRequestImageBytes === undefined ? {} : { lastRequestImageBytes }),
     ...(lastDroppedImages === undefined ? {} : { lastDroppedImages }),
+    ...firstRequest,
     updatedAt: now,
   })
   // Observation only: hand the cache-warmup registry the same numbers this
@@ -1410,6 +1505,82 @@ export class KimiCodeAdapter extends LlmAdapter {
 
   private settings() {
     return this.preferences ? Promise.resolve(this.preferences.status()) : this.modelSettings.read()
+  }
+
+  /** Whether this deployment routes by warm prefix cache; on unless switched off. */
+  private cacheAffinityEnabled(): boolean {
+    try {
+      return this.options.cacheAffinity?.() !== false
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * Which accounts this request would rather be served by, when the prefix cache
+   * can say something useful about it.
+   *
+   * The service keeps one prefix cache per account, so rotation — which knows
+   * cooldowns, tokens and last use, never prompt content — can spend a request on
+   * an account that has never seen this prompt while another one has it hot. Both
+   * facts needed to do better are already in this process: the cold-start gate
+   * records which (prefix, account) pairs are warm, and the quota cache says how
+   * much each account has left.
+   *
+   * Returns undefined — no preference at all — wherever a preference would be a
+   * guess: the switch is off, there is no pool or only one account, the pool
+   * document cannot be read, a region cannot be resolved, or no account has this
+   * prefix warm. The pool then applies its rotation strategy exactly as it would
+   * have without this method.
+   *
+   * @param pool - The account pool serving this route, or null when none is installed.
+   * @param options - The request about to be sent; its system prompt, tools and
+   *   static bootstrap are what decide the prefix identity.
+   * @returns a preference for the pool, or undefined for "strategy decides".
+   */
+  private async cacheAffinityHint(
+    pool: KimiCodeAccountPool | null,
+    options: NormalizedGenerateOptions,
+  ): Promise<AccountSelectionHint | undefined> {
+    if (pool === null || !this.cacheAffinityEnabled()) return undefined
+    let scopes: Array<{ id: string; region: KimiCodeRegion | null }>
+    try {
+      scopes = await pool.accountScopes()
+    } catch {
+      // A pool document that cannot be read must never be the reason a request
+      // has no account; the rotation path reports pool problems itself.
+      return undefined
+    }
+    // One account has nothing to prefer, and the check would resolve a region
+    // only to compare a set against itself.
+    if (scopes.length < 2) return undefined
+    // Accounts issued in different regions are answered by different services,
+    // each with its own cache, so the fallback is resolved at most once and only
+    // when some account did not state a region of its own.
+    let fallbackRegion: KimiCodeRegion | null = null
+    if (scopes.some((scope) => scope.region === null)) {
+      try {
+        fallbackRegion = await resolveRegion()
+      } catch {
+        fallbackRegion = null
+      }
+    }
+    const candidates: AffinityCandidate[] = []
+    for (const scope of scopes) {
+      const region = scope.region ?? fallbackRegion
+      if (region === null) continue
+      if (!isWarmPrefixGroup(region, options, scope.id)) continue
+      candidates.push({ id: scope.id, warm: true })
+    }
+    if (candidates.length === 0) return undefined
+    // Quota is read only for candidates that are actually warm: a cold account
+    // cannot be preferred whatever its window says.
+    const remainingShareById: Record<string, number | null> = {}
+    for (const candidate of candidates) {
+      remainingShareById[candidate.id] = remainingQuotaShare(cachedQuotaFor(candidate.id))
+    }
+    const preferAccountIds = orderAffinityCandidates({ candidates, remainingShareById })
+    return preferAccountIds.length === 0 ? undefined : { preferAccountIds }
   }
 
   /**
@@ -1788,6 +1959,14 @@ export class KimiCodeAdapter extends LlmAdapter {
 
     const pool = this.accountPool
     const tried = new Set<string>()
+    // This request's account preference, computed once instead of per rotation
+    // attempt: a warm prefix only ever narrows as `tried` grows, and the pool
+    // skips tried ids itself, so recomputing would spend quota reads to learn
+    // the same answer.
+    // The side-channel title request borrows the conversation's identity but not
+    // its prefix, so it has no account preference worth computing (and the pool
+    // read behind it would be spent for an answer nobody can use).
+    const affinity = sideChannel ? undefined : await this.cacheAffinityHint(pool, requestOptions)
     // Hoisted out of the rotation loop so the account that actually served the
     // response is still in scope when the stream closes and files its usage, and
     // when a failure reported inside the stream takes that account out of
@@ -1823,7 +2002,7 @@ export class KimiCodeAdapter extends LlmAdapter {
           // path above: the harness owns this request's retry budget.
           effective = await pool.getEffectiveCredential(tried, fetchFn, {
             maxAttempts: MODEL_REFRESH_MAX_ATTEMPTS,
-          })
+          }, affinity)
         } catch (error) {
           throw credentialFailure(error, signal)
         }
@@ -1955,7 +2134,7 @@ export class KimiCodeAdapter extends LlmAdapter {
           if (signal.aborted) throw new LlmError('Kimi Code request aborted', 'ABORTED')
         }
       }
-      const coldGroupKey = sideChannel ? undefined : coldStartGroupKey(region, requestOptions)
+      const coldGroupKey = sideChannel ? undefined : coldStartGroupKey(region, requestOptions, accountScope)
       const coldGate = coldGroupKey === undefined
         ? undefined
         : await acquireColdStartWarmup(coldGroupKey, signal)

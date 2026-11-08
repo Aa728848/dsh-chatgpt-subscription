@@ -267,6 +267,51 @@ describe('kimi-code K3.1 Pro card', () => {
     expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe('0')
   })
 
+
+  it('draws the opening inheritance with the tokens it was measured on', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 9,
+        cachedTokens: 30_000,
+        freshTokens: 1_000,
+        outputTokens: 400,
+        hitRatio: 30_000 / 31_000,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        opening: { cachedTokens: 14_080, promptTokens: 21_527, hitRatio: 14_080 / 21_527 },
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const openingRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheOpening)
+    expect(openingRow).toBeDefined()
+    // Both token counts and the ratio read off the first request's own numbers,
+    // not off the rolling totals beside them.
+    expect(openingRow!.querySelector('.dsha-value')?.textContent).toBe(
+      zh.cacheOpeningValue
+        .replace('{cached}', (14_080).toLocaleString())
+        .replace('{tokens}', (21_527).toLocaleString())
+        .replace('{ratio}', `${((14_080 / 21_527) * 100).toFixed(1)}%`),
+    )
+  })
+
+  it('omits the opening row for a conversation that predates the measurement', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 4,
+        cachedTokens: 1_000,
+        freshTokens: 250,
+        outputTokens: 90,
+        hitRatio: 0.8,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    expect(rows.some((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheOpening)).toBe(false)
+  })
+
   it('renders the cache warmup budget row when warmup status is reported', async () => {
     const node = await mount(status({
       cache: {

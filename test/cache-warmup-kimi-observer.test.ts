@@ -226,7 +226,9 @@ describe('the Kimi cache-warmup observation', () => {
     // The whole record, field for field: the observation added a call, not a
     // change to what was already being filed. `lastDrift` is present because the
     // mapper attributes a cause to EVERY request — this one is a session's first,
-    // so it carries 'first-request' rather than a real prefix break.
+    // so it carries 'first-request' rather than a real prefix break. The two
+    // `firstRequest*` fields are this turn's own opening measurement: a first
+    // request IS the opening, so they are written with it.
     expect(writeSpy.mock.calls[0]).toEqual([session, {
       lastActiveAt: expect.any(Number),
       totalTokens: 400,
@@ -238,6 +240,8 @@ describe('the Kimi cache-warmup observation', () => {
       cacheWrite5mTokens: 0,
       cacheWrite1hTokens: 0,
       lastDrift: 'first-request',
+      firstRequestCachedTokens: 300,
+      firstRequestPromptTokens: 400,
       updatedAt: expect.any(Number),
     }])
 

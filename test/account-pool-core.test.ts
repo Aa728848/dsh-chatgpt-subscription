@@ -216,6 +216,59 @@ describe('AccountPoolCore', () => {
     expect((await pool.getEffectiveAccount()).account.id).toBe(a2.id)
   })
 
+  it('lets a request preference outrank the rotation strategy without overriding a pin', async () => {
+    let pinned: string | null = null
+    const pool = build({ preferAccountId: () => pinned })
+    const a1 = await pool.addAccount(makeCredential(1), '账号1')
+    const a2 = await pool.addAccount(makeCredential(2), '账号2')
+    await pool.setPrimary(a1.id)
+
+    // Sequential would serve the primary; this request prefers the other one.
+    expect((await pool.getEffectiveAccount(undefined, fetch, false, undefined, {
+      preferAccountIds: [a2.id],
+    })).account.id).toBe(a2.id)
+
+    // A pin is a standing user decision about which account may be spent, so it
+    // still wins: the hint only says which one would answer THIS request cheaper.
+    pinned = a1.id
+    expect((await pool.getEffectiveAccount(undefined, fetch, false, undefined, {
+      preferAccountIds: [a2.id],
+    })).account.id).toBe(a1.id)
+  })
+
+  it('skips a preferred account that cannot serve the request and falls back to the strategy', async () => {
+    const pool = build()
+    const a1 = await pool.addAccount(makeCredential(1), '账号1')
+    const a2 = await pool.addAccount(makeCredential(2), '账号2')
+    await pool.setPrimary(a1.id)
+    await pool.markCooldown(a2.id, 600_000, '429')
+
+    // a2 is preferred but cooling down: the strategy's primary serves instead of
+    // the request failing on a hint that could not be honoured.
+    expect((await pool.getEffectiveAccount(undefined, fetch, false, undefined, {
+      preferAccountIds: [a2.id],
+    })).account.id).toBe(a1.id)
+
+    // An id already tried for this request is skipped the same way.
+    expect((await pool.getEffectiveAccount(new Set([a2.id]), fetch, false, undefined, {
+      preferAccountIds: [a2.id],
+    })).account.id).toBe(a1.id)
+  })
+
+  it('treats a preference naming no eligible account as no preference at all', async () => {
+    const pool = build()
+    const a1 = await pool.addAccount(makeCredential(1), '账号1')
+    await pool.addAccount(makeCredential(2), '账号2')
+    await pool.setPrimary(a1.id)
+
+    expect((await pool.getEffectiveAccount(undefined, fetch, false, undefined, {
+      preferAccountIds: ['missing'],
+    })).account.id).toBe(a1.id)
+    expect((await pool.getEffectiveAccount(undefined, fetch, false, undefined, {
+      preferAccountIds: [],
+    })).account.id).toBe(a1.id)
+  })
+
   it('raises a RATE_LIMIT error naming the provider when every account is cooling down', async () => {
     const pool = build()
     const a1 = await pool.addAccount(makeCredential(1), '账号1')

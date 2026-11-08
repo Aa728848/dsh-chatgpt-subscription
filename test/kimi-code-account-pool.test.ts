@@ -127,6 +127,24 @@ afterEach(() => {
 })
 
 describe('KimiCodeAccountPool', () => {
+
+  it('exposes account ids and regions for routing without leaking any credential', async () => {
+    const { pool } = harness()
+    await pool.addAccount(credential(1), '账号1')
+    await pool.addAccount(credential(2), '账号2')
+
+    const scopes = await pool.accountScopes()
+    expect(scopes.map((scope) => scope.region)).toEqual(['mainland-cn', 'mainland-cn'])
+    expect(scopes).toHaveLength(2)
+    // The projection is deliberately two fields wide: tokens must never travel
+    // out of the pool, not even to a caller inside this process.
+    for (const scope of scopes) {
+      expect(Object.keys(scope).sort()).toEqual(['id', 'region'])
+    }
+    expect(JSON.stringify(scopes)).not.toContain('at-1')
+    expect(JSON.stringify(scopes)).not.toContain('rt-1')
+  })
+
   it('projects the pre-pool credential as the primary account without writing', async () => {
     const { pool, poolBackend } = harness({ mirror: credential(1) })
     const save = vi.spyOn(poolBackend, 'save')

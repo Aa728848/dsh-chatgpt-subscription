@@ -638,6 +638,24 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
                 <span className="dsha-value">{driftLabel(status.cache.lastDrift, t)}</span>
               </div>
             )}
+            {/* How much of the FIRST request already came out of cache. It sits
+                beside the drift row because it answers the neighbouring
+                question: drift says whether the prefix held, this says whether
+                the conversation started warm at all — the only visible trace of
+                a prefix inherited from another conversation on the same
+                account. Absent for a conversation whose first request predates
+                this measurement. */}
+            {status.cache.opening !== undefined && (
+              <div className="dsha-row">
+                <span className="dsha-label">{t.cacheOpening}</span>
+                <span className="dsha-value">
+                  {t.cacheOpeningValue
+                    .replace('{cached}', status.cache.opening.cachedTokens.toLocaleString())
+                    .replace('{tokens}', status.cache.opening.promptTokens.toLocaleString())
+                    .replace('{ratio}', `${(status.cache.opening.hitRatio * 100).toFixed(1)}%`)}
+                </span>
+              </div>
+            )}
             {/* The write side gets its own row rather than a slot in the meter:
                 a write is billed separately from a fresh prompt token, and
                 folding it into the fresh count would make the hit ratio above

@@ -113,6 +113,8 @@ export const dictionary: Record<KimiCodeLocaleKey, string> = {
   unknownMetric: 'нет данных',
   cacheExpired: 'Сессия простаивала дольше времени жизни кеша, поэтому следующий ход заново обработает около {tokens} токенов.',
   cacheDrift: 'Состояние последнего префикса',
+  cacheOpening: 'Наследование на старте',
+  cacheOpeningValue: '{cached} / {tokens} ток. ({ratio})',
   cacheDriftFirst: 'Первый запрос (кеш пуст)',
   cacheDriftStable: 'Стабильно (префикс не менялся)',
   cacheDriftSystemPrompt: 'Системный промпт изменился (кеш сброшен)',

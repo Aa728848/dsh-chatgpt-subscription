@@ -293,6 +293,27 @@ function warmupStatusOf(sessionId?: string): KimiCodeCacheStatsDto['warmup'] {
   }
 }
 
+/**
+ * How much of this conversation's first prompt was served from cache.
+ *
+ * Read from the durable record on BOTH paths, because the in-memory totals carry
+ * rolling sums only: the first request's own numbers exist exactly once, at the
+ * turn that closed it, and the record is where the adapter filed them. A record
+ * written before this field existed simply has nothing to say, which is the
+ * honest answer for a conversation that started under an older build.
+ */
+function openingInheritanceOf(sessionId?: string): KimiCodeCacheStatsDto['opening'] {
+  const durable = sessionCacheState.read(sessionId)
+  const cachedTokens = durable?.firstRequestCachedTokens
+  const promptTokens = durable?.firstRequestPromptTokens
+  if (cachedTokens === undefined || promptTokens === undefined || promptTokens <= 0) return undefined
+  return {
+    cachedTokens,
+    promptTokens,
+    hitRatio: Math.min(1, Math.max(0, cachedTokens / promptTokens)),
+  }
+}
+
 function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   const stats = getCacheStats(sessionId)
   // A process that just started has no totals, and answering "nothing yet" for
@@ -301,10 +322,12 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   if (stats.requests === 0) return durableCacheStats(sessionId)
   const lastDrift = getLastDriftCause(sessionId)
   const warmup = warmupStatusOf(sessionId)
+  const opening = openingInheritanceOf(sessionId)
   return {
     ...stats,
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(warmup === undefined ? {} : { warmup }),
+    ...(opening === undefined ? {} : { opening }),
     // What the image budget did on the last turn, next to the ceiling it
     // enforces: a card that shows the budget without showing what it cost
     // cannot say whether the conversation is close to losing a picture.
@@ -365,6 +388,7 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
   if (durable === undefined || durable.requests === 0) return null
   const lastDrift = driftCauseOf(durable.lastDrift)
   const warmup = warmupStatusOf(sessionId)
+  const opening = openingInheritanceOf(sessionId)
   return {
     requests: durable.requests,
     cachedTokens: durable.cachedTokens,
@@ -376,6 +400,7 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
     cacheWrite1hTokens: durable.cacheWrite1hTokens,
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(warmup === undefined ? {} : { warmup }),
+    ...(opening === undefined ? {} : { opening }),
     imageBudget: imageBudgetOf(sessionId),
   }
 }

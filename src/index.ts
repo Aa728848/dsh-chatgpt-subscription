@@ -226,6 +226,10 @@ import {
   type KimiCacheWaitContext,
 } from './host/kimi-code/cache-wait.ts'
 import {
+  CACHE_AFFINITY_SETTING_DESCRIPTION,
+  resolveCacheAffinityEnabled,
+} from './host/kimi-code/cache-affinity.ts'
+import {
   CACHE_WARMUP_SETTING_DESCRIPTION,
   CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION,
   resolveCacheWarmupSettings,
@@ -340,6 +344,11 @@ export interface Config {
    * 过期重建。默认开启。
    */
   cacheWaitWarmup?: Volatile<boolean>
+  /**
+   * 「账号缓存亲和」开关：Kimi Code 号池在轮换时优先选「这条前缀的缓存还热着」
+   * 的账号，前提是该账号剩余额度不低于 20%。默认开启；关闭后完全按原轮换策略。
+   */
+  cacheAffinity?: Volatile<boolean>
   /** Independent web fetch selection; auto preserves proxy/search-driven selection.
    * Plugin mode uses the plugin destination policy, not DSH DNS pinning, even without a proxy. */
   fetchProvider?: 'auto' | 'plugin' | 'dsh'
@@ -462,6 +471,8 @@ export interface ConfigInput {
   cacheWarmupRetrieval?: boolean
   /** 「等待缓存续热」开关（默认开启；等待子代理期间每 20 分钟持续触发续热）。 */
   cacheWaitWarmup?: boolean
+  /** 「账号缓存亲和」开关（默认开启；轮换优先选前缀缓存还热的账号）。 */
+  cacheAffinity?: boolean
   /** Idle budget for one Codex Responses stream, in milliseconds. */
   codexStreamIdleTimeoutMs?: number
   /**
@@ -526,6 +537,11 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description(CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION),
   cacheWaitWarmup: z.boolean().default(true).volatile()
     .description(CACHE_WAIT_WARMUP_SETTING_DESCRIPTION),
+  // 多账号轮换与缓存亲和的取舍：热账号能直接继承前缀，额度更足的账号能让会话跑得
+  // 更久。默认开启并要求剩余额度不低于 20%，把「为了省一次 prefix 而把一个窗口提前
+  // 打穿」这条路堵住；volatile，设置保存即生效，无需重挂。
+  cacheAffinity: z.boolean().default(true).volatile()
+    .description(CACHE_AFFINITY_SETTING_DESCRIPTION),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
@@ -1054,7 +1070,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       kimiCodeStore,
       kimiCodeModelSettings,
       kimiCodePreferences,
-      { fetchFn: modelFetch['kimi-code'], attachments: ctx.attachments, videos: kimiVideos },
+      {
+        fetchFn: modelFetch['kimi-code'],
+        attachments: ctx.attachments,
+        videos: kimiVideos,
+        // Live getter: the switch is volatile in settings, so a captured value
+        // would keep routing by an answer the user has already changed.
+        cacheAffinity: () => resolveCacheAffinityEnabled(pluginConfig, process.env),
+      },
       kimiCodeAccountPool,
     )
     const kimiCodeClaim = claimProviderRoute(ctx, {

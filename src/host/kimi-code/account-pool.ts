@@ -5,6 +5,7 @@ import {
   normalizeRotationStrategy,
   type AccountPoolHooks,
   type AccountPoolRefreshOptions,
+  type AccountSelectionHint,
   type PoolAccountShape,
   type PoolData,
 } from '../common/account-pool.ts'
@@ -306,13 +307,35 @@ export class KimiCodeAccountPool extends AccountPoolCore<
    *
    * The returned credential carries its own region, OAuth host and base URL, so
    * the caller must use those rather than the process-wide defaults.
+   *
+   * @param selection - this request's own preference, used by the cache-affinity
+   *   routing to put an account whose prefix cache is still warm first. Absent
+   *   means the rotation strategy decides alone.
    */
   async getEffectiveCredential(
     excludeIds?: ReadonlySet<string>,
     fetchFn: typeof fetch = fetch,
     options?: AccountPoolRefreshOptions,
+    selection?: AccountSelectionHint,
   ): Promise<{ account: KimiCodePoolAccount; credentials: KimiCodeCredentials }> {
-    return this.getEffectiveAccount(excludeIds, fetchFn, false, options)
+    return this.getEffectiveAccount(excludeIds, fetchFn, false, options, selection)
+  }
+
+  /**
+   * Every pooled account's id with the region that decides its prefix group.
+   *
+   * The cache-affinity routing needs exactly two facts per account — which one
+   * it is, and which regional service answers it, because each region keeps its
+   * own prefix cache — and nothing else. Deliberately a narrow projection over
+   * the pool document rather than a credential read: tokens never leave the
+   * pool, and nothing here can be mistaken for a credential accessor.
+   */
+  async accountScopes(): Promise<Array<{ id: string; region: KimiCodeRegion | null }>> {
+    const data = await this.read()
+    return data.accounts.map((account) => ({
+      id: account.id,
+      region: account.region ?? account.credentials.region ?? null,
+    }))
   }
 
   /** The pre-pool credential file this pool mirrors its primary account into. */
