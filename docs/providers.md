@@ -177,7 +177,7 @@
   - 严格遵循 K3 规范：思考档位仅发模型声明集合（`low` / `high` / `max`；`k3.1-pro` 系列强制开启思考），开启思考时历史 assistant 消息必带 `reasoning_content`，不发 `temperature`，`stop` 裁剪至 ≤5 条且每条 ≤32 字节；
   - 支持 `k3` 消息级动态工具声明（`dynamically_loaded_tools`），并在工具调用批次未闭合前自动缓冲中途插入的系统/用户消息，杜绝工具结果乱序 400；
   - 支持视频输入（`k3`、`kimi-for-coding`、`k3.1-pro` 系列）并注册 `kimi_attach_video` 工具（视频预算 48 MiB base64）；
-  - **粘性双水位图片预算**：默认 20 MiB 高水位 / 10 MiB 低水位（`DSH_KIMI_CODE_MAX_IMAGE_BYTES` 可覆盖），已淘汰旧图持久化记录，避免后续轮次反复重算打断前缀缓存；
+  - **粘性双水位内联图片预算**：默认 20 MiB 高水位 / 10 MiB 低水位（`DSH_KIMI_CODE_MAX_IMAGE_BYTES` 可覆盖），只计量实际发送的 base64 字节；OpenAI 协议下成功上传的 `ms://` 图片引用不占该预算，上传失败回退为内联时重新计量。已淘汰旧图持久化记录，避免后续轮次反复重算打断前缀缓存；
   - **请求体守卫与自动压缩衔接**：1M 档模型默认上限 **24 MiB**、256K 档默认 **2 MiB**（`DSH_KIMI_CODE_MAX_BODY_BYTES` 可覆盖），超限抛出 `CONTEXT_WINDOW_EXCEEDED` 交由 DSH 自动压缩重试；另支持 `DSH_KIMI_CODE_BYTES_PER_TOKEN` 提前压缩折算；
   - **缓存预热与等待策略**：自动监测约 25 分钟前缀缓存存活窗口，配合 `cache-warmup` 子系统（大结果 `ref://` 预览 + `cache_warmup_result` 精确分页补读）、主代理等待子代理期间的可选轻量续热，以及四段式重复工具调用刹车（`KIMI_CODE_REPEAT_BREAKER`）。
   - **共享化边界**：结果预览与分级重复提醒可覆盖其他受控线路；静态前缀排序和 in-flight 冷启动协调已复用到 Codex、Antigravity、Step、Claude、MiniMax。账号亲和、warm 跳过、等待续热和 hosted media 仍按各线路证据与 `promptCacheOverrides` 启用，Kimi 的 TTL、协议字段和错误词表不向外复制。

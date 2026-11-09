@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
+import { requestInlineImageBytes } from '../src/host/common/request-images.ts'
 import {
   MAX_REQUEST_IMAGE_BYTES,
   REQUEST_IMAGE_MAX_EDGE,
@@ -246,6 +247,41 @@ describe('offloadRequestImagesWithStickyBudget', () => {
     expect(result.droppedCount).toBe(0)
     expect(result.newlyDroppedKeys).toEqual([])
     expect(result.remainingBytes).toBe(400)
+  })
+
+  it('gives hosted references zero inline weight without losing their order', () => {
+    const request = options({
+      messages: [inlineImage('A'.repeat(400)), inlineImage('B'.repeat(400)), inlineImage('C'.repeat(400))],
+    })
+    const hosted = new Set([
+      requestImageKey({ type: 'image', data: 'A'.repeat(400) })!,
+      requestImageKey({ type: 'image', data: 'B'.repeat(400) })!,
+    ])
+    // Without the reference weights this request is 1200 bytes over a 1000-byte
+    // ceiling and loses A/B. Their actual `ms://` form carries neither payload,
+    // so only C's 400 inline bytes remain and no history is rewritten.
+    const result = offloadRequestImagesWithStickyBudget(request, 1_000, 500, undefined, undefined, hosted)
+    expect(result.options).toBe(request)
+    expect(result.newlyDroppedKeys).toEqual([])
+    expect(result.remainingBytes).toBe(400)
+    expect(requestInlineImageBytes(request, undefined, hosted)).toBe(400)
+    expect(requestInlineImageBytes(request)).toBe(1_200)
+  })
+
+  it('does not resurrect a sticky omission when that image later has a reference', () => {
+    const request = options({ messages: [inlineImage('A'.repeat(400)), inlineImage('B'.repeat(400))] })
+    const keyA = requestImageKey({ type: 'image', data: 'A'.repeat(400) })!
+    const result = offloadRequestImagesWithStickyBudget(
+      request,
+      1_000,
+      500,
+      undefined,
+      new Set([keyA]),
+      new Set([keyA]),
+    )
+    expect(result.newlyDroppedKeys).toEqual([])
+    expect(result.droppedCount).toBe(1)
+    expect(imageBlocksOf(result.options)).toEqual({ images: 1, omitted: 1 })
   })
 
   it('trims the oldest images back under the low mark', () => {

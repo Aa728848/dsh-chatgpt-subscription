@@ -413,6 +413,27 @@ function collectImageOccurrences(
 }
 
 /**
+ * Inline base64 bytes one request actually carries.
+ *
+ * `inlineExcludedKeys` names occurrences serialized as hosted references on
+ * this build. Their original resolution still supplies the identity, but the
+ * reference—not the base64 payload—is what goes on the wire, so those bytes
+ * must not be reported as request image usage.
+ */
+export function requestInlineImageBytes(
+  options: GenerateOptions,
+  images?: ResolvedRequestImages,
+  inlineExcludedKeys?: ReadonlySet<string>,
+): number {
+  let total = 0
+  for (const occurrence of collectImageOccurrences(options, images)) {
+    if (inlineExcludedKeys?.has(occurrence.key)) continue
+    total += occurrence.bytes
+  }
+  return total
+}
+
+/**
  * The identities of the images one request still carries, each once.
  *
  * The caller compares two of these to learn what a later build gave back: the
@@ -524,6 +545,9 @@ export interface StickyImageOffloadResult {
  * @param lowBytes - low-water mark; the trimming stops once the request is back under it.
  * @param images - the resolution the request will be sent with.
  * @param priorDroppedKeys - identities dropped by earlier turns.
+ * @param inlineExcludedKeys - identities whose actual wire form is a hosted
+ * reference rather than inline bytes. They stay in request order with a zero
+ * byte weight; only genuinely inline images consume this budget.
  */
 export function offloadRequestImagesWithStickyBudget(
   options: GenerateOptions,
@@ -531,14 +555,18 @@ export function offloadRequestImagesWithStickyBudget(
   lowBytes: number = Math.max(1, Math.floor(maxBytes / 2)),
   images?: ResolvedRequestImages,
   priorDroppedKeys?: ReadonlySet<string>,
+  inlineExcludedKeys?: ReadonlySet<string>,
 ): StickyImageOffloadResult {
   const allDroppedKeys = new Set<string>(priorDroppedKeys ?? [])
   // Only the images that are still candidates are budgeted: a picture dropped
-  // by an earlier turn is replaced below and never carries bytes again.
+  // by an earlier turn is replaced below and never carries bytes again. A
+  // hosted reference also carries no inline bytes, but retaining its zero-byte
+  // entry preserves the request order of the inline images around it.
   const pending = new Map<string, number>()
   for (const occurrence of collectImageOccurrences(options, images)) {
     if (allDroppedKeys.has(occurrence.key)) continue
-    pending.set(occurrence.key, (pending.get(occurrence.key) ?? 0) + occurrence.bytes)
+    const bytes = inlineExcludedKeys?.has(occurrence.key) ? 0 : occurrence.bytes
+    pending.set(occurrence.key, (pending.get(occurrence.key) ?? 0) + bytes)
   }
   let total = 0
   for (const bytes of pending.values()) total += bytes

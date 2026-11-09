@@ -110,6 +110,7 @@ import {
   offloadRequestImagesWithStickyBudget,
   replaceOldestRequestImages,
   requestHasSendableImage,
+  requestInlineImageBytes,
   requestImagePayloadLengths,
   requestImageTarget,
   MAX_MESSAGE_BODY_BYTES,
@@ -1601,6 +1602,28 @@ export class KimiCodeAdapter extends LlmAdapter {
         signal,
         KIMI_CODE_REQUEST_IMAGE_MAX_EDGE,
       )
+    const settings = await this.settings()
+    const modalities = inputModalitiesForEntry(options.model, catalog)
+    /**
+     * Which readable image occurrences the reference path would cover.
+     *
+     * Planned BEFORE the image budget: a durable image this OpenAI request will
+     * cite as `ms://` carries no inline base64 bytes, exactly as in Kimi's own
+     * media resolver. Nothing is uploaded here; the actual references are still
+     * checked after upload so a failed upload cannot escape the inline budget.
+     * Videos stay out of this early plan: their own oldest-first pass runs
+     * before their bytes are read, just as it did before this change.
+     */
+    const plannedImages = planMediaReferences({
+      wire,
+      imageAccepted: modalities.includes('image'),
+      videoAccepted: false,
+      images,
+      videos: new Map(),
+    })
+    const plannedInlineImageKeys = new Set(
+      plannedImages.map((item) => `attachment:${item.attachmentId}`),
+    )
     // The image budget is STICKY: a picture the budget gave back stays given
     // back for the rest of the conversation, so the retained prefix the service
     // cached stops changing. The identities of the pictures dropped by earlier
@@ -1616,6 +1639,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       lowRequestImageBytes(),
       images,
       priorDroppedKeys,
+      plannedInlineImageKeys,
     )
     const imageTrimmed = stickyOffload.options
     // Recorded BEFORE the body is built, so the prefix attribution names the
@@ -1649,8 +1673,6 @@ export class KimiCodeAdapter extends LlmAdapter {
       ? videoTrimmed
       : { ...videoTrimmed, reasoningEffort: ReasoningEffortId(gatedEffort.effort) }
     const videos = await resolveRequestVideos(requestOptions, this.options.videos, signal)
-    const settings = await this.settings()
-    const modalities = inputModalitiesForEntry(options.model, catalog)
     /**
      * Everything every attempt shares: the media reads and the capability gates.
      *
@@ -1671,13 +1693,14 @@ export class KimiCodeAdapter extends LlmAdapter {
      * be sent; nothing is uploaded, and no network is touched, until that guard
      * has accepted the request (see the rotation loop).
      */
-    const planned = planMediaReferences({
+    const plannedVideos = planMediaReferences({
       wire,
-      imageAccepted: modalities.includes('image'),
+      imageAccepted: false,
       videoAccepted: baseMedia.videoAccepted === true,
-      images,
+      images: new Map(),
       videos,
     })
+    const planned = [...plannedImages, ...plannedVideos]
 
     const contextWindow = this.contextWindowFor(
       options.model,
@@ -1725,15 +1748,18 @@ export class KimiCodeAdapter extends LlmAdapter {
      * references), the real reference build after the upload, and the all-inline
      * rebuild the missing-resource fallback re-sends.
      *
-     * Every call restarts from `boundedOptions`. That is load bearing rather than
-     * tidy: the inline fallback has to re-fit the inline body from scratch and
-     * stay inside the same ceiling instead of inheriting an omission the
-     * reference path made to fit a different, much smaller body.
+     * Calls normally restart from `boundedOptions`; the post-upload pass may
+     * supply the same options after budgeting the images that really stayed
+     * inline. Re-fitting from that baseline is load bearing: the inline fallback
+     * must not inherit an omission made for a different, much smaller body, and
+     * its positional drop loop must not mistake non-contiguous budget omissions
+     * for the oldest remaining images.
      */
     const buildBodyWithinLimit = (
       media: RequestMediaOptions,
+      baseline: NormalizedGenerateOptions = boundedOptions,
     ): { body: string; options: NormalizedGenerateOptions } => {
-      let buildOptions = boundedOptions
+      let buildOptions = baseline
       for (let attempt = 0; ; attempt++) {
         const built = buildRequest(buildOptions, wire, images, undefined, media)
         // The guard returns the serialized body it measured, so the multi-megabyte
@@ -1751,7 +1777,7 @@ export class KimiCodeAdapter extends LlmAdapter {
         // guard answering from the composition alone promises an omission a
         // stalled loop never performed.
         const context = (): BodyFitContext => ({
-          droppedImages: countOmitted(buildOptions, requestOptions, images),
+          droppedImages: countOmitted(buildOptions, baseline, images),
           sendableImagesRemaining: requestImagePayloadLengths(buildOptions, images).length,
           excessBytes: bytes - bodyLimit,
         })
@@ -1759,7 +1785,7 @@ export class KimiCodeAdapter extends LlmAdapter {
           assertRequestBodyFits(built, carriesVideo, context(), bodyLimit)
           throw new Error('unreachable: assertRequestBodyFits returns or throws')
         }
-        const drop = dropOldestImagesUntilFits(buildOptions, images, bytes - bodyLimit, requestOptions)
+        const drop = dropOldestImagesUntilFits(buildOptions, images, bytes - bodyLimit, baseline)
         // Nothing was droppable even though an image is still attached: the images
         // left weigh less than the overflow, so another turn would rebuild the
         // identical body. Stop here instead of spending the attempt budget
@@ -1784,6 +1810,10 @@ export class KimiCodeAdapter extends LlmAdapter {
      */
     let measured: { body: string; options: NormalizedGenerateOptions } | undefined
     let sentBuild: { body: string; options: NormalizedGenerateOptions } | undefined
+    // Actual hosted image references in the build that reached the service.
+    // Planned references are not enough: an upload failure makes those bytes
+    // inline again, and the usage card must describe the build that was sent.
+    let sentImageReferenceKeys: ReadonlySet<string> | undefined
 
     const pool = this.accountPool
     const tried = new Set<string>()
@@ -1911,17 +1941,41 @@ export class KimiCodeAdapter extends LlmAdapter {
       // Rebuilt from the references that really exist, not from the plan: an
       // occurrence whose upload failed is sent inline while its siblings are
       // cited, so one refused clip does not cost the request its images.
+      // Those failed or unuploaded occurrences re-enter the sticky byte budget
+      // here; successful `ms://` references have zero inline weight. Each
+      // account attempt gets its own baseline, so one account's upload failure
+      // cannot drop an image from the next account's otherwise identical build.
+      const imageReferenceKeys = new Set<string>()
+      if (uploads !== undefined) {
+        for (const id of uploads.imageReferences.keys()) imageReferenceKeys.add(`attachment:${id}`)
+      }
+      const postUploadOffload = offloadRequestImagesWithStickyBudget(
+        boundedOptions,
+        maxRequestImageBytes(),
+        lowRequestImageBytes(),
+        images,
+        stickyOffload.allDroppedKeys,
+        imageReferenceKeys,
+      )
+      const finalBaseline: NormalizedGenerateOptions = postUploadOffload.options
+      if (!sideChannel) {
+        markPendingImageOffload(
+          options.sessionId,
+          stickyOffload.newlyDroppedKeys.length + postUploadOffload.newlyDroppedKeys.length,
+        )
+      }
       // When every planned upload was dropped by the budget pass (uploadable is
       // empty while planned was not), or when uploads are absent, the body must
       // not keep the placeholder references from `measured`.
       let finalBuild = uploads === undefined
-        ? (planned.length === 0 ? measured : buildBodyWithinLimit(baseMedia))
+        ? (planned.length === 0 ? measured : buildBodyWithinLimit(baseMedia, finalBaseline))
         : buildBodyWithinLimit({
             ...baseMedia,
             imageReferences: uploads.imageReferences,
             videoReferences: uploads.videoReferences,
-          })
+          }, finalBaseline)
       sentBuild = finalBuild
+      sentImageReferenceKeys = uploads === undefined ? undefined : imageReferenceKeys
       let body = finalBuild.body
 
       const post = async (payload: string): Promise<Response> => {
@@ -2021,8 +2075,23 @@ export class KimiCodeAdapter extends LlmAdapter {
           uploader.forget({ baseUrl: base, accountScope, mediaType: item.mediaType, data: item.data })
         }
         let inlineBuild: { body: string; options: NormalizedGenerateOptions } | undefined
+        // Every formerly cited image is inline on this resend, so none of the
+        // references that were forgotten above may remain budget-exempt.
+        const inlineOffload = offloadRequestImagesWithStickyBudget(
+          boundedOptions,
+          maxRequestImageBytes(),
+          lowRequestImageBytes(),
+          images,
+          stickyOffload.allDroppedKeys,
+        )
+        if (!sideChannel) {
+          markPendingImageOffload(
+            options.sessionId,
+            stickyOffload.newlyDroppedKeys.length + inlineOffload.newlyDroppedKeys.length,
+          )
+        }
         try {
-          inlineBuild = buildBodyWithinLimit(baseMedia)
+          inlineBuild = buildBodyWithinLimit(baseMedia, inlineOffload.options)
         } catch {
           // The inline body cannot fit this ceiling, so the reference path was the
           // only one that could send this request; the 404 is reported as it stands
@@ -2032,6 +2101,7 @@ export class KimiCodeAdapter extends LlmAdapter {
         if (inlineBuild !== undefined) {
           finalBuild = inlineBuild
           sentBuild = inlineBuild
+          sentImageReferenceKeys = undefined
           body = inlineBuild.body
           response = await post(body)
           detail = response.ok ? '' : (await response.text().catch(() => '')).slice(0, 2_000)
@@ -2095,8 +2165,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     // to make the body fit must not come back on the next turn, or the prefix
     // it broke is rebuilt on the turn after that.
     if (sentBuild !== undefined && !sideChannel) {
-      const requestImageBytes = requestImagePayloadLengths(sentBuild.options, images)
-        .reduce((sum, bytes) => sum + bytes, 0)
+      const requestImageBytes = requestInlineImageBytes(sentBuild.options, images, sentImageReferenceKeys)
       const trimmedKeys = new Set(collectRemainingImageKeys(imageTrimmed, images))
       const sentKeys = new Set(collectRemainingImageKeys(sentBuild.options, images))
       const bodyFitDroppedKeys = [...trimmedKeys].filter((key) => !sentKeys.has(key))

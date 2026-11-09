@@ -10,6 +10,7 @@ import {
   type KimiCodeCredentials,
 } from '../src/host/kimi-code/token-store.ts'
 import { clearCachedCatalog } from '../src/host/kimi-code/client.ts'
+import { getSessionImageBudgetStats, resetCacheStats } from '../src/host/kimi-code/mapper.ts'
 import {
   createMediaFilesUploader,
   type KimiMediaFilesUploader,
@@ -488,6 +489,47 @@ describe('a reference the store no longer holds', () => {
     expect(uploads).toHaveLength(2)
   })
 
+  it('re-budgets every image when dead references force an inline resend', async () => {
+    const previousBudget = process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES
+    process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES = '2400000'
+    const session = 'media-dead-reference-inline-budget'
+    try {
+      const dropped = new Uint8Array(1_000_000).fill(7)
+      const kept = new Uint8Array(900_000).fill(9)
+      const { adapter, chats } = await buildAdapter({
+        imageBytes: (attachmentId) => (attachmentId === 'a' ? dropped : kept),
+        upload: (form) => jsonResponse({ id: 'img-' + (form.get('file') as File).size }),
+        chat: () => (chats.length === 1
+          ? jsonResponse({ error: { message: 'The requested resource was not found' } }, 404)
+          : sseResponse()),
+      })
+
+      const chunks = await drain(adapter.stream(generateOptions('k3-256k', {
+        sessionId: session as never,
+        messages: [{ role: 'user', content: [imageBlock('a'), imageBlock('b')] }] as never,
+      })))
+
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish' })
+      expect(chats).toHaveLength(2)
+      expect(imageUrls(lastUserParts(JSON.parse(String(chats[0]!.init.body)) as Record<string, unknown>)))
+        .toEqual(['ms://img-' + dropped.byteLength, 'ms://img-' + kept.byteLength])
+      const resent = JSON.parse(String(chats[1]!.init.body)) as Record<string, unknown>
+      const parts = lastUserParts(resent)
+      expect(imageUrls(parts)).toHaveLength(1)
+      expect(imageUrls(parts)[0]).toMatch(/^data:image\/png;base64,/)
+      expect(JSON.stringify(resent)).toContain('[image omitted')
+      expect(JSON.stringify(resent)).not.toContain('ms://')
+      expect(getSessionImageBudgetStats(session)).toMatchObject({
+        requestImageBytes: 1_200_000,
+        droppedImages: 1,
+      })
+    } finally {
+      resetCacheStats(session)
+      if (previousBudget === undefined) delete process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES
+      else process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES = previousBudget
+    }
+  })
+
   it('does not resend for a 404 that is not the missing-resource sentence', async () => {
     const { adapter, uploads, chats } = await buildAdapter({
       upload: () => jsonResponse({ id: 'file-0' }),
@@ -566,46 +608,84 @@ describe('body fit with references', () => {
     expect(chats).toHaveLength(0)
   })
 
-  it('uploads nothing for a media the body no longer carries, and cites the one it keeps', async () => {
-    // Two ~1 MB images together exceed the route's image budget, so the budget
-    // pass replaces the OLDEST occurrence with a text placeholder before the
-    // request is planned. The plan still lists both readings, so unless the upload
-    // set is read off the FINAL build the dropped one is uploaded under a reference
-    // nothing cites — bytes paid for that no request will ever mention.
-    //
-    // The budget is PINNED for this test. The route's own ceiling is Kimi's 20 MiB
-    // (the official CLI's REQUEST_MEDIA_BUDGET_BYTES), and a test that allocated
-    // twenty megabytes of pixels to reach it would be slow for no gain. The pinned
-    // pair of marks drops exactly the OLDER image: the two images carry 1.33 MB
-    // and 1.20 MB of base64, the ceiling is 2.40 MB and the recovery mark is
-    // 1.20 MB, so the older one goes and the younger one stays.
+  it('does not charge hosted references against the inline image budget', async () => {
+    // The two original payloads would exceed this pinned INLINE ceiling, but
+    // neither base64 string reaches the chat body: both become stable `ms://`
+    // references. Dropping either one here would rewrite the cached prefix for
+    // bytes the request never carries. Kimi's own resolver gives these parts the
+    // same zero inline weight.
     const previousBudget = process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES
     process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES = '2400000'
+    const session = 'media-hosted-zero-inline-weight'
     try {
-      const dropped = new Uint8Array(1_000_000).fill(7)
-      const kept = new Uint8Array(900_000).fill(9)
+      const first = new Uint8Array(1_000_000).fill(7)
+      const second = new Uint8Array(900_000).fill(9)
       const { adapter, uploads, chats } = await buildAdapter({
-        imageBytes: (attachmentId) => (attachmentId === 'a' ? dropped : kept),
-        // The minted id names the payload size, so which occurrence was uploaded is
-        // not a guess: only the surviving one is 900,000 bytes.
+        imageBytes: (attachmentId) => (attachmentId === 'a' ? first : second),
         upload: (form) => jsonResponse({ id: 'img-' + (form.get('file') as File).size }),
         chat: () => sseResponse(),
       })
 
       const chunks = await drain(adapter.stream(generateOptions('k3-256k', {
+        sessionId: session as never,
         messages: [{ role: 'user', content: [imageBlock('a'), imageBlock('b')] }] as never,
       })))
 
       expect(chunks.at(-1)).toMatchObject({ type: 'finish' })
-      // Exactly ONE upload: the occurrence that survived the budget pass.
-      expect(uploads).toHaveLength(1)
+      expect(uploads).toHaveLength(2)
       const body = JSON.parse(String(chats[0]!.init.body)) as Record<string, unknown>
-      expect(imageUrls(lastUserParts(body))).toEqual(['ms://img-' + kept.byteLength])
-      // The dropped occurrence contributes neither a reference nor its bytes.
-      expect(JSON.stringify(body)).not.toContain('data:image')
+      expect(imageUrls(lastUserParts(body))).toEqual([
+        'ms://img-' + first.byteLength,
+        'ms://img-' + second.byteLength,
+      ])
+      expect(JSON.stringify(body)).not.toContain('[image omitted')
+      expect(getSessionImageBudgetStats(session)).toMatchObject({
+        requestImageBytes: 0,
+        droppedImages: 0,
+      })
     } finally {
-      // The pin belongs to THIS test: the next one must see the route's own
-      // ceiling again.
+      resetCacheStats(session)
+      if (previousBudget === undefined) delete process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES
+      else process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES = previousBudget
+    }
+  })
+
+  it('re-budgets an image whose upload failed and therefore stayed inline', async () => {
+    // Same pinned ceiling as the hosted case, now with both uploads refused.
+    // Their 1.33 MB + 1.20 MB base64 payloads really do reach the wire, so the
+    // oldest is omitted to reach the 1.20 MB low-water mark. The successful-
+    // reference exemption must not let this fallback bypass the budget.
+    const previousBudget = process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES
+    process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES = '2400000'
+    const session = 'media-upload-failure-inline-budget'
+    try {
+      const dropped = new Uint8Array(1_000_000).fill(7)
+      const kept = new Uint8Array(900_000).fill(9)
+      const { adapter, uploads, chats } = await buildAdapter({
+        imageBytes: (attachmentId) => (attachmentId === 'a' ? dropped : kept),
+        upload: () => jsonResponse({ error: { message: 'upload unavailable' } }, 500),
+        chat: () => sseResponse(),
+      })
+
+      const chunks = await drain(adapter.stream(generateOptions('k3-256k', {
+        sessionId: session as never,
+        messages: [{ role: 'user', content: [imageBlock('a'), imageBlock('b')] }] as never,
+      })))
+
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish' })
+      expect(uploads).toHaveLength(2)
+      const body = JSON.parse(String(chats[0]!.init.body)) as Record<string, unknown>
+      const parts = lastUserParts(body)
+      expect(imageUrls(parts)).toHaveLength(1)
+      expect(imageUrls(parts)[0]).toMatch(/^data:image\/png;base64,/)
+      expect(JSON.stringify(body)).toContain('[image omitted')
+      expect(JSON.stringify(body)).not.toContain('ms://')
+      expect(getSessionImageBudgetStats(session)).toMatchObject({
+        requestImageBytes: 1_200_000,
+        droppedImages: 1,
+      })
+    } finally {
+      resetCacheStats(session)
       if (previousBudget === undefined) delete process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES
       else process.env.DSH_KIMI_CODE_MAX_IMAGE_BYTES = previousBudget
     }
