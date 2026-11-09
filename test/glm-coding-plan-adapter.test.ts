@@ -3,6 +3,7 @@ import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
 import {
   GLM_CODING_PLAN_RETRY_POLICY_CONFIG,
   GLM_POOL_COOLDOWN_MS,
+  GlmCodingPlanAdapter,
   buildGlmRequestPlan,
   glmCooldownDecision,
   readGlmResetAt,
@@ -14,12 +15,14 @@ import {
   GlmAdoptedCredentialRefreshError,
   GlmCodingPlanAccountPool,
   glmCodingPlanPoolQuota,
+  type GlmCodingPlanPoolAccount,
 } from '../src/host/glm-coding-plan/account-pool.ts'
 import {
   credentialsFromAdopt,
   credentialsFromCliLogin,
   isAdoptedCredential,
   type GlmCodingPlanCredentials,
+  type GlmCodingPlanModelSettings,
 } from '../src/host/glm-coding-plan/token-store.ts'
 import { QUOTA_WINDOW_MINUTES } from '../src/host/glm-coding-plan/types.ts'
 import { isAdoptedZcodeCredential, ZCODE_CREDENTIAL_SOURCE } from '../src/host/glm-coding-plan/adopt.ts'
@@ -30,6 +33,7 @@ import type { GlmCliCredentials } from '../src/host/glm-coding-plan/oauth.ts'
 import type { GlmCodingPlanKey } from '../src/host/glm-coding-plan/exchange.ts'
 import type { GlmQuotaSnapshotDto } from '../src/shared/glm-coding-plan-contracts.ts'
 import type { CredentialStore } from '../src/host/token-store.ts'
+import type { PoolData } from '../src/host/common/account-pool.ts'
 
 function options(model: string, extra: Partial<GenerateOptions> = {}): GenerateOptions {
   return {
@@ -270,6 +274,93 @@ describe('GLM 适配器：重试策略', () => {
       .toEqual(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'])
     expect(GLM_CODING_PLAN_RETRY_POLICY_CONFIG.retryableCodes).not.toContain('QUOTA')
     expect(GLM_CODING_PLAN_RETRY_POLICY_CONFIG.retryableCodes).not.toContain('AUTH')
+  })
+})
+
+describe('GLM 适配器：模型目录复用只读区域快照', () => {
+  async function adapterWithCountingPool(enabledModelIds: string[] = ['GLM-5.3']) {
+    const storage = memoryPoolBackend<PoolData<GlmCodingPlanPoolAccount>>()
+    let loads = 0
+    let saves = 0
+    const backend: CredentialStore<PoolData<GlmCodingPlanPoolAccount>> = {
+      load: async () => {
+        loads += 1
+        return storage.load()
+      },
+      save: async (data) => {
+        saves += 1
+        await storage.save(data)
+      },
+      clear: () => storage.clear(),
+    }
+    const pool = new GlmCodingPlanAccountPool({
+      backend,
+      store: { read: async () => null, write: async () => undefined, delete: async () => undefined } as never,
+    })
+    await pool.addAccount(browserCredentials('cn'))
+    loads = 0
+    saves = 0
+    const settings: GlmCodingPlanModelSettings = {
+      enabled: true,
+      enabledModelIds,
+      contextWindowOverrides: {},
+      defaultReasoningEffort: null,
+      selectedAccountId: null,
+    }
+    const adapter = new GlmCodingPlanAdapter(
+      { read: async () => null } as never,
+      { read: async () => settings } as never,
+      undefined,
+      { accountPool: pool },
+    )
+    return {
+      adapter,
+      pool,
+      settings,
+      loads: () => loads,
+      saves: () => saves,
+    }
+  }
+
+  it('一个模型都没启用时不访问号池', async () => {
+    const { adapter, loads, saves } = await adapterWithCountingPool([])
+    await expect(adapter.listModels()).resolves.toEqual([])
+    expect(loads()).toBe(0)
+    expect(saves()).toBe(0)
+  })
+
+  it('列表与并发逐模型解析只读一次号池，且不写轮转状态', async () => {
+    const { adapter, pool, loads, saves } = await adapterWithCountingPool()
+    await expect(adapter.listModels()).resolves.toEqual([
+      expect.objectContaining({ id: 'GLM-5.3' }),
+    ])
+    const resolved = await Promise.all(
+      Array.from({ length: 8 }, () => adapter.resolveModel('glm-coding-plan', 'GLM-5.3')),
+    )
+    expect(resolved).toHaveLength(8)
+    expect(loads()).toBe(1)
+    expect(saves()).toBe(0)
+    expect((await pool.read()).accounts[0]?.lastUsedAt).toBeUndefined()
+  })
+
+  it('号池 revision 或指定账号变化后重新读取区域', async () => {
+    const { adapter, pool, settings, loads, saves } = await adapterWithCountingPool()
+    await adapter.listModels()
+    expect(loads()).toBe(1)
+
+    const intl = await pool.addAccount(browserCredentials('intl'))
+    let previousLoads = loads()
+    let previousSaves = saves()
+    await adapter.listModels()
+    expect(loads()).toBe(previousLoads + 1)
+    expect(saves()).toBe(previousSaves)
+
+    settings.selectedAccountId = intl.id
+    previousLoads = loads()
+    previousSaves = saves()
+    await adapter.listModels()
+    expect(loads()).toBe(previousLoads + 1)
+    expect(saves()).toBe(previousSaves)
   })
 })
 

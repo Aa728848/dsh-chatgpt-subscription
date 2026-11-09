@@ -283,6 +283,11 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   private readonly preferences: GlmCodingPlanPreferenceStore | undefined
   private readonly accountPool: GlmCodingPlanAccountPool | null
   private readonly options: GlmCodingPlanAdapterOptions
+  private catalogRegionSnapshot: {
+    revision: number
+    selectedAccountId: string | null
+    region: Promise<GlmRegion | null>
+  } | undefined
 
   constructor(
     store: GlmCodingPlanCredentialStore = new GlmCodingPlanCredentialStore(),
@@ -328,6 +333,55 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   }
 
   /**
+   * 模型目录只需要区域，不需要一把可发请求的凭据。
+   *
+   * 这里刻意不调用 credentialFor：那是真实请求的选号入口，会重复解密号池并回写
+   * lastUsedAt。目录构建会为每个模型并发调用 resolveModel，把它放在这里会让一次
+   * 选择器刷新放大成一串 DPAPI 读写。区域快照按号池 revision 与指定账号失效，
+   * 同一代的并发调用共享同一次只读；读不到或尚未登录时不缓存，登录后即可重试。
+   */
+  private catalogRegion(settings: GlmCodingPlanModelSettings): Promise<GlmRegion | null> {
+    const pool = this.accountPool
+    if (pool === null) return this.readCatalogRegion(settings).catch(() => null)
+    const revision = pool.currentIdentityRevision()
+    const selectedAccountId = settings.selectedAccountId
+    const cached = this.catalogRegionSnapshot
+    if (cached !== undefined
+      && cached.revision === revision
+      && cached.selectedAccountId === selectedAccountId) {
+      return cached.region
+    }
+    const snapshot = {
+      revision,
+      selectedAccountId,
+      region: this.readCatalogRegion(settings).catch(() => null),
+    }
+    this.catalogRegionSnapshot = snapshot
+    void snapshot.region.then((region) => {
+      if (region === null && this.catalogRegionSnapshot === snapshot) {
+        this.catalogRegionSnapshot = undefined
+      }
+    })
+    return snapshot.region
+  }
+
+  private async readCatalogRegion(settings: GlmCodingPlanModelSettings): Promise<GlmRegion | null> {
+    if (this.accountPool === null) {
+      return (await this.store.read())?.codingPlan.region ?? null
+    }
+    const data = await this.accountPool.read()
+    // 与 getCredentialAccount 一样，目录元数据不因请求冷却而消失；已经明确鉴权
+    // 失败的账号则不用于决定区域。GLM 不主动刷新 Coding Plan Key，因此无需为了
+    // 读取这个非机密字段再走一次 freshAccount 的第二次号池加载。
+    const usable = data.accounts.filter((account) => account.authStatus === undefined || account.authStatus === 'ok')
+    const selected = usable.find((account) => account.id === settings.selectedAccountId)
+      ?? usable.find((account) => account.id === data.activeAccountId)
+      ?? usable.find((account) => account.isPrimary)
+      ?? usable[0]
+    return selected?.credentials.codingPlan.region ?? null
+  }
+
+  /**
    * 这一行请求用哪份凭据。
    *
    * 有池时轮转；没有池时读单凭据存储（无头 host 与测试的形态）。
@@ -354,10 +408,9 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
     const prov = provider || PROVIDER_ID
     const settings = await this.settings()
-    if (settings.enabled === false) return []
-    const pick = await this.credentialFor().catch(() => null)
-    if (pick === null) return []
-    const region = pick.credentials.codingPlan.region
+    if (settings.enabled === false || settings.enabledModelIds.length === 0) return []
+    const region = await this.catalogRegion(settings)
+    if (region === null) return []
     const available = this.catalog(region)
     const enabled = new Set(settings.enabledModelIds)
     return available
@@ -374,8 +427,7 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     if (signal?.aborted) throw new LlmError(t('glm.modelResolveAborted', { provider: PROVIDER_NAME }), 'ABORTED')
     const settings = await this.settings()
-    const pick = await this.credentialFor().catch(() => null)
-    const region: GlmRegion = pick?.credentials.codingPlan.region ?? 'intl'
+    const region: GlmRegion = await this.catalogRegion(settings) ?? 'intl'
     const catalog = this.catalog(region)
     const entry = resolveGlmModel(model, catalog)
     const override = settings.contextWindowOverrides[model]
