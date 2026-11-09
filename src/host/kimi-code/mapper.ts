@@ -128,6 +128,7 @@ export {
 import type { KimiCodeReasoningEffort, KimiCodeRequestDiagnostic, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
 import {
   KimiToolArgumentGuard,
+  repairAskUserQuestionArgumentWhitespace,
   TOOL_ARGUMENT_BYTES_EXCEEDED_CODE,
   TOOL_ARGUMENT_REPEATED_KEY_CODE,
   type KimiToolGuardViolation,
@@ -2649,6 +2650,11 @@ function appendGuardedArguments(
   throwToolGuardViolation(state, call, call.guard.observe(delta))
 }
 
+function completedToolArguments(call: PendingToolCall): string {
+  const argumentText = call.arguments === '' ? '{}' : call.arguments
+  return repairAskUserQuestionArgumentWhitespace(call.name, argumentText)
+}
+
 function closeToolCalls(state: KimiCodeStreamState): StreamChunk[] {
   const out: StreamChunk[] = []
   for (const [wireIndex, call] of [...state.toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
@@ -2657,7 +2663,7 @@ function closeToolCalls(state: KimiCodeStreamState): StreamChunk[] {
       type: 'tool-call',
       id: toToolCallId(state.toolCallIds.normalize(call.id)),
       name: call.name,
-      arguments: call.arguments === '' ? '{}' : call.arguments,
+      arguments: completedToolArguments(call),
     }
     state.blocks[call.blockIndex] = block
     out.push({ type: 'block-end', index: call.blockIndex, block })
@@ -2821,7 +2827,7 @@ function applyOpenAIToolDelta(entry: Record<string, unknown>, state: KimiCodeStr
       type: 'tool-call',
       id: toToolCallId(state.toolCallIds.normalize(call.id)),
       name: call.name,
-      arguments: call.arguments === '' ? '{}' : call.arguments,
+      arguments: completedToolArguments(call),
     }
     state.blocks[call.blockIndex] = closedBlock
     out.push({ type: 'block-end', index: call.blockIndex, block: closedBlock })
@@ -3001,7 +3007,7 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
         type: 'tool-call',
         id: toToolCallId(state.toolCallIds.normalize(pending.id)),
         name: pending.name,
-        arguments: pending.arguments === '' ? '{}' : pending.arguments,
+        arguments: completedToolArguments(pending),
       }
       state.blocks[pending.blockIndex] = block
       out.push({ type: 'block-end', index: pending.blockIndex, block })

@@ -633,6 +633,15 @@ export function validateAskUserQuestionArgs(args: unknown): string | undefined {
 
     const misplaced = misplacedQuestionKey(question)
     if (misplaced !== undefined) {
+      if (misplaced !== 'options' && misplaced.trim() === 'options') {
+        return invalidAskUserQuestion(
+          `${at} has an options property whose key contains surrounding whitespace. `
+          + 'Do not copy that malformed key or retry with another variant. Rebuild ONE fresh call with the exact, '
+          + 'case-sensitive key "options" (no spaces, annotations, or underscores), and nest its choices inside it: '
+          + '{"questions":[{"id":"choice","question":"Which choice?","options":[{"label":"A","description":"…"}]}]}. '
+          + 'The complete top-level object must contain the questions array.',
+        )
+      }
       return invalidAskUserQuestion(
         `${at} carries the misplaced key ${JSON.stringify(misplaced)}: option fields collapsed into the `
         + 'question object. Build ONE question object and nest its choices inside it: '

@@ -474,6 +474,19 @@ describe('validateAskUserQuestionArgs：主控提问载荷的结构校验', () =
     }
   })
 
+  it('空白 options 键得到重新构造调用的准确指引，而不是字段摊平误诊', () => {
+    const reason = validateAskUserQuestionArgs({
+      questions: [{ id: 'delivery-scope', question: '请选择交付方式？', 'options ': [{ label: 'A' }] }],
+    })
+    expect(reason).toContain('INVALID_USER_QUESTION')
+    expect(reason).toContain('surrounding whitespace')
+    expect(reason).toContain('Rebuild ONE fresh call')
+    expect(reason).toContain('{"questions":[{"id":"choice"')
+    expect(reason).toContain('"options":[{"label":"A"')
+    expect(reason).not.toContain('collapsed into the question object')
+    expect(reason).not.toContain('"options "')
+  })
+
   it('选项字段摊在问题对象上（label / description）被拒', () => {
     for (const key of ['label', 'description']) {
       const reason = validateAskUserQuestionArgs({

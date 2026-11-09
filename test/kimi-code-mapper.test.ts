@@ -592,6 +592,37 @@ describe('OpenAI stream parsing', () => {
     expect(block).toMatchObject({ type: 'tool-call', name: 'read', arguments: '{"path":"a"}' })
   })
 
+  it('repairs unambiguous ask_user_question whitespace keys when an OpenAI call closes', () => {
+    const state = createStreamState('openai')
+    const argumentText = JSON.stringify({
+      questions: [{
+        id: 'delivery-scope',
+        question: '请选择交付方式？',
+        'header ': '确认执行口径',
+        'options ': [{ label: '本地修复并验证（推荐）' }],
+      }],
+    })
+    processOpenAIStreamLine(frame({
+      choices: [{ delta: { tool_calls: [{
+        index: 0,
+        id: 'call_ask',
+        function: { name: 'ask_user_question', arguments: argumentText },
+      }] } }],
+    }), state)
+    const out = processOpenAIStreamLine(frame({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }), state)
+    const block = out.flatMap((chunk) => (chunk.type === 'block-end' ? [chunk.block] : []))
+      .find((entry) => entry.type === 'tool-call')
+    const args = block?.type === 'tool-call' ? block.arguments : undefined
+    expect(JSON.parse(args ?? '')).toEqual({
+      questions: [{
+        id: 'delivery-scope',
+        question: '请选择交付方式？',
+        header: '确认执行口径',
+        options: [{ label: '本地修复并验证（推荐）' }],
+      }],
+    })
+  })
+
   it('splits a second parallel call that reuses index 0 with a different id', () => {
     const state = createStreamState('openai')
     const chunks = [
@@ -738,6 +769,31 @@ describe('Anthropic stream parsing', () => {
     const block = out.flatMap((chunk) => (chunk.type === 'block-end' ? [chunk.block] : []))
       .find((entry) => entry.type === 'tool-call')
     expect(block).toMatchObject({ type: 'tool-call', name: 'read', arguments: '{"path":"a"}' })
+  })
+
+  it('applies the same whitespace repair when an Anthropic tool block closes', () => {
+    const state = createStreamState('anthropic')
+    const frame = (payload: unknown): string => `data: ${JSON.stringify(payload)}`
+    const argumentText = JSON.stringify({
+      questions: [{ id: 'q', question: 'Choose?', 'options ': [{ label: 'A' }] }],
+    })
+    processAnthropicStreamLine(frame({
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: 'toolu_ask', name: 'ask_user_question' },
+    }), state)
+    processAnthropicStreamLine(frame({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json: argumentText },
+    }), state)
+    const out = processAnthropicStreamLine(frame({ type: 'content_block_stop', index: 0 }), state)
+    const block = out.flatMap((chunk) => (chunk.type === 'block-end' ? [chunk.block] : []))
+      .find((entry) => entry.type === 'tool-call')
+    const args = block?.type === 'tool-call' ? block.arguments : undefined
+    expect(JSON.parse(args ?? '')).toEqual({
+      questions: [{ id: 'q', question: 'Choose?', options: [{ label: 'A' }] }],
+    })
   })
 
   it('finishes on message_stop', () => {

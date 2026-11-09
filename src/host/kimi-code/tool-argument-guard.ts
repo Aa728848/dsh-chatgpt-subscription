@@ -35,6 +35,47 @@ export function toolArgumentLimit(toolName: string): number {
   return DEFAULT_ARGUMENT_LIMIT
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Repair only a complete ask_user_question call whose optional field names carry
+ * surrounding whitespace. One unambiguous source key and the expected value type
+ * are required; collisions, underscore variants, and all other tools stay intact
+ * so the execution guard can still reject payloads whose meaning is unclear.
+ */
+export function repairAskUserQuestionArgumentWhitespace(toolName: string, argumentText: string): string {
+  if (toolName !== 'ask_user_question') return argumentText
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(argumentText)
+  } catch {
+    return argumentText
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.questions)) return argumentText
+
+  let changed = false
+  const questions = parsed.questions.map((candidate) => {
+    if (!isRecord(candidate)) return candidate
+    let repaired: Record<string, unknown> | undefined
+    for (const canonical of ['header', 'options'] as const) {
+      if (Object.prototype.hasOwnProperty.call(candidate, canonical)) continue
+      const sources = Object.keys(candidate).filter((key) => key !== canonical && key.trim() === canonical)
+      if (sources.length !== 1) continue
+      const source = sources[0]!
+      const value = candidate[source]
+      if (canonical === 'header' ? typeof value !== 'string' : !Array.isArray(value)) continue
+      repaired ??= { ...candidate }
+      delete repaired[source]
+      repaired[canonical] = value
+      changed = true
+    }
+    return repaired ?? candidate
+  })
+  return changed ? JSON.stringify({ ...parsed, questions }) : argumentText
+}
+
 interface KeyGroup {
   count: number
   sawVariant: boolean

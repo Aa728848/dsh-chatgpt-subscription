@@ -4,7 +4,11 @@ import {
   processAnthropicStreamLine,
   processOpenAIStreamLine,
 } from '../src/host/kimi-code/mapper.ts'
-import { KimiToolArgumentGuard, toolArgumentLimit } from '../src/host/kimi-code/tool-argument-guard.ts'
+import {
+  KimiToolArgumentGuard,
+  repairAskUserQuestionArgumentWhitespace,
+  toolArgumentLimit,
+} from '../src/host/kimi-code/tool-argument-guard.ts'
 
 function malformedQuestionArguments(): string {
   const keys = [
@@ -107,5 +111,45 @@ describe('Kimi tool argument guard', () => {
       }
     }).toThrow(/runaway repeated-key/)
     expect(state.toolGuard).toMatchObject({ rule: 'repeated-key', toolName: 'ask_user_question' })
+  })
+
+  it('repairs the observed complete retry with whitespace around header and options', () => {
+    const raw = JSON.stringify({
+      questions: [{
+        id: 'delivery-scope',
+        question: '请选择交付方式？',
+        'header ': '确认执行口径',
+        'options ': [{ label: '本地修复并验证（推荐）', description: '完成修改和测试。' }],
+      }],
+    })
+    const repaired = repairAskUserQuestionArgumentWhitespace('ask_user_question', raw)
+    expect(JSON.parse(repaired)).toEqual({
+      questions: [{
+        id: 'delivery-scope',
+        question: '请选择交付方式？',
+        header: '确认执行口径',
+        options: [{ label: '本地修复并验证（推荐）', description: '完成修改和测试。' }],
+      }],
+    })
+  })
+
+  it('does not guess when a whitespace key is ambiguous or has the wrong value type', () => {
+    const questions = [
+      { id: 'collision', question: 'Q', options: [], 'options ': [] },
+      { id: 'two-sources', question: 'Q', 'header ': 'A', 'header\t': 'B' },
+      { id: 'wrong-options', question: 'Q', 'options ': null },
+      { id: 'wrong-header', question: 'Q', 'header ': ['not', 'text'] },
+      { id: 'underscore', question: 'Q', options_: [{ label: 'A' }] },
+    ]
+    for (const question of questions) {
+      const raw = JSON.stringify({ questions: [question] })
+      expect(repairAskUserQuestionArgumentWhitespace('ask_user_question', raw)).toBe(raw)
+    }
+  })
+
+  it('leaves other tools and incomplete JSON untouched', () => {
+    const raw = JSON.stringify({ questions: [{ 'options ': [] }] })
+    expect(repairAskUserQuestionArgumentWhitespace('read', raw)).toBe(raw)
+    expect(repairAskUserQuestionArgumentWhitespace('ask_user_question', '{"questions":')).toBe('{"questions":')
   })
 })
