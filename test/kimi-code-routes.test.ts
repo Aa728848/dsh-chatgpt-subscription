@@ -382,6 +382,25 @@ describe('Kimi Code settings routes', () => {
       lastRequestFreshTokens: 324,
       previousRequestPromptTokens: 1_000,
     })
+    const lastRequest = {
+      id: 'request-latest',
+      startedAt: 1,
+      endedAt: 2,
+      model: 'k3.1-pro',
+      wire: 'openai' as const,
+      accountId: 'acc-1',
+      accountChanged: false,
+      outcome: 'success' as const,
+      attempts: [],
+      usage: {
+        freshTokens: 324,
+        cacheReadTokens: null,
+        cacheWriteTokens: 0,
+        outputTokens: 20,
+        reasoningTokens: null,
+      },
+    }
+    sessionCacheState.noteRequest(session, lastRequest)
     const expected = {
       cachedTokens: 700,
       freshTokens: 324,
@@ -399,16 +418,18 @@ describe('Kimi Code settings routes', () => {
     recordCacheStats(state, session)
     const live = fakeExchange()
     await handler(fakeRequest({ url: '/kimi-code/api/status?sessionId=' + session }), live.response)
-    const liveCache = (live.captured.body as { value: { cache: { continuation?: unknown } } }).value.cache
+    const liveCache = (live.captured.body as { value: { cache: { continuation?: unknown; lastRequest?: unknown } } }).value.cache
     expect(liveCache.continuation).toEqual(expected)
+    expect(liveCache.lastRequest).toEqual(lastRequest)
 
     // Durable path: a restarted process has no in-memory requests, yet the
     // status route must return the same measurement from disk-backed state.
     resetCacheStats(session)
     const durable = fakeExchange()
     await handler(fakeRequest({ url: '/kimi-code/api/status?sessionId=' + session }), durable.response)
-    const durableCache = (durable.captured.body as { value: { cache: { continuation?: unknown } } }).value.cache
+    const durableCache = (durable.captured.body as { value: { cache: { continuation?: unknown; lastRequest?: unknown } } }).value.cache
     expect(durableCache.continuation).toEqual(expected)
+    expect(durableCache.lastRequest).toEqual(lastRequest)
   })
 
   /**

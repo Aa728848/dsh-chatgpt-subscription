@@ -6,6 +6,7 @@ import {
   createStreamState,
   getCacheStats,
   getLastDriftCause,
+  processAnthropicStreamLine,
   processOpenAIStreamLine,
   resetCacheStats,
 } from '../src/host/kimi-code/mapper.ts'
@@ -75,6 +76,34 @@ describe('per-session cache accounting', () => {
     expect(getCacheStats('sess', 'account-2').hitRatio).toBe(0)
     // Unnamed account reads the whole session.
     expect(getCacheStats('sess').requests).toBe(2)
+  })
+
+  it('keeps the actual account when an OpenAI terminal DONE closes the stream', () => {
+    const state = createStreamState('openai', 'terminal-openai')
+    state.accountId = 'account-terminal'
+    processOpenAIStreamLine(`data: ${JSON.stringify({
+      choices: [{ delta: {}, finish_reason: 'stop' }],
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 1,
+        prompt_tokens_details: { cached_tokens: 900 },
+      },
+    })}`, state)
+    processOpenAIStreamLine('data: [DONE]', state)
+
+    expect(getCacheStats('terminal-openai', 'account-terminal')).toMatchObject({ requests: 1, cachedTokens: 900 })
+  })
+
+  it('keeps the actual account when an Anthropic message_stop closes the stream', () => {
+    const state = createStreamState('anthropic', 'terminal-anthropic')
+    state.accountId = 'account-terminal'
+    processAnthropicStreamLine(`data: ${JSON.stringify({
+      type: 'message_start',
+      message: { usage: { input_tokens: 100, cache_read_input_tokens: 80, output_tokens: 0 } },
+    })}`, state)
+    processAnthropicStreamLine(`data: ${JSON.stringify({ type: 'message_stop' })}`, state)
+
+    expect(getCacheStats('terminal-anthropic', 'account-terminal')).toMatchObject({ requests: 1, cachedTokens: 80 })
   })
 
   it('sums every session when none is named', () => {

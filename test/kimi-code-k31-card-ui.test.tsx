@@ -15,7 +15,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { KimiCodeModelOption, KimiCodeWebStatus } from '../src/shared/kimi-code-contracts.ts'
+import type { KimiCodeModelOption, KimiCodeRequestDiagnostic, KimiCodeWebStatus } from '../src/shared/kimi-code-contracts.ts'
 import { KimiCodeSection } from '../src/client/kimi-code/KimiCodeSection.tsx'
 import { zh } from '../src/client/kimi-code/locales.ts'
 
@@ -91,6 +91,21 @@ function status(overrides: Partial<KimiCodeWebStatus> = {}): KimiCodeWebStatus {
     loginRegion: 'mainland-cn',
     serving: true,
     conflict: null,
+    ...overrides,
+  }
+}
+
+function requestDiagnostic(overrides: Partial<KimiCodeRequestDiagnostic> = {}): KimiCodeRequestDiagnostic {
+  return {
+    id: 'request-1',
+    startedAt: 1,
+    endedAt: 2,
+    model: 'k3.1-pro',
+    wire: 'openai',
+    accountId: 'acc-1',
+    accountChanged: false,
+    outcome: 'success',
+    attempts: [],
     ...overrides,
   }
 }
@@ -325,6 +340,70 @@ describe('kimi-code K3.1 Pro card', () => {
         .replace('{fresh}', (324).toLocaleString())
         .replace('{ratio}', `${((700 / 768) * 100).toFixed(1)}%`),
     )
+  })
+
+  it('breaks down the latest request cost and attributes a reasoning-heavy spike', async () => {
+    const node = await mount(status({
+      accounts: [{ id: 'acc-1', alias: '主号', isPrimary: true }],
+      cache: {
+        requests: 2,
+        cachedTokens: 800_000,
+        freshTokens: 6_000,
+        outputTokens: 6_000,
+        hitRatio: 0.99,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        lastRequest: requestDiagnostic({
+          accountChanged: true,
+          usage: {
+            freshTokens: 5_911,
+            cacheReadTokens: 399_872,
+            cacheWriteTokens: 0,
+            outputTokens: 5_574,
+            reasoningTokens: 3_920,
+          },
+        }),
+      },
+    }))
+    expect(node.textContent).toContain('主号')
+    expect(node.textContent).toContain(zh.cacheAccountChanged)
+    expect(node.textContent).toContain(zh.cacheReasoningCost)
+    expect(node.textContent).toContain('3,920')
+    expect(node.textContent).toContain('70.3%')
+    expect(node.textContent).toContain('399,872')
+  })
+
+  it('distinguishes omitted usage fields from explicit zero readings', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 1,
+        cachedTokens: 0,
+        freshTokens: 100,
+        outputTokens: 0,
+        hitRatio: 0,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        lastRequest: requestDiagnostic({
+          usage: {
+            freshTokens: 100,
+            cacheReadTokens: null,
+            cacheWriteTokens: 0,
+            outputTokens: 0,
+            reasoningTokens: null,
+          },
+        }),
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const input = rows.find((entry) => entry.querySelector('.dsha-label')?.textContent === zh.cacheLastInput)
+    const reasoning = rows.find((entry) => entry.querySelector('.dsha-label')?.textContent === zh.cacheLastReasoning)
+    expect(input?.textContent).toContain(zh.metricNotReported)
+    expect(reasoning?.textContent).toContain(zh.metricNotReported)
+    expect(node.textContent).not.toContain(zh.cacheReasoningCost)
+    // Cache write was explicitly reported as zero and must not read as omitted.
+    expect(input?.textContent).toContain('0')
   })
 
   it('omits the opening row for a conversation that predates the measurement', async () => {

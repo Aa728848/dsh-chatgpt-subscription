@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   KimiCodeLoginFlowStatus,
   KimiCodeModelOption,
+  KimiCodeRequestDiagnostic,
   KimiCodeReasoningEffort,
   KimiCodeWebStatus,
 } from '../../shared/kimi-code-contracts.ts'
@@ -36,7 +37,8 @@ interface Props {
  * reads as "nothing was measured", and the two are different claims. Only a
  * number this build cannot read at all falls back to "暂无".
  */
-function tokenCount(value: number | undefined, t: typeof zh): string {
+function tokenCount(value: number | null | undefined, t: typeof zh): string {
+  if (value === null) return t.metricNotReported
   return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : t.unknownMetric
 }
 
@@ -72,6 +74,66 @@ function driftLabel(
     case 'image-offload': return t.cacheDriftImageOffload
     default: return String(cause)
   }
+}
+
+function KimiLatestRequestRows(input: {
+  status: KimiCodeWebStatus
+  request: KimiCodeRequestDiagnostic
+  t: typeof zh
+}): React.ReactElement {
+  const { request, status, t } = input
+  const account = status.accounts?.find((entry) => entry.id === request.accountId)?.alias
+    ?? request.accountId ?? t.unknownMetric
+  const outcome = request.outcome === 'success'
+    ? t.cacheRequestSuccess
+    : request.outcome === 'aborted' ? t.cacheRequestAborted : t.cacheRequestError
+  const usage = request.usage
+  const reasoning = usage?.reasoningTokens
+  const reasoningRatio = usage !== undefined && reasoning !== null && reasoning !== undefined && usage.outputTokens > 0
+    ? reasoning / usage.outputTokens
+    : null
+  return (
+    <>
+      <div className="dsha-row">
+        <span className="dsha-label">{t.cacheLastRequest}</span>
+        <span className="dsha-value">
+          {account}{request.accountChanged ? t.cacheAccountChanged : ''} · {outcome}
+        </span>
+      </div>
+      {usage !== undefined && (
+        <>
+          <div className="dsha-row">
+            <span className="dsha-label">{t.cacheLastInput}</span>
+            <span className="dsha-value">
+              {t.cacheLastInputValue
+                .replace('{fresh}', tokenCount(usage.freshTokens, t))
+                .replace('{cached}', tokenCount(usage.cacheReadTokens, t))
+                .replace('{written}', tokenCount(usage.cacheWriteTokens, t))}
+            </span>
+          </div>
+          <div className="dsha-row">
+            <span className="dsha-label">{t.cacheLastOutput}</span>
+            <span className="dsha-value">{tokenCount(usage.outputTokens, t)}</span>
+          </div>
+          <div className="dsha-row">
+            <span className="dsha-label">{t.cacheLastReasoning}</span>
+            <span className="dsha-value">
+              {reasoning == null
+                ? t.metricNotReported
+                : reasoningRatio === null
+                  ? tokenCount(reasoning, t)
+                  : t.cacheReasoningValue
+                      .replace('{tokens}', tokenCount(reasoning, t))
+                      .replace('{ratio}', `${(reasoningRatio * 100).toFixed(1)}%`)}
+            </span>
+          </div>
+          {reasoning != null && reasoning >= 1_000 && reasoningRatio !== null && reasoningRatio >= 0.5 && (
+            <p className="dsha-notice">{t.cacheReasoningCost}</p>
+          )}
+        </>
+      )}
+    </>
+  )
 }
 
 export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): React.ReactElement {
@@ -671,6 +733,9 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
                     .replace('{ratio}', `${(status.cache.continuation.retentionRatio * 100).toFixed(1)}%`)}
                 </span>
               </div>
+            )}
+            {status.cache.lastRequest !== undefined && (
+              <KimiLatestRequestRows status={status} request={status.cache.lastRequest} t={t} />
             )}
             {/* The write side gets its own row rather than a slot in the meter:
                 a write is billed separately from a fresh prompt token, and

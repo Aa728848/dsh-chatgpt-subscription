@@ -125,7 +125,8 @@ export {
   type ResolvedRequestVideos,
 }
 
-import type { KimiCodeReasoningEffort, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
+import type { KimiCodeReasoningEffort, KimiCodeRequestDiagnostic, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
+import { KimiToolArgumentGuard, type KimiToolGuardViolation } from './tool-argument-guard.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -2435,6 +2436,7 @@ interface PendingToolCall {
   name: string
   arguments: string
   started: boolean
+  guard?: KimiToolArgumentGuard
 }
 
 /**
@@ -2531,6 +2533,10 @@ export interface KimiCodeStreamState {
   cacheWrite5mTokens: number
   cacheWrite1hTokens: number
   reasoningTokens: number
+  /** Whether the upstream actually carried each optional usage field. */
+  cacheReadReported: boolean
+  cacheWriteReported: boolean
+  reasoningReported: boolean
   sawUsage: boolean
   /**
    * Per-request tool-call id assignment.
@@ -2555,6 +2561,10 @@ export interface KimiCodeStreamState {
    * rolling cache ratio would then describe a prompt the session never sent.
    */
   sideChannel: boolean
+  /** Actual pooled account behind this response, retained through terminal events. */
+  accountId?: string
+  /** Bounded guard evidence; never includes the tool argument payload. */
+  toolGuard?: NonNullable<KimiCodeRequestDiagnostic['toolGuard']>
 }
 
 export function createStreamState(
@@ -2584,6 +2594,9 @@ export function createStreamState(
     cacheWrite5mTokens: 0,
     cacheWrite1hTokens: 0,
     reasoningTokens: 0,
+    cacheReadReported: false,
+    cacheWriteReported: false,
+    reasoningReported: false,
     sawUsage: false,
     toolCallIds: new ToolCallIdNormalizer(),
   }
@@ -2602,9 +2615,37 @@ function closeCurrent(state: KimiCodeStreamState): StreamChunk[] {
   return [{ type: 'block-end', index, block }]
 }
 
+function throwToolGuardViolation(
+  state: KimiCodeStreamState,
+  call: PendingToolCall,
+  violation: KimiToolGuardViolation | undefined,
+): void {
+  if (violation === undefined) return
+  state.toolGuard = violation
+  const reason = violation.rule === 'argument-bytes'
+    ? `arguments exceeded the ${violation.rule} safety budget`
+    : 'arguments contained a runaway repeated-key family'
+  throw new LlmError(
+    `Kimi Code stopped tool call "${violation.toolName}": ${reason} at ${violation.bytes} bytes. The tool was not executed.`,
+    'PROVIDER_ERROR',
+  )
+}
+
+function appendGuardedArguments(
+  state: KimiCodeStreamState,
+  call: PendingToolCall,
+  delta: string,
+): void {
+  if (delta === '') return
+  call.arguments += delta
+  call.guard ??= new KimiToolArgumentGuard(call.name)
+  throwToolGuardViolation(state, call, call.guard.observe(delta))
+}
+
 function closeToolCalls(state: KimiCodeStreamState): StreamChunk[] {
   const out: StreamChunk[] = []
   for (const [wireIndex, call] of [...state.toolCalls.entries()].sort((a, b) => a[0] - b[0])) {
+    throwToolGuardViolation(state, call, call.guard?.finish())
     const block: OutboundContentBlock = {
       type: 'tool-call',
       id: toToolCallId(state.toolCallIds.normalize(call.id)),
@@ -2674,9 +2715,15 @@ export function processOpenAIStreamLine(line: string, state: KimiCodeStreamState
     state.inputTokens = Math.max(0, prompt - cached - written)
     state.cacheReadTokens = cached
     state.cacheWriteTokens = written
+    state.cacheReadReported = details !== undefined && typeof details.cached_tokens === 'number' && Number.isFinite(details.cached_tokens)
+    state.cacheWriteReported = details !== undefined && typeof details.cache_write_tokens === 'number' && Number.isFinite(details.cache_write_tokens)
     state.outputTokens = numberOr(usage.completion_tokens, state.outputTokens)
     if (isRecord(usage.completion_tokens_details)) {
-      state.reasoningTokens = numberOr(usage.completion_tokens_details.reasoning_tokens, state.reasoningTokens)
+      const reasoning = usage.completion_tokens_details.reasoning_tokens
+      state.reasoningReported = typeof reasoning === 'number' && Number.isFinite(reasoning)
+      state.reasoningTokens = numberOr(reasoning, state.reasoningTokens)
+    } else {
+      state.reasoningReported = false
     }
   }
 
@@ -2796,7 +2843,7 @@ function applyOpenAIToolDelta(entry: Record<string, unknown>, state: KimiCodeStr
   }
 
   const argsDelta = asString(fn.arguments) ?? ''
-  if (argsDelta !== '') call.arguments += argsDelta
+  appendGuardedArguments(state, call, argsDelta)
 
   if (!call.started) {
     call.started = true
@@ -2835,7 +2882,13 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
       state.inputTokens = numberOr(usage.input_tokens, 0)
       state.cacheReadTokens = numberOr(usage.cache_read_input_tokens, 0)
       state.cacheWriteTokens = numberOr(usage.cache_creation_input_tokens, 0)
+      state.cacheReadReported = typeof usage.cache_read_input_tokens === 'number' && Number.isFinite(usage.cache_read_input_tokens)
+      state.cacheWriteReported = typeof usage.cache_creation_input_tokens === 'number' && Number.isFinite(usage.cache_creation_input_tokens)
       state.outputTokens = numberOr(usage.output_tokens, 0)
+      const reasoningDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : undefined
+      const reasoning = usage.reasoning_tokens ?? reasoningDetails?.reasoning_tokens
+      state.reasoningReported = typeof reasoning === 'number' && Number.isFinite(reasoning)
+      state.reasoningTokens = numberOr(reasoning, state.reasoningTokens)
     }
     const stop = message ? asString(message.stop_reason) : undefined
     if (stop !== undefined) state.finishReason = stop
@@ -2894,7 +2947,7 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
       const pending = state.toolCalls.get(contentIndex)
       const partial = asString(delta.partial_json) ?? ''
       if (pending !== undefined) {
-        pending.arguments += partial
+        appendGuardedArguments(state, pending, partial)
         out.push({
           type: 'tool-call-delta',
           index: pending.blockIndex,
@@ -2935,6 +2988,7 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
     const contentIndex = numberOr(event.index, 0)
     const pending = state.toolCalls.get(contentIndex)
     if (pending !== undefined) {
+      throwToolGuardViolation(state, pending, pending.guard?.finish())
       state.toolCalls.delete(contentIndex)
       const block: OutboundContentBlock = {
         type: 'tool-call',
@@ -2958,6 +3012,12 @@ export function processAnthropicStreamLine(line: string, state: KimiCodeStreamSt
     if (usage) {
       state.sawUsage = true
       state.outputTokens = numberOr(usage.output_tokens, state.outputTokens)
+      const reasoningDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : undefined
+      const reasoning = usage.reasoning_tokens ?? reasoningDetails?.reasoning_tokens
+      if (typeof reasoning === 'number' && Number.isFinite(reasoning)) {
+        state.reasoningReported = true
+        state.reasoningTokens = reasoning
+      }
     }
     return out
   }
@@ -3640,7 +3700,7 @@ export function closeStream(state: KimiCodeStreamState, accountId?: string): Str
   const out = [...closeCurrent(state), ...closeToolCalls(state)]
   if (state.sawUsage) {
     // One accounting point per request, so the rolling cache ratio stays honest.
-    recordCacheStats(state, state.sessionId, accountId)
+    recordCacheStats(state, state.sessionId, accountId ?? state.accountId)
     out.push({ type: 'usage', usage: tokenUsage(state) })
   }
   const replayState = reasoningReplayState(state)

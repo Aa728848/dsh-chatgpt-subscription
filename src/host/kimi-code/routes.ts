@@ -336,6 +336,10 @@ function continuationOf(sessionId?: string): KimiCodeCacheStatsDto['continuation
   }
 }
 
+function lastRequestDiagnosticOf(sessionId?: string): KimiCodeCacheStatsDto['lastRequest'] {
+  return sessionCacheState.read(sessionId)?.recentRequests?.at(-1)
+}
+
 function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   const stats = getCacheStats(sessionId)
   // A process that just started has no totals, and answering "nothing yet" for
@@ -346,12 +350,14 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   const warmup = warmupStatusOf(sessionId)
   const opening = openingInheritanceOf(sessionId)
   const continuation = continuationOf(sessionId)
+  const lastRequest = lastRequestDiagnosticOf(sessionId)
   return {
     ...stats,
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(warmup === undefined ? {} : { warmup }),
     ...(opening === undefined ? {} : { opening }),
     ...(continuation === undefined ? {} : { continuation }),
+    ...(lastRequest === undefined ? {} : { lastRequest }),
     // What the image budget did on the last turn, next to the ceiling it
     // enforces: a card that shows the budget without showing what it cost
     // cannot say whether the conversation is close to losing a picture.
@@ -409,11 +415,12 @@ function cacheHintOrNull(sessionId: string | undefined): KimiCodeCacheHintDto | 
  */
 function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
   const durable = sessionCacheState.read(sessionId)
-  if (durable === undefined || durable.requests === 0) return null
+  if (durable === undefined || (durable.requests === 0 && durable.recentRequests === undefined)) return null
   const lastDrift = driftCauseOf(durable.lastDrift)
   const warmup = warmupStatusOf(sessionId)
   const opening = openingInheritanceOf(sessionId)
   const continuation = continuationOf(sessionId)
+  const lastRequest = lastRequestDiagnosticOf(sessionId)
   return {
     requests: durable.requests,
     cachedTokens: durable.cachedTokens,
@@ -427,6 +434,7 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
     ...(warmup === undefined ? {} : { warmup }),
     ...(opening === undefined ? {} : { opening }),
     ...(continuation === undefined ? {} : { continuation }),
+    ...(lastRequest === undefined ? {} : { lastRequest }),
     imageBudget: imageBudgetOf(sessionId),
   }
 }

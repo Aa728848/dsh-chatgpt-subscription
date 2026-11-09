@@ -422,7 +422,7 @@ describe('Kimi Code pool routes', () => {
 })
 
 describe('KimiCodeAdapter account rotation', () => {
-  it('cools a rate-limited account down and serves the request from the next one', async () => {
+  it('keeps ordinary 429 back-pressure on the same account even when another is available', async () => {
     const { pool, mirror, mirrorBackend } = harness()
     await mirrorBackend.save(credential(1))
     const second = await pool.addAccount(credential(2))
@@ -446,17 +446,16 @@ describe('KimiCodeAdapter account rotation', () => {
       loadCatalog: async () => CATALOG,
     }, pool)
 
-    const assembled = new BlockAssembler()
-    for await (const chunk of adapter.stream({
+    await expect(collect(adapter.stream({
       provider: 'kimi-code',
       model: 'k3',
       messages: [{ role: 'user', content: 'hi' } as never],
-    } as unknown as GenerateOptions)) assembled.push(chunk)
+    } as unknown as GenerateOptions))).rejects.toMatchObject({ code: 'RATE_LIMIT' })
 
-    expect(authorizations).toEqual(['Bearer at-1', 'Bearer at-2'])
-    expect(assembled.blocks()).toEqual([{ type: 'text', text: 'served by the second account' }])
-    const cooling = (await pool.listAccounts()).find((entry) => entry.id !== second.id)
-    expect(cooling?.cooldownUntil).toBeGreaterThan(Date.now())
+    expect(authorizations).toEqual(['Bearer at-1'])
+    const other = (await pool.listAccounts()).find((entry) => entry.id !== second.id)
+    expect(other?.cooldownUntil).toBeUndefined()
+    expect(poolBackendDocument(await pool.read())).toEqual({ cooldownUntil: [], cooldownReasons: [] })
   })
 
   it('cools a spent usage window down and serves the request from the next account', async () => {
@@ -768,10 +767,9 @@ describe('KimiCodeAdapter account rotation', () => {
     expect((await pool.listAccounts()).every((account) => account.cooldownUntil === undefined)).toBe(true)
   })
 
-  it('still cools and rotates on a genuine 429 back-pressure', async () => {
-    // The counterpart, so the new rule cannot be satisfied by simply never
-    // cooling a 429 again: real back-pressure IS about this account, so it
-    // still leaves rotation with the delay the provider stated.
+  it('does not cool or rotate on generic back-pressure without account-owned evidence', async () => {
+    // A shared 429 says nothing about which account is at fault. The harness may
+    // retry it with backoff, but this attempt must neither cool nor switch.
     const { pool, mirror, mirrorBackend } = harness()
     await mirrorBackend.save(credential(1))
     const second = await pool.addAccount(credential(2))
@@ -795,17 +793,16 @@ describe('KimiCodeAdapter account rotation', () => {
       loadCatalog: async () => CATALOG,
     }, pool)
 
-    const assembled = new BlockAssembler()
-    for await (const chunk of adapter.stream({
+    await expect(collect(adapter.stream({
       provider: 'kimi-code',
       model: 'k3',
       messages: [{ role: 'user', content: 'hi' } as never],
-    } as unknown as GenerateOptions)) assembled.push(chunk)
+    } as unknown as GenerateOptions))).rejects.toMatchObject({ code: 'RATE_LIMIT' })
 
-    expect(authorizations).toEqual(['Bearer at-1', 'Bearer at-2'])
-    expect(assembled.blocks()).toEqual([{ type: 'text', text: 'served by the second account' }])
-    const cooling = (await pool.listAccounts()).find((entry) => entry.id !== second.id)
-    expect(cooling?.cooldownUntil).toBeGreaterThan(Date.now())
+    expect(authorizations).toEqual(['Bearer at-1'])
+    const other = (await pool.listAccounts()).find((entry) => entry.id !== second.id)
+    expect(other?.cooldownUntil).toBeUndefined()
+    expect(poolBackendDocument(await pool.read())).toEqual({ cooldownUntil: [], cooldownReasons: [] })
   })
 
   it('stops routing to an account whose refresh was rejected and uses the other one', async () => {

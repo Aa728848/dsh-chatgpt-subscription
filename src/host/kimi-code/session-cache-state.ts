@@ -17,6 +17,11 @@
 import path from 'node:path'
 import { dshHomeDir } from '../common/home.ts'
 import { CommonSessionCacheStateStore } from '../common/session-cache-state.ts'
+import type {
+  KimiCodeRequestAttemptDiagnostic,
+  KimiCodeRequestDiagnostic,
+  KimiCodeRequestUsageDiagnostic,
+} from '../../shared/kimi-code-contracts.ts'
 
 /**
  * Conversations kept in the document.
@@ -27,13 +32,15 @@ import { CommonSessionCacheStateStore } from '../common/session-cache-state.ts'
  * is the same order the "most recent conversation" fallback reads.
  */
 export const MAX_SESSION_RECORDS = 64
+/** Bounded request evidence retained per conversation. */
+export const MAX_REQUEST_DIAGNOSTICS = 20
 
 /** One conversation's cache state, as it survives the process. */
 export interface KimiCodeSessionCacheRecord {
   /** When this conversation last sent a request, epoch ms. */
   lastActiveAt: number
   /**
-   * Prompt tokens of the most recent request (cache read + fresh input).
+   * Prompt tokens of the most recent request (cache read + fresh input + cache write).
    *
    * The LAST request, not the rolling total: the expiry hint is about how much
    * the next turn will have to reprocess, and summing every turn of a long
@@ -61,7 +68,7 @@ export interface KimiCodeSessionCacheRecord {
    * conversation start warm".
    */
   firstRequestCachedTokens?: number
-  /** Total prompt tokens that first request carried (cache read + fresh input). */
+  /** Total prompt tokens that first request carried (cache read + fresh input + cache write). */
   firstRequestPromptTokens?: number
   /** Cache-read tokens from the most recent request, when this build recorded them. */
   lastRequestCachedTokens?: number
@@ -69,6 +76,12 @@ export interface KimiCodeSessionCacheRecord {
   lastRequestFreshTokens?: number
   /** Prompt size of the request before the most recent one; the continuation baseline. */
   previousRequestPromptTokens?: number
+  /** Pool account that served the most recent successful usage-bearing request. */
+  lastAccountId?: string
+  /** When that successful account observation was recorded, epoch ms. */
+  lastAccountAt?: number
+  /** Most recent requests, oldest first, capped at MAX_REQUEST_DIAGNOSTICS. */
+  recentRequests?: KimiCodeRequestDiagnostic[]
   /**
    * Consecutive warmup-qualified hits recorded for this session, when non-zero.
    *
@@ -128,6 +141,29 @@ export class SessionCacheStateStore extends CommonSessionCacheStateStore<KimiCod
     })
   }
 
+  /** Append bounded request evidence, including a first request that failed before usage. */
+  noteRequest(sessionId: string, request: KimiCodeRequestDiagnostic): void {
+    const existing = this.read(sessionId)
+    const base: KimiCodeSessionCacheRecord = existing ?? {
+      lastActiveAt: request.startedAt,
+      totalTokens: 0,
+      requests: 0,
+      cachedTokens: 0,
+      freshTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite5mTokens: 0,
+      cacheWrite1hTokens: 0,
+      updatedAt: request.endedAt,
+    }
+    this.write(sessionId, {
+      ...base,
+      lastActiveAt: Math.max(base.lastActiveAt, request.endedAt),
+      recentRequests: [...base.recentRequests ?? [], request].slice(-MAX_REQUEST_DIAGNOSTICS),
+      updatedAt: request.endedAt,
+    })
+  }
+
   /** Update the warmup streak without creating a record for an unknown session. */
   noteWarmupStreak(sessionId: string, consecutiveHits: number): void {
     this.update(sessionId, existing => {
@@ -138,6 +174,104 @@ export class SessionCacheStateStore extends CommonSessionCacheStateStore<KimiCod
       return rest
     })
   }
+}
+
+function optionalText(value: unknown, maxLength = 256): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim().slice(0, maxLength) : undefined
+}
+
+function nullableCount(value: unknown): number | null | undefined {
+  return value === null ? null : nonNegative(value)
+}
+
+function normalizeAttempt(value: unknown): KimiCodeRequestAttemptDiagnostic | undefined {
+  if (!isRecord(value)) return undefined
+  const startedAt = finite(value.startedAt)
+  if (startedAt === undefined) return undefined
+  const poolAction = value.poolAction === 'retry-same-account' || value.poolAction === 'cooldown-and-rotate'
+    || value.poolAction === 'mark-auth-failed' || value.poolAction === 'none'
+    ? value.poolAction
+    : undefined
+  const status = nonNegative(value.status)
+  const endedAt = finite(value.endedAt)
+  const retryAfterMs = nonNegative(value.retryAfterMs)
+  const accountId = optionalText(value.accountId)
+  const code = optionalText(value.code)
+  const providerRequestId = optionalText(value.providerRequestId, 128)
+  return {
+    startedAt,
+    ...(accountId === undefined ? {} : { accountId }),
+    ...(endedAt === undefined ? {} : { endedAt }),
+    ...(status === undefined ? {} : { status }),
+    ...(code === undefined ? {} : { code }),
+    ...(poolAction === undefined ? {} : { poolAction }),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    ...(providerRequestId === undefined ? {} : { providerRequestId }),
+  }
+}
+
+function normalizeUsage(value: unknown): KimiCodeRequestUsageDiagnostic | undefined {
+  if (!isRecord(value)) return undefined
+  const freshTokens = nonNegative(value.freshTokens)
+  const outputTokens = nonNegative(value.outputTokens)
+  const cacheReadTokens = nullableCount(value.cacheReadTokens)
+  const cacheWriteTokens = nullableCount(value.cacheWriteTokens)
+  const reasoningTokens = nullableCount(value.reasoningTokens)
+  if (freshTokens === undefined || outputTokens === undefined || cacheReadTokens === undefined
+    || cacheWriteTokens === undefined || reasoningTokens === undefined) return undefined
+  return { freshTokens, cacheReadTokens, cacheWriteTokens, outputTokens, reasoningTokens }
+}
+
+function normalizeRequestDiagnostic(value: unknown): KimiCodeRequestDiagnostic | undefined {
+  if (!isRecord(value)) return undefined
+  const id = optionalText(value.id, 128)
+  const model = optionalText(value.model, 256)
+  const startedAt = finite(value.startedAt)
+  const endedAt = finite(value.endedAt)
+  const wire = value.wire === 'openai' || value.wire === 'anthropic' ? value.wire : undefined
+  const outcome = value.outcome === 'success' || value.outcome === 'error' || value.outcome === 'aborted'
+    ? value.outcome
+    : undefined
+  if (id === undefined || model === undefined || startedAt === undefined || endedAt === undefined
+    || wire === undefined || outcome === undefined) return undefined
+  const usage = normalizeUsage(value.usage)
+  const attempts = (Array.isArray(value.attempts) ? value.attempts : [])
+    .map(normalizeAttempt)
+    .filter((attempt): attempt is KimiCodeRequestAttemptDiagnostic => attempt !== undefined)
+  const accountId = optionalText(value.accountId)
+  const previousAccountId = optionalText(value.previousAccountId)
+  const code = optionalText(value.code)
+  const finishReason = optionalText(value.finishReason)
+  const guard = isRecord(value.toolGuard) ? value.toolGuard : undefined
+  const guardName = optionalText(guard?.toolName)
+  const guardBytes = nonNegative(guard?.bytes)
+  const guardRule = guard?.rule === 'argument-bytes' || guard?.rule === 'repeated-key' ? guard.rule : undefined
+  return {
+    id,
+    startedAt,
+    endedAt,
+    model,
+    wire,
+    accountChanged: value.accountChanged === true,
+    outcome,
+    attempts,
+    ...(accountId === undefined ? {} : { accountId }),
+    ...(previousAccountId === undefined ? {} : { previousAccountId }),
+    ...(code === undefined ? {} : { code }),
+    ...(finishReason === undefined ? {} : { finishReason }),
+    ...(usage === undefined ? {} : { usage }),
+    ...(guardName === undefined || guardBytes === undefined || guardRule === undefined
+      ? {}
+      : { toolGuard: { toolName: guardName, bytes: guardBytes, rule: guardRule } }),
+  }
+}
+
+function normalizeRecentRequests(value: unknown): KimiCodeRequestDiagnostic[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(normalizeRequestDiagnostic)
+    .filter((request): request is KimiCodeRequestDiagnostic => request !== undefined)
+    .slice(-MAX_REQUEST_DIAGNOSTICS)
 }
 
 function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined {
@@ -151,10 +285,15 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
   const lastRequestCachedTokens = nonNegative(value.lastRequestCachedTokens)
   const lastRequestFreshTokens = nonNegative(value.lastRequestFreshTokens)
   const previousRequestPromptTokens = nonNegative(value.previousRequestPromptTokens)
+  const lastAccountId = typeof value.lastAccountId === 'string' && value.lastAccountId.trim() !== ''
+    ? value.lastAccountId.trim()
+    : undefined
+  const lastAccountAt = nonNegative(value.lastAccountAt)
   const warmupStreak = count(value.warmupConsecutiveHits)
   const budgetDropped = droppedImageKeys(value.budgetDropped)
   const lastRequestImageBytes = nonNegative(value.lastRequestImageBytes)
   const lastDroppedImages = nonNegative(value.lastDroppedImages)
+  const recentRequests = normalizeRecentRequests(value.recentRequests)
   return {
     lastActiveAt,
     updatedAt,
@@ -172,6 +311,9 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
     ...(lastRequestCachedTokens === undefined ? {} : { lastRequestCachedTokens }),
     ...(lastRequestFreshTokens === undefined ? {} : { lastRequestFreshTokens }),
     ...(previousRequestPromptTokens === undefined ? {} : { previousRequestPromptTokens }),
+    ...(lastAccountId === undefined ? {} : { lastAccountId }),
+    ...(lastAccountAt === undefined ? {} : { lastAccountAt }),
+    ...(recentRequests.length > 0 ? { recentRequests } : {}),
     ...(warmupStreak > 0 ? { warmupConsecutiveHits: warmupStreak } : {}),
     ...(budgetDropped.length > 0 ? { budgetDropped } : {}),
     ...(lastRequestImageBytes === undefined ? {} : { lastRequestImageBytes }),

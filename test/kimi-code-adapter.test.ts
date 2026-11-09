@@ -512,8 +512,7 @@ const ANTHROPIC_CATALOG: KimiCodeCatalogModel[] = [
 ]
 const MESSAGE_START = { type: 'message_start', message: { usage: { input_tokens: 1 } } }
 
-/** The window an ordinary rate limit gets, and the one a spent window gets instead. */
-const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
+/** The cooldown a proven account-owned spent window receives. */
 const SPENT_WINDOW_MS = 5 * 60 * 60 * 1000
 
 /** The pool surface the adapter uses, recorded instead of persisted. */
@@ -745,7 +744,7 @@ describe('kimi-code in-band stream errors on the Anthropic wire', () => {
     expect(calls).toHaveLength(1)
   })
 
-  it('takes an in-band rate limit out of rotation so the retry lands elsewhere', async () => {
+  it('keeps an ordinary in-band rate limit on the same account without a cooldown', async () => {
     const pool = new FakePool()
     const { adapter, calls } = await adapterFor([
       MESSAGE_START,
@@ -753,13 +752,7 @@ describe('kimi-code in-band stream errors on the Anthropic wire', () => {
     ], 'anthropic', pool)
     const { error } = await streamOf(adapter)
     expect(error).toMatchObject({ code: 'RATE_LIMIT' })
-    // The body cannot be re-requested from here, but the evidence is the same
-    // one a 429 carries, so the account leaves rotation the same way. The
-    // harness retry is about to repeat this request, and repeating it against
-    // the account that just refused fails identically.
-    expect(pool.cooldowns).toEqual([
-      { id: 'kc-1', ms: RATE_LIMIT_WINDOW_MS, reason: 'Kimi Code in-stream 429' },
-    ])
+    expect(pool.cooldowns).toHaveLength(0)
     expect(pool.authFailures).toHaveLength(0)
     expect(calls).toHaveLength(1)
   })
@@ -776,7 +769,7 @@ describe('kimi-code in-band stream errors on the Anthropic wire', () => {
     const { error } = await streamOf(adapter)
     expect(error).toMatchObject({ code: 'PROVIDER_ERROR' })
     expect(pool.cooldowns).toEqual([
-      { id: 'kc-1', ms: SPENT_WINDOW_MS, reason: 'Kimi Code in-stream 429' },
+      { id: 'kc-1', ms: SPENT_WINDOW_MS, reason: 'Kimi Code in-stream limit' },
     ])
     expect(calls).toHaveLength(1)
   })
@@ -879,18 +872,14 @@ describe('kimi-code in-band stream errors on the OpenAI wire', () => {
     expect(calls).toHaveLength(1)
   })
 
-  it('takes an in-band rate limit out of rotation so the retry lands elsewhere', async () => {
+  it('keeps an ordinary OpenAI in-band rate limit on the same account without a cooldown', async () => {
     const pool = new FakePool()
     const { adapter, calls } = await adapterFor([
       { error: { code: 'rate_limit_exceeded', message: "We're receiving too many requests" } },
     ], 'openai', pool)
     const { error } = await streamOf(adapter)
     expect(error).toMatchObject({ code: 'RATE_LIMIT' })
-    // The same rule the 429 response would have applied, reached off the code
-    // rather than off a status this vocabulary never carries.
-    expect(pool.cooldowns).toEqual([
-      { id: 'kc-1', ms: RATE_LIMIT_WINDOW_MS, reason: 'Kimi Code in-stream 429' },
-    ])
+    expect(pool.cooldowns).toHaveLength(0)
     expect(pool.authFailures).toHaveLength(0)
     expect(calls).toHaveLength(1)
   })
@@ -910,7 +899,9 @@ describe('kimi-code in-band stream errors on the OpenAI wire', () => {
     ], 'openai', pool)
     const { error } = await streamOf(adapter)
     expect(error).toMatchObject({ code: 'PROVIDER_ERROR' })
-    expect(pool.cooldowns).toHaveLength(0)
+    expect(pool.cooldowns).toEqual([
+      { id: 'kc-1', ms: SPENT_WINDOW_MS, reason: 'Kimi Code in-stream limit' },
+    ])
     expect(calls).toHaveLength(1)
   })
 
@@ -942,6 +933,44 @@ describe('kimi-code in-band stream errors on the OpenAI wire', () => {
     expect(calls).toHaveLength(1)
   })
 })
+describe('Kimi tool-argument runaway recovery', () => {
+  it('cancels the response reader and files only bounded guard evidence', async () => {
+    const keys = [
+      'header（可选）', 'header（可选）_comment', 'header（可选）_unused',
+      'header（可选）_', 'header（可选）__', 'header（可选）___',
+      'header（可选）____', 'header（可选）_____',
+    ]
+    const args = '{"questions":[{' + keys.map((key) => JSON.stringify(key) + ':""').join(',') + '}]}'
+    let cancelled = false
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+          choices: [{ delta: { tool_calls: [{
+            index: 0,
+            id: 'call-runaway',
+            function: { name: 'ask_user_question', arguments: args },
+          }] } }],
+        })}\n\n`))
+        // Deliberately stay open: the guard, not EOF, must settle the request.
+      },
+      cancel() { cancelled = true },
+    }))
+    const { adapter } = await buildAdapter({ fetchFn: (async () => response) as typeof fetch })
+    const sessionId = 'kc-tool-argument-guard'
+    await expect(drain(adapter.stream(generateOptions('k3', { sessionId: sessionId as never }))))
+      .rejects.toMatchObject({ code: 'PROVIDER_ERROR' })
+
+    expect(cancelled).toBe(true)
+    const request = sessionCacheState.read(sessionId)?.recentRequests?.at(-1)
+    expect(request).toMatchObject({
+      outcome: 'error',
+      code: 'PROVIDER_ERROR',
+      toolGuard: { toolName: 'ask_user_question', rule: 'repeated-key' },
+    })
+    expect(JSON.stringify(request)).not.toContain('header（可选）')
+  })
+})
+
 describe('the body-fit loop gives up on the first turn it cannot improve', () => {
   it('does not report an omission it never performed', async () => {
     // One small image plus enough text to clear the 2 MB ceiling. The overflow is
@@ -1387,9 +1416,13 @@ describe('the Kimi Code cold-start singleflight', () => {
 function fakePool(input: { ids: string[]; defaultId: string; region?: string }): {
   pool: KimiCodeAccountPool
   setDefault: (id: string) => void
+  selections: string[][]
+  cooldowns: Array<{ id: string; ms: number }>
 } {
   let defaultId = input.defaultId
   const region = input.region ?? 'mainland-cn'
+  const selections: string[][] = []
+  const cooldowns: Array<{ id: string; ms: number }> = []
   const credentialsFor = (id: string) => credentials({ accessToken: `at-${id}` })
   const pool = {
     async getEffectiveCredential(
@@ -1398,18 +1431,19 @@ function fakePool(input: { ids: string[]; defaultId: string; region?: string }):
       _options?: unknown,
       selection?: { preferAccountIds?: readonly string[] },
     ) {
+      selections.push([...selection?.preferAccountIds ?? []])
       const chosen = selection?.preferAccountIds?.find((id) => input.ids.includes(id)) ?? defaultId
       return { account: { id: chosen }, credentials: credentialsFor(chosen) }
     },
     async accountScopes() {
       return input.ids.map((id) => ({ id, region }))
     },
-    async markCooldown(): Promise<void> {},
+    async markCooldown(id: string, ms: number): Promise<void> { cooldowns.push({ id, ms }) },
     async markAuthFailed(): Promise<void> {},
     async hasAnotherAvailableAccount(): Promise<boolean> { return false },
     async getFreshCredential() { return credentialsFor(defaultId) },
   } as unknown as KimiCodeAccountPool
-  return { pool, setDefault: (id: string) => { defaultId = id } }
+  return { pool, setDefault: (id: string) => { defaultId = id }, selections, cooldowns }
 }
 
 /** The bearer token a request went out with, however its headers were shaped. */
@@ -1502,6 +1536,76 @@ describe('KimiCodeAdapter cache affinity', () => {
     const off = await buildAdapter({ fetchFn, pool, cacheAffinity: () => false })
     await drain(off.adapter.stream(generateOptions('k3', { sessionId: 'kc-aff-c' as never, system })))
     expect(tokens[2]).toContain('at-acc-2')
+  })
+
+  it('keeps an ordinary 429 on the same account across an outer round-robin retry', async () => {
+    const tokens: string[] = []
+    let call = 0
+    const fetchFn = vi.fn(async (_url: unknown, init: RequestInit) => {
+      tokens.push(authTokenOf(init))
+      call += 1
+      if (call === 1) {
+        return new Response(JSON.stringify({ error: { message: 'too many requests' } }), { status: 429 })
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'recovered' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { pool, setDefault, cooldowns } = fakePool({ ids: ['acc-1', 'acc-2'], defaultId: 'acc-1' })
+    const { adapter } = await buildAdapter({ fetchFn, pool })
+    const controller = new AbortController()
+    const options = generateOptions('k3', {
+      sessionId: 'kc-retry-same-account' as never,
+      system: 'same account retry',
+      signal: controller.signal,
+    })
+
+    await expect(drain(adapter.stream(options))).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    expect(cooldowns).toHaveLength(0)
+    const failed = sessionCacheState.read('kc-retry-same-account')?.recentRequests?.at(-1)
+    expect(failed).toMatchObject({ outcome: 'error', code: 'RATE_LIMIT', accountId: 'acc-1' })
+    expect(failed?.attempts[0]).toMatchObject({ status: 429, poolAction: 'retry-same-account' })
+
+    // The standing strategy would move to acc-2. The 429-specific preference
+    // must outrank it on the next attempt that reuses this step's signal.
+    setDefault('acc-2')
+    await drain(adapter.stream(options))
+    expect(tokens).toEqual(['Bearer at-acc-1', 'Bearer at-acc-1'])
+    expect(cooldowns).toHaveLength(0)
+    expect(sessionCacheState.read('kc-retry-same-account')?.recentRequests).toHaveLength(2)
+  })
+
+  it('prefers the account that last served this conversation over a static-prefix match', async () => {
+    const tokens: string[] = []
+    const fetchFn = vi.fn(async (_url: unknown, init: RequestInit) => {
+      tokens.push(authTokenOf(init))
+      return sseResponse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        {
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: {
+            prompt_tokens: 1000,
+            completion_tokens: 1,
+            prompt_tokens_details: { cached_tokens: 800 },
+          },
+        },
+      ])
+    }) as unknown as typeof fetch
+    const { pool } = fakePool({ ids: ['acc-1', 'acc-2'], defaultId: 'acc-1' })
+    const { adapter } = await buildAdapter({ fetchFn, pool })
+    const sessionId = 'kc-existing-session-affinity'
+    const system = 'existing session affinity'
+    const options = generateOptions('k3', { sessionId: sessionId as never, system })
+    await drain(adapter.stream(options))
+
+    const durable = sessionCacheState.read(sessionId)
+    expect(durable?.lastAccountId).toBe('acc-1')
+    // Simulate the observed successful history living on acc-2 while acc-1 also
+    // has the shared static prefix. The conversation-specific evidence wins.
+    sessionCacheState.write(sessionId, { ...durable!, lastAccountId: 'acc-2', updatedAt: Date.now() })
+    await drain(adapter.stream(options))
+    expect(tokens[1]).toContain('at-acc-2')
   })
 })
 

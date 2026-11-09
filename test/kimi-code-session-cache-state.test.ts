@@ -139,6 +139,41 @@ describe('SessionCacheStateStore', () => {
     })
   })
 
+  it('bounds request history and round-trips omitted versus explicit-zero usage', () => {
+    const store = new SessionCacheStateStore(file)
+    for (let index = 0; index < 25; index += 1) {
+      store.noteRequest('session-a', {
+        id: `request-${index}`,
+        startedAt: NOW + index,
+        endedAt: NOW + index + 1,
+        model: 'k3.1-pro',
+        wire: 'openai',
+        accountId: 'acc-1',
+        accountChanged: false,
+        outcome: 'success',
+        attempts: [{ accountId: 'acc-1', startedAt: NOW + index, status: 200 }],
+        usage: {
+          freshTokens: 100,
+          cacheReadTokens: null,
+          cacheWriteTokens: 0,
+          outputTokens: 10,
+          reasoningTokens: null,
+        },
+      })
+    }
+    store.flush()
+
+    const reopened = new SessionCacheStateStore(file)
+    const requests = reopened.read('session-a')?.recentRequests
+    expect(requests).toHaveLength(20)
+    expect(requests?.[0]?.id).toBe('request-5')
+    expect(requests?.at(-1)?.usage).toMatchObject({
+      cacheReadTokens: null,
+      cacheWriteTokens: 0,
+      reasoningTokens: null,
+    })
+  })
+
   it('drops malformed budget entries instead of poisoning the record', () => {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.writeFileSync(file, JSON.stringify({

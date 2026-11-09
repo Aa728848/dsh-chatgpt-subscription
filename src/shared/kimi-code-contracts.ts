@@ -253,6 +253,52 @@ export interface KimiCodeWebStatus {
  * with no marker to set, so the read ratio is the only evidence a session is
  * actually reusing its prefix.
  */
+export type KimiCodePoolAction = 'retry-same-account' | 'cooldown-and-rotate' | 'mark-auth-failed' | 'none'
+
+/** One account attempt inside a request; never carries credentials or prompt content. */
+export interface KimiCodeRequestAttemptDiagnostic {
+  accountId?: string
+  startedAt: number
+  endedAt?: number
+  status?: number
+  code?: string
+  poolAction?: KimiCodePoolAction
+  retryAfterMs?: number
+  /** Safe, whitelisted upstream request identity, when the service supplied one. */
+  providerRequestId?: string
+}
+
+export interface KimiCodeRequestUsageDiagnostic {
+  freshTokens: number
+  /** Null means the upstream omitted the field; zero is an explicit zero. */
+  cacheReadTokens: number | null
+  cacheWriteTokens: number | null
+  outputTokens: number
+  reasoningTokens: number | null
+}
+
+/** Bounded request evidence used by cache/cost diagnostics and issue attribution. */
+export interface KimiCodeRequestDiagnostic {
+  id: string
+  startedAt: number
+  endedAt: number
+  model: string
+  wire: KimiCodeWire
+  accountId?: string
+  previousAccountId?: string
+  accountChanged: boolean
+  outcome: 'success' | 'error' | 'aborted'
+  code?: string
+  finishReason?: string
+  usage?: KimiCodeRequestUsageDiagnostic
+  toolGuard?: {
+    toolName: string
+    rule: 'argument-bytes' | 'repeated-key'
+    bytes: number
+  }
+  attempts: KimiCodeRequestAttemptDiagnostic[]
+}
+
 export interface KimiCodeCacheStatsDto {
   requests: number
   cachedTokens: number
@@ -324,6 +370,8 @@ export interface KimiCodeCacheStatsDto {
   }
   /** Latest request's prefix continuity and newly processed input, when a baseline exists. */
   continuation?: KimiCodeCacheContinuationDto
+  /** Most recent bounded request diagnostic, including an unsuccessful request. */
+  lastRequest?: KimiCodeRequestDiagnostic
   /**
    * Per-request image payload budget and the latest turn's image usage, when known.
    */

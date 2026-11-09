@@ -672,6 +672,38 @@ describe('OpenAI stream parsing', () => {
     })
   })
 
+  it('keeps omitted cache and reasoning fields distinct from explicit zeroes', () => {
+    const omitted = createStreamState('openai')
+    processOpenAIStreamLine(frame({
+      choices: [],
+      usage: { prompt_tokens: 100, completion_tokens: 20 },
+    }), omitted)
+    expect(omitted).toMatchObject({
+      cacheReadReported: false,
+      cacheWriteReported: false,
+      reasoningReported: false,
+    })
+
+    const zero = createStreamState('openai')
+    processOpenAIStreamLine(frame({
+      choices: [],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 0 },
+      },
+    }), zero)
+    expect(zero).toMatchObject({
+      cacheReadReported: true,
+      cacheWriteReported: true,
+      reasoningReported: true,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+    })
+  })
+
   it('raises a provider error for a mid-stream error frame', () => {
     const state = createStreamState('openai')
     expect(() => processOpenAIStreamLine(
@@ -713,6 +745,23 @@ describe('Anthropic stream parsing', () => {
     processAnthropicStreamLine('data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}', state)
     const chunks = processAnthropicStreamLine('data: {"type":"message_stop"}', state)
     expect(chunks.some((chunk) => chunk.type === 'finish')).toBe(true)
+  })
+
+  it('preserves Anthropic usage field presence, including explicit zeroes', () => {
+    const omitted = createStreamState('anthropic')
+    processAnthropicStreamLine('data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}', omitted)
+    expect(omitted).toMatchObject({ cacheReadReported: false, cacheWriteReported: false, reasoningReported: false })
+
+    const zero = createStreamState('anthropic')
+    processAnthropicStreamLine('data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0,"reasoning_tokens":0}}}', zero)
+    expect(zero).toMatchObject({
+      cacheReadReported: true,
+      cacheWriteReported: true,
+      reasoningReported: true,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+    })
   })
 
   it('ignores a ping keepalive', () => {

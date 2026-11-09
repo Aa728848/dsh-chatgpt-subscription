@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { recordCacheWarmupUsage } from '../cache-warmup/index.ts'
 import { localizedProviderName } from '../common/i18n/index.ts'
 import {
@@ -96,7 +97,7 @@ import {
   type KimiCodeStreamState,
   type RequestMediaOptions,
 } from './mapper.ts'
-import { sessionCacheState } from './session-cache-state.ts'
+import { MAX_REQUEST_DIAGNOSTICS, sessionCacheState } from './session-cache-state.ts'
 import {
   createMediaFilesUploader,
   type KimiMediaFilesUploader,
@@ -201,7 +202,12 @@ import {
 } from './cache-affinity.ts'
 import { ensureAccessToken, KimiCodeOAuthError, KimiCodeRetryableError, KimiCodeUnauthorizedError } from './oauth.ts'
 import { retryAfterMs } from '../wire-auth.ts'
-import type { KimiCodeRegion, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
+import type {
+  KimiCodeRegion,
+  KimiCodeRequestAttemptDiagnostic,
+  KimiCodeRequestDiagnostic,
+  KimiCodeWire,
+} from '../../shared/kimi-code-contracts.ts'
 
 /**
  * Transient-failure retry policy for the `kimi-code` route.
@@ -296,7 +302,12 @@ export function resolveDefaultReasoningEffort(
  * retried. The body text is what separates them, so the classification reads
  * it rather than trusting the status alone.
  */
+/** What the account pool may do with one failed attempt. */
+export type KimiPoolAction = 'retry-same-account' | 'cooldown-and-rotate' | 'mark-auth-failed' | 'none'
+
 export interface KimiFailureClassification extends ProviderFailureClassification {
+  /** Account-pool side effect, kept separate from the retry code. */
+  poolAction: KimiPoolAction
   /** DSH error code; decides whether the route retries. */
   code: string
   /** Message shown to the user, with the provider's own text appended. */
@@ -616,7 +627,7 @@ export function plannedReferenceMaps(planned: readonly PlannedMediaReference[]):
 export function classifyKimiFailure(status: number, bodyText: string): KimiFailureClassification {
   const detail = summarizeFailureBody(bodyText)
   if (isHttpContextOverflow(status, bodyText)) {
-    return { code: CONTEXT_OVERFLOW_CODE, retryable: false, accountScoped: false, upstreamOverload: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
+    return { code: CONTEXT_OVERFLOW_CODE, poolAction: 'none', retryable: false, accountScoped: false, upstreamOverload: false, message: `${PROVIDER_NAME} context window exceeded: ${detail}` }
   }
 
   if (status === 400 && isKimiBodySizeRefusal(detail)) {
@@ -628,6 +639,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     // bytes, because a byte refusal is what happened.
     return {
       code: CONTEXT_OVERFLOW_CODE,
+      poolAction: 'none',
       retryable: false,
       accountScoped: false,
       upstreamOverload: false,
@@ -640,6 +652,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     // describe it as usually temporary and recommend waiting and retrying.
     return {
       code: 'SERVER',
+      poolAction: 'retry-same-account',
       retryable: true,
       accountScoped: false,
       upstreamOverload: false,
@@ -653,6 +666,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       // cannot help, and retrying cannot either.
       return {
         code: 'PROVIDER_ERROR',
+        poolAction: 'none',
         retryable: false,
         // A plan refusal is the same plan on every account of the pool, and it
         // is fixed by an upgrade rather than by a different account.
@@ -671,6 +685,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       const limitReached = matchesAny(detail, ACCOUNT_LIMIT_PATTERNS)
       return {
         code: 'PROVIDER_ERROR',
+        poolAction: 'cooldown-and-rotate',
         retryable: false,
         // A spent window is this account's own quota. The 403 carries neither a
         // dead credential nor a signal worth retrying against the same account,
@@ -683,6 +698,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     }
     return {
       code: 'INVALID_CREDENTIAL',
+      poolAction: 'mark-auth-failed',
       retryable: false,
       accountScoped: false,
       upstreamOverload: false,
@@ -696,6 +712,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
       // until the account is topped up, so it must not be retried.
       return {
         code: 'PROVIDER_ERROR',
+        poolAction: 'cooldown-and-rotate',
         retryable: false,
         // Balance, not back-pressure: this account's own, and it stays spent.
         accountScoped: true,
@@ -715,6 +732,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
         // 在 UI 与号池文案里的含义是「这个账号被限流了」，用过载去借它会让用户在
         // 界面上读到一个关于自己账号的错误结论。
         code: 'SERVER',
+        poolAction: 'retry-same-account',
         // 过载是典型的瞬时故障，退避后重试正是为它准备的。
         retryable: true,
         // 换号也救不了：下一台引擎一样忙。所以轮转没有任何意义。
@@ -725,9 +743,10 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     }
     return {
       code: 'RATE_LIMIT',
+      poolAction: 'retry-same-account',
       retryable: true,
-      // Ordinary back-pressure says nothing about this account in particular,
-      // and the shared 429 cooldown below already rotates on it.
+      // Ordinary back-pressure says nothing about this account in particular:
+      // retry the same account without cooling it or rotating the pool.
       accountScoped: false,
       upstreamOverload: false,
       message: `${PROVIDER_NAME} is rate limited (429): ${detail || 'too many requests'}. Retrying with backoff.`,
@@ -740,6 +759,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
     // bounded policy above instead of failing the turn outright.
     return {
       code: 'SERVER',
+      poolAction: 'retry-same-account',
       retryable: true,
       accountScoped: false,
       // A 5xx is the same upstream condition this line reports for an overloaded
@@ -752,6 +772,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
   if (status === 400) {
     return {
       code: 'PROVIDER_ERROR',
+      poolAction: 'none',
       retryable: false,
       accountScoped: false,
       upstreamOverload: false,
@@ -761,6 +782,7 @@ export function classifyKimiFailure(status: number, bodyText: string): KimiFailu
 
   return {
     code: 'PROVIDER_ERROR',
+    poolAction: 'none',
     retryable: false,
     accountScoped: false,
     upstreamOverload: false,
@@ -805,7 +827,7 @@ export function accountLimitCooldownMs(bodyText: string, now: number = Date.now(
     resetAtMs: resetsAt,
     now,
     fallbackMs: BILLING_CYCLE_PATTERN.test(bodyText) ? BILLING_CYCLE_COOLDOWN_MS : ACCOUNT_LIMIT_COOLDOWN_MS,
-    minimumMs: POOL_COOLDOWN_MS,
+    minimumMs: MIN_ACCOUNT_LIMIT_COOLDOWN_MS,
     maximumMs: MAX_ACCOUNT_LIMIT_COOLDOWN_MS,
   })
 }
@@ -847,14 +869,36 @@ export interface KimiCodeAdapterOptions {
   cacheAffinity?: () => boolean
 }
 
+/** Minimum cooldown for a proven account-owned usage limit near its reset. */
+const MIN_ACCOUNT_LIMIT_COOLDOWN_MS = 15 * 60_000
+
 /**
- * Cooldown one rate-limited account takes when the provider states no delay.
+ * The account a shared/transient failure should use on the harness's next attempt.
  *
- * 只在**真正的**限流上使用：上游引擎过载走 SERVER，既不落这条窗口，也不消耗轮转
- * 名额。它是 15 分钟而不是服务自己说的时长，正是因为拿不准——拿不准的那次猜测
- * 落在一个只有单个账号的号池上，代价是整个号池在 15 分钟里彻底不可用。
+ * DSH rebuilds GenerateOptions for a retry, but keeps the step's original abort
+ * signal. Keying by that signal avoids a process-global session latch: concurrent
+ * sessions cannot affect one another, and an abandoned retry chain disappears by GC.
  */
-const POOL_COOLDOWN_MS = 15 * 60_000
+const sameAccountRetryBySignal = new WeakMap<AbortSignal, string>()
+
+function rememberSameAccountRetry(signal: AbortSignal | undefined, accountId: string | undefined): void {
+  if (signal !== undefined && accountId !== undefined && !signal.aborted) {
+    sameAccountRetryBySignal.set(signal, accountId)
+  }
+}
+
+function clearSameAccountRetry(signal: AbortSignal | undefined): void {
+  if (signal !== undefined) sameAccountRetryBySignal.delete(signal)
+}
+
+/** Only these non-secret, bounded upstream identities may enter durable diagnostics. */
+function upstreamRequestId(headers: Headers): string | undefined {
+  for (const name of ['x-request-id', 'msh-request-id']) {
+    const value = headers.get(name)?.trim() ?? ''
+    if (/^[A-Za-z0-9._:-]{1,128}$/.test(value)) return value
+  }
+  return undefined
+}
 
 /**
  * Fallback cooldown for an account whose usage window is spent.
@@ -1036,10 +1080,15 @@ function reportDriftCause(sessionId: string, cause: string | undefined): void {
   )
 }
 
-function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStreamState): void {
+function noteSessionCacheState(
+  sessionId: string | undefined,
+  state: KimiCodeStreamState,
+  successful: boolean,
+  requestDiagnostic?: KimiCodeRequestDiagnostic,
+): void {
   if (sessionId === undefined || sessionId.trim() === '') return
   const stats = getCacheStats(sessionId)
-  if (stats.requests === 0) return
+  if (stats.requests === 0 && requestDiagnostic === undefined) return
   const lastDrift = getLastDriftCause(sessionId)
   reportDriftCause(sessionId, lastDrift)
   const now = Date.now()
@@ -1063,10 +1112,19 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
   // The opening inheritance is measured exactly once, on the turn whose request
   // was the conversation's first: it answers "did this conversation start warm",
   // and a later turn copying its own numbers over it would erase the only answer.
+  const recentRequests = requestDiagnostic === undefined
+    ? priorRecord?.recentRequests
+    : [...priorRecord?.recentRequests ?? [], requestDiagnostic].slice(-MAX_REQUEST_DIAGNOSTICS)
+  const accountObservation = successful && state.accountId !== undefined
+    ? { lastAccountId: state.accountId, lastAccountAt: now }
+    : {
+        ...(priorRecord?.lastAccountId === undefined ? {} : { lastAccountId: priorRecord.lastAccountId }),
+        ...(priorRecord?.lastAccountAt === undefined ? {} : { lastAccountAt: priorRecord.lastAccountAt }),
+      }
   const firstRequest = stats.requests === 1
     ? {
         firstRequestCachedTokens: state.cacheReadTokens,
-        firstRequestPromptTokens: state.cacheReadTokens + state.inputTokens,
+        firstRequestPromptTokens: state.cacheReadTokens + state.inputTokens + state.cacheWriteTokens,
       }
     : {
         ...(priorRecord?.firstRequestCachedTokens === undefined
@@ -1078,7 +1136,7 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
       }
   sessionCacheState.write(sessionId, {
     lastActiveAt: now,
-    totalTokens: state.cacheReadTokens + state.inputTokens,
+    totalTokens: state.cacheReadTokens + state.inputTokens + state.cacheWriteTokens,
     requests: stats.requests,
     cachedTokens: stats.cachedTokens,
     freshTokens: stats.freshTokens,
@@ -1088,6 +1146,8 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
     cacheWrite1hTokens: stats.cacheWrite1hTokens,
     lastRequestCachedTokens: state.cacheReadTokens,
     lastRequestFreshTokens: state.inputTokens,
+    ...accountObservation,
+    ...(recentRequests === undefined ? {} : { recentRequests }),
     ...(previousRequestPromptTokens === undefined ? {} : { previousRequestPromptTokens }),
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(budgetDropped === undefined ? {} : { budgetDropped }),
@@ -1105,7 +1165,7 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
     inputTokens: state.inputTokens,
     cacheReadTokens: state.cacheReadTokens,
     outputTokens: state.outputTokens,
-    totalTokens: state.cacheReadTokens + state.inputTokens,
+    totalTokens: state.cacheReadTokens + state.inputTokens + state.cacheWriteTokens,
     at: now,
     ...(lastDrift === undefined ? {} : { driftCause: lastDrift }),
   })
@@ -1305,14 +1365,27 @@ export class KimiCodeAdapter extends LlmAdapter {
       if (!isWarmPrefixGroup(region, options, scope.id)) continue
       candidates.push({ id: scope.id, warm: true })
     }
-    if (candidates.length === 0) return undefined
     // Quota is read only for candidates that are actually warm: a cold account
     // cannot be preferred whatever its window says.
     const remainingShareById: Record<string, number | null> = {}
     for (const candidate of candidates) {
       remainingShareById[candidate.id] = remainingQuotaShare(cachedQuotaFor(candidate.id))
     }
-    const preferAccountIds = orderAffinityCandidates({ candidates, remainingShareById })
+    const warmAccountIds = orderAffinityCandidates({ candidates, remainingShareById })
+    // A successful request on THIS conversation is stronger evidence than a
+    // shared static head warmed by another conversation: only that account has
+    // observed the dynamic history. The pool still applies pin/eligibility rules.
+    const sessionId = typeof options.sessionId === 'string' ? options.sessionId.trim() : ''
+    const durable = sessionId === '' ? undefined : sessionCacheState.read(sessionId)
+    const previousAccountId = durable?.lastAccountId
+    const previousAge = durable?.lastAccountAt === undefined ? Infinity : Date.now() - durable.lastAccountAt
+    const previousIsWarm = previousAccountId !== undefined
+      && scopes.some((scope) => scope.id === previousAccountId)
+      && previousAge >= 0 && previousAge < CACHE_TTL_MS
+    const preferAccountIds = [...new Set([
+      ...(previousIsWarm ? [previousAccountId] : []),
+      ...warmAccountIds,
+    ])]
     return preferAccountIds.length === 0 ? undefined : { preferAccountIds }
   }
 
@@ -1478,6 +1551,26 @@ export class KimiCodeAdapter extends LlmAdapter {
     // read as the session's own turn.
     const sideChannel = isAuxiliaryRequest(normalized) || isSideChannelTitleRequest(normalized)
     const sessionKey = typeof options.sessionId === 'string' ? options.sessionId.trim() : ''
+    const retrySignal = options.signal
+    const sameAccountRetryId = sideChannel || retrySignal === undefined
+      ? undefined
+      : sameAccountRetryBySignal.get(retrySignal)
+    const previousAccountId = sideChannel || sessionKey === ''
+      ? undefined
+      : sessionCacheState.read(sessionKey)?.lastAccountId
+    const requestDiagnostic: KimiCodeRequestDiagnostic = {
+      id: randomUUID(),
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+      model: options.model,
+      wire: 'openai',
+      ...(previousAccountId === undefined ? {} : { previousAccountId }),
+      accountChanged: false,
+      outcome: 'error',
+      attempts: [],
+    }
+    let diagnosticState: KimiCodeStreamState | undefined
+    let requestError: unknown
     const mainHeaderRelease = !sideChannel && sessionKey !== ''
       ? registerInFlightMainSessionHeader(sessionKey)
       : () => undefined
@@ -1485,6 +1578,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     try {
       const catalog = await this.catalog().catch(() => [])
       const wire: KimiCodeWire = wireForCatalogEntry(options.model, catalog)
+      requestDiagnostic.wire = wire
 
       const entry = catalog.find((model) => model.id === options.model)
 
@@ -1699,7 +1793,10 @@ export class KimiCodeAdapter extends LlmAdapter {
     // The side-channel title request borrows the conversation's identity but not
     // its prefix, so it has no account preference worth computing (and the pool
     // read behind it would be spent for an answer nobody can use).
-    const affinity = sideChannel ? undefined : await this.cacheAffinityHint(pool, requestOptions)
+    const cacheAffinity = sideChannel ? undefined : await this.cacheAffinityHint(pool, requestOptions)
+    const affinity: AccountSelectionHint | undefined = sameAccountRetryId === undefined
+      ? cacheAffinity
+      : { preferAccountIds: [...new Set([sameAccountRetryId, ...cacheAffinity?.preferAccountIds ?? []])] }
     // Hoisted out of the rotation loop so the account that actually served the
     // response is still in scope when the stream closes and files its usage, and
     // when a failure reported inside the stream takes that account out of
@@ -1744,6 +1841,12 @@ export class KimiCodeAdapter extends LlmAdapter {
         tried.add(accountId)
         apiCredentials = effective.credentials
       }
+
+      const attemptDiagnostic: KimiCodeRequestAttemptDiagnostic = {
+        startedAt: Date.now(),
+        ...(accountId === undefined ? {} : { accountId }),
+      }
+      if (!sideChannel) requestDiagnostic.attempts.push(attemptDiagnostic)
 
       // Every attempt uses the credential's own region and hosts: one pool may
       // legitimately hold accounts issued in different regions.
@@ -1934,47 +2037,43 @@ export class KimiCodeAdapter extends LlmAdapter {
         }
       }
 
-      if (response.ok) break
+      attemptDiagnostic.status = response.status
+      const providerRequestId = upstreamRequestId(response.headers)
+      if (providerRequestId !== undefined) attemptDiagnostic.providerRequestId = providerRequestId
+      if (response.ok) {
+        attemptDiagnostic.endedAt = Date.now()
+        if (accountId !== undefined) requestDiagnostic.accountId = accountId
+        clearSameAccountRetry(retrySignal)
+        break
+      }
 
       const failure = classifyKimiFailure(response.status, detail)
+      attemptDiagnostic.code = failure.code
+      attemptDiagnostic.poolAction = failure.poolAction
+      attemptDiagnostic.endedAt = Date.now()
       const after = response.status === 429 ? retryAfterMs(response.headers) : undefined
+      if (after !== undefined) attemptDiagnostic.retryAfterMs = after
+
+      if (failure.poolAction === 'retry-same-account') {
+        // The retry policy belongs to DSH; this carries only the account choice
+        // into the next attempt, including when the pool strategy is round-robin.
+        rememberSameAccountRetry(retrySignal, accountId)
+      } else {
+        clearSameAccountRetry(retrySignal)
+      }
 
       if (pool !== null && accountId !== undefined) {
-        // A plan-scoped 429 is a property of the request, not of the account:
-        // rotating cannot help, and cooling every account after one such request
-        // would take the whole pool offline.
-        const planScoped = response.status === 429 && matchesAny(detail, ENTITLEMENT_PATTERNS)
-        // 过载必须在这里显式排除：整条链路的判据历来是 HTTP 状态码，而 429 同时
-        // 承载「本账号被限流」和「上游引擎繁忙」两种含义。若不在这一层挡下，
-        // classifyKimiFailure 判得再对也没有用——号池会照旧给唯一那个账号写
-        // 15 分钟冷却（POOL_COOLDOWN_MS），harness 的每一次退避重试随后都被
-        // isEligible 挡在门外，一次网络请求都发不出去。判据取自分类结果的
-        // upstreamOverload（正文命中 UPSTREAM_OVERLOAD_PATTERNS），而不是这里
-        // 再匹配一次正文：分类是唯一知道这句话含义的地方，号池只消费它的结论。
-        // 排除后既不冷却也不轮转，直接把可重试的 SERVER 抛给 harness，让退避
-        // 在同一个账号上真的重发请求——过载时换号只会撞上同一台繁忙的引擎。
-        if (response.status === 429 && !planScoped && !failure.upstreamOverload) {
-          // A spent balance is this account's own and stays spent, so it takes
-          // the window's length rather than the retry-after of a back-pressure
-          // signal that would have meant nothing here.
-          const cooldownMs = failure.accountScoped
-            ? accountLimitCooldownMs(detail)
-            : after ?? POOL_COOLDOWN_MS
-          await pool.markCooldown(accountId, cooldownMs, `${PROVIDER_NAME} 429`).catch(() => undefined)
+        if (failure.poolAction === 'cooldown-and-rotate') {
+          // Only a body that proves an account-owned limit may take it out of
+          // rotation. Ordinary back-pressure and shared overload never do so.
+          await pool.markCooldown(
+            accountId,
+            accountLimitCooldownMs(detail),
+            `${PROVIDER_NAME} ${response.status}`,
+          ).catch(() => undefined)
           if (await pool.hasAnotherAvailableAccount(tried)) continue
-        } else if (failure.code === 'INVALID_CREDENTIAL') {
-          // A dead refresh token is that account's problem alone: keep the
-          // account (signing in again restores it) and take it out of rotation.
+        } else if (failure.poolAction === 'mark-auth-failed') {
           await pool.markAuthFailed(accountId, failure.message).catch(() => undefined)
-          if (await pool.hasAnotherAvailableAccount(tried)) continue
-        } else if (failure.accountScoped) {
-          // A usage window this account has spent, which this service reports as
-          // a 403. Neither of the branches above recognizes it — the credential
-          // is fine and the request must not be retried against the same account
-          // — so before this branch existed a pool of several accounts failed the
-          // whole turn on whichever one happened to be first. Cooling this one
-          // until its window resets is what lets the next account answer.
-          await pool.markCooldown(accountId, accountLimitCooldownMs(detail), `${PROVIDER_NAME} 403`).catch(() => undefined)
           if (await pool.hasAnotherAvailableAccount(tried)) continue
         }
       }
@@ -2020,6 +2119,8 @@ export class KimiCodeAdapter extends LlmAdapter {
     // conversation when the stream closes; the account is passed separately
     // below, once rotation has settled on one.
     const state = createStreamState(wire, requestOptions.sessionId, sideChannel)
+    state.accountId = servedByAccountId
+    diagnosticState = state
     // The per-tier split of the cache write exists ONLY in the response headers
     // (the body states the total), so it is read here — the one place the
     // Response is in hand — and filed with the rest of the usage at close time.
@@ -2099,24 +2200,67 @@ export class KimiCodeAdapter extends LlmAdapter {
         const inBand = state.streamError
         if (error instanceof LlmError && !outputStarted && error.code === 'PROVIDER_ERROR'
           && inBand !== undefined) {
-          throw await this.inBandStreamFailure(error, inBand, servedByAccountId)
+          throw await this.inBandStreamFailure(error, inBand, servedByAccountId, retrySignal, requestDiagnostic.attempts.at(-1))
         }
         // Everything else that escaped the read loop came from the transport, not
         // from the provider: see streamFailure.
         throw streamFailure(error, signal)
       }
       } finally {
-        // Filed before the reader is released: the record is what lets a status
-        // card still say "this conversation sat idle past the cache lifetime"
-        // after the process that ran it is gone.
-        // A side-channel title request files nothing under the session: it is a
-        // different conversation that merely borrowed the session's identity.
-        if (state.sawUsage && !sideChannel) {
-          noteSessionCacheState(requestOptions.sessionId ?? state.sessionId, state)
-        }
         void reader.cancel().catch(() => undefined)
       }
+    } catch (error) {
+      requestError = error
+      throw error
     } finally {
+      const endedAt = Date.now()
+      const finalAccountId = diagnosticState?.accountId
+        ?? requestDiagnostic.accountId
+        ?? requestDiagnostic.attempts.at(-1)?.accountId
+      const errorCode = requestError instanceof LlmError
+        ? requestError.code
+        : requestError === undefined ? undefined : 'UNKNOWN'
+      const lastAttempt = requestDiagnostic.attempts.at(-1)
+      if (lastAttempt !== undefined && errorCode !== undefined) {
+        lastAttempt.code = errorCode
+        lastAttempt.endedAt ??= endedAt
+      }
+      requestDiagnostic.endedAt = endedAt
+      if (finalAccountId !== undefined) requestDiagnostic.accountId = finalAccountId
+      requestDiagnostic.accountChanged = previousAccountId !== undefined
+        && finalAccountId !== undefined && previousAccountId !== finalAccountId
+      requestDiagnostic.outcome = retrySignal?.aborted === true || errorCode === 'ABORTED'
+        ? 'aborted'
+        : requestError === undefined && diagnosticState?.finished === true ? 'success' : 'error'
+      if (errorCode !== undefined) requestDiagnostic.code = errorCode
+      else if (requestDiagnostic.outcome === 'error') requestDiagnostic.code = 'INCOMPLETE_STREAM'
+      if (diagnosticState?.finishReason !== null && diagnosticState?.finishReason !== undefined) {
+        requestDiagnostic.finishReason = diagnosticState.finishReason
+      }
+      if (diagnosticState?.sawUsage === true) {
+        requestDiagnostic.usage = {
+          freshTokens: diagnosticState.inputTokens,
+          cacheReadTokens: diagnosticState.cacheReadReported ? diagnosticState.cacheReadTokens : null,
+          cacheWriteTokens: diagnosticState.cacheWriteReported ? diagnosticState.cacheWriteTokens : null,
+          outputTokens: diagnosticState.outputTokens,
+          reasoningTokens: diagnosticState.reasoningReported ? diagnosticState.reasoningTokens : null,
+        }
+      }
+      if (diagnosticState?.toolGuard !== undefined) requestDiagnostic.toolGuard = diagnosticState.toolGuard
+      if (!sideChannel && sessionKey !== '') {
+        if (diagnosticState?.sawUsage === true) {
+          // One atomic record: complete request evidence lands before the
+          // cache-warmup observer reads it, never in a second trailing write.
+          noteSessionCacheState(
+            diagnosticState.sessionId,
+            diagnosticState,
+            requestError === undefined && diagnosticState.finished,
+            requestDiagnostic,
+          )
+        } else {
+          sessionCacheState.noteRequest(sessionKey, requestDiagnostic)
+        }
+      }
       mainHeaderRelease()
     }
   }
@@ -2141,6 +2285,8 @@ export class KimiCodeAdapter extends LlmAdapter {
     thrown: LlmError,
     inBand: KimiCodeInBandStreamError,
     accountId: string | undefined,
+    retrySignal?: AbortSignal,
+    attemptDiagnostic?: KimiCodeRequestAttemptDiagnostic,
   ): Promise<LlmError> {
     const bodyText = JSON.stringify({ error: inBand.error })
     const reclassified = inBand.vocabulary === 'anthropic'
@@ -2149,72 +2295,37 @@ export class KimiCodeAdapter extends LlmAdapter {
     const pool = this.accountPool
     if (pool === null || accountId === undefined) return reclassified
 
+    let action: KimiPoolAction = 'none'
     if (inBand.vocabulary === 'anthropic') {
       const status = inBandAnthropicStatus(inBand.error)
       // A type this vocabulary does not name classifies to nothing, so there is
       // no verdict to weigh against the pool and the mapper's own stands.
       if (status === null) return reclassified
-      const failure = classifyKimiFailure(status, bodyText)
-      // The same chain the non-2xx branch runs, in the same order: a
-      // plan-scoped 429 is a property of the request, so it cools nothing and
-      // rotating on it would spend the whole pool to learn the same refusal.
-      // Kept whole rather than narrowed to the statuses named today, so a type
-      // the table later adds lands in the arm that already owns it.
-      const planScoped = status === 429 && matchesAny(bodyText, ENTITLEMENT_PATTERNS)
-      // 与 HTTP 分支同一个排除项：in-band 走的是同一套判定，只是投递方式不同。
-      // 同一个信号换个投递方式就又冷却一次，等于这条线路只在状态码那条路上修好了。
-      if (status === 429 && !planScoped && !failure.upstreamOverload) {
-        await this.coolInBandRateLimit(pool, accountId, failure.accountScoped, bodyText)
-      } else if (failure.code === 'INVALID_CREDENTIAL') {
-        // A credential the stream itself calls dead is that account's problem
-        // alone, and signing in again restores it — so mark it, never delete.
-        await pool.markAuthFailed(accountId, failure.message).catch(() => undefined)
-      } else if (failure.accountScoped) {
-        // A window this account has spent: the retry is about to repeat the
-        // request, and repeating it against the same spent window fails
-        // identically three times over.
-        await pool.markCooldown(accountId, accountLimitCooldownMs(bodyText), `${PROVIDER_NAME} in-stream 403`).catch(() => undefined)
-      }
+      action = classifyKimiFailure(status, bodyText).poolAction
+    } else if (reclassified.code === 'RATE_LIMIT' || matchesAny(bodyText, QUOTA_EXHAUSTED_PATTERNS)) {
+      // A spent balance is deliberately reclassified as PROVIDER_ERROR; the
+      // body still proves that the account, rather than the shared engine, owns it.
+      action = classifyKimiFailure(429, bodyText).poolAction
+    } else if (reclassified.code === 'SERVER') {
+      action = 'retry-same-account'
+    }
+
+    if (attemptDiagnostic !== undefined) {
+      attemptDiagnostic.code = reclassified.code
+      attemptDiagnostic.poolAction = action
+      attemptDiagnostic.endedAt = Date.now()
+    }
+    if (action === 'retry-same-account') {
+      rememberSameAccountRetry(retrySignal, accountId)
       return reclassified
     }
-
-    // This vocabulary names no status at all, so nothing is synthesized to
-    // classify against and no arm is invented: the code the vocabulary derived
-    // selects it. RATE_LIMIT is the 429 rule below, and SERVER is the 5xx rule,
-    // which the HTTP path leaves the pool alone for — an overload is not one
-    // account's property to carry.
-    //
-    // 过载不需要在这里再排除一次，因为本臂的判据是 code 而不是状态码：那条 code
-    // 正是 classifyKimiFailure 给同一段正文定的罪，而它现在把过载定成 SERVER，
-    // 所以过载根本走不进来。Anthropic 那条臂就不同了 —— 它的判据是自己合成的
-    // 状态码（rate_limit_error → 429），不经过分类，所以必须显式排除。两条臂
-    // 判据不同，防护的位置也就必须不同。
-    if (reclassified.code === 'RATE_LIMIT' && !matchesAny(bodyText, ENTITLEMENT_PATTERNS)) {
-      // The same 429 rule, with the scope read off that arm's own classification
-      // — which is where the HTTP branch reads `accountScoped` from too, so a
-      // spent balance leaves rotation here exactly as it does there.
-      await this.coolInBandRateLimit(pool, accountId, classifyKimiFailure(429, bodyText).accountScoped, bodyText)
+    clearSameAccountRetry(retrySignal)
+    if (action === 'cooldown-and-rotate') {
+      await pool.markCooldown(accountId, accountLimitCooldownMs(bodyText), `${PROVIDER_NAME} in-stream limit`).catch(() => undefined)
+    } else if (action === 'mark-auth-failed') {
+      await pool.markAuthFailed(accountId, reclassified.message).catch(() => undefined)
     }
     return reclassified
-  }
-
-  /**
-   * Cool the account whose own rate limit the stream reported.
-   *
-   * The window this route already defaults to, never a Retry-After: there is no
-   * 429 response to read one from, and a delay stated on the 200 belongs to a
-   * different message. An account-scoped verdict takes its own window instead,
-   * because a spent balance is not back-pressure and 15 minutes would put the
-   * account back into rotation four times inside the window that refused it.
-   */
-  private async coolInBandRateLimit(
-    pool: KimiCodeAccountPool,
-    accountId: string,
-    accountScoped: boolean,
-    bodyText: string,
-  ): Promise<void> {
-    const cooldownMs = accountScoped ? accountLimitCooldownMs(bodyText) : POOL_COOLDOWN_MS
-    await pool.markCooldown(accountId, cooldownMs, `${PROVIDER_NAME} in-stream 429`).catch(() => undefined)
   }
 }
 
