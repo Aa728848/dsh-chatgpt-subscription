@@ -21,7 +21,13 @@ const BASE = `
 .dsha-value{font-size:13px;min-width:0;overflow-wrap:anywhere;text-align:right;color:var(--dsw-alias-label-primary)}
 .dsha-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;padding-top:12px}
 .dsha-btn{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;corner-shape:round;color:var(--dsw-alias-label-primary);cursor:pointer;font:inherit;font-size:13px;line-height:1;padding:8px 13px;white-space:nowrap}
-.dsha-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+/* The hover tint belongs to the unfilled button only: it is a translucent wash
+   over the neutral fill, and letting it match .dsha-btn-primary would paint the
+   filled button with the wash while the label stayed white — the primary fill
+   is (0,1,0) and this rule is (0,3,0), so nothing else could win it back. The
+   exclusion is written into the selector, like the shared chip's
+   :not([aria-pressed='true']), so a later filled variant cannot reintroduce it. */
+.dsha-btn:hover:not(:disabled):not(.dsha-btn-primary){background:var(--dsw-alias-interactive-bg-hover)}
 .dsha-btn:disabled{cursor:default;opacity:.5}
 .dsha-btn-primary{background:var(--dsw-alias-button-info-fill,#397ee8);border-color:transparent;color:var(--dsw-alias-button-info-label,#fff)}
 .dsha-btn-primary:hover:not(:disabled){opacity:.9}
