@@ -15,6 +15,31 @@ const ANTIGRAVITY_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-
 const KIMI_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/kimi-code"]'
 const tags = () => document.querySelectorAll<HTMLStyleElement>(SELECTOR)
 
+/**
+ * One sheet's text with its CSS comments removed, so a rule can be looked up by
+ * the selector it declares rather than by the prose written above it.
+ */
+function sheetText(selector: string): string {
+  const css = document.querySelector<HTMLStyleElement>(selector)?.textContent ?? ''
+  return css.replace(/\/\*[\s\S]*?\*\//g, '')
+}
+
+/**
+ * The declaration block a selector carries in one sheet, or undefined.
+ *
+ * The sheets are plain text, so a cascade decision ("does this hover rule
+ * match that button?") can only be asserted on the selector itself. Reading a
+ * rule by its exact selector keeps the assertion about the rule, not about the
+ * order the declarations happen to be written in.
+ */
+function ruleBody(css: string, selector: string): string | undefined {
+  for (const chunk of css.split('}')) {
+    const [rawSelector, body] = chunk.split('{')
+    if (rawSelector?.trim() === selector) return body
+  }
+  return undefined
+}
+
 afterEach(() => {
   for (const selector of [SELECTOR, HUB_SELECTOR, CHECKLIST_SELECTOR, POOL_SELECTOR, ANTIGRAVITY_SELECTOR, KIMI_SELECTOR]) {
     for (const tag of [...document.querySelectorAll<HTMLStyleElement>(selector)]) tag.remove()
@@ -77,6 +102,26 @@ describe('provider hub overview styles', () => {
       const css = document.querySelector<HTMLStyleElement>(selector)?.textContent ?? ''
       expect(css).not.toContain('.dsha-models{')
       expect(css).toContain('.dsha-models-hint{')
+    }
+  })
+
+  it('keeps the filled primary button painted while the pointer is on it', () => {
+    // The resting fill is .dsha-btn-primary at (0,1,0); the shared hover tint is
+    // (0,3,0) and paints a ~6% wash. When the tint also matched the filled
+    // button it replaced the blue outright while the label stayed white, so a
+    // hovered "保存设置" read as an empty pill. The exclusion is part of the
+    // selector — the same shape the shared chip uses for its pressed state — so
+    // the two sheets that carry this vocabulary cannot drift apart on it.
+    installAntigravityStyles()
+    installKimiCodeStyles()
+    for (const selector of [ANTIGRAVITY_SELECTOR, KIMI_SELECTOR]) {
+      const css = sheetText(selector)
+      // The unguarded rule is what made the fill disappear: it must be gone.
+      expect(ruleBody(css, '.dsha-btn:hover:not(:disabled)')).toBeUndefined()
+      const hover = ruleBody(css, '.dsha-btn:hover:not(:disabled):not(.dsha-btn-primary)')
+      expect(hover).toBeDefined()
+      // The fill the hover must not overwrite is still the info colour.
+      expect(ruleBody(css, '.dsha-btn-primary')).toContain('var(--dsw-alias-button-info-fill')
     }
   })
 })
