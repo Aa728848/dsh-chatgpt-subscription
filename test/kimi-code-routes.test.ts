@@ -9,6 +9,7 @@ import { FileCredentialStore, FileModelSettingsStore, registerKimiCodePreference
 import { clearCachedCatalog, clearCachedQuota } from '../src/host/kimi-code/client.ts'
 import { KimiCodeAccountPool, parseKimiCodePoolData } from '../src/host/kimi-code/account-pool.ts'
 import { resetRefreshRejections, resetWebLogin } from '../src/host/kimi-code/oauth.ts'
+import { sessionCacheState } from '../src/host/kimi-code/session-cache-state.ts'
 import {
   createStreamState,
   recordCacheStats,
@@ -361,6 +362,53 @@ describe('Kimi Code settings routes', () => {
       const written = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as { contextWindowOverrides: unknown }
       expect(written.contextWindowOverrides).toEqual({ 'kimi-for-coding': 500_000 })
     })
+  })
+
+  it('reports latest prefix continuity on both live and durable status paths', async () => {
+    const session = 'session-prefix-continuation-fixture'
+    vi.spyOn(store, 'read').mockResolvedValue(credential() as never)
+    sessionCacheState.write(session, {
+      lastActiveAt: Date.now(),
+      updatedAt: Date.now(),
+      totalTokens: 1_324,
+      requests: 2,
+      cachedTokens: 1_400,
+      freshTokens: 924,
+      outputTokens: 20,
+      cacheWriteTokens: 0,
+      cacheWrite5mTokens: 0,
+      cacheWrite1hTokens: 0,
+      lastRequestCachedTokens: 700,
+      lastRequestFreshTokens: 324,
+      previousRequestPromptTokens: 1_000,
+    })
+    const expected = {
+      cachedTokens: 700,
+      freshTokens: 324,
+      previousPromptTokens: 1_000,
+      expectedCachedTokens: 768,
+      retentionRatio: 700 / 768,
+    }
+
+    // Live path: one in-memory request exists, but continuation still comes
+    // from the durable raw counters rather than the rolling totals.
+    const state = createStreamState('openai', session)
+    state.sawUsage = true
+    state.inputTokens = 324
+    state.cacheReadTokens = 700
+    recordCacheStats(state, session)
+    const live = fakeExchange()
+    await handler(fakeRequest({ url: '/kimi-code/api/status?sessionId=' + session }), live.response)
+    const liveCache = (live.captured.body as { value: { cache: { continuation?: unknown } } }).value.cache
+    expect(liveCache.continuation).toEqual(expected)
+
+    // Durable path: a restarted process has no in-memory requests, yet the
+    // status route must return the same measurement from disk-backed state.
+    resetCacheStats(session)
+    const durable = fakeExchange()
+    await handler(fakeRequest({ url: '/kimi-code/api/status?sessionId=' + session }), durable.response)
+    const durableCache = (durable.captured.body as { value: { cache: { continuation?: unknown } } }).value.cache
+    expect(durableCache.continuation).toEqual(expected)
   })
 
   /**

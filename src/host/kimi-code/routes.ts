@@ -314,6 +314,28 @@ function openingInheritanceOf(sessionId?: string): KimiCodeCacheStatsDto['openin
   }
 }
 
+/**
+ * Latest request's continuity against the previous prompt's observed 256-token
+ * alignment baseline. Raw counts travel with the ratio so an above-baseline
+ * reading stays visible instead of being hidden by clamping.
+ */
+function continuationOf(sessionId?: string): KimiCodeCacheStatsDto['continuation'] {
+  const durable = sessionCacheState.read(sessionId)
+  const cachedTokens = durable?.lastRequestCachedTokens
+  const freshTokens = durable?.lastRequestFreshTokens
+  const previousPromptTokens = durable?.previousRequestPromptTokens
+  if (cachedTokens === undefined || freshTokens === undefined || previousPromptTokens === undefined) return undefined
+  const expectedCachedTokens = Math.floor(previousPromptTokens / 256) * 256
+  if (expectedCachedTokens <= 0) return undefined
+  return {
+    cachedTokens,
+    freshTokens,
+    previousPromptTokens,
+    expectedCachedTokens,
+    retentionRatio: Math.min(1, Math.max(0, cachedTokens / expectedCachedTokens)),
+  }
+}
+
 function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   const stats = getCacheStats(sessionId)
   // A process that just started has no totals, and answering "nothing yet" for
@@ -323,11 +345,13 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   const lastDrift = getLastDriftCause(sessionId)
   const warmup = warmupStatusOf(sessionId)
   const opening = openingInheritanceOf(sessionId)
+  const continuation = continuationOf(sessionId)
   return {
     ...stats,
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(warmup === undefined ? {} : { warmup }),
     ...(opening === undefined ? {} : { opening }),
+    ...(continuation === undefined ? {} : { continuation }),
     // What the image budget did on the last turn, next to the ceiling it
     // enforces: a card that shows the budget without showing what it cost
     // cannot say whether the conversation is close to losing a picture.
@@ -389,6 +413,7 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
   const lastDrift = driftCauseOf(durable.lastDrift)
   const warmup = warmupStatusOf(sessionId)
   const opening = openingInheritanceOf(sessionId)
+  const continuation = continuationOf(sessionId)
   return {
     requests: durable.requests,
     cachedTokens: durable.cachedTokens,
@@ -401,6 +426,7 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(warmup === undefined ? {} : { warmup }),
     ...(opening === undefined ? {} : { opening }),
+    ...(continuation === undefined ? {} : { continuation }),
     imageBudget: imageBudgetOf(sessionId),
   }
 }

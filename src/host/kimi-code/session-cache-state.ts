@@ -63,6 +63,12 @@ export interface KimiCodeSessionCacheRecord {
   firstRequestCachedTokens?: number
   /** Total prompt tokens that first request carried (cache read + fresh input). */
   firstRequestPromptTokens?: number
+  /** Cache-read tokens from the most recent request, when this build recorded them. */
+  lastRequestCachedTokens?: number
+  /** Newly processed input tokens from the most recent request. */
+  lastRequestFreshTokens?: number
+  /** Prompt size of the request before the most recent one; the continuation baseline. */
+  previousRequestPromptTokens?: number
   /**
    * Consecutive warmup-qualified hits recorded for this session, when non-zero.
    *
@@ -142,6 +148,9 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
   const drift = typeof value.lastDrift === 'string' && value.lastDrift !== '' ? value.lastDrift : undefined
   const firstRequestCachedTokens = nonNegative(value.firstRequestCachedTokens)
   const firstRequestPromptTokens = nonNegative(value.firstRequestPromptTokens)
+  const lastRequestCachedTokens = nonNegative(value.lastRequestCachedTokens)
+  const lastRequestFreshTokens = nonNegative(value.lastRequestFreshTokens)
+  const previousRequestPromptTokens = nonNegative(value.previousRequestPromptTokens)
   const warmupStreak = count(value.warmupConsecutiveHits)
   const budgetDropped = droppedImageKeys(value.budgetDropped)
   const lastRequestImageBytes = nonNegative(value.lastRequestImageBytes)
@@ -160,6 +169,9 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
     ...(drift === undefined ? {} : { lastDrift: drift }),
     ...(firstRequestCachedTokens === undefined ? {} : { firstRequestCachedTokens }),
     ...(firstRequestPromptTokens === undefined ? {} : { firstRequestPromptTokens }),
+    ...(lastRequestCachedTokens === undefined ? {} : { lastRequestCachedTokens }),
+    ...(lastRequestFreshTokens === undefined ? {} : { lastRequestFreshTokens }),
+    ...(previousRequestPromptTokens === undefined ? {} : { previousRequestPromptTokens }),
     ...(warmupStreak > 0 ? { warmupConsecutiveHits: warmupStreak } : {}),
     ...(budgetDropped.length > 0 ? { budgetDropped } : {}),
     ...(lastRequestImageBytes === undefined ? {} : { lastRequestImageBytes }),

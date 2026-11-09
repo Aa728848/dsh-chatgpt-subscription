@@ -89,6 +89,7 @@ import {
   installCacheWarmup,
 } from '../src/host/cache-warmup/install.ts'
 import { CACHE_WARMUP_RESULT_TOOL } from '../src/host/cache-warmup/result-tool.ts'
+import { CACHE_WARMUP_DEFAULTS } from '../src/host/cache-warmup/index.ts'
 import { cacheWarmupErrorLabel } from '../src/host/cache-warmup/logging.ts'
 
 /** post-execute 监听器的签名（只用得到这三样）。 */
@@ -724,5 +725,34 @@ describe('cache warmup host integration', () => {
     expect(projectionCalls()).toBe(1)
     expect(core.calls[0]?.navigation).toBe(true)
     expect(decision.kind).toBe('accept')
+  })
+
+  it('admits grep/glob above the warmup budget for structured evaluation in edit tasks', async () => {
+    settings.retrievalEnabled = true
+    const { listener } = install()
+    for (const name of ['grep', 'glob']) {
+      const exec = retrievalExec(name, '把本项目的所有issues全部解决')
+      const text = 'x'.repeat(CACHE_WARMUP_DEFAULTS.warmupMaxChars)
+      const result: Readonly<ToolExecutionResult> = {
+        isError: false,
+        content: [{ type: 'text', text }],
+      } as unknown as Readonly<ToolExecutionResult>
+      const decision = await listener(exec, result, async () => ({ kind: 'accept', content: result.content }))
+      expect(decision.kind).toBe('accept')
+    }
+    expect(projectionCalls()).toBe(2)
+    expect(core.calls.map(call => call.navigation)).toEqual([true, true])
+
+    // 低于最小预热预算时不额外调用核心；高于候选线但仍在当前预算内的结果，
+    // 由核心自身的 verbatim-small 规则逐字返回（投影核心测试覆盖）。
+    const exec = retrievalExec('grep', '把本项目的所有issues全部解决')
+    const text = 'x'.repeat(CACHE_WARMUP_DEFAULTS.warmupMaxChars - 1)
+    const result: Readonly<ToolExecutionResult> = {
+      isError: false,
+      content: [{ type: 'text', text }],
+    } as unknown as Readonly<ToolExecutionResult>
+    const original: PostToolDecision = { kind: 'accept', content: result.content }
+    expect(await listener(exec, result, async () => original)).toBe(original)
+    expect(projectionCalls()).toBe(2)
   })
 })

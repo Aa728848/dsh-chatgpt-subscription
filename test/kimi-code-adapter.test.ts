@@ -1029,6 +1029,9 @@ describe('the Kimi Code side-channel title request', () => {
     const afterFirst = sessionCacheState.read(sessionId)
     expect(afterFirst?.firstRequestCachedTokens).toBe(400)
     expect(afterFirst?.firstRequestPromptTokens).toBe(1_000)
+    expect(afterFirst?.lastRequestCachedTokens).toBe(400)
+    expect(afterFirst?.lastRequestFreshTokens).toBe(600)
+    expect(afterFirst?.previousRequestPromptTokens).toBeUndefined()
 
     await drain(adapter.stream(generateOptions('k3', {
       sessionId: sessionId as never,
@@ -1040,6 +1043,9 @@ describe('the Kimi Code side-channel title request', () => {
     expect(afterSecond?.requests).toBe(2)
     expect(afterSecond?.firstRequestCachedTokens).toBe(400)
     expect(afterSecond?.firstRequestPromptTokens).toBe(1_000)
+    expect(afterSecond?.lastRequestCachedTokens).toBe(2_400)
+    expect(afterSecond?.lastRequestFreshTokens).toBe(0)
+    expect(afterSecond?.previousRequestPromptTokens).toBe(1_000)
   })
 
   it('files nothing under the conversation it titles', async () => {
@@ -1087,6 +1093,9 @@ describe('the Kimi Code side-channel title request', () => {
     expect(afterTitle?.cachedTokens).toBe(afterConversation?.cachedTokens)
     expect(afterTitle?.lastActiveAt).toBe(afterConversation?.lastActiveAt)
     expect(afterTitle?.lastDrift).toBe(afterConversation?.lastDrift)
+    expect(afterTitle?.lastRequestCachedTokens).toBe(afterConversation?.lastRequestCachedTokens)
+    expect(afterTitle?.lastRequestFreshTokens).toBe(afterConversation?.lastRequestFreshTokens)
+    expect(afterTitle?.previousRequestPromptTokens).toBe(afterConversation?.previousRequestPromptTokens)
     expect(afterTitle?.warmupConsecutiveHits).toBe(1)
     expect(sessionLastActiveAt(sessionId)).toBe(activeAfterConversation)
   })

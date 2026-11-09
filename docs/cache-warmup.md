@@ -27,7 +27,7 @@
 ## 缓存安全不变量
 
 1. 只处理当前新产生的工具结果，不回改旧历史。
-2. 原日志路径的 `value` 不变，只替换模型可见的 `content`。独立检索开关开启且明确为导航任务时，`read` / `web_fetch` / `grep` / `glob` 若实际生成 preview，可以把结构化 `value` 转为内容预览；未生成 preview 时原决策逐字返回，原文始终先存入 ref。
+2. 原日志路径的 `value` 不变，只替换模型可见的 `content`。独立检索开关开启且明确为导航任务时，`read` / `web_fetch` / `grep` / `glob` 若实际生成 preview，可以把结构化 `value` 转为内容预览；此外，超过当前预算且能可靠结构化的 grep/glob 在编辑或审查任务中也可生成 preview。未生成 preview 时原决策逐字返回，原文始终先存入 ref。
 3. preview 和 refId 一旦写入历史就不再变化；原文过期、淘汰或释放不会改写 preview。
 4. 非文本块原样保留；非 Kimi 线路、非受控执行/日志工具（`run_code`、`win_bash`、`bash`、`pwsh`、`job_output`）、无法确认会话的结果不变。
 5. 不自动重热、不重写前缀、不因为命中率下降而重建会话。
@@ -37,10 +37,11 @@
 
 小结果原样通过。大结果只有在能可靠提取时才生成 preview：
 
-- 测试日志：完整失败集合与汇总；装不下完整失败集合时回退原文。
+- 测试日志：成功时保留零失败集合与完整汇总，失败时保留完整失败集合与汇总；没有明确通过汇总、存在非零退出或错误证据时不得误判为成功，装不下必要证据时回退原文。
 - Shell / TypeScript 构建日志：退出码与完整错误集合（含 `error TSxxxx` 紧随其后的缩进类型差异详情行）。
 - PTC `run_code` JSON Envelope：若外层是轻量 JSON 对象且仅包含单一超长白名单日志字段（`stdout`/`stderr`/`output`/`logs`/`log`），只将该字段值替换为 preview 并保留外层 JSON 结构；含多份源码或被截断的混合证据保持原样。
-- grep/glob：计数、分布和有限样本，完整原文通过 ref 补读。
+- PTC 工具目录：严格识别 `tools` 数组及每项的 `name` / `namespace` / `description`，保留完整名称索引和截断说明，参数与返回 schema 通过 ref 补读；额外根成员、非 PTC 调用或字段缺失均回退原文。
+- grep/glob：计数、分布和有限样本，完整原文通过 ref 补读。结果超过当前会话预览预算时，即使处于编辑或审查任务也允许进入结构化判定；无法可靠解析时仍逐字返回。
 - 文件导航：只在明确导航意图下，列出可识别声明的完整集合与原始行号；编辑、审查和未知意图保持原文。PTC 的 Read JSON Envelope 必须具有唯一、连续、完整的 lines 数组，混合输出与契约仍保持原文。
 - 网页导航：只在明确导航意图下，列出完整 title 与 h1-h3 / Markdown heading 集合，不做任务相关性事实摘要。
 - JSON Lines / TSV：字段、行数与分页信息。
@@ -51,7 +52,7 @@
 - 含批量源码/契约的 JSON 文档及被宿主截断的 JSON 对象；
 - 子代理报告、混合证据和无法可靠解析的大文本；
 - 原日志路径中含 `value` 的后续决策，以及所有非 `accept` 决策和非文本块。
-- 直接检索工具的编辑、审查、验证、全量审计和无法判断意图的结果。
+- `read` / `web_fetch` 在编辑、审查、验证、全量审计和无法判断意图时的结果；grep/glob 只有在超过当前预算且结构可靠时才例外允许预览。
 
 这套策略优先保证信息准确，不追求对所有大结果都压缩。对最初分析的 110 条真实工具结果，最终只有一条真实测试失败日志被投影，其余源码和混合证据均保持原文。
 
@@ -70,6 +71,10 @@ cacheReadTokens / (inputTokens + cacheReadTokens)
 - 控制器只读用量，不发请求、不改消息；登记和读侧均为非抛出路径，避免影响 adapter 的 `finally`。
 
 97% 是内部退出阈值。必须连续两次达标，单次达到 97% 不会立即退出；真实 drift 仍会清零。
+
+### 累计命中率与前缀延续
+
+累计 `cachedTokens / (cachedTokens + freshTokens)` 会被本轮新增的助手输出、工具结果和用户消息拉低，因此不能单独用来判断旧前缀是否失效。Kimi 状态接口额外返回可选 `continuation`：持久化最近一轮的缓存读、新增输入和上一轮 prompt，按实测的 256-token 对齐基线计算 `expectedCachedTokens` 与 `retentionRatio`，并在缓存卡片分别展示前缀延续和新增输入。首轮、旧记录或无有效基线时省略该指标；256-token 对齐只是诊断基线，不是上游缓存内部契约。
 
 ## 原文引用与补读
 
@@ -98,8 +103,8 @@ cacheReadTokens / (inputTokens + cacheReadTokens)
 ## 验证
 
 - 完整类型检查：通过。
-- 全套 Vitest：310 files passed / 2 skipped，5166 passed / 9 skipped；默认开启后的 112 项相关测试另通过。
-- `npm run build`、`npm pack --dry-run`、`git diff --check`：通过。
+- 全套 Vitest：382 files passed / 2 skipped，6966 passed / 9 skipped。
+- `npm run build`、`git diff --check`：通过。
 - 检索投影的真实 Kimi 对照严格使用 4 次请求（A/B/C/D，无重试）：
   - 原始组：冷启动 687 fresh；加入原始文件结果时 512 cached + 1251 fresh；
   - 大纲组：冷启动 687 fresh；加入大纲结果时 512 cached + 317 fresh；

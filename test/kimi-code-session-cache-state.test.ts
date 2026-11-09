@@ -122,6 +122,23 @@ describe('SessionCacheStateStore', () => {
     })
   })
 
+  it('round-trips the latest request continuation counters', () => {
+    const store = new SessionCacheStateStore(file)
+    store.write('session-a', record({
+      lastRequestCachedTokens: 700,
+      lastRequestFreshTokens: 324,
+      previousRequestPromptTokens: 1_000,
+    }))
+    store.flush()
+
+    const reopened = new SessionCacheStateStore(file)
+    expect(reopened.read('session-a')).toMatchObject({
+      lastRequestCachedTokens: 700,
+      lastRequestFreshTokens: 324,
+      previousRequestPromptTokens: 1_000,
+    })
+  })
+
   it('drops malformed budget entries instead of poisoning the record', () => {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.writeFileSync(file, JSON.stringify({
@@ -135,6 +152,9 @@ describe('SessionCacheStateStore', () => {
           budgetDropped: ['', 3, null, 'attachment:a', 'attachment:a'],
           lastRequestImageBytes: -1,
           lastDroppedImages: 'many',
+          lastRequestCachedTokens: -1,
+          lastRequestFreshTokens: 'many',
+          previousRequestPromptTokens: -100,
         },
       },
     }), 'utf8')
@@ -144,6 +164,9 @@ describe('SessionCacheStateStore', () => {
     // A negative byte count and a non-numeric image count are not counts.
     expect(store.read('broken')?.lastRequestImageBytes).toBeUndefined()
     expect(store.read('broken')?.lastDroppedImages).toBeUndefined()
+    expect(store.read('broken')?.lastRequestCachedTokens).toBeUndefined()
+    expect(store.read('broken')?.lastRequestFreshTokens).toBeUndefined()
+    expect(store.read('broken')?.previousRequestPromptTokens).toBeUndefined()
   })
 
   it('persists and clears warmupConsecutiveHits via noteWarmupStreak without an extra write()', () => {

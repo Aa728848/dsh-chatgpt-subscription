@@ -115,6 +115,8 @@ export const dictionary: Record<KimiCodeLocaleKey, string> = {
   cacheDrift: 'Состояние последнего префикса',
   cacheOpening: 'Наследование на старте',
   cacheOpeningValue: '{cached} / {tokens} ток. ({ratio})',
+  cacheContinuation: 'Непрерывность последнего префикса',
+  cacheContinuationValue: '{cached} / {expected} ток. ({ratio}) · новых: {fresh} ток.',
   cacheDriftFirst: 'Первый запрос (кеш пуст)',
   cacheDriftStable: 'Стабильно (префикс не менялся)',
   cacheDriftSystemPrompt: 'Системный промпт изменился (кеш сброшен)',

@@ -480,15 +480,18 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     const blocks = decision.content ?? result.content
     if (blocks.length === 0) return decision
     const baseNavigation = retrievalTool || ptcRetrieval ? cacheWarmupNavigationIntentOf(exec.agent) : undefined
-    const isOversizedSearchDump =
+    // grep/glob 超过最小预热预算时就允许进入核心判定；是否真正替换仍由核心的
+    // 当前会话预算决定（预热 1200 / 稳态 8000）。只有可靠结构才会变成 preview，
+    // 编辑/审查任务里的不可解析结果与原文回退规则完全不变。
+    const isSearchPreviewCandidate =
       (exec.name === 'grep' || exec.name === 'glob')
       && blocks.reduce((sum, block) => {
         const text = typeof block === 'object' && block !== null && typeof (block as { text?: unknown }).text === 'string'
           ? (block as { text: string }).text
           : ''
         return sum + text.length
-      }, 0) >= 20_000
-    const navigation = baseNavigation === true || isOversizedSearchDump ? true : baseNavigation
+      }, 0) >= CACHE_WARMUP_DEFAULTS.warmupMaxChars
+    const navigation = baseNavigation === true || isSearchPreviewCandidate ? true : baseNavigation
     // 不确定、编辑或审查：连核心都不调用，原 value/content 决策逐字交回。
     if (retrievalTool && navigation !== true) return decision
     if (sourceTool && !settings.enabled && navigation !== true) return decision

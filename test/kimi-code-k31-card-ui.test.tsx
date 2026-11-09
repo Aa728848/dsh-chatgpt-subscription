@@ -295,6 +295,38 @@ describe('kimi-code K3.1 Pro card', () => {
     )
   })
 
+  it('draws latest prefix continuity separately from newly processed input', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 2,
+        cachedTokens: 1_400,
+        freshTokens: 924,
+        outputTokens: 20,
+        hitRatio: 1_400 / 2_324,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        continuation: {
+          cachedTokens: 700,
+          freshTokens: 324,
+          previousPromptTokens: 1_000,
+          expectedCachedTokens: 768,
+          retentionRatio: 700 / 768,
+        },
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const row = rows.find((entry) => entry.querySelector('.dsha-label')?.textContent === zh.cacheContinuation)
+    expect(row).toBeDefined()
+    expect(row!.querySelector('.dsha-value')?.textContent).toBe(
+      zh.cacheContinuationValue
+        .replace('{cached}', (700).toLocaleString())
+        .replace('{expected}', (768).toLocaleString())
+        .replace('{fresh}', (324).toLocaleString())
+        .replace('{ratio}', `${((700 / 768) * 100).toFixed(1)}%`),
+    )
+  })
+
   it('omits the opening row for a conversation that predates the measurement', async () => {
     const node = await mount(status({
       cache: {
@@ -310,6 +342,7 @@ describe('kimi-code K3.1 Pro card', () => {
     }))
     const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
     expect(rows.some((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheOpening)).toBe(false)
+    expect(rows.some((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheContinuation)).toBe(false)
   })
 
   it('renders the cache warmup budget row when warmup status is reported', async () => {

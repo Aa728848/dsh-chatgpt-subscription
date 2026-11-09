@@ -322,6 +322,8 @@ export interface KimiCodeCacheStatsDto {
     /** cachedTokens / promptTokens, in [0, 1]. */
     hitRatio: number
   }
+  /** Latest request's prefix continuity and newly processed input, when a baseline exists. */
+  continuation?: KimiCodeCacheContinuationDto
   /**
    * Per-request image payload budget and the latest turn's image usage, when known.
    */
@@ -331,6 +333,24 @@ export interface KimiCodeCacheStatsDto {
     requestImageBytes: number
     droppedImages: number
   }
+}
+
+/**
+ * How much of the previous request's 256-token-aligned prompt survived into the
+ * latest request. This is a diagnostic baseline derived from observed Kimi
+ * behaviour, not a claim about the service's internal cache implementation.
+ */
+export interface KimiCodeCacheContinuationDto {
+  /** Prompt tokens the latest request served from cache. */
+  cachedTokens: number
+  /** Newly processed input tokens from the latest request. */
+  freshTokens: number
+  /** Total prompt tokens carried by the previous request. */
+  previousPromptTokens: number
+  /** Previous prompt rounded down to a 256-token boundary. */
+  expectedCachedTokens: number
+  /** cachedTokens / expectedCachedTokens, clamped to [0, 1]. */
+  retentionRatio: number
 }
 
 /**

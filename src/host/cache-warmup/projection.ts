@@ -1580,6 +1580,65 @@ type ProjectionPlan =
     }
   | { kind: 'verbatim'; strategy: ProjectionStrategy }
 
+/**
+ * PTC 工具目录：保留完整的 namespace/name 索引，重 schema 由原文 ref 补读。
+ *
+ * 只认 code_tools_list / code_tools_search 的根对象形状。任意字段缺失、额外根成员
+ * 或非 PTC 调用都回退原文，避免把业务 JSON 里的 tools 数组误当成工具发现结果。
+ */
+function planToolCatalogProjection(text: string, toolName: string): Extract<ProjectionPlan, { kind: 'preview' }> | undefined {
+  if (!isPtcTransportName(toolName)) return undefined
+  const candidate = parseJsonCandidate(text)
+  if (candidate?.kind !== 'object') return undefined
+  const record = candidate.record
+  if (Object.keys(record).some(key => key !== 'tools' && key !== 'fallback')) return undefined
+  if (!Array.isArray(record.tools) || record.tools.length === 0) return undefined
+  const lines: string[] = []
+  for (const entry of record.tools) {
+    if (!isPlainRecord(entry)) return undefined
+    if (typeof entry.name !== 'string' || entry.name.trim() === '') return undefined
+    if (typeof entry.namespace !== 'string' || entry.namespace.trim() === '') return undefined
+    if (typeof entry.description !== 'string') return undefined
+    const name = entry.name.trim()
+    const namespace = entry.namespace.trim()
+    const description = entry.description.replace(/\s+/g, ' ').trim()
+    lines.push(`  ${namespace}/${name}: ${clip(description, 180)}`)
+  }
+  const header = [`tools: ${record.tools.length} (complete name index; descriptions clipped)`]
+  if (typeof record.fallback === 'string' && record.fallback.trim() !== '') {
+    header.push('fallback: ' + clip(record.fallback.replace(/\s+/g, ' ').trim(), 240))
+  }
+  return {
+    kind: 'preview',
+    strategy: 'tool-catalog',
+    sections: [{ lines: header }, { lines }],
+  }
+}
+
+/** 成功测试日志必须有明确通过汇总，且没有任何可识别的失败证据。 */
+function isSuccessfulTestEvidence(text: string, evidence: TestEvidence): boolean {
+  if (evidence.failures.length > 0 || evidence.summary.length === 0) return false
+  if (!evidence.summary.some(line => /\b\d+\s+passed\b/i.test(line))) return false
+  if (/(?:^|\s)[1-9]\d*\s+failed\b/i.test(text)) return false
+  const exitMatch = /(?:exit code|exited with code|process exited with code)[:=\s]+(-?\d+)/i.exec(text)
+    ?? /\[exit code: (-?\d+)\]/i.exec(text)
+  if (exitMatch !== null && Number(exitMatch[1]) !== 0) return false
+  for (const raw of text.split('\n')) {
+    const trimmed = raw.trim()
+    if (trimmed === '' || /^npm notice\b/i.test(trimmed)) continue
+    // 通过行与“0 failed / 0 errors”汇总是成功证据，不因包含 failed/error 字样误伤。
+    if (/^(?:PASS\b|[✓✔]|ok\s+\d+)/i.test(trimmed)) continue
+    // Vitest 的 stdout/stderr 标题是测试名称，可能合法包含 error/cannot；Node
+    // warning 同样是运行日志而不是失败结论。独立 Error/FAIL/非零退出仍在下方拒绝。
+    if (/^(?:stdout|stderr)\s*\|/i.test(trimmed)) continue
+    if (/^\(node:\d+\).*Warning:/i.test(trimmed)) continue
+    if (/^\s*(?:0|no)\s+(?:errors?|failures?|failed)\b/i.test(trimmed)) continue
+    if (/\b\d+\s+passed\b/i.test(trimmed)) continue
+    if (SHELL_ERROR_LINE.test(trimmed)) return false
+  }
+  return true
+}
+
 /** 对一段纯文本（非 JSON 文档）做投影计划判定。 */
 function planPlainTextProjection(rawText: string, toolName: string): ProjectionPlan {
   const text = stripAnsi(rawText)
@@ -1589,6 +1648,9 @@ function planPlainTextProjection(rawText: string, toolName: string): ProjectionP
   const test = extractTestEvidence(text)
   if (test !== undefined && test.failures.length > 0) {
     return { kind: 'preview', strategy: 'test-failure', sections: buildTestSections(test) }
+  }
+  if (test !== undefined && isSuccessfulTestEvidence(text, test)) {
+    return { kind: 'preview', strategy: 'test-success', sections: buildTestSections(test) }
   }
 
   const grep = extractGrepEvidence(text)
@@ -1645,6 +1707,12 @@ function planProjection(
   if (oversized && !isJsonDocument(text)) {
     const multiSection = planMultiSectionProjection(text)
     if (multiSection !== undefined) return multiSection
+  }
+  // 工具目录的 description/parameters 可能含有契约字样，但完整 schema 已由 ref 保留；
+  // 必须在通用契约回退之前识别其严格根形状，否则目录永远只能原样进入历史。
+  if (isJsonDocument(text)) {
+    const toolCatalog = planToolCatalogProjection(text, toolName)
+    if (toolCatalog !== undefined) return toolCatalog
   }
   if (looksLikeContract(text)) return { kind: 'verbatim', strategy: 'verbatim-contract' }
   // 程序传输（`run_code` / `code_run`）把 read 包在程序里：只接受严格单一行号文件，

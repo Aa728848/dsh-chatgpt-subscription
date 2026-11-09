@@ -1288,4 +1288,110 @@ describe('projectToolResult 的超长多读/多节输出', () => {
     expect(result.preview).toContain('exit code: 1')
     expect(result.preview).toContain('[Error: Uncaught Error: boom]')
   })
+
+  it('PTC 工具目录保留完整名称索引，重 schema 通过 ref 精确回读', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const tools = Array.from({ length: 18 }, (_, index) => ({
+      name: `tool_${index}`,
+      namespace: 'plugin',
+      description: `Tool ${index} discovers a resource and returns bounded metadata for the caller.`,
+      parameters: { type: 'object', properties: { payload: { type: 'string', description: 'x'.repeat(700) } } },
+      output: { type: 'object', description: 'y'.repeat(300) },
+    }))
+    const raw = JSON.stringify({ tools }, null, 2)
+    expect(raw.length).toBeGreaterThan(STEADY.maxChars)
+    const result = await projectToolResult({ toolName: 'code_run', sessionId: 'catalog-1', content: raw, budget: STEADY, store })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('tool-catalog')
+    expect(result.preview).toContain('tools: 18 (complete name index; descriptions clipped)')
+    for (let index = 0; index < 18; index += 1) expect(result.preview).toContain(`plugin/tool_${index}:`)
+    expect(result.preview).not.toContain('parameters')
+    const page = await store.page({ sessionId: 'catalog-1', refId: result.refId!, limit: 512, maxBytes: 65_536 })
+    expect(page.complete).toBe(true)
+    expect(page.content).toBe(raw)
+  })
+
+  it('工具目录只认严格 PTC 根形状；额外成员、非 PTC 与预算不足都保持原文', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const tools = Array.from({ length: 12 }, (_, index) => ({
+      name: `tool_${index}`, namespace: 'plugin', description: `description ${index}`,
+      parameters: { type: 'object', description: 'z'.repeat(800) },
+    }))
+    const valid = JSON.stringify({ tools })
+    const extra = JSON.stringify({ tools, unexpected: true })
+    const extraResult = await projectToolResult({ toolName: 'code_run', sessionId: 'catalog-extra', content: extra, budget: STEADY, store })
+    expect(extraResult.changed).toBe(false)
+    expect(extraResult.content).toBe(extra)
+    const readResult = await projectToolResult({ toolName: 'read', sessionId: 'catalog-read', content: valid, budget: STEADY, store })
+    expect(readResult.changed).toBe(false)
+    expect(readResult.content).toBe(valid)
+    const tightResult = await projectToolResult({ toolName: 'code_run', sessionId: 'catalog-tight', content: valid, budget: STARVED, store })
+    expect(tightResult.changed).toBe(false)
+    expect(tightResult.metrics.strategy).toBe('verbatim-budget')
+    expect(tightResult.content).toBe(valid)
+  })
+
+  it('成功 Vitest 日志保留零失败集合与完整汇总，原文可回读', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const content = [
+      '> npm test',
+      ' RUN  v4.1.12 C:/repo',
+      ...Array.from({ length: 300 }, (_, index) => ` ✓ test/example-${index % 12}.test.ts > successful case ${index}`),
+      'stdout | test/example.test.ts > expected diagnostic > cannot use credentials after logout',
+      'stderr | test/example.test.ts > expected diagnostic > reports an error payload',
+      '(node:123) [EXPECTED] Warning: model cannot disable thinking; using max instead.',
+      'Test Files  12 passed (12)',
+      'Tests  300 passed (300)',
+      'Duration  1.23s',
+      '[exit code: 0]',
+    ].join('\n')
+    expect(content.length).toBeGreaterThan(STEADY.maxChars)
+    const result = await projectToolResult({ toolName: 'win_bash', sessionId: 'test-success-1', content, budget: STEADY, store })
+    expect(result.changed).toBe(true)
+    expect(result.metrics.strategy).toBe('test-success')
+    expect(result.preview).toContain('failures: 0 (complete set)')
+    expect(result.preview).toContain('Test Files  12 passed (12)')
+    expect(result.preview).toContain('Tests  300 passed (300)')
+    const page = await store.page({ sessionId: 'test-success-1', refId: result.refId!, limit: 512, maxBytes: 65_536 })
+    expect(page.complete).toBe(true)
+    expect(page.content).toBe(content)
+  })
+
+  it('成功测试策略同样适用于 PTC 日志信封，非零退出不会误判为成功', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const passing = [
+      ...Array.from({ length: 300 }, (_, index) => ` ✓ test/example.test.ts > case ${index}`),
+      'Test Files  1 passed (1)',
+      'Tests  300 passed (300)',
+    ].join('\n')
+    const envelope = JSON.stringify({ exitCode: 0, command: 'vitest run', stdout: passing })
+    const success = await projectToolResult({ toolName: 'run_code', sessionId: 'test-success-env', content: envelope, budget: STEADY, store })
+    expect(success.changed).toBe(true)
+    expect(success.metrics.strategy).toBe('test-success')
+    const parsed = JSON.parse(success.preview!) as { exitCode: number, command: string, stdout: string }
+    expect(parsed.exitCode).toBe(0)
+    expect(parsed.command).toBe('vitest run')
+    expect(parsed.stdout).toContain('failures: 0 (complete set)')
+
+    const failedExitLog = [...passing, '[exit code: 1]'].join('\n')
+    const failedExit = await projectToolResult({ toolName: 'win_bash', sessionId: 'test-success-exit', content: failedExitLog, budget: STEADY, store })
+    expect(failedExit.metrics.strategy).not.toBe('test-success')
+    const explicitError = await projectToolResult({
+      toolName: 'win_bash',
+      sessionId: 'test-success-error',
+      content: [...passing, 'Error: boom'].join('\n'),
+      budget: STEADY,
+      store,
+    })
+    expect(explicitError.metrics.strategy).not.toBe('test-success')
+  })
+
+  it('当前预算装得下的成功日志仍然逐字保留', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const content = 'Test Files  1 passed (1)\nTests  2 passed (2)\n[exit code: 0]'
+    const result = await projectToolResult({ toolName: 'win_bash', sessionId: 'test-success-small', content, budget: STEADY, store })
+    expect(result.changed).toBe(false)
+    expect(result.metrics.strategy).toBe('verbatim-small')
+    expect(result.content).toBe(content)
+  })
 })

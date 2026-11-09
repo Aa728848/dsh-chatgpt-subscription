@@ -112,11 +112,13 @@ export type ProjectionStrategy =
   | 'verbatim-intent'
   | 'verbatim-budget'
   | 'store-unavailable'
+  | 'test-success'
   | 'test-failure'
   | 'shell-output'
   | 'grep-results'
   | 'glob-results'
   | 'structured-rows'
+  | 'tool-catalog'
   | 'file-outline'
   | 'web-outline'
 

@@ -1049,6 +1049,7 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
   // because it is the only source for a session this process has not served.
   const imageBudget = getSessionImageBudgetStats(sessionId)
   const priorRecord = sessionCacheState.read(sessionId)
+  const previousRequestPromptTokens = priorRecord?.totalTokens
   const budgetDropped = imageBudget !== undefined && imageBudget.droppedKeys.length > 0
     ? imageBudget.droppedKeys
     : priorRecord?.budgetDropped
@@ -1085,6 +1086,9 @@ function noteSessionCacheState(sessionId: string | undefined, state: KimiCodeStr
     cacheWriteTokens: stats.cacheWriteTokens,
     cacheWrite5mTokens: stats.cacheWrite5mTokens,
     cacheWrite1hTokens: stats.cacheWrite1hTokens,
+    lastRequestCachedTokens: state.cacheReadTokens,
+    lastRequestFreshTokens: state.inputTokens,
+    ...(previousRequestPromptTokens === undefined ? {} : { previousRequestPromptTokens }),
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(budgetDropped === undefined ? {} : { budgetDropped }),
     ...(lastRequestImageBytes === undefined ? {} : { lastRequestImageBytes }),

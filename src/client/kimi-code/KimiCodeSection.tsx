@@ -656,6 +656,22 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
                 </span>
               </div>
             )}
+            {/* The rolling ratio includes newly appended tool results. This row
+                answers a different question: how much of the PREVIOUS prompt
+                survived into the latest request, and how much new input that
+                request actually added. Older records simply omit the row. */}
+            {status.cache.continuation !== undefined && (
+              <div className="dsha-row">
+                <span className="dsha-label">{t.cacheContinuation}</span>
+                <span className="dsha-value">
+                  {t.cacheContinuationValue
+                    .replace('{cached}', status.cache.continuation.cachedTokens.toLocaleString())
+                    .replace('{expected}', status.cache.continuation.expectedCachedTokens.toLocaleString())
+                    .replace('{fresh}', status.cache.continuation.freshTokens.toLocaleString())
+                    .replace('{ratio}', `${(status.cache.continuation.retentionRatio * 100).toFixed(1)}%`)}
+                </span>
+              </div>
+            )}
             {/* The write side gets its own row rather than a slot in the meter:
                 a write is billed separately from a fresh prompt token, and
                 folding it into the fresh count would make the hit ratio above

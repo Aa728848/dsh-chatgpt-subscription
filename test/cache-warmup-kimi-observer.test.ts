@@ -216,19 +216,20 @@ describe('the Kimi cache-warmup observation', () => {
     expect(cacheWarmupUsageSessions()).toHaveLength(0)
   })
 
-  it('leaves the durable record byte-identical, and writes it before observing', async () => {
+  it('files the complete durable record before observing', async () => {
     const session = 'sess-warmup-order'
     const { writeSpy, reportsAtWrite } = captureDurableWrite()
     const adapter = await buildAdapter((async () => sseResponse(TURN)) as unknown as typeof fetch)
 
     await drain(adapter.stream(generateOptions({ sessionId: session })))
 
-    // The whole record, field for field: the observation added a call, not a
-    // change to what was already being filed. `lastDrift` is present because the
-    // mapper attributes a cause to EVERY request — this one is a session's first,
-    // so it carries 'first-request' rather than a real prefix break. The two
-    // `firstRequest*` fields are this turn's own opening measurement: a first
-    // request IS the opening, so they are written with it.
+    // The whole record, field for field: observation still happens only after the
+    // durable write. `lastDrift` is present because the mapper attributes a cause
+    // to EVERY request — this one is a session's first, so it carries
+    // 'first-request' rather than a real prefix break. The two `firstRequest*`
+    // fields are this turn's opening measurement; the two `lastRequest*` fields
+    // are the new per-request continuation counters, with no previous baseline
+    // on a first request.
     expect(writeSpy.mock.calls[0]).toEqual([session, {
       lastActiveAt: expect.any(Number),
       totalTokens: 400,
@@ -239,6 +240,8 @@ describe('the Kimi cache-warmup observation', () => {
       cacheWriteTokens: 0,
       cacheWrite5mTokens: 0,
       cacheWrite1hTokens: 0,
+      lastRequestCachedTokens: 300,
+      lastRequestFreshTokens: 100,
       lastDrift: 'first-request',
       firstRequestCachedTokens: 300,
       firstRequestPromptTokens: 400,
