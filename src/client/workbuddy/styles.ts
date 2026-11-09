@@ -24,8 +24,6 @@ export function installWorkBuddyStyles(): void {
   installPluginStyle('workbuddy', `
 .dsh-wb-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
 .dsha-account-add-actions{display:flex;flex-wrap:wrap;gap:8px}
-.dsha-account-add-actions .dsha-btn{background:var(--dsw-alias-button-info-fill,#397ee8);border-color:transparent;color:var(--dsw-alias-button-info-label,#fff)}
-.dsha-account-add-actions .dsha-btn:hover:not(:disabled){opacity:.9;background:var(--dsw-alias-button-info-fill,#397ee8)}
 /* The whole-pool state banner. It renders BEFORE the account list on purpose:
    a paused pool means nothing is routable, and a list of green account cards
    above that sentence reads as "available" whatever the banner says. */

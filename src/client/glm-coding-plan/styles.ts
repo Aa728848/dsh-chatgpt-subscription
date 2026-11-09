@@ -33,11 +33,13 @@ export function installGlmCodingPlanStyles(): void {
 .dshglm-model-meta{color:var(--dsw-alias-label-tertiary);font-size:11px;margin-left:5px}
 .dsha-badge.glm-adopted{background:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 16%,var(--dsw-alias-bg-layer-1));border-color:color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 45%,var(--dsw-alias-border-l2));color:var(--dsw-alias-label-primary)}
 
-/* 跨线路共享的登录入口按钮行：两区登录入口把多个「添加账号」按钮排进同一行，
-   按钮沿用基础 .dsha-btn 的形状，只在这里统一换成信息色填充。原先是另一张卡片的
-   样式表带出来的，那张卡片下线后这份声明移到这里，选择器与取值一字未改。 */
+/* 跨线路共享的登录入口按钮行：两区登录入口把多个按钮排进同一行，行本身只负责
+   换行与间距。按钮的主次由各自的 class 决定 —— 主按钮带 .dsha-btn-primary，取信息
+   色填充；次要入口（设备码登录、导入本地登录）保持中性外观，这样一行里才读得出
+   「主入口 + 另外两种进入方式」。这里原先统一涂成信息色，是为了绕开
+   .dsha-btn:hover 盖掉主按钮填充的问题（见 antigravity / kimi-code 两张表里的
+   :not(.dsha-btn-primary)）；通用 hover 修好后它只剩副作用：把 .dsha-btn 的次要
+   按钮也画成主按钮，故删除。 */
 .dsha-account-add-actions{display:flex;flex-wrap:wrap;gap:8px}
-.dsha-account-add-actions .dsha-btn{background:var(--dsw-alias-button-info-fill,#397ee8);border-color:transparent;color:var(--dsw-alias-button-info-label,#fff)}
-.dsha-account-add-actions .dsha-btn:hover:not(:disabled){opacity:.9;background:var(--dsw-alias-button-info-fill,#397ee8)}
 `, STYLE_ID)
 }
