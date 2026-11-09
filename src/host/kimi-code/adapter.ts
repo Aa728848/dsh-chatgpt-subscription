@@ -97,6 +97,7 @@ import {
   type KimiCodeStreamState,
   type RequestMediaOptions,
 } from './mapper.ts'
+import { isKimiToolArgumentGuardCode } from './tool-argument-guard.ts'
 import { MAX_REQUEST_DIAGNOSTICS, sessionCacheState } from './session-cache-state.ts'
 import {
   createMediaFilesUploader,
@@ -2210,6 +2211,9 @@ export class KimiCodeAdapter extends LlmAdapter {
         void reader.cancel().catch(() => undefined)
       }
     } catch (error) {
+      if (error instanceof LlmError && isKimiToolArgumentGuardCode(error.code)) {
+        rememberSameAccountRetry(retrySignal, diagnosticState?.accountId)
+      }
       requestError = error
       throw error
     } finally {

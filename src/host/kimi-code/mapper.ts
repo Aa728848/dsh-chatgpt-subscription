@@ -126,7 +126,12 @@ export {
 }
 
 import type { KimiCodeReasoningEffort, KimiCodeRequestDiagnostic, KimiCodeWire } from '../../shared/kimi-code-contracts.ts'
-import { KimiToolArgumentGuard, type KimiToolGuardViolation } from './tool-argument-guard.ts'
+import {
+  KimiToolArgumentGuard,
+  TOOL_ARGUMENT_BYTES_EXCEEDED_CODE,
+  TOOL_ARGUMENT_REPEATED_KEY_CODE,
+  type KimiToolGuardViolation,
+} from './tool-argument-guard.ts'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -2627,7 +2632,9 @@ function throwToolGuardViolation(
     : 'arguments contained a runaway repeated-key family'
   throw new LlmError(
     `Kimi Code stopped tool call "${violation.toolName}": ${reason} at ${violation.bytes} bytes. The tool was not executed.`,
-    'PROVIDER_ERROR',
+    violation.rule === 'argument-bytes'
+      ? TOOL_ARGUMENT_BYTES_EXCEEDED_CODE
+      : TOOL_ARGUMENT_REPEATED_KEY_CODE,
   )
 }
 

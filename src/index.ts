@@ -91,6 +91,10 @@ import {
   installKimiRepeatBreaker,
   type KimiRepeatBreakerContext,
 } from './host/kimi-code/repeat-breaker.ts'
+import {
+  installKimiToolArgumentRecovery,
+  type RecoveryContext as KimiToolArgumentRecoveryContext,
+} from './host/kimi-code/tool-argument-recovery.ts'
 import { MinimaxCodeAdapter } from './host/minimax-code/adapter.ts'
 import { MinimaxCodeAccountPool } from './host/minimax-code/account-pool.ts'
 import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
@@ -752,6 +756,13 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       globalEnabled: () => resolveToolRunawayGuardEnabled(pluginConfig),
     }),
     'dsh-chatgpt-subscription: shared tool runaway guard',
+  )
+
+  // 参数流失控后的单次恢复：提示追加到失败 attempt 之后，由同一 turn/step
+  // 立即重试；第二次仍失控则交还默认错误处理。只处理本模块自己的专用错误码。
+  ctx.effect(
+    () => installKimiToolArgumentRecovery(ctx as unknown as KimiToolArgumentRecoveryContext),
+    'dsh-chatgpt-subscription: Kimi tool argument recovery',
   )
 
   // 调度执行守卫：执行期拦截子代理越权调用主控专用工具，以及等待子代理期间的纯

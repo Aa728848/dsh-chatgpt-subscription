@@ -958,13 +958,13 @@ describe('Kimi tool-argument runaway recovery', () => {
     const { adapter } = await buildAdapter({ fetchFn: (async () => response) as typeof fetch })
     const sessionId = 'kc-tool-argument-guard'
     await expect(drain(adapter.stream(generateOptions('k3', { sessionId: sessionId as never }))))
-      .rejects.toMatchObject({ code: 'PROVIDER_ERROR' })
+      .rejects.toMatchObject({ code: 'KIMI_TOOL_ARGUMENT_REPEATED_KEY' })
 
     expect(cancelled).toBe(true)
     const request = sessionCacheState.read(sessionId)?.recentRequests?.at(-1)
     expect(request).toMatchObject({
       outcome: 'error',
-      code: 'PROVIDER_ERROR',
+      code: 'KIMI_TOOL_ARGUMENT_REPEATED_KEY',
       toolGuard: { toolName: 'ask_user_question', rule: 'repeated-key' },
     })
     expect(JSON.stringify(request)).not.toContain('header（可选）')
@@ -1574,6 +1574,45 @@ describe('KimiCodeAdapter cache affinity', () => {
     expect(tokens).toEqual(['Bearer at-acc-1', 'Bearer at-acc-1'])
     expect(cooldowns).toHaveLength(0)
     expect(sessionCacheState.read('kc-retry-same-account')?.recentRequests).toHaveLength(2)
+  })
+
+  it('keeps a tool-argument recovery retry on the account that produced the bad call', async () => {
+    const tokens: string[] = []
+    let call = 0
+    const keys = [
+      'header（可选）', 'header（可选）_comment', 'header（可选）_unused',
+      'header（可选）_', 'header（可选）__', 'header（可选）___',
+      'header（可选）____', 'header（可选）_____',
+    ]
+    const args = '{"questions":[{' + keys.map((key) => JSON.stringify(key) + ':""').join(',') + '}]}'
+    const fetchFn = vi.fn(async (_url: unknown, init: RequestInit) => {
+      tokens.push(authTokenOf(init))
+      call += 1
+      if (call === 1) {
+        return sseResponse([{ choices: [{ delta: { tool_calls: [{
+          index: 0,
+          id: 'call-runaway-recovery',
+          function: { name: 'ask_user_question', arguments: args },
+        }] } }] }])
+      }
+      return sseResponse([
+        { choices: [{ delta: { content: 'recovered with a fresh call' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { pool, setDefault } = fakePool({ ids: ['acc-1', 'acc-2'], defaultId: 'acc-1' })
+    const { adapter } = await buildAdapter({ fetchFn, pool })
+    const controller = new AbortController()
+    const options = generateOptions('k3', {
+      sessionId: 'kc-tool-guard-retry-account' as never,
+      system: 'tool guard retry account',
+      signal: controller.signal,
+    })
+
+    await expect(drain(adapter.stream(options))).rejects.toMatchObject({ code: 'KIMI_TOOL_ARGUMENT_REPEATED_KEY' })
+    setDefault('acc-2')
+    await drain(adapter.stream(options))
+    expect(tokens).toEqual(['Bearer at-acc-1', 'Bearer at-acc-1'])
   })
 
   it('prefers the account that last served this conversation over a static-prefix match', async () => {

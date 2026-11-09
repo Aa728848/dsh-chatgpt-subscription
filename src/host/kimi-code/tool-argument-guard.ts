@@ -10,6 +10,15 @@ import type { KimiCodeRequestDiagnostic } from '../../shared/kimi-code-contracts
 
 export type KimiToolGuardViolation = NonNullable<KimiCodeRequestDiagnostic['toolGuard']>
 
+export const TOOL_ARGUMENT_BYTES_EXCEEDED_CODE = 'KIMI_TOOL_ARGUMENT_BYTES_EXCEEDED'
+export const TOOL_ARGUMENT_REPEATED_KEY_CODE = 'KIMI_TOOL_ARGUMENT_REPEATED_KEY'
+export type KimiToolArgumentGuardCode = typeof TOOL_ARGUMENT_BYTES_EXCEEDED_CODE | typeof TOOL_ARGUMENT_REPEATED_KEY_CODE
+
+/** Whether one adapter failure belongs to the recoverable argument guard. */
+export function isKimiToolArgumentGuardCode(code: unknown): code is KimiToolArgumentGuardCode {
+  return code === TOOL_ARGUMENT_BYTES_EXCEEDED_CODE || code === TOOL_ARGUMENT_REPEATED_KEY_CODE
+}
+
 const ASK_USER_ARGUMENT_LIMIT = 32 * 1024
 const LARGE_PROGRAM_ARGUMENT_LIMIT = 1024 * 1024
 const DEFAULT_ARGUMENT_LIMIT = 256 * 1024
