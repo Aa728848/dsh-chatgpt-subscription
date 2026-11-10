@@ -1,13 +1,13 @@
 # 调度模式（dispatch）
 
-基于 **Code Mode** 的调度 Agent：本预设自己注册的工具保持原生可调（schema 不变），
-预设清单以外的一切（MCP 服务端工具、profile 级插件工具、按 agent 注册的工具集）不进入模型
-上下文，只能在 `code_run` 程序里用 `code_tools_search` 现查现调。改变的是**身份与流程纪律**。
+基于 **Code Mode** 的调度 Agent：native 工具块只保留最小白名单 `code_run`、`cache_warmup_result`、`dispatch_ledger`、`progress_update`、`structured_output`、`win_bash`。其余工具即使由本预设注册，也不进入 native schema，只能在 `code_run` 程序里用 `code_tools_search` 现查现调。工具注册本身不删除，`code_run` 的嵌套调用仍走完整原生执行管线。
 
 > 内核的 `ptc` 呈现方式只把 `run_code` 交给模型、其余名字一律硬拒，`standard` 又完全没有程序
 > 传输；「原生工具 + 程序」这个组合在内核里表达不出来，所以本预设自带一行 `code-mode`
 > （`@eddyskywalker/dsh-chatgpt-subscription/codemode`）。代次上不可用原生 executor 时，
 > `resolveDispatchPreset` 会自动退回 PTC 呈现（见 `src/host/agent-preset.ts`）。
+
+> `code-mode.config.nativeToolsOnly: true` 是这一白名单模式的开关，默认关闭以保持其他调用方的旧行为。白名单外的顶层直呼会被拒绝，但带嵌套标记的程序内调用放行。比如 `ask_user_question` 仍由 `tool-ask-user` 注册，主控只是不再直接调用它，而是在一个 `code_run` 程序中执行 `return await tools.ask_user_question({ questions: [...] })`。
 
 > **缓存前提**：Code Mode 的说明段是**恒定文本**（不含任何遮蔽计数或 namespace 清单），
 > 加上既有的 `ptc-sdk-cache-guard`，kimi-code / minimax-code 的前缀缓存不因 MCP 增删而失效。
@@ -42,7 +42,7 @@
 | R7 | 主代理维护任务清单、决策记录与访谈结论 |
 | R8 | 兜底需说明原因；**任务级、非会话级**——只覆盖触发它的那一个任务，下一个任务按 R0 重新分诊并恢复派发 |
 | R-W | 回合边界纪律：等待靠完成通知而非 sleep/轮询；不主动建目标（清单走 `todo_write`）；需要拍板一律用提问工具 |
-| R9 | 计划模式管线：仅 L2 且 R-G 已收敛（前沿为空 + 用户明确确认）时立刻 `enter_plan_mode`；进入这一步只完成进入，下一步才做只读探索并在计划模式内写出 decision-complete 计划，`exit_plan_mode` 是该轮唯一且最后的调用；打回（Keep planning）= 按反馈修订后再呈交，放弃计划须用户明确表示并带 reason 调 `leave_plan_mode`（它不是审批出口）；旧代或开关关闭时降级为用一次 `ask_user_question` 请用户输入 `/plan` |
+| R9 | 计划模式管线：仅 L2 且 R-G 已收敛（前沿为空 + 用户明确确认）时立刻在一个 `code_run` 中调用 `tools.enter_plan_mode`；进入这一步只完成进入，下一步才做只读探索并在计划模式内写出 decision-complete 计划，审批是该轮唯一且最后的顶层 `code_run`，程序中只调用一次 `tools.exit_plan_mode`；打回（Keep planning）= 按反馈修订后再呈交，放弃计划须用户明确表示并带 reason 在程序内调 `tools.leave_plan_mode`（它不是审批出口）；旧代或开关关闭时降级为在一个 `code_run` 中调用 `tools.ask_user_question` 请用户输入 `/plan` |
 
 ## 回合边界（R-W）
 
@@ -55,8 +55,8 @@
   `todo_write`。原因是机制性的：目标激活后 DSH 会自动续跑唤醒主代理，而子代理何时返回不由它
   控制，等待会被从中间劈开，还要为每次续跑重载整段历史。
 - **需要拍板就用提问工具** — 凡是「我停在这里是因为缺一个决定」的停点（收到子代理结果要选下一步、
-  验收不过要定返工范围、前提被推翻要改计划）都用 `ask_user_question` 递出去，而不是用一段文字结尾
-  然后等用户回话。例外是 plan mode 的计划审批（走 `exit_plan_mode`）与任务完成后的收尾。
+  验收不过要定返工范围、前提被推翻要改计划）都在一个 `code_run` 程序中调用一次 `tools.ask_user_question`，
+  而不是用一段文字结尾然后等用户回话。例外是 plan mode 的计划审批（在一个 `code_run` 中只调用一次 `tools.exit_plan_mode`）与任务完成后的收尾。
 
 ## 依赖的设置
 
@@ -122,14 +122,14 @@ system prompt 因此改写一次；这与计划模式当初刻意用"尾部用�
 钉住这件事。任务书里不要要求子代理「进入计划模式」，它是执行者，只按任务书干活并回报证据。
 
 **旧代 harness 或开关关闭时降级**：工具列表里没有 `enter_plan_mode`（插件不支持该行的旧代 harness，
-或 `planModePipeline` 开关关闭导致该行不注册工具）时，退化路径是用一次 `ask_user_question` 请用户手动
-输入 `/plan`，然后按已配置的 `plan-mode` section 继续；不得把计划直接贴在普通回复里代替审批。
+或 `planModePipeline` 开关关闭导致该行不注册工具）时，退化路径是在一个 `code_run` 程序中调用一次 `tools.ask_user_question`
+请用户手动输入 `/plan`，然后按已配置的 `plan-mode` section 继续；不得把计划直接贴在普通回复里代替审批。
 
 ## 缓存成本与两处压缩
 
 Kimi 线路按请求内容前缀命中缓存：**同一会话内 system 段或工具列表一变，整个前缀缓存归零**
 （见根 `README.md`）。「进入计划模式」这一步两样都会变——`plan-mode` 的 section 换新，
-`exit_plan_mode` 第一次进入工具表——所以这一次重建**无法避免**，换任何写法都躲不掉。
+`exit_plan_mode` 第一次进入程序内工具目录（native 白名单不因它扩员）——所以这一次重建**无法避免**，换任何写法都躲不掉。
 
 能压的只有**重建之后每一步都还要重发的字节**。于是做了两处压缩：
 

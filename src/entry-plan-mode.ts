@@ -1146,9 +1146,10 @@ export class PlanModeController extends Service {
  * 段、不动工具表**，所以它不会让任何前端前缀缓存重建。
  */
 export const PLAN_EXIT_REMINDER_TEXT = 'Plan mode is still active, and the previous response ended in plain text '
-  + 'without calling a tool. If the plan is ready, call exit_plan_mode now with the complete markdown plan '
-  + '(starting with a # heading) as the sole tool call. If an unsettled user decision blocks planning, call '
-  + 'ask_user_question instead. If the user explicitly asked to abandon planning, call leave_plan_mode.'
+  + 'without calling a tool. If the plan is ready, make ONE code_run program whose only sub-call is exit_plan_mode '
+  + 'with the complete markdown plan (starting with a # heading), as the sole top-level tool call. If an unsettled '
+  + 'user decision blocks planning, call ask_user_question inside code_run instead. If the user explicitly asked to '
+  + 'abandon planning, call leave_plan_mode inside code_run.'
 
 /** 一条「纯文本收尾」之后的提醒状态，按会话分桶。 */
 interface ExitReminderState {

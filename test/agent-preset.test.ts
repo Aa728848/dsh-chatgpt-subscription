@@ -229,11 +229,16 @@ describe('the dispatch definition', () => {
       modelSelection: true,
       modelDiscovery: true,
     })
-    // Code Mode carries its own executor row: no mode config, and no PTС
-    // executor beside it (one executor per scope).
+    // Code Mode carries its own executor row and keeps only the minimal native
+    // whitelist; every other registered tool stays reachable inside code_run.
     expect(rowById('code-mode')).toEqual({
       id: 'code-mode',
       name: '@eddyskywalker/dsh-chatgpt-subscription/codemode',
+      config: { nativeToolsOnly: true },
+    })
+    expect(rowById('tool-ask-user')).toEqual({
+      id: 'tool-ask-user',
+      name: '@deepseek-ai/dsh-tool-ask-user',
     })
     expect(rowById('persona').config).toMatchObject({ suffix: 'Your working directory is {{cwd}}.' })
     expect((rowById('persona').config as { prefix: string }).prefix).not.toContain('{{cwd}}')
@@ -314,6 +319,7 @@ describe('the dispatch definition', () => {
     expect(codemode.plugins.find(row => row.id === 'code-mode')).toEqual({
       id: 'code-mode',
       name: '@eddyskywalker/dsh-chatgpt-subscription/codemode',
+      config: { nativeToolsOnly: true },
     })
     expect(codemode.plugins.find(row => row.id === 'tool-executor-ptc')).toBeUndefined()
     expect(codemode.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
@@ -685,10 +691,10 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('never call create_goal or /goal')
       expect(persona).toContain('in todo_write, not create_goal; see R-W')
       // A blocked-on decision is a question, not a paragraph.
-      expect(persona).toContain('hand the question out with a single ask_user_question call')
+      expect(persona).toContain('hand the question out with ONE code_run program containing exactly one tools.ask_user_question(...) sub-call')
       expect(persona).toContain('The same rule covers every decision stop outside the interview')
       // Plan-mode approval keeps its own channel; a finished task asks nothing.
-      expect(persona).toContain('Only two exceptions: plan-mode approval still goes through exit_plan_mode')
+      expect(persona).toContain('Only two exceptions: plan-mode approval still goes through tools.exit_plan_mode inside code_run')
       // The anti-patterns that let each of the three back in.
       expect(persona).toContain('placeholder long commands to wait')
       expect(persona).toContain('Proactively creating a goal at the start of a task')
@@ -920,10 +926,10 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('enter_plan_mode')
       expect(persona).toContain('leave_plan_mode')
       expect(persona).toContain('exit_plan_mode')
-      expect(persona).toContain('Call enter_plan_mode immediately once that holds')
-      expect(persona).toContain('exit_plan_mode must be the sole and final tool call of the turn that submits the plan')
+      expect(persona).toContain('Call tools.enter_plan_mode inside ONE code_run immediately once that holds')
+      expect(persona).toContain('ONE code_run containing only tools.exit_plan_mode must be the sole and final top-level tool call of the turn that submits the plan')
       // The degraded path when the tool is absent stays a question, never prose.
-      expect(persona).toContain('the degraded path is one ask_user_question asking the user to enter /plan')
+      expect(persona).toContain('the degraded path is ONE code_run program containing exactly one tools.ask_user_question(...) sub-call asking the user to enter /plan')
       // Anti-patterns 21 and 22 pin the two ways R9 gets abused.
       expect(persona).toContain('21. Entering Plan Mode for an L0/L1 task, or before the R-G interview has converged')
       expect(persona).toContain('22. Using leave_plan_mode to bypass exit_plan_mode approval')
@@ -999,13 +1005,18 @@ describe('the persona block the declaration transcribes', () => {
     // A clean hand_back is a scope routing event, not a failed run.
     expect(prefix).toContain('does not increment the brief\u2019s 3-run failure counter')
     expect(prefix).toContain('send_message({ agent_id })')
+    // Minimal native whitelist and the program-only question/plan contract.
+    expect(prefix).toContain('[Dispatch Native Tool Whitelist]')
+    expect(prefix).toContain('Top-level: only code_run, cache_warmup_result, progress_update, structured_output, win_bash')
+    expect(prefix).toContain('Q1/G4 are rule ids, never argument-key suffixes')
+    expect(prefix).not.toContain('hand the question out with a single ask_user_question call')
     // The compact brief form and the three new anti-patterns.
     expect(prefix).toContain('Compact Delta Brief')
     expect(prefix).toContain('use a Compact Delta Brief by default')
     // Dual-track Code Mode wording: no stale PTC-only parentheticals remain.
     expect(prefix).not.toContain('Criterion: whether spawn_teammate exists')
     expect(prefix).toContain('The board tools stay declared whether or not the board is on')
-    expect(prefix).toContain('(native calls; use code_run Promise.all for batch filter/MCP)')
+    expect(prefix).toContain('Dispatch independent tasks concurrently through code_run Promise.all')
     expect(prefix).not.toContain('(PTC: tools.spawn_teammate)')
     expect(prefix).not.toContain('stay visible in the PTC SDK')
     expect(prefix).not.toContain('(in PTC mode: tools.list_subagent_models)')

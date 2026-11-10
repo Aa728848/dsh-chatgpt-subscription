@@ -1254,6 +1254,7 @@ describe('the plan mode exit reminder', () => {
     for (const tool of [EXIT_PLAN_MODE, 'ask_user_question', 'leave_plan_mode']) {
       expect(text).toContain(tool)
     }
+    expect(text).toContain('code_run')
     // 走的是本包自己的 plan-mode-notice 来源，不会伪装成一条新的用户回合。
     expect((reminder.steered[0] as { source?: unknown }).source).toMatchObject({
       kind: PLAN_NOTICE_SOURCE_KIND,

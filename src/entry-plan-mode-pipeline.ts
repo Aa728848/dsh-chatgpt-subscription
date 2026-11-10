@@ -638,11 +638,12 @@ export function enterResultText(result: PlanModeTransitionResult): string {
     + ' (2) write a decision-complete plan: goal and success criteria; changes grouped by subsystem;'
     + ' public API, schema and data-flow changes; boundaries and failure modes; test strategy;'
     + ' acceptance criteria; explicit assumptions — enough that an executor needs no further design decisions.'
-    + ' (3) submit it with ' + APPROVAL_EXIT_TOOL + ' as the sole and final tool call of that turn;'
-    + ' never paste the plan into a chat reply and never ask "should I proceed?" in prose or via ask_user_question.'
-    + ' If the plan is rejected, fold the feedback in and submit it again via ' + APPROVAL_EXIT_TOOL
+    + ' (3) submit it through ONE code_run program whose only sub-call is ' + APPROVAL_EXIT_TOOL + ';'
+    + ' that code_run is the sole and final top-level tool call of that turn;'
+    + ' never paste the plan into a chat reply and never ask "should I proceed?" in prose or via tools.ask_user_question inside code_run.'
+    + ' If the plan is rejected, fold the feedback in and submit it again via ' + APPROVAL_EXIT_TOOL + ' inside code_run'
     + ': a rejection keeps you in Plan Mode, it is not an exit.'
-    + ' ' + APPROVAL_EXIT_TOOL + ' is the only approval exit: implement nothing and dispatch nothing before approval,'
+    + ' ' + APPROVAL_EXIT_TOOL + ' inside code_run is the only approval exit: implement nothing and dispatch nothing before approval,'
     + ' and ' + LEAVE_PLAN_MODE_TOOL + ' abandons planning without approving anything.'
 }
 

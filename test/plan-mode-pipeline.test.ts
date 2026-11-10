@@ -489,9 +489,9 @@ describe('the plan-mode texts: resident budgets and the rules they still carry',
     ]) {
       expect(text).toContain(item)
     }
-    // 唯一且最后的调用，且不得用散文问「是否继续」。
-    expect(text).toContain('as the sole and final tool call of that turn')
-    expect(text).toContain('never ask "should I proceed?" in prose or via ask_user_question')
+    // 唯一且最后的顶层程序调用，且不得用散文问「是否继续」。
+    expect(text).toContain('that code_run is the sole and final top-level tool call of that turn')
+    expect(text).toContain('never ask "should I proceed?" in prose or via tools.ask_user_question inside code_run')
     // 打回循环：按反馈修订后再呈交，不退出计划模式。
     expect(text).toContain('If the plan is rejected, fold the feedback in and submit it again')
     expect(text).toContain('a rejection keeps you in Plan Mode, it is not an exit')

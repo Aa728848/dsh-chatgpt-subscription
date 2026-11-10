@@ -59,6 +59,8 @@ export interface CodemodeOptions {
   readonly hiddenPrefixes: readonly string[]
   /** 始终原生呈现的名字。 */
   readonly nativeTools: readonly string[]
+  /** 是否只让 nativeTools 与传输工具原生呈现，其他已注册工具全部程序内调用。 */
+  readonly nativeToolsOnly: boolean
   /** 始终遮蔽的名字。 */
   readonly hiddenTools: readonly string[]
   /** 发现工具名。 */
@@ -89,6 +91,8 @@ export interface CodemodeConfig {
   hiddenPrefixes?: readonly string[]
   /** 见 {@link CodemodeOptions.nativeTools}。 */
   nativeTools?: readonly string[]
+  /** 见 {@link CodemodeOptions.nativeToolsOnly}。 */
+  nativeToolsOnly?: boolean
   /** 见 {@link CodemodeOptions.hiddenTools}。 */
   hiddenTools?: readonly string[]
   /** 见 {@link CodemodeOptions.metaTools}。 */
@@ -152,6 +156,7 @@ export function normalizeConfig(config?: CodemodeConfig | null): CodemodeOptions
     nativeScope: source.nativeScope !== false,
     hiddenPrefixes: Object.freeze(stringList(source.hiddenPrefixes, DEFAULT_HIDDEN_PREFIXES)),
     nativeTools: Object.freeze(stringList(source.nativeTools, DEFAULT_NATIVE_TOOLS)),
+    nativeToolsOnly: source.nativeToolsOnly === true,
     hiddenTools: Object.freeze(stringList(source.hiddenTools, [])),
     metaTools: Object.freeze(metaTools),
     runToolName,
@@ -191,7 +196,7 @@ export const DISABLED_VIEW: CodemodeView = Object.freeze({
  * 判定一个名字是否要从模型清单里剥离。
  *
  * 顺序：显式例外（`nativeTools` / 传输工具 / 发现工具）→ 显式遮蔽
- * （`hiddenTools`）→ 名字前缀 → 作用域归属。
+ * （`hiddenTools`）→ 名字前缀 → `nativeToolsOnly` 白名单 → 作用域归属。
  *
  * 作用域归属只在能确认归属时遮蔽：
  *
@@ -211,6 +216,7 @@ export function isMaskedName(name: string | undefined, rules: CodemodeRules, vie
   for (const prefix of rules.options.hiddenPrefixes) {
     if (prefix.length > 0 && name.startsWith(prefix)) return true
   }
+  if (rules.options.nativeToolsOnly) return true
   if (!rules.options.nativeScope || !view.enabled) return false
   if (view.globalNames.has(name)) return true
   if (view.presetNames.has(name)) return false

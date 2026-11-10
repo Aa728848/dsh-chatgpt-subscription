@@ -119,6 +119,25 @@ describe('遮蔽规则', () => {
     expect(isMaskedName('todo_write', rules, view)).toBe(false)
   })
 
+  it('nativeToolsOnly 只保留最小白名单，其他预设工具也全部程序内化', () => {
+    expect(createRules({}).options.nativeToolsOnly).toBe(false)
+    const rules = createRules({ nativeToolsOnly: true })
+    const view = {
+      enabled: true,
+      globalNames: new Set<string>(),
+      presetNames: new Set([
+        'ask_user_question', 'read', 'subagent', 'exit_plan_mode',
+        'cache_warmup_result', 'dispatch_ledger', 'progress_update', 'structured_output', 'win_bash', 'code_run',
+      ]),
+    }
+    for (const name of ['ask_user_question', 'read', 'subagent', 'exit_plan_mode']) {
+      expect(isMaskedName(name, rules, view), name).toBe(true)
+    }
+    for (const name of ['cache_warmup_result', 'dispatch_ledger', 'progress_update', 'structured_output', 'win_bash', 'code_run']) {
+      expect(isMaskedName(name, rules, view), name).toBe(false)
+    }
+  })
+
   it('作用域规则：全局层遮蔽（系统点名白名单除外）、预设层保留、发现工具默认遮蔽', () => {
     const rules = createRules({})
     const view = {
@@ -222,6 +241,53 @@ describe('执行器', () => {
     const input = executor.describe(definitions)
     expect(input.schemas.map(schema => (schema as { name: string }).name).sort()).toEqual(['code_run', 'todo_write'])
     expect(target.seen[0]).toEqual(['todo_write', 'code_run'])
+  })
+
+  it('最小白名单模式下提问与其他非白名单工具直呼被拒、嵌套调用放行', async () => {
+    const target = delegate()
+    const execute = target.execute
+    let executions = 0
+    target.execute = async (input) => {
+      executions += 1
+      return execute(input)
+    }
+    const whitelistRules = createRules({ nativeToolsOnly: true })
+    const whitelistView = {
+      enabled: true,
+      globalNames: new Set<string>(),
+      presetNames: new Set(['ask_user_question', 'read', 'code_run', 'progress_update', 'win_bash']),
+    }
+    const executor = createCodemodeExecutor({ get: () => undefined }, whitelistRules, {
+      delegate: target,
+      view: () => whitelistView,
+      viewForName: () => whitelistView,
+      sectionText: () => 'SECTION',
+    })
+    const described = executor.describe([
+      { name: 'ask_user_question', description: 'ask', parameters: {} },
+      { name: 'read', description: 'read', parameters: {} },
+      { name: 'progress_update', description: 'progress', parameters: {} },
+      { name: 'win_bash', description: 'shell', parameters: {} },
+      { name: 'code_run', description: 'program', parameters: {} },
+    ])
+    expect(described.schemas.map(schema => (schema as { name: string }).name).sort())
+      .toEqual(['code_run', 'progress_update', 'win_bash'])
+
+    const direct = await executor.execute({
+      calls: [{ id: 'ask-native', name: 'ask_user_question', arguments: '{"questions":[]}' }],
+      signal: new AbortController().signal,
+    })
+    const denied = direct.results[0] as { result: { isError: boolean; error: { code: string } } }
+    expect(denied.result.isError).toBe(true)
+    expect(denied.result.error.code).toBe('UNKNOWN_TOOL')
+    expect(executions).toBe(0)
+
+    const nested = await executor.execute({
+      calls: [{ id: 'ask-nested:ptc:1', name: 'ask_user_question', arguments: '{"questions":[]}' }],
+      signal: new AbortController().signal,
+    })
+    expect((nested.results[0] as { result: { isError: boolean } }).result.isError).toBe(false)
+    expect(executions).toBe(1)
   })
 
   it('说明段挂成 tools:sdk，且正文恒定', () => {

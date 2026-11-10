@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **[dispatch / Code Mode] 非白名单工具统一改走 `code_run`，消除畸形 native 提问入口**
+  - native 工具块仅保留 `code_run`、`cache_warmup_result`、`dispatch_ledger`、`progress_update`、`structured_output` 与 `win_bash`；文件、提问、子代理、计划模式等其他工具仍完整注册，但只通过程序内嵌套调用执行，不再直接暴露给模型。
+  - 新增默认关闭的 `nativeToolsOnly` 配置以保持其他调用方行为，dispatch 显式开启；白名单外顶层直呼返回 `UNKNOWN_TOOL`，带嵌套标记的同名调用继续进入原生执行管线，既有提问结构校验与子代理越权守卫不变。
+  - 调度访谈、计划进入/审批、并发派发及降级提问全部同步为 `code_run` 指引，并明确 `Q1/G4` 是规则编号而非参数键后缀，避免模型把访谈规则拼进 `headerQ1`、`multi_selectG4` 等畸形字段。
+  - **验证**：6 个聚焦测试文件共 240 例通过；全量 Vitest 为 384 个文件通过 / 2 个跳过（7011 项通过 / 9 项跳过 / 0 失败）；三工程强制类型检查、清洁构建与 `npm pack --dry-run`（979 个文件）通过。
+
 - **[tools / settings] 新增默认开启的 `mediaTools` 注册期总开关**
   - 统一控制 Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解这五个工具；显式关闭并重载插件或重启 DSH 后，它们不再进入任何会话的工具 schema，MiniMax 的线路级开关继续叠加生效。
   - 开关刻意不使用 volatile 或动态 `{ when }`，默认路径的工具定义与注册顺序不变，也不修改 Kimi 的聊天、原生图片输入和缓存实现；既有 Kimi 会话在工具表实际变化后仅承担一次可诊断的 `tools` 前缀重建。
