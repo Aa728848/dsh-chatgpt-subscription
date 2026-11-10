@@ -471,6 +471,47 @@ describe('CommandCodeAdapter streaming', () => {
     }
   })
 
+  it('classifies a body severed mid-stream as a retryable transport error with its cause chain', async () => {
+    const { adapter, store } = buildAdapter()
+    vi.spyOn(store, 'read').mockResolvedValue({ apiKey: 'k' })
+    const originalFetch = globalThis.fetch
+    const cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+    let calls = 0
+    globalThis.fetch = (async () => {
+      calls += 1
+      const encoder = new TextEncoder()
+      let sent = false
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sent) {
+            sent = true
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: 'partial' } }] })}\n\n`))
+            return
+          }
+          controller.error(new TypeError('terminated', { cause }))
+        },
+      }), { headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    try {
+      const chunks: StreamChunk[] = []
+      let failure: unknown
+      try {
+        for await (const chunk of adapter.stream({ provider: 'command-code', model: OPENAI_MODEL, messages: [] } as unknown as GenerateOptions)) chunks.push(chunk)
+      } catch (error) {
+        failure = error
+      }
+      expect(JSON.stringify(chunks)).toContain('partial')
+      expect(failure).toMatchObject({ code: 'TRANSPORT' })
+      expect((failure as Error).message).toContain('terminated')
+      expect((failure as Error).message).toContain('ECONNRESET')
+      expect(adapter.providerRetryPolicy()).toMatchObject({ retryableCodes: expect.arrayContaining(['TRANSPORT']) })
+      // Classification only: the harness, not the adapter, owns the retry.
+      expect(calls).toBe(1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('refuses to call the API without a stored credential', async () => {
     const { adapter, store } = buildAdapter()
     vi.spyOn(store, 'read').mockResolvedValue(null)

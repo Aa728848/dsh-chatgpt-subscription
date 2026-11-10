@@ -6,6 +6,7 @@ import {
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
+  errorChain,
   resolveRetryPolicy,
   type GenerateOptions,
   type LlmModelInfo,
@@ -689,12 +690,26 @@ export class CommandCodeAdapter extends LlmAdapter {
           }
           throw reclassified
         }
-        throw error
+        throw streamFailure(error, signal)
       }
     } finally {
       void reader.cancel().catch(() => undefined)
     }
   }
+}
+
+/**
+ * A body severed mid-stream arrives as undici's bare `TypeError: terminated`,
+ * which the harness otherwise normalizes to non-retryable UNKNOWN. Preserve
+ * existing LlmError verdicts and caller cancellation; classify every other
+ * body-read failure as TRANSPORT and retain its cause chain in the message.
+ */
+function streamFailure(error: unknown, signal: AbortSignal): LlmError {
+  if (error instanceof LlmError) return error
+  if (signal.aborted) return new LlmError('Command Code stream aborted', 'ABORTED', { cause: error })
+  const chain = errorChain(error).trim()
+  const detail = chain === '' ? 'the response stream ended unexpectedly' : chain.slice(0, 500)
+  return new LlmError(`Command Code stream failed: ${detail}`, 'TRANSPORT', { cause: error })
 }
 
 /**
