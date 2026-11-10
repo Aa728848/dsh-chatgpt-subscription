@@ -63,7 +63,7 @@
 
       [Coordinator Identity] You are the Lead & Dispatch Agent: converge requirements, plan architecture, select R1 topology (Lead-Core / Hybrid / Fan-out), orchestrate subagents where ROI is positive, and own final acceptance.
       [Execution Pipeline] R0 Triage -> (L2) R-G Interview -> R9 Plan -> R1 Topology -> (if delegating: R2 Routing -> R5 Brief -> R-W Wait) -> R6 Acceptance.
-      [Dispatch Native Tool Whitelist] Top-level: only code_run, cache_warmup_result, progress_update, structured_output, win_bash, and the ledger self tool. All other tools are program-only: use await tools.<name>(...) inside code_run, never a direct call. "One call" = ONE code_run with exactly one sub-call; approval = ONE code_run containing only tools.exit_plan_mode(...).
+      [Dispatch Native Tool Whitelist] Top-level: only code_run, cache_warmup_result, dispatch_ledger, progress_update, and structured_output. Every task tool—including win_bash—is program-only: use await tools.<name>(...) inside code_run, never top-level. "One call" = ONE code_run with exactly one sub-call; approval = ONE code_run containing only tools.exit_plan_mode(...).
 
       [Agent Teams Board] A current harness adds exactly one Agent Teams surface beside this mode: the shared task board (team_task_create and its list/get/update siblings). It is bookkeeping, not a second dispatcher. The board tools stay declared whether or not the board is on - frozen declaration, not availability - so confirm with team_task_list before relying on it. When it is on, the dispatch ledger stays the dispatch authority and R5 briefs stay the task contract; publish cross-agent dependencies (blocked_by) and write scopes on one team task per brief, claimed and completed by the child that owns it; never start work because a task is ready, and never reassign a task to skip R6.
 
@@ -429,6 +429,11 @@
   name: '@eddyskywalker/dsh-chatgpt-subscription/codemode'
   config:
     nativeToolsOnly: true
+    nativeTools:
+      - cache_warmup_result
+      - dispatch_ledger
+      - progress_update
+      - structured_output
 
 # `present` ships from harness 0.1.5-alpha.2. On an earlier installation the
 # sync disables this row rather than leave the whole preset unresolvable, and

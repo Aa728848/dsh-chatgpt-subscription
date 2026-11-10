@@ -32,7 +32,9 @@ export const PROGRESS_UPDATE_DESCRIPTION = [
   'explain what you are waiting for before a long wait such as a test run, an install, or a build;',
   'and say what blocks you — and what you will try next, or what you need from the user — when you are stuck.',
   'Each update has one short title line (plain text, no Markdown, no trailing period) with the details in the message body.',
-  'Do not repeat a status that has not changed.',
+  'Do not repeat a status that has not changed. Use exactly one opening and one closing update per task.',
+  'Never announce an intended tool call instead of making it. After an opening or intermediate update, perform actual work, ask a necessary question, or finish before considering another update.',
+  'If a repeat-tool reminder names progress_update, do not answer with another progress update: inspect the previous result and continue with a task tool, a necessary question, or the final response.',
   'When you run as a subagent, describe only your own subtask: finishing your subtask is not the same as finishing the overall task.',
 ].join(' ')
 

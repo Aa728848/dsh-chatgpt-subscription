@@ -106,6 +106,46 @@ describe('Code Mode 说明段', () => {
     expect(text).toContain('never leave `undefined` in an object property value')
     expect(text).toContain('x.opt ?? null')
   })
+
+  it('白名单说明把全局工具名映射到程序内，默认说明保持原样', () => {
+    const rules = createRules({})
+    const base = { runToolName: rules.options.runToolName, metaTools: rules.options.metaTools, programFormat: 'function-body' }
+    const legacy = buildCodemodeSectionText(base)
+    expect(legacy).toContain('The tools in your tool list are called directly, exactly as usual')
+
+    const dispatchRules = createRules({
+      nativeToolsOnly: true,
+      nativeTools: ['cache_warmup_result', 'dispatch_ledger', 'progress_update', 'structured_output'],
+    })
+    const input = {
+      ...base,
+      nativeToolsOnly: dispatchRules.options.nativeToolsOnly,
+      nativeTools: dispatchRules.options.nativeTools,
+    }
+    const text = buildCodemodeSectionText(input)
+    expect(buildCodemodeSectionText(input)).toBe(text)
+    expect(text).toContain('Code Mode with a native whitelist')
+    expect(text).toContain('`read` → `tools.read`')
+    expect(text).toContain('`ask_user_question` → `tools.ask_user_question`')
+    expect(text).toContain('`win_bash` → `tools.win_bash`')
+    expect(text).toContain('never a top-level call')
+    expect(text).not.toContain('The tools in your tool list are called directly, exactly as usual')
+
+    const genericRules = createRules({ nativeToolsOnly: true })
+    const generic = buildCodemodeSectionText({
+      ...base,
+      nativeToolsOnly: true,
+      nativeTools: genericRules.options.nativeTools,
+    })
+    expect(generic).not.toContain('`win_bash` → `tools.win_bash`')
+
+    const allCommonNative = buildCodemodeSectionText({
+      ...base,
+      nativeToolsOnly: true,
+      nativeTools: ['read', 'glob', 'grep', 'edit', 'write', 'read_image', 'ask_user_question', 'subagent', 'win_bash'],
+    })
+    expect(allCommonNative).not.toContain('Common mappings: .')
+  })
 })
 
 describe('遮蔽规则', () => {
@@ -284,6 +324,54 @@ describe('执行器', () => {
 
     const nested = await executor.execute({
       calls: [{ id: 'ask-nested:ptc:1', name: 'ask_user_question', arguments: '{"questions":[]}' }],
+      signal: new AbortController().signal,
+    })
+    expect((nested.results[0] as { result: { isError: boolean } }).result.isError).toBe(false)
+    expect(executions).toBe(1)
+  })
+
+  it('dispatch 显式白名单拒绝顶层 Shell，但放行嵌套 tools.win_bash', async () => {
+    const target = delegate()
+    const execute = target.execute
+    let executions = 0
+    target.execute = async (input) => {
+      executions += 1
+      return execute(input)
+    }
+    const dispatchRules = createRules({
+      nativeToolsOnly: true,
+      nativeTools: ['cache_warmup_result', 'dispatch_ledger', 'progress_update', 'structured_output'],
+    })
+    const dispatchView = {
+      enabled: true,
+      globalNames: new Set<string>(),
+      presetNames: new Set(['code_run', 'progress_update', 'win_bash']),
+    }
+    const executor = createCodemodeExecutor({ get: () => undefined }, dispatchRules, {
+      delegate: target,
+      view: () => dispatchView,
+      viewForName: () => dispatchView,
+      sectionText: () => 'SECTION',
+    })
+    const described = executor.describe([
+      { name: 'progress_update', description: 'progress', parameters: {} },
+      { name: 'win_bash', description: 'shell', parameters: {} },
+      { name: 'code_run', description: 'program', parameters: {} },
+    ])
+    expect(described.schemas.map(schema => (schema as { name: string }).name).sort())
+      .toEqual(['code_run', 'progress_update'])
+
+    const direct = await executor.execute({
+      calls: [{ id: 'shell-native', name: 'win_bash', arguments: '{"command":"git status --short"}' }],
+      signal: new AbortController().signal,
+    })
+    const denied = direct.results[0] as { result: { isError: boolean; error: { code: string } } }
+    expect(denied.result.isError).toBe(true)
+    expect(denied.result.error.code).toBe('UNKNOWN_TOOL')
+    expect(executions).toBe(0)
+
+    const nested = await executor.execute({
+      calls: [{ id: 'shell-nested:ptc:1', name: 'win_bash', arguments: '{"command":"git status --short"}' }],
       signal: new AbortController().signal,
     })
     expect((nested.results[0] as { result: { isError: boolean } }).result.isError).toBe(false)

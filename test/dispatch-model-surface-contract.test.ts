@@ -92,8 +92,8 @@ interface Token {
 type Scalar = string
 /** 映射。 */
 interface Mapping { [key: string]: Value }
-/** 序列。 */
-type Sequence = Mapping[]
+/** 序列；preset 行是映射项，nativeTools 等配置是标量项。 */
+type Sequence = Value[]
 /** 解析出的值。 */
 type Value = Scalar | Mapping | Sequence
 
@@ -228,6 +228,13 @@ function parseSequence(tokens: Token[], index: number, base: number): { value: S
   while (cursor < tokens.length) {
     const token = tokens[cursor]!
     if (token.seq !== true || token.base !== base) break
+    // 标量项（例如 nativeTools 的工具名）没有 `key:` 头，必须消费一项前进；
+    // 否则 parseMapping 原地返回，收集阶段就会无限追加空对象直到 OOM。
+    if (!/^[^:]+:/.test(token.text)) {
+      items.push(unquote(token.text))
+      cursor += 1
+      continue
+    }
     const parsed = parseMapping(tokens, cursor, token.indent, true)
     items.push(parsed.value)
     cursor = parsed.next
@@ -279,14 +286,17 @@ interface RowView {
  * @returns 行视图表。
  */
 function rowViews(sequence: Sequence): RowView[] {
-  return sequence.map(item => ({
-    id: unquote(String(item['id'] ?? '')),
-    name: unquote(String(item['name'] ?? '')),
-    ...(item['disabled'] === undefined ? {} : { disabled: String(item['disabled']) }),
-    ...(item['group'] === undefined ? {} : { group: String(item['group']) }),
-    ...(isMapping(item['isolate']) ? { isolate: item['isolate'] } : {}),
-    ...(item['config'] === undefined ? {} : { config: item['config'] }),
-  }))
+  return sequence.map(item => {
+    if (!isMapping(item)) throw new Error('a preset row sequence must contain mappings')
+    return {
+      id: unquote(String(item['id'] ?? '')),
+      name: unquote(String(item['name'] ?? '')),
+      ...(item['disabled'] === undefined ? {} : { disabled: String(item['disabled']) }),
+      ...(item['group'] === undefined ? {} : { group: String(item['group']) }),
+      ...(isMapping(item['isolate']) ? { isolate: item['isolate'] } : {}),
+      ...(item['config'] === undefined ? {} : { config: item['config'] }),
+    }
+  })
 }
 
 /**
@@ -388,6 +398,29 @@ function brief(value: unknown): string {
  */
 function diffConfig(yaml: Value | undefined, decl: unknown, where: string): string[] {
   const problems: string[] = []
+  if (Array.isArray(decl) && decl.every(value => typeof value !== 'object' || value === null)) {
+    if (!Array.isArray(yaml)) {
+      problems.push(`${where}.config: 形状不同 —— YAML ${brief(yaml)}，声明是标量数组`)
+      return problems
+    }
+    if (yaml.length !== decl.length) {
+      problems.push(`${where}.config: 标量数组长度不同 —— YAML ${yaml.length}，声明 ${decl.length}`)
+      return problems
+    }
+    for (let index = 0; index < decl.length; index += 1) {
+      const yamlValue = yaml[index]
+      if (typeof yamlValue !== 'string') {
+        problems.push(`${where}.config[${index}]: YAML 侧不是标量（${brief(yamlValue)}）`)
+        continue
+      }
+      const left = unquote(yamlValue)
+      const right = String(decl[index])
+      if (left !== right) {
+        problems.push(`${where}.config[${index}]: 值不同 —— YAML ${brief(left)}，声明 ${brief(right)}`)
+      }
+    }
+    return problems
+  }
   if (Array.isArray(decl)) {
     if (!isSequence(yaml)) {
       problems.push(`${where}.config: 形状不同 —— YAML ${brief(yaml)}，声明是嵌套行数组`)
@@ -416,11 +449,28 @@ function diffConfig(yaml: Value | undefined, decl: unknown, where: string): stri
   }
   for (const key of yamlKeys) {
     const yamlValue = yaml[key]
+    const declValue = decl[key]
+    if (Array.isArray(declValue)) {
+      if (!Array.isArray(yamlValue)) {
+        problems.push(`${where}.config.${key}: YAML 侧不是数组（${brief(yamlValue)}）`)
+        continue
+      }
+      if (yamlValue.length !== declValue.length) {
+        problems.push(`${where}.config.${key}: 数组长度不同 —— YAML ${yamlValue.length}，声明 ${declValue.length}`)
+        continue
+      }
+      for (let index = 0; index < declValue.length; index += 1) {
+        const item = yamlValue[index]
+        if (typeof item !== 'string' || unquote(item) !== String(declValue[index])) {
+          problems.push(`${where}.config.${key}[${index}]: 值不同 —— YAML ${brief(item)}，声明 ${brief(declValue[index])}`)
+        }
+      }
+      continue
+    }
     if (typeof yamlValue !== 'string') {
       problems.push(`${where}.config.${key}: YAML 侧不是标量（${brief(yamlValue)}）`)
       continue
     }
-    const declValue = decl[key]
     // 尾部换行是模板字面量的书写痕迹，不是内容：两侧一律按"去掉尾部换行"再比。
     const left = unquote(yamlValue).replace(/\n+$/, '')
     const right = String(declValue).replace(/\n+$/, '')
@@ -653,14 +703,18 @@ describe('the vocabulary the model reads', () => {
     expect(DISPATCH_LEDGER_TOOL).toBe('dispatch_ledger')
     const persona = declaredPersona()
     const mentions = persona.split('\n').filter(line => line.includes(DISPATCH_LEDGER_TOOL))
-    expect(mentions.length, `persona 里 ${DISPATCH_LEDGER_TOOL} 出现了 ${mentions.length} 次（应为一行短引导）`)
-      .toBe(1)
-    expect(mentions[0]).toContain('{action:"self"}')
+    expect(mentions.length, `persona 里 ${DISPATCH_LEDGER_TOOL} 应分别出现在 native 白名单与 self 引导中`)
+      .toBe(2)
+    expect(mentions.some(line => line.includes('[Dispatch Native Tool Whitelist]'))).toBe(true)
+    expect(mentions.some(line => line.includes('{action:"self"}'))).toBe(true)
 
     for (const row of yamlRows) {
       expect(row.name, `preset 行 "${row.id}" 挂载了 ${DISPATCH_LEDGER_TOOL}`).not.toContain(DISPATCH_LEDGER_TOOL)
-      expect(brief(row.config), `preset 行 "${row.id}" 的 config 里出现了 ${DISPATCH_LEDGER_TOOL}`)
-        .not.toContain(DISPATCH_LEDGER_TOOL)
+      // code-mode 的 nativeTools 只是引用根工具的白名单，不是再注册一次账本工具。
+      if (row.id !== 'code-mode') {
+        expect(brief(row.config), `preset 行 "${row.id}" 的 config 里出现了 ${DISPATCH_LEDGER_TOOL}`)
+          .not.toContain(DISPATCH_LEDGER_TOOL)
+      }
     }
     for (const row of DISPATCH_PRESET.plugins) {
       expect(row.name, `声明行 "${row.id}" 挂载了 ${DISPATCH_LEDGER_TOOL}`).not.toContain(DISPATCH_LEDGER_TOOL)

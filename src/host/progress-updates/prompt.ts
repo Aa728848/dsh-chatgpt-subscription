@@ -71,6 +71,8 @@ export const PROGRESS_GUIDANCE = [
   '- **Opening**: before the first tool call of the task, send one update stating the plan (which steps, what you touch first). The user must be able to redirect you before you disappear into execution.',
   '- **Closing**: after the work is done and before your final answer, send one update stating the result (what changed, what was verified, what is left). The panel and the conversation both close on this line.',
   '',
+  'Use exactly one opening and one closing update per task. Never announce an intended tool call instead of making it: after an opening or intermediate update, perform actual work, ask a necessary question, or finish before considering another update. If a repeat-tool reminder names `progress_update`, do not answer with another progress update; inspect the previous result and continue with a task tool, a necessary question, or the final response.',
+  '',
   'Beyond those two, these moments are worth a report:',
   '- **Early planning**: the opening update covers it; report again only when the plan really changes (different approach, smaller scope, a broken premise).',
   '- **A meaningful conclusion**: a key fact, a root cause, a verified assumption — report the conclusion itself, not "I just read a file".',

@@ -1,13 +1,13 @@
 # 调度模式（dispatch）
 
-基于 **Code Mode** 的调度 Agent：native 工具块只保留最小白名单 `code_run`、`cache_warmup_result`、`dispatch_ledger`、`progress_update`、`structured_output`、`win_bash`。其余工具即使由本预设注册，也不进入 native schema，只能在 `code_run` 程序里用 `code_tools_search` 现查现调。工具注册本身不删除，`code_run` 的嵌套调用仍走完整原生执行管线。
+基于 **Code Mode** 的调度 Agent：native 工具块只保留最小白名单 `code_run`、`cache_warmup_result`、`dispatch_ledger`、`progress_update`、`structured_output`。其余工具即使由本预设注册，也不进入 native schema，只能在 `code_run` 程序里用 `code_tools_search` 现查现调；`win_bash` 也不例外，Shell 一律写成 `await tools.win_bash(...)`。工具注册本身不删除，`code_run` 的嵌套调用仍走完整原生执行管线。
 
 > 内核的 `ptc` 呈现方式只把 `run_code` 交给模型、其余名字一律硬拒，`standard` 又完全没有程序
 > 传输；「原生工具 + 程序」这个组合在内核里表达不出来，所以本预设自带一行 `code-mode`
 > （`@eddyskywalker/dsh-chatgpt-subscription/codemode`）。代次上不可用原生 executor 时，
 > `resolveDispatchPreset` 会自动退回 PTC 呈现（见 `src/host/agent-preset.ts`）。
 
-> `code-mode.config.nativeToolsOnly: true` 是这一白名单模式的开关，默认关闭以保持其他调用方的旧行为。白名单外的顶层直呼会被拒绝，但带嵌套标记的程序内调用放行。比如 `ask_user_question` 仍由 `tool-ask-user` 注册，主控只是不再直接调用它，而是在一个 `code_run` 程序中执行 `return await tools.ask_user_question({ questions: [...] })`。
+> `code-mode.config.nativeToolsOnly: true` 是这一白名单模式的开关，默认关闭以保持其他调用方的旧行为；dispatch 另用 `nativeTools` 显式冻结四个辅助工具，避免继承通用默认值里的原生 Shell。白名单外的顶层直呼会被拒绝，但带嵌套标记的程序内调用放行。比如 `ask_user_question` 仍由 `tool-ask-user` 注册，主控只是不再直接调用它，而是在一个 `code_run` 程序中执行 `return await tools.ask_user_question({ questions: [...] })`。全局指令点名 `read` / `glob` / `grep` / `edit` / `write` / `win_bash` 时，同样指程序内的 `tools.*`，不是顶层工具。
 
 > **缓存前提**：Code Mode 的说明段是**恒定文本**（不含任何遮蔽计数或 namespace 清单），
 > 加上既有的 `ptc-sdk-cache-guard`，kimi-code / minimax-code 的前缀缓存不因 MCP 增删而失效。

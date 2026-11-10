@@ -234,8 +234,14 @@ describe('the dispatch definition', () => {
     expect(rowById('code-mode')).toEqual({
       id: 'code-mode',
       name: '@eddyskywalker/dsh-chatgpt-subscription/codemode',
-      config: { nativeToolsOnly: true },
+      config: {
+        nativeToolsOnly: true,
+        nativeTools: ['cache_warmup_result', 'dispatch_ledger', 'progress_update', 'structured_output'],
+      },
     })
+    const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
+    expect(yml).toContain("    nativeToolsOnly: true\n    nativeTools:\n      - cache_warmup_result\n      - dispatch_ledger\n      - progress_update\n      - structured_output")
+    expect(yml).not.toContain('      - win_bash')
     expect(rowById('tool-ask-user')).toEqual({
       id: 'tool-ask-user',
       name: '@deepseek-ai/dsh-tool-ask-user',
@@ -319,7 +325,10 @@ describe('the dispatch definition', () => {
     expect(codemode.plugins.find(row => row.id === 'code-mode')).toEqual({
       id: 'code-mode',
       name: '@eddyskywalker/dsh-chatgpt-subscription/codemode',
-      config: { nativeToolsOnly: true },
+      config: {
+        nativeToolsOnly: true,
+        nativeTools: ['cache_warmup_result', 'dispatch_ledger', 'progress_update', 'structured_output'],
+      },
     })
     expect(codemode.plugins.find(row => row.id === 'tool-executor-ptc')).toBeUndefined()
     expect(codemode.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
@@ -1007,7 +1016,9 @@ describe('the persona block the declaration transcribes', () => {
     expect(prefix).toContain('send_message({ agent_id })')
     // Minimal native whitelist and the program-only question/plan contract.
     expect(prefix).toContain('[Dispatch Native Tool Whitelist]')
-    expect(prefix).toContain('Top-level: only code_run, cache_warmup_result, progress_update, structured_output, win_bash')
+    expect(prefix).toContain('Top-level: only code_run, cache_warmup_result, dispatch_ledger, progress_update, and structured_output')
+    expect(prefix).toContain('Every task tool—including win_bash—is program-only')
+    expect(prefix).not.toContain('structured_output, win_bash')
     expect(prefix).toContain('Q1/G4 are rule ids, never argument-key suffixes')
     expect(prefix).not.toContain('hand the question out with a single ask_user_question call')
     // The compact brief form and the three new anti-patterns.

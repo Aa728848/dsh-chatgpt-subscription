@@ -263,6 +263,10 @@ export interface SectionInput {
   readonly language?: string
   /** 运行时的程序形态；`repl` 表示常驻 REPL。 */
   readonly programFormat?: string
+  /** 是否启用显式 native 白名单；缺省保持旧的归属遮蔽说明。 */
+  readonly nativeToolsOnly?: boolean
+  /** native 白名单的辅助工具；传输工具由 runToolName 单独给出。 */
+  readonly nativeTools?: readonly string[]
 }
 
 /**
@@ -270,15 +274,15 @@ export interface SectionInput {
  *
  * ## 恒定契约
  *
- * 这段正文**只**依赖入参里的两个工具名与部署级的 `language` / `programFormat`。它刻意不含遮蔽
- * 工具的数量、namespace 分布、会话 id 或时间，因此同一部署下逐字节恒定：挂载或卸载
- * MCP 服务端不会改写它，前缀缓存不会因为它失效。
+ * 这段正文**只**依赖入参里的工具名与部署级的 `language` / `programFormat` / native 白名单
+ * 配置。它刻意不含遮蔽工具的数量、namespace 分布、会话 id 或时间，因此同一部署下逐字节恒定：
+ * 挂载或卸载 MCP 服务端不会改写它，前缀缓存不会因为它失效。
  *
  * 结果形状索引（`read` / `glob` / `grep` … 的顶层字段）也**必须是静态的**：它照抄自各工具
  * 声明过的 output schema，不读活 catalog。按 catalog 生成会让「挂一个 MCP 服务端」改写系统
  * 提示词首段，正好毁掉这一层要保住的前缀缓存。
  *
- * @param input - 传输工具名、发现工具名与程序形态。
+ * @param input - 传输工具名、发现工具名、程序形态与部署级 native 白名单。
  * @returns 说明段正文。
  */
 export function buildCodemodeSectionText(input: SectionInput): string {
@@ -311,11 +315,29 @@ export function buildCodemodeSectionText(input: SectionInput): string {
           : 'return pages.flatMap((r) => r.lines.filter((l) => l.text.includes("TODO")).map((l) => l.text))',
         '```',
       ]
+  const nativeNames = [run, ...(input.nativeTools ?? []).filter((name) => name !== run)]
+  const nativeOnly = input.nativeToolsOnly === true
+  const introduction = nativeOnly
+    ? 'This session runs in Code Mode with a native whitelist: ' + nativeNames.map((name) => '`' + name + '`').join(', ')
+      + '. Every other registered tool—including MCP tools, external plugin tools, and non-whitelist tools owned by this preset—is program-only. Reach them through `tools.<name>(...)` inside ' + run + '.'
+    : 'This session runs in Code Mode. The tools in your tool list are called directly, exactly as usual. A second, larger set of tools is deliberately **not** in your context: every MCP tool, and every tool contributed by a plugin outside this preset. Reach them from inside ' + run + '.'
+  const commonProgramTools = ['read', 'glob', 'grep', 'edit', 'write', 'read_image', 'ask_user_question', 'subagent', 'win_bash']
+    .filter((name) => !nativeNames.includes(name))
+  const whitelistGuidance = nativeOnly
+    ? [
+        'Whenever another instruction names a non-whitelist tool, it means the corresponding `tools.<name>(...)` call inside ' + run + ', never a top-level call.'
+          + (commonProgramTools.length > 0
+            ? ' Common mappings: ' + commonProgramTools.map((name) => '`' + name + '` → `tools.' + name + '`').join(', ') + '.'
+            : ''),
+      ]
+    : []
   const lines = [
     '## Code Mode',
     '',
-    'This session runs in Code Mode. The tools in your tool list are called directly, exactly as usual. A second, larger set of tools is deliberately **not** in your context: every MCP tool, and every tool contributed by a plugin outside this preset. Reach them from inside ' + run + '.',
+    introduction,
     '',
+    ...whitelistGuidance,
+    ...(whitelistGuidance.length > 0 ? [''] : []),
     '### Calling tools from a program',
     '',
     ...example,

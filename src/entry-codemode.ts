@@ -411,6 +411,8 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
         metaTools: rules.options.metaTools,
         language: runtime?.language,
         programFormat: runtime?.programFormat,
+        nativeToolsOnly: rules.options.nativeToolsOnly,
+        nativeTools: rules.options.nativeTools,
       })
     },
     onCatalog: (definitions) => {
