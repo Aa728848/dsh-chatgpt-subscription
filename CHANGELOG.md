@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.67.0 - 2026-11-10
+
 - **[dispatch / Code Mode] 统一 K31P 通用工具入口并切断进展更新空转**
   - dispatch 的 native 白名单不再保留 `win_bash`；文件、搜索、编辑、提问、子代理与 Shell 均经 `code_run` 的 `tools.*` 调用，避免模型用顶层命令工具绕过程序传输。
   - 白名单模式的固定说明现在明确映射全局指令中的工具名，进展更新指引禁止连续播报预定动作或回应针对 `progress_update` 的重复提醒；默认 Code Mode 行为、进展输出 schema、UI 与 Harness 重复提醒实现保持不变。
@@ -23,6 +25,15 @@
   - 统一控制 Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解这五个工具；显式关闭并重载插件或重启 DSH 后，它们不再进入任何会话的工具 schema，MiniMax 的线路级开关继续叠加生效。
   - 开关刻意不使用 volatile 或动态 `{ when }`，默认路径的工具定义与注册顺序不变，也不修改 Kimi 的聊天、原生图片输入和缓存实现；既有 Kimi 会话在工具表实际变化后仅承担一次可诊断的 `tools` 前缀重建。
   - 设置分区新增中英俄三语开关与重载/缓存提示，保留既有历史工具卡片；新增宿主注册矩阵、默认顺序、配置解析和客户端交互回归测试。
+
+- **[command-code / 传输] 流式中途被掐断不再以 `UNKNOWN` 结束整轮（#99）**
+  - undici 的裸 `TypeError: terminated` 原先绕过流读取阶段的 in-band 重分类直抛给 harness，被归一成不在 `retryableCodes` 里的 `UNKNOWN`，一次断流就结束整轮、零重试；现在响应体读取阶段把裸传输异常统一归类为 `TRANSPORT`，进入既有 `maxRetries: 3` 的退避重试。
+  - 归类保留既有 `LlmError` 判定与调用方取消语义（取消仍报 `ABORTED`），并通过 `errorChain` 把 `terminated`、`ECONNRESET` 等原因链写进错误消息，报告不再只有一行没有上下文的 `terminated`；适配器自身不发起重试，仍由 harness 重试策略接管。
+  - **验证**：新增中途断流回归测试（先确认修复前失败再修复），command-code 适配器 36 例通过；全量 `npm test`、`npm run typecheck`、`npm run build` 通过。
+
+- **[kimi-code / 工具参数] 恢复畸形 `ask_user_question` 参数，不再弹窗失败**
+  - mapper、工具参数守卫与恢复链同步修正：畸形提问参数在弹窗前被拦截并允许同一步恢复一次，`dispatch-execution-guard` 的结构校验与 `tool-argument-recovery` 的恢复提示保持一致，原始失控参数不写入恢复提示。
+  - **验证**：`dispatch-execution-guard`、`kimi-code-mapper`、`tool-argument-guard`、`tool-argument-recovery` 四个测试文件同步扩充，全量 Vitest 通过。
 
 ## 0.66.2 - 2026-11-09
 
