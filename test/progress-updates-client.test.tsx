@@ -6,7 +6,7 @@
  *
  * A. 对话流 —— 视图注册在 `tool.call.toolview` 上、key 是 `progress_update`，
  *    注册的那个组件渲染出来就是这次调用的进展（三个工具阶段都读得对）；
- * B. 设置页 —— 独立一格 `settings.section`，七行都渲染，点「打开进展面板」
+ * B. 设置页 —— 独立一格 `settings.section`，全部设置卡片都渲染，点「打开进展面板」
  *    **确实调用了 openTab**（`vi.fn` + 真实 click），并且开关/阈值写的是本插件
  *    Config 的那两个字段；
  * C. 取数 —— 面板真的发请求到 `/api/dsh-progress-updates/updates`，路由返回的
@@ -338,7 +338,7 @@ describe('A. 对话流里的进展行', () => {
   })
 })
 
-describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTab', () => {
+describe('B. 设置页：独立一格，全部设置卡片与按钮交互', () => {
   it('注册成独立的一格：id 是 progress-updates，order 与订阅服务那格不冲突', () => {
     // Given 一个装着侧栏服务的上下文
     const { ctx, registrations } = makeCtx({ sidebarRightTabs: { register: () => () => {} }, sidebarRight: { openTab: vi.fn() } })
@@ -357,13 +357,13 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(sections[0]!.locale).toBe(NS_PROGRESS_UPDATES)
   })
 
-  it('七行卡片都渲染：进展、两个缓存开关、计划模式管线、阈值、语言与面板', async () => {
+  it('全部设置卡片都渲染：运行时开关、阈值、语言与面板', async () => {
     // Given 一份就绪的表单与一个假侧栏
     const form = fakeForm({ progressUpdates: false, progressUpdatesNudgeThreshold: 8 })
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
       openPanel: vi.fn(), close: vi.fn(), settings: form,
     } as never)))
-    // Then 七行都在
+    // Then 全部卡片都在
     expect(container.querySelector('[data-dsh-part="settings-row-enabled"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-cache-warmup"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-retrieval"]')).not.toBeNull()
@@ -373,6 +373,7 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.querySelector('[data-dsh-part="settings-row-dispatch-execution-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-tool-runaway-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-team-policy-cache-guard"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-media-tools"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-language"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-panel"]')).not.toBeNull()
@@ -386,12 +387,13 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
     expect(container.textContent).toContain(zh.settingsDispatchExecutionGuardName)
     expect(container.textContent).toContain(zh.settingsToolRunawayGuardName)
     expect(container.textContent).toContain(zh.settingsTeamPolicyCacheGuardName)
+    expect(container.textContent).toContain(zh.settingsMediaToolsName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
     expect(container.textContent).toContain(zh.settingsLanguageName)
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(12)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(13)
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {
@@ -559,6 +561,36 @@ describe('B. 设置页：独立一格，七行都渲染，按钮真的调 openTa
       openPanel: vi.fn(), close: vi.fn(),
     } as never)))
     expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-team-policy-cache-guard-switch"]')?.disabled).toBe(true)
+  })
+
+  it('媒体工具开关缺键读成开，点击写回 mediaTools 并显示重载与缓存提示', async () => {
+    const form = fakeForm({})
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    const toggle = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-media-tools-switch"]')!
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    const row = container.querySelector<HTMLElement>('[data-dsh-part="settings-row-media-tools"]')!
+    expect(row.textContent).toContain('重载插件或重启后生效')
+    expect(row.textContent).toContain('重建一次前缀缓存')
+    await act(async () => { toggle.click() })
+    expect(form.writes).toEqual([['mediaTools', false]])
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('媒体工具开关只有显式 false 才回显关闭', async () => {
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: fakeForm({ mediaTools: false }),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-media-tools-switch"]')?.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('没有设置服务时媒体工具开关禁用并说明原因', async () => {
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(),
+    } as never)))
+    expect(container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-media-tools-switch"]')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLElement>('[data-dsh-part="settings-row-media-tools"]')?.textContent).toContain(zh.settingsUnavailable)
   })
 
   it('未声明检索字段时设置页默认开启', async () => {

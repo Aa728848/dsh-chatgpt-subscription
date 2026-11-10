@@ -197,6 +197,17 @@ function TeamBoardMark(): ReactNode {
   )
 }
 
+/** 媒体工具那一行的标记：一张带播放符号的图片（生图与视频共用）。 */
+function MediaToolsMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3.5" width="14" height="13" rx="2" />
+      <circle cx="7" cy="7.2" r="1.2" />
+      <path d="m4.5 14 3.6-3.4 2.2 2 2.1-2.1 3.1 3.5M11.5 5.5l3 2-3 2Z" />
+    </svg>
+  )
+}
+
 function PanelMark(): ReactNode {
   return (
     <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -273,7 +284,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'teamPolicyCacheGuard', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'mediaTools' | 'teamPolicyCacheGuard', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -293,6 +304,8 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   const dispatchExecutionGuard = value.dispatchExecutionGuard !== false
   // 缺键 = 开：所有线路获得提醒，只有 Kimi 的既有强停配置保持不变。
   const toolRunawayGuard = value.toolRunawayGuard !== false
+  // 缺键 = 开：与宿主注册期开关一致，老配置升级后不会意外失去媒体工具。
+  const mediaTools = value.mediaTools !== false
   // 缺键 = 开：宿主 schema 上是 default(true)，缺键时界面必须同样读成开。
   const teamPolicyCacheGuard = value.teamPolicyCacheGuard !== false
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
@@ -316,7 +329,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'teamPolicyCacheGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'mediaTools' | 'teamPolicyCacheGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -562,6 +575,28 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
             data-dsh-part="settings-team-policy-cache-guard-switch"
             disabled={!writable}
             onClick={() => { write('teamPolicyCacheGuard', 'teamPolicyCacheGuard', !teamPolicyCacheGuard) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-media-tools"
+          brand="#9b6a43"
+          mark={<MediaToolsMark />}
+          name={translate('settingsMediaToolsName')}
+          note={unavailable
+            ?? (failure?.row === 'mediaTools' ? failure.text : translate('settingsMediaToolsNote'))}
+          danger={failure?.row === 'mediaTools' || unavailable !== undefined}
+          enabled={mediaTools}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={mediaTools}
+            aria-label={translate('settingsMediaToolsName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-media-tools-switch"
+            disabled={!writable}
+            onClick={() => { write('mediaTools', 'mediaTools', !mediaTools) }}
           />
         </CardRow>
 

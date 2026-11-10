@@ -318,6 +318,14 @@ export interface Config {
   /** 工具失控治理总开关：各线路提醒重复调用；只有 Kimi 保留第 12 次强停。 */
   toolRunawayGuard?: Volatile<boolean>
   /**
+   * 图片/视频工具总开关：控制 Codex/Antigravity 生图、Kimi 视频挂载，以及
+   * MiniMax 视频生成与理解这五个工具的注册。默认开启。
+   *
+   * 刻意不是 volatile：工具 schema 是 Kimi 前缀缓存的稳定输入，不能在会话中途
+   * 热切换。修改后重载插件或重启 DSH；既有会话在工具表实际变化后重建一次前缀。
+   */
+  mediaTools?: boolean
+  /**
    * 「Agent Teams 策略段」缓存守卫：默认开启。
    *
    * 内置 `@deepseek-ai/dsh-tool-agent-team` 的 `team:policy` 段在开关关闭时是空串、
@@ -477,6 +485,8 @@ export interface ConfigInput {
   dispatchExecutionGuard?: boolean
   /** 工具失控治理总开关（默认开启）；非 Kimi 线路只提醒，不继承强停。 */
   toolRunawayGuard?: boolean
+  /** 五个图片/视频工具的注册期总开关（默认开启；修改后重载插件或重启）。 */
+  mediaTools?: boolean
   /** 「Agent Teams 策略段」缓存守卫（默认开启）：摘段并改为尾部投递。 */
   teamPolicyCacheGuard?: boolean
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
@@ -541,6 +551,10 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('启用调度执行守卫：在执行期拦截子代理越权调用主控专用工具，并拦截等待子代理期间的纯 sleep 空等命令；不修改工具声明面，零损耗保护 Kimi 缓存。'),
   toolRunawayGuard: z.boolean().default(true).volatile()
     .description('启用工具失控治理：重复调用同一工具与参数时分级提醒；Kimi 保留第 12 次强停，其他线路只提醒。'),
+  // 这是注册期开关而非执行期开关：false 时五个工具完全不登记，老代 Harness
+  // 也能从 schema 中移除它们。默认 true 保持既有工具表与缓存前缀不变。
+  mediaTools: z.boolean().default(true)
+    .description('注册图片/视频工具：Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解；默认开启。修改后重载插件或重启 DSH，Kimi 既有会话在工具表变化后会重建一次前缀缓存。'),
 
   // Agent Teams 策略段守卫：把内置 `team:policy` 段从 system 里摘掉，改成切开关时
   // 尾部投递一次，避免中途开团队协作时整段前缀重建。默认开启——它不增加任何工具
@@ -1871,19 +1885,29 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // 服务不可用时路由自己降级为「只给命令」。
     const disposeUpdateRoutes = registerUpdateRoutes(ctx, { fetchFn: proxyFetch })
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
-    const disposeImageTool = ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
+    // Registration-time gate, deliberately not volatile or `{ when }`: the tool
+    // table is a Kimi prefix-cache input, so it changes only with a plugin reload.
+    // Default-on preserves every existing deployment's declarations byte-for-byte.
+    const mediaToolsEnabled = pluginConfig.mediaTools !== false
+    const disposeImageTool = mediaToolsEnabled
+      ? ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
+      : () => undefined
     // gemini-3.1-flash-image is served as a tool, not a chat model: the harness
     // accepts text-only assistant output, so only a tool result can carry the image.
-    const disposeAntigravityImageTool = ctx.tools.register(createAntigravityImageTool(
-      antigravityAccountPool,
-      antigravityStore,
-      ctx.attachments,
-      { fetchFn: antigravityProxyFetch, isEnabled: () => antigravityPreferences.status().enabled !== false },
-    ))
+    const disposeAntigravityImageTool = mediaToolsEnabled
+      ? ctx.tools.register(createAntigravityImageTool(
+        antigravityAccountPool,
+        antigravityStore,
+        ctx.attachments,
+        { fetchFn: antigravityProxyFetch, isEnabled: () => antigravityPreferences.status().enabled !== false },
+      ))
+      : () => undefined
     // The video ingress for the Kimi route. Registered here because the tool
     // needs the plugin context to resolve the calling session's route before it
     // agrees to attach anything.
-    const disposeVideoTool = ctx.tools.register(createKimiVideoTool(ctx, { fetchFn: proxyFetch }))
+    const disposeVideoTool = mediaToolsEnabled
+      ? ctx.tools.register(createKimiVideoTool(ctx, { fetchFn: proxyFetch }))
+      : () => undefined
     // The two media tools for the MiniMax Code route. They ride the Matrix
     // gateway beside the Messages route (host/minimax-code/matrix-client.ts)
     // and present this line's own subscription credential, which is why the
@@ -1891,8 +1915,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // ~/.minimax directory this route once shared is gone on a fresh install,
     // and only a pooled account still holds a live session.
     //
-    // Both are registered ONLY while this line is enabled. A user who turned the
-    // line off never calls either one, yet their schemas cost ≈2000 tokens of
+    // Both require the global media switch AND this line to be enabled. A user
+    // who turned either off never calls them, yet their schemas cost ≈2000 tokens of
     // context on every request (generate 1442 + understand 571) — 74% of what
     // this plugin's always-on tool list spends, paid by deployments that cannot
     // use it. Registration happens during load and reads the synchronous
@@ -1902,7 +1926,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // with no settings seam `status()` answers the shipped default
     // (`enabled: true`) until its disk read lands, which keeps the pre-change
     // behaviour there rather than silently dropping the tools.
-    const minimaxMediaToolsEnabled = minimaxCodePreferences.status().enabled
+    const minimaxMediaToolsEnabled = mediaToolsEnabled && minimaxCodePreferences.status().enabled
     const disposeMinimaxUnderstandVideoTool = minimaxMediaToolsEnabled
       ? ctx.tools.register(
         createMinimaxUnderstandVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),

@@ -50,6 +50,7 @@
     planModePipeline: true                # 启用调度模式 enter_plan_mode / leave_plan_mode（热生效）
     dispatchExecutionGuard: true          # 启用调度执行守卫与 Mandate v2 账本守卫（热生效）
     toolRunawayGuard: true                # 工具重复调用分级提醒；Kimi 保留强停（热生效）
+    mediaTools: true                      # 注册五个图片/视频工具（重载插件或重启后生效）
     cacheWarmup: true                     # 受控线路的大结果 ref:// 预览（热生效）
     cacheWarmupRetrieval: true            # 受控线路的导航检索大纲投影（热生效）
     cacheWaitWarmup: true                 # 默认 Kimi 的等待续热；其他线路需显式策略（热生效）
@@ -79,6 +80,7 @@
 | `dispatchExecutionGuard` | `boolean` | `true` | **热生效（volatile）** | 执行期拦截子代理越权调用主控专用工具、拦截空 `sleep` 及校验 Mandate v2 账本 |
 | `teamPolicyCacheGuard` | `boolean` | `true` | **热生效（volatile）** | 把内置 Agent Teams 的 `team:policy` 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作刷掉整段前缀缓存 |
 | `toolRunawayGuard` | `boolean` | `true` | **热生效（volatile）** | 各线路重复工具调用分级提醒；只有 Kimi 保留第 12 次强停，MiniMax 保留自己的官方失控规则 |
+| `mediaTools` | `boolean` | `true` | **重载插件 / 重启** | 统一注册 Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解；`false` 时五个工具均不进入 schema，MiniMax 仍叠加自己的线路开关；Kimi 既有会话在工具表变化后重建一次前缀缓存 |
 | `cacheWarmup` | `boolean` | `true` | **热生效（volatile）** | 受控线路的命令/日志大结果 `ref://` 预览与 `cache_warmup_result` 补读 |
 | `cacheWarmupProviders` | `string[]` | 全部 controlled providers | **热生效（volatile）** | 允许产生新预览的线路；`[]` 关闭所有新投影，已有 ref 不受影响 |
 | `cacheWarmupRetrieval` | `boolean` | `true` | **热生效（volatile）** | 受控线路明确导航意图下的文件/网页检索结果大纲投影 |

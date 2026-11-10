@@ -90,6 +90,8 @@ export interface ProgressUpdatesSettingsValues {
   dispatchExecutionGuard?: boolean
   /** 工具失控治理开关（缺键 = 开）；非 Kimi 线路只提醒，不强停。 */
   toolRunawayGuard?: boolean
+  /** 五个图片/视频工具的注册期总开关（缺键 = 开；重载插件或重启后生效）。 */
+  mediaTools?: boolean
   /**
    * Agent Teams 策略段缓存守卫开关（缺键 = 开）。
    *
@@ -114,6 +116,7 @@ export type ProgressUpdatesField =
   | 'planModePipeline'
   | 'dispatchExecutionGuard'
   | 'toolRunawayGuard'
+  | 'mediaTools'
   | 'teamPolicyCacheGuard'
 
 /**
