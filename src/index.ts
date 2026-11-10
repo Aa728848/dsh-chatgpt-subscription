@@ -321,10 +321,10 @@ export interface Config {
    * 图片/视频工具总开关：控制 Codex/Antigravity 生图、Kimi 视频挂载，以及
    * MiniMax 视频生成与理解这五个工具的注册。默认开启。
    *
-   * 刻意不是 volatile：工具 schema 是 Kimi 前缀缓存的稳定输入，不能在会话中途
-   * 热切换。修改后重载插件或重启 DSH；既有会话在工具表实际变化后重建一次前缀。
+   * volatile 只负责允许设置表单保存；apply 只读取一次，不在会话中途热切换。
+   * 修改后重载插件或重启 DSH；既有会话在工具表实际变化后重建一次前缀。
    */
-  mediaTools?: boolean
+  mediaTools?: Volatile<boolean>
   /**
    * 「Agent Teams 策略段」缓存守卫：默认开启。
    *
@@ -551,9 +551,9 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('启用调度执行守卫：在执行期拦截子代理越权调用主控专用工具，并拦截等待子代理期间的纯 sleep 空等命令；不修改工具声明面，零损耗保护 Kimi 缓存。'),
   toolRunawayGuard: z.boolean().default(true).volatile()
     .description('启用工具失控治理：重复调用同一工具与参数时分级提醒；Kimi 保留第 12 次强停，其他线路只提醒。'),
-  // 这是注册期开关而非执行期开关：false 时五个工具完全不登记，老代 Harness
-  // 也能从 schema 中移除它们。默认 true 保持既有工具表与缓存前缀不变。
-  mediaTools: z.boolean().default(true)
+  // 注册期开关：volatile 只让设置写入器接受保存，apply 仍只读取一次，
+  // 不在会话中途改变工具表。默认 true 保持既有工具表与缓存前缀不变。
+  mediaTools: z.boolean().default(true).volatile()
     .description('注册图片/视频工具：Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解；默认开启。修改后重载插件或重启 DSH，Kimi 既有会话在工具表变化后会重建一次前缀缓存。'),
 
   // Agent Teams 策略段守卫：把内置 `team:policy` 段从 system 里摘掉，改成切开关时
@@ -1885,10 +1885,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // 服务不可用时路由自己降级为「只给命令」。
     const disposeUpdateRoutes = registerUpdateRoutes(ctx, { fetchFn: proxyFetch })
     const disposeAdapter = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
-    // Registration-time gate, deliberately not volatile or `{ when }`: the tool
-    // table is a Kimi prefix-cache input, so it changes only with a plugin reload.
-    // Default-on preserves every existing deployment's declarations byte-for-byte.
-    const mediaToolsEnabled = pluginConfig.mediaTools !== false
+    // Registration-time gate: volatile permits the settings write, but the live
+    // reference is read exactly once and no `{ when }` is added. The tool table is a
+    // Kimi prefix-cache input, so it changes only with a plugin reload. Default-on
+    // preserves every existing deployment's declarations byte-for-byte.
+    const mediaToolsEnabled = pluginConfig.mediaTools?.get() !== false
     const disposeImageTool = mediaToolsEnabled
       ? ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
       : () => undefined

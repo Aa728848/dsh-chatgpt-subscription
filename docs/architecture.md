@@ -84,7 +84,7 @@
 
 - DSH Profile 的 `cordis.patch.yml` 按条目 `id` **整行覆盖** `config`；若把既有用户已经写进核心行的字段迁移到子行，旧 patch 会将子行配置抹回默认值，造成「面板显示开启、实际未生效」的配置撕裂。
 - 这些字段在 Schemastery schema 中标记了 `.volatile()`：宿主设置面板保存时直接更新内存中的活引用（`Volatile<T>`），核心入口通过 `attachProgressSettings` / `attachPlanModePipelineSettings` 将读取闭包移交给子入口，**无需重挂任何插件行，下一步模型调用即刻生效**。
-- `mediaTools` 同样留在核心 Config，但刻意**不是** `volatile`：它控制 Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解这五个工具的注册。工具 schema 是 Kimi 前缀缓存的稳定输入，因此只在插件重载或重启时改变工具表，不使用执行期拒绝或动态 `{ when }` 冒充关闭。默认 `true` 保持旧部署的工具表不变；实际切换后，既有 Kimi 会话会有一次可诊断的 `tools` 前缀重建，随后保持稳定。
+- `mediaTools` 同样留在核心 Config，并标记为 `volatile` 以允许共享设置表单保存；apply 只在注册时读取一次，不订阅活引用：它控制 Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解这五个工具的注册。工具 schema 是 Kimi 前缀缓存的稳定输入，因此只在插件重载或重启时改变工具表，不使用执行期拒绝或动态 `{ when }` 冒充关闭。默认 `true` 保持旧部署的工具表不变；实际切换后，既有 Kimi 会话会有一次可诊断的 `tools` 前缀重建，随后保持稳定。
 
 ---
 

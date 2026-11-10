@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **[tools / settings] 修复媒体工具关闭时保存失败**
+  - `mediaTools` 改用 volatile 活引用以通过 DSH 设置写入校验；apply 只在注册时读取一次，不把引用对象误判为开启，也不引入会话中途热切换。`false` 现在可以正常保存，工具表仍在重载插件或重启后变化。
+  - 新增配置解析、单次读取、关闭后五个媒体工具均不注册及设置页写回回归测试；原有默认开启、MiniMax 线路开关叠加和缓存重建语义保持不变。
+  - **验证**：相关测试 61 例通过；全量 Vitest 为 384 个文件通过 / 2 个跳过（7012 项通过 / 9 项跳过 / 0 失败）；三工程强制类型检查、构建与 `npm pack --dry-run`（979 个文件）通过。
+
 - **[dispatch / Code Mode] 非白名单工具统一改走 `code_run`，消除畸形 native 提问入口**
   - native 工具块仅保留 `code_run`、`cache_warmup_result`、`dispatch_ledger`、`progress_update`、`structured_output` 与 `win_bash`；文件、提问、子代理、计划模式等其他工具仍完整注册，但只通过程序内嵌套调用执行，不再直接暴露给模型。
   - 新增默认关闭的 `nativeToolsOnly` 配置以保持其他调用方行为，dispatch 显式开启；白名单外顶层直呼返回 `UNKNOWN_TOOL`，带嵌套标记的同名调用继续进入原生执行管线，既有提问结构校验与子代理越权守卫不变。

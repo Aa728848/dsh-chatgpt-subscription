@@ -11,7 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type z from '@deepseek-ai/schemastery'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apply, Config as PluginConfig } from '../src/index.ts'
+import { apply, Config as PluginConfig, type Config as PluginConfigShape } from '../src/index.ts'
 import * as platformStore from '../src/host/platform-token-store.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
 import { MINIMAX_CODE_PREFERENCES_NAMESPACE } from '../src/host/minimax-code/token-store.ts'
@@ -43,7 +43,7 @@ afterEach(() => {
  * @param config - core registration-time settings under test.
  * @returns every tool name the plugin registered, in registration order.
  */
-function mountPlugin(minimaxSettings: SettingsValue, config: { mediaTools?: boolean } = {}): string[] {
+function mountPlugin(minimaxSettings: SettingsValue, config: Pick<PluginConfigShape, 'mediaTools'> = {}): string[] {
   const registeredTools: string[] = []
   const adapters = new Map<string, LlmAdapter>()
   const services: Record<string, unknown> = {}
@@ -133,20 +133,20 @@ describe('MiniMax media tools follow the line switch', () => {
   })
 
   it('keeps the media registration order unchanged when mediaTools is explicit', () => {
-    const tools = mountPlugin({ enabled: true }, { mediaTools: true })
+    const tools = mountPlugin({ enabled: true }, { mediaTools: { get: () => true } })
     expect(tools.filter(name => (MEDIA_TOOLS as readonly string[]).includes(name))).toEqual(MEDIA_TOOLS)
     expect(tools).toContain('dispatch_ledger')
   })
 
   it('registers none of the five media tools when the global switch is off', () => {
-    const disabled = mountPlugin({ enabled: true }, { mediaTools: false })
+    const disabled = mountPlugin({ enabled: true }, { mediaTools: { get: () => false } })
     for (const name of MEDIA_TOOLS) expect(disabled).not.toContain(name)
     expect(disabled).toContain('dispatch_ledger')
   })
 
   it('lets the global switch dominate the MiniMax line switch in both directions', () => {
-    const globallyOff = mountPlugin({ enabled: true }, { mediaTools: false })
-    const lineOff = mountPlugin({ enabled: false }, { mediaTools: true })
+    const globallyOff = mountPlugin({ enabled: true }, { mediaTools: { get: () => false } })
+    const lineOff = mountPlugin({ enabled: false }, { mediaTools: { get: () => true } })
     expect(globallyOff).not.toContain('minimax_generate_video')
     expect(globallyOff).not.toContain('minimax_understand_video')
     expect(lineOff).not.toContain('minimax_generate_video')
@@ -154,9 +154,23 @@ describe('MiniMax media tools follow the line switch', () => {
     expect(lineOff).toContain('kimi_attach_video')
   })
 
-  it('parses mediaTools as a default-on plain boolean, not a volatile reference', () => {
-    expect(PluginConfig({}).mediaTools).toBe(true)
-    expect(PluginConfig({ mediaTools: true }).mediaTools).toBe(true)
-    expect(PluginConfig({ mediaTools: false }).mediaTools).toBe(false)
+  it('parses mediaTools as a default-on volatile setting that can be saved', () => {
+    expect(PluginConfig({}).mediaTools?.get()).toBe(true)
+    expect(PluginConfig({ mediaTools: true }).mediaTools?.get()).toBe(true)
+    expect(PluginConfig({ mediaTools: false }).mediaTools?.get()).toBe(false)
+  })
+
+  it('reads the volatile setting once at registration and does not mistake it for enabled', () => {
+    let reads = 0
+    const disabled = mountPlugin({ enabled: true }, {
+      mediaTools: {
+        get: () => {
+          reads += 1
+          return false
+        },
+      },
+    })
+    expect(reads).toBe(1)
+    for (const name of MEDIA_TOOLS) expect(disabled).not.toContain(name)
   })
 })
