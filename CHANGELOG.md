@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.68.1 - 2026-11-11
+
 - **[opendesign / 号池] 套餐不含某个模型不再判成密钥失效，并补回清除失效标记的入口**
   - **现象**：Go 档账号用 `deepseek-v4.1-flash` 偶发失败后，卡片把该账号标成「登录已失效 / 需替换 Key」，而同一把 Key 打同一个模型在下一次请求就成功；用户反复「重新登录」也只能换一个新账号，旧行一直是红的。
   - **根因**：`isAuthenticationError` 把 **401 与 403 一律**判成 `AUTH`，`streamErrorCode` 因此把网关的 `tier_request_kind_not_entitled`（`membership tier "go" is not entitled to use this model for chat_completions`）与 `tier_model_not_entitled`（`Go/Plus 用户不允许访问最贵的模型`）也归到 `AUTH`，`standDown` 再写成 `authStatus: "invalid"`。这两种拒绝说的是**套餐与模型**，同一把 Key 对其余模型照常可用；而 `invalid` 只由 `clearAuthFailed` 解除，本线路的账号路由又没有该 action（实测 `POST {"action":"relogin"}` 返回 `Unsupported account action.`），于是正常账号被永久挂起。
