@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.69.0 - 2026-11-12
+
 - **[codemode / 兼容] 对齐 DSH 0.2.2-rc.2：升级 `code_run` 图文混排投影、`scoped-repl` 顶层 `return` 自愈、一等 `PtcImage` 绑定与子代理血缘守卫**
   - **有序图文输出与 `projectContent` 内联投影**：兼容 DSH `0.2.2-rc.2` 的 `PtcRunResult.output: PtcOutputBlock[]` 与旧代 `result.logs: string[]` 双轨协议；`code_run` 实现 `ToolDefinition.projectContent(exec, result)`，在成功时按 `inspect(...)` 顺序把文本与图片直接投射为 `ToolResultMessage.content` 中的有序多模态块，在程序报错时将报错前已 `inspect` 的文本和图片追加在错误块之后保留现场。
   - **`scoped-repl` 默认格式识别与末尾顶层 `return` 自动修复**：`rules.ts` 与 `transport.ts` 将 `'scoped-repl'` / `'script'` 归入 REPL 格式（生成无 `return` 的 REPL 示例并补充 `inspect(...values)` 指引）；新增词法状态机 `sanitizeReplTopLevelReturn`，在 TypeScript REPL 模式下自动剥离末尾顶层 `return <expr>`（对象字面量自动包 `({...})`），避免模型沿用 `function-body` 习惯导致 `SyntaxError: Return statement is not allowed here`。
