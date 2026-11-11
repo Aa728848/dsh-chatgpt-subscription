@@ -501,6 +501,13 @@ export function registerOpenDesignRoutes(ctx: Context, options: OpenDesignRouteO
               await accountPool.deleteAccount(accountId)
             } else if (action === 'clear-cooldown') {
               await accountPool.clearCooldown(accountId)
+            } else if (action === 'relogin') {
+              // Every sibling line answers this action by clearing the failure
+              // marker and deleting nothing, because re-authorizing is what
+              // restores an account. This line had no such action at all, so an
+              // account parked by a refusal that was never about its key had no
+              // way back except being added again under a different identity.
+              await accountPool.clearAuthFailed(accountId)
             } else if (action === 'strategy'
               && (body.strategy === 'sequential' || body.strategy === 'round-robin' || body.strategy === 'sticky')) {
               await accountPool.setStrategy(body.strategy)

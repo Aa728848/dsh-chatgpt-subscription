@@ -31,6 +31,7 @@ import { resolveModelInfo } from './catalog.ts'
 import { openDesignVisibleModelIds } from './line.ts'
 import {
   buildOpenDesignBody,
+  isModelEntitlementDenial,
   isUnsupportedMaxTokensError,
   parseServerSentEvents,
   streamErrorCode,
@@ -394,6 +395,14 @@ export class OpenDesignAdapter extends LlmAdapter {
           if (code === 'AUTH' || code === 'QUOTA') {
             refused.add(account.id)
             await this.standDown(account.id, code, detail)
+            continue
+          }
+          // A model the plan withholds is worth another ACCOUNT — a pooled key
+          // may sit on a higher tier — but it is not a rejected credential, so
+          // nothing is parked: this account keeps serving every model it does
+          // include, which is why `standDown` is not called here.
+          if (isModelEntitlementDenial(detail, response.status)) {
+            refused.add(account.id)
             continue
           }
           break

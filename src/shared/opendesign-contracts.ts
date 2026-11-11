@@ -285,6 +285,7 @@ export type OpenDesignAccountAction =
   | 'set-alias'
   | 'delete'
   | 'clear-cooldown'
+  | 'relogin'
   | 'strategy'
 
 /** Re-export so the line's consumers read one module. */
