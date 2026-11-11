@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.68.0 - 2026-11-11
+
+- **[cline-pass / 路由] 移除客户端上游钉选，模型路由完全交还 Cline 网关**
+  - Cline 对客户端自带的 `providerOptions` 模型路由直接返回 HTTP 403，钉选子系统因此无法作为可用能力存在，也不再保留「失败后重试」的兼容路径：删除上游钉选存储与请求注入、`strict` / `preferred` 钉选模式、渠道排除与 `gateway.has` 能力过滤、逐渠道判定与渠道编辑器。
+  - 移除 `/models/pin`、`/models/reset`、`/models/probe`、`/models/validate` 四个宿主路由，以及 `cline_pass_pin`、`cline_pass_probe`、`cline_pass_validate` 三个管理工具（可选工具由 8 个收缩为 5 个）与对应的公开 DTO / 导出面；被移除的路由现在返回 404。
+  - 普通模型测试与线上会话一律只走 Cline 自动路由：请求体既不含 `provider`，也不含 `providerOptions`，即使旧设置里仍残留钉选数据也不会再被读取或注入；旧 `pinSpelling` 键不再持久化。
+  - 响应侧的管线、实际服务渠道、一手指纹与匿名贡献者路由（`openai-compatible-private`，无 ZDR 保障）仍作为只读事实回读并在卡片上告警；账号池轮换、AUTH / QUOTA 退避、传输重试、空回合重放、模型目录、配额与请求历史语义不变。
+  - 旧配置迁移只保留 `pins` 键用于「在用目录行」提升判定，其路由取值被忽略；升级后卡片的渠道编辑器消失，属于预期内的功能移除。
+  - **验证**：`npm run typecheck` 通过；全量 Vitest 为 384 个文件通过 / 2 个跳过（6988 例通过 / 9 例跳过 / 0 失败）；`npm run build` 通过（PR 作者在 v0.67.0 基线上验证，合并后本仓库复跑 typecheck 与全量测试同样通过）。
+
 - **[antigravity] 新增 Gemini 4 Carbon、同步官方 2.31.0 客户端标识并对齐上游模型目录（2026-11-11 线上实测）**
   - **客户端版本与构建号对齐**：从官方最新更新清单发布的 `2.31.0` 归档（`language_server` 构建元数据）核实并同步 `DEFAULT_ANTIGRAVITY_VERSION = '2.31.0'`、`DEFAULT_ANTIGRAVITY_CL = '1017595969'` 与 `HUB_RELEASE_CHANGELISTS['2.31.0']`，确保首轮请求与运行期读取到 `2.31.0` 清单后的 `User-Agent` 均完整携带对应 `cl=1017595969`。
   - **新增 Gemini 4 Carbon 与关闭思考回退**：对齐上游 `/v1internal:fetchAvailableModels`（`defaultAgentModelId: "gemini-4-carbon-medium"`），在可选模型目录首位新增 `gemini-4-carbon`（`Gemini 4 Carbon`，上下文窗口 `1048576`，最大输出 `262144`，支持文本与图片输入及 `low` / `medium` / `high` 三档思考，归属 `gemini` 配额组）；线上实测裸 `gemini-4-carbon` 与 `gemini-4-carbon-tiered` 均返回 `404 NOT_FOUND`，路由一对一映射至 `gemini-4-carbon-low` / `gemini-4-carbon-medium` / `gemini-4-carbon-high`（默认 `gemini-4-carbon-medium`），并修正适配器在显式收到 `off` / `none` 思考档位时命中 `ROUTING[model].off`（`gemini-4-carbon-low`）且附带 `includeThoughts: false`。
