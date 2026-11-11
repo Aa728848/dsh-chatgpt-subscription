@@ -8,13 +8,11 @@
  * - `GET  api.cline.bot/…/recommended-models` — official subscription list
  * - `GET  models.dev/api.json` — community registry, a metadata backstop
  * - `GET  ai-gateway.vercel.sh/v1/models` — the upstream's own catalog
- * - `GET  openrouter.ai/api/v1/…` — endpoint detail for direct-pipeline models
  *
  * @module dsh-chatgpt-subscription/cline-pass-client
  */
 import {
   MODELS_DEV_URL,
-  OPENROUTER_API,
   RECOMMENDED_MODELS_URL,
   USAGE_LIMITS_PATH,
   VERCEL_MODELS_URL,
@@ -386,67 +384,6 @@ export async function fetchOfficialModels({
     catalog[id] = entry
   }
   return { models, catalog, sources }
-}
-
-/** Resolve a canonical slug against OpenRouter's public catalog. */
-export async function resolveOpenRouterSlug(
-  fetchFn: typeof fetch,
-  slug: string,
-  { signal, timeoutMs = 30_000 }: { signal?: AbortSignal; timeoutMs?: number } = {},
-): Promise<string | null> {
-  try {
-    const result = await sendJSON(fetchFn, `${OPENROUTER_API}/models`, { signal, timeoutMs })
-    const data = isRecord(result.json) && Array.isArray(result.json.data) ? result.json.data : []
-    const ids = data.map((model) => (isRecord(model) ? model.id : undefined)).filter((id): id is string => typeof id === 'string')
-    const normalize = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, '')
-    return ids.find((id) => id === slug) ?? ids.find((id) => normalize(id) === normalize(slug)) ?? null
-  } catch {
-    return null
-  }
-}
-
-/** One upstream endpoint detail, as OpenRouter reports it. */
-export interface ClinePassEndpointDetail {
-  slug: string
-  name: string
-  endpoints: number
-  context: number
-  uptime: number
-}
-
-/** Per-upstream endpoint detail (context length, recent uptime) for one model. */
-export async function openRouterEndpoints(
-  fetchFn: typeof fetch,
-  slug: string,
-  { signal, timeoutMs = 30_000 }: { signal?: AbortSignal; timeoutMs?: number } = {},
-): Promise<{ slug: string; endpoints: ClinePassEndpointDetail[] }> {
-  const real = await resolveOpenRouterSlug(fetchFn, slug, { signal, timeoutMs })
-  if (real === null) return { slug, endpoints: [] }
-  try {
-    const result = await sendJSON(fetchFn, `${OPENROUTER_API}/models/${real}/endpoints`, { signal, timeoutMs })
-    const payload = isRecord(result.json) && isRecord(result.json.data) ? result.json.data : undefined
-    const rows = payload !== undefined && Array.isArray(payload.endpoints) ? payload.endpoints : []
-    const detail = new Map<string, ClinePassEndpointDetail>()
-    for (const entry of rows) {
-      if (!isRecord(entry)) continue
-      const providerSlug = String(entry.tag ?? '').split('/')[0] || String(entry.provider_name ?? '').toLowerCase().replace(/\s+/g, '-')
-      if (providerSlug === '') continue
-      const current = detail.get(providerSlug) ?? {
-        slug: providerSlug,
-        name: String(entry.provider_name ?? providerSlug),
-        endpoints: 0,
-        context: 0,
-        uptime: 0,
-      }
-      current.endpoints += 1
-      current.context = Math.max(current.context, Number(entry.context_length ?? 0))
-      current.uptime = Math.max(current.uptime, Math.round(Number(entry.uptime_last_30m ?? 0)))
-      detail.set(providerSlug, current)
-    }
-    return { slug: real, endpoints: [...detail.values()] }
-  } catch {
-    return { slug: real, endpoints: [] }
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -53,7 +53,7 @@ export interface ClinePassWireMessage {
   tool_call_id?: string
 }
 
-/** One request body, as sent after pin injection. */
+/** One automatically routed request body. */
 export interface ClinePassWireBody {
   model: string
   messages: ClinePassWireMessage[]
@@ -68,8 +68,6 @@ export interface ClinePassWireBody {
   reasoning_effort?: string
   /** Explicit thinking switch: the OpenAI-compatible spelling for a disabled reasoning level. */
   thinking?: { type: 'disabled' }
-  provider?: Record<string, unknown>
-  providerOptions?: Record<string, unknown>
 }
 
 /** Lead-in text for the user message that carries images recovered from tool results. */

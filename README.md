@@ -147,7 +147,7 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 | `minimax_generate_video` | `minimax-code` 会话 | 调用 MiniMax-H3 / H3-Max / Hailuo-2.3 生成视频（支持首尾帧与参考图/视频/音频）并下载至工作区 |
 | `minimax_understand_video` | `minimax-code` 会话 | 上传或内联本地视频并调用 MiniMax 视频理解接口回答问题 |
 | `enter_plan_mode` / `leave_plan_mode` | `dispatch` 预设会话 | 调度模式下在澄清访谈收敛后进入只读计划模式，或显式放弃规划 |
-| `cline_pass_*`（共 8 个） | 可选开启（默认不注册） | Cline Pass 状态、目录、渠道探测、逐渠道校验、钉选与请求历史管理工具 |
+| `cline_pass_*`（共 5 个） | 可选开启（默认不注册） | Cline Pass 状态、目录、普通模型测试、账号与请求历史管理工具 |
 
 ### Web 客户端与看板扩展
 

@@ -7,7 +7,6 @@ import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
 import { MacKeychainCredentialStore } from '../token-store-macos.ts'
 import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
 import { dshHomeDir } from '../common/home.ts'
-import type { ClinePassPinMode } from '../../shared/cline-pass-contracts.ts'
 import {
   DEFAULT_BASE_URL,
   DEFAULT_CONTEXT_WINDOW,
@@ -15,13 +14,7 @@ import {
   DEFAULT_MAX_CONCURRENT_REQUESTS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-  MAX_GATEWAY_HAS,
-  MAX_GATEWAY_HAS_LENGTH,
   PROVIDER_ID,
-  capGatewayHas,
-  defaultGatewayHas,
-  defaultPin,
-  type ClinePassPinSettings,
 } from './types.ts'
 
 /**
@@ -174,8 +167,6 @@ export interface ClinePassModelSettings {
   baseURL: string
   enabledModelIds: string[] | null
   catalogModels: ClinePassCatalogModel[]
-  /** Per-model upstream pin, keyed by model id. */
-  pins: Record<string, ClinePassPinSettings>
   /** Models the route must not advertise even though it still knows them. */
   hiddenModels: string[]
   /** Per-model context-window override; absent uses the published window. */
@@ -186,8 +177,6 @@ export interface ClinePassModelSettings {
   streamIdleTimeoutMs: number
   historyLimit: number
   exposeCatalog: boolean
-  /** Which pin spellings a request carries: `both` (default) or `detected`. */
-  pinSpelling: string
   /** Whether the `cline_pass_*` tools are registered on the next start. */
   exposeTools: boolean
 }
@@ -313,37 +302,6 @@ export class FileCredentialStore {
   }
 }
 
-/** One pin as stored, validated; a malformed row falls back to the default. */
-function readPin(value: unknown, model: string): ClinePassPinSettings {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return defaultPin(model)
-  const record = value as Record<string, unknown>
-  return {
-    upstreams: Array.isArray(record.upstreams)
-      ? record.upstreams.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
-      : [],
-    exclude: Array.isArray(record.exclude)
-      ? record.exclude.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
-      : [],
-    pinMode: record.pinMode === 'preferred' ? 'preferred' : 'strict',
-    sort: typeof record.sort === 'string' ? record.sort : '',
-    // Legacy pins predate `has`: inherit the model's measured default. An
-    // explicitly saved empty array stays empty, so clearing it is respected.
-    has: Array.isArray(record.has)
-      ? capGatewayHas(record.has.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim()))
-      : defaultGatewayHas(model),
-  }
-}
-
-function readPins(value: unknown): Record<string, ClinePassPinSettings> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
-  const pins: Record<string, ClinePassPinSettings> = {}
-  for (const [model, pin] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof model !== 'string' || model.length === 0) continue
-    pins[model] = readPin(pin, model)
-  }
-  return pins
-}
-
 function readNumberOverrides(value: unknown): Record<string, number> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
   const overrides: Record<string, number> = {}
@@ -419,14 +377,17 @@ export function parseClinePassModelSettings(value: unknown): ClinePassModelSetti
     : Array.isArray(record.enabledModelIds)
       ? record.enabledModelIds.filter((id): id is string => typeof id === 'string')
       : null
-  const pins = readPins(record.pins)
+  // Legacy pin keys still prove that a gateway-only row was in use. Preserve
+  // that catalog migration without reading or applying the removed pin values.
+  const legacyPins = typeof record.pins === 'object' && record.pins !== null && !Array.isArray(record.pins)
+    ? record.pins as Record<string, unknown>
+    : {}
   const contextWindowOverrides = readNumberOverrides(record.contextWindowOverrides)
   return {
     enabled: record.enabled !== false,
     baseURL: typeof record.baseURL === 'string' && record.baseURL.trim() !== '' ? record.baseURL.trim() : DEFAULT_BASE_URL,
     enabledModelIds,
-    catalogModels: promoteInUseCatalogRows(readCatalogModels(record.catalogModels), enabledModelIds, pins, contextWindowOverrides),
-    pins,
+    catalogModels: promoteInUseCatalogRows(readCatalogModels(record.catalogModels), enabledModelIds, legacyPins, contextWindowOverrides),
     hiddenModels: Array.isArray(record.hiddenModels)
       ? record.hiddenModels.filter((id): id is string => typeof id === 'string')
       : [],
@@ -437,7 +398,6 @@ export function parseClinePassModelSettings(value: unknown): ClinePassModelSetti
     streamIdleTimeoutMs: positiveInteger(record.streamIdleTimeoutMs, DEFAULT_STREAM_IDLE_TIMEOUT_MS),
     historyLimit: positiveInteger(record.historyLimit, DEFAULT_HISTORY_LIMIT),
     exposeCatalog: record.exposeCatalog === true,
-    pinSpelling: typeof record.pinSpelling === 'string' && record.pinSpelling.length > 0 ? record.pinSpelling : 'both',
     exposeTools: record.exposeTools === true,
   }
 }
@@ -527,9 +487,7 @@ export class ClinePassModelSettingsStore implements ClinePassPreferenceStore {
     const next: ClinePassModelSettings = {
       ...current,
       ...patch,
-      // Collections are replaced as a whole rather than merged, so a caller can
-      // delete a pin or an override by passing the next map.
-      pins: patch.pins === undefined ? current.pins : patch.pins,
+      // The override collection is replaced as a whole so a caller can clear it.
       contextWindowOverrides: patch.contextWindowOverrides === undefined
         ? current.contextWindowOverrides
         : patch.contextWindowOverrides,
@@ -538,24 +496,10 @@ export class ClinePassModelSettingsStore implements ClinePassPreferenceStore {
     return next
   }
 
-  /** Record a catalog sync without touching the user's selection or pins. */
+  /** Record a catalog sync without touching the user's selection. */
   async storeCatalog(models: ClinePassCatalogModel[]): Promise<ClinePassModelSettings> {
     const current = await this.read()
     return await this.write({ ...current, catalogModels: models })
-  }
-
-  /** Store one model's pin; an empty pin list returns it to automatic routing. */
-  async setPin(model: string, pin: ClinePassPinSettings): Promise<ClinePassModelSettings> {
-    const current = await this.read()
-    return await this.write({ ...current, pins: { ...current.pins, [model]: pin } })
-  }
-
-  /** Drop one model's pin entirely. */
-  async clearPin(model: string): Promise<ClinePassModelSettings> {
-    const current = await this.read()
-    const pins = { ...current.pins }
-    delete pins[model]
-    return await this.write({ ...current, pins })
   }
 
   /** Store or clear (null) one model's context-window override. */

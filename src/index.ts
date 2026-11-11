@@ -2577,7 +2577,6 @@ export {
 export {
   ClinePassEngine,
   type ClinePassAccount,
-  type ClinePassAttemptOutcome,
   type ClinePassEngineOptions,
 } from './host/cline-pass/engine.ts'
 export {
@@ -2639,37 +2638,19 @@ export {
   type ClinePassWireMessage,
 } from './host/cline-pass/mapper.ts'
 export {
-  CHANNEL_ALIASES,
-  buildAttempts,
-  channelNameFor,
-  classifyUpstreamError,
-  extractAvailableProviders,
-  injectPrefs,
-  isAdherenceOk,
-  mergeUpstreams,
-  normalizePinMode,
-  normalizeSort,
   parseRouting,
-  parseTier0,
-  pinAdherence,
-  pinWarnings,
-  type PinAttempt,
-  type PinConfig,
   type RoutingFacts,
 } from './host/cline-pass/protocol.ts'
 export {
   DEFAULT_BASE_URL as CLINE_PASS_DEFAULT_BASE_URL,
   DEFAULT_MODELS as CLINE_PASS_DEFAULT_MODELS,
-  MAX_UPSTREAMS as CLINE_PASS_MAX_UPSTREAMS,
   MODEL_CATALOG as CLINE_PASS_MODEL_CATALOG,
   POOL_COOLDOWN_MS as CLINE_PASS_POOL_COOLDOWN_MS,
   REASONING_EFFORTS as CLINE_PASS_REASONING_EFFORTS,
   catalogEntry as clinePassCatalogEntry,
-  defaultPin as clinePassDefaultPin,
   type ClinePassConnection,
   type ClinePassModelInfo,
   type ClinePassModelMeta,
-  type ClinePassPinSettings,
   type ClinePassReasoningEffort,
 } from './host/cline-pass/types.ts'
 export {
@@ -2679,24 +2660,18 @@ export {
   clinePassAccountQuota,
   clinePassWindowDurationMins,
   clinePassWindowLabel,
-  isClinePassPinMode,
   type ClinePassAccountAction,
   type ClinePassAccountSummaryDto,
-  type ClinePassAttemptTraceDto,
   type ClinePassAuthResult,
-  type ClinePassChannelVerdictDto,
   type ClinePassHistoryRowDto,
   type ClinePassModelDto,
-  type ClinePassPinMode,
   type ClinePassPoolStatusDto,
-  type ClinePassProbeResultDto,
   type ClinePassSettingsDto,
   type ClinePassSettingsUpdateDto,
   type ClinePassTestResultDto,
   type ClinePassUsageAccountDto,
   type ClinePassUsageDto,
   type ClinePassUsageWindowDto,
-  type ClinePassValidateResultDto,
   type ClinePassWebStatus,
 } from './shared/cline-pass-contracts.ts'
 

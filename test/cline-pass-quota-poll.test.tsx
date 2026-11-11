@@ -62,7 +62,6 @@ const BASE: StatusWithRefresh = {
     streamIdleTimeoutMs: 300_000,
     historyLimit: 100,
     exposeCatalog: false,
-    pinSpelling: 'both',
   },
 }
 
