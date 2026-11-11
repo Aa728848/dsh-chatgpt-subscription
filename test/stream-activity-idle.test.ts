@@ -24,6 +24,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
 import {
+  STREAM_FIRST_OUTPUT_TIMEOUT_MS as ANTIGRAVITY_FIRST_OUTPUT_MS,
+  STREAM_IDLE_TIMEOUT_MS as ANTIGRAVITY_IDLE_MS,
+} from '../src/host/antigravity/types.ts'
+import {
   FileCredentialStore as AntigravityCredentialStore,
   FileModelSettingsStore as AntigravityModelSettings,
 } from '../src/host/antigravity/token-store.ts'
@@ -237,6 +241,45 @@ describe('antigravity transport activity keeps the stream alive', () => {
       expect(await outcome).toMatchObject({ code: 'TIMEOUT' })
     }
   })
+})
+
+// ---------------------------------------------------------------------------
+// Antigravity: the wait before the first chunk
+// ---------------------------------------------------------------------------
+
+describe('antigravity waits out a silent model before its first chunk', () => {
+  it('survives silence longer than the shared idle budget, and still fails a stream that never answers', async () => {
+    {
+      const body = controllableBody()
+      const chunks: StreamChunk[] = []
+      vi.useFakeTimers()
+      const run = collect(chunks)(antigravityAdapter(fetchReturning(body)).stream(antigravityOptions))
+      await flushRealIo()
+      // 比共享空闲预算还久的静默，仍在首帧窗口之内：这是模型在思考（gemini-4-carbon
+      // 这类），不是死流。修复前这段静默必然判 TIMEOUT。
+      await vi.advanceTimersByTimeAsync(ANTIGRAVITY_IDLE_MS + 30_000)
+      const before = body.pulls
+      body.send(ANTIGRAVITY_TAIL)
+      await awaitDrain(body, before)
+      body.end()
+      await run
+      expect(textOf(chunks)).toBe('done')
+      expect(chunks.some((chunk) => chunk.type === 'finish')).toBe(true)
+    }
+    {
+      // 反向：连首帧窗口都等不到东西就照旧判 TIMEOUT——放宽窗口不是关掉窗口。
+      const body = controllableBody()
+      vi.useFakeTimers()
+      const run = collect([])(antigravityAdapter(fetchReturning(body)).stream(antigravityOptions))
+      const outcome = failureOf(run)
+      await flushRealIo()
+      await vi.advanceTimersByTimeAsync(ANTIGRAVITY_FIRST_OUTPUT_MS + 1_000)
+      body.end()
+      await flushRealIo()
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(await outcome).toMatchObject({ code: 'TIMEOUT' })
+    }
+  }, 30_000)
 })
 
 // ---------------------------------------------------------------------------

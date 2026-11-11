@@ -51,7 +51,8 @@
 | **WorkBuddy 提示号池已暂停 30 分钟（`WORKBUDDY_POOL_PAUSED`）** | 上游返回 `11140` 账号受限，且 30 分钟内已有 2 个不同账号触发该风控，号池启动保护性熔断 | 等待 30 分钟自动解除整池暂停；被标记 `11140` 的受限账号需人工核查并重新登录后才会回到轮换 |
 | **Cline Pass 报 `client-supplied "providerOptions" model routing is not supported`** | 旧版客户端钉选字段不被 Cline 接受 | 升级到已移除上游钉选的版本；请求由网关自动路由，卡片只读回实际渠道 |
 | **MiniMax Code 额度面板提示需要官方客户端标识头** | 插件默认不伪造 MiniMax 第一方客户端签名头，因此用量接口拒绝读取（完全不影响模型对话） | 可直接在 MiniMax 官方控制台查看用量条；若接受携带第一方标识头的取舍，可设置 `DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION=1` 重启 DSH |
-| **长请求约 2 分钟无输出后自动报错重试** | 流式空闲看门狗（默认 120s，Ollama 为 300s）检测到响应头之后超过 2 分钟零字节到达，主动切断僵死连接触发重试 | 属于防挂死保护机制；Codex 线路若需调整可通过插件配置 `codexStreamIdleTimeoutMs` 修改 |
+| **长请求约 2 分钟无输出后自动报错重试** | 流式空闲看门狗（chunk 之间默认 120s，Ollama 为 300s）检测到超过预算仍零字节到达，主动切断僵死连接触发重试 | 属于防挂死保护机制；Codex 线路用 `codexStreamIdleTimeoutMs` 调整，其它线路按共享值 |
+| **antigravity 跑 carbon 这类慢思考模型，响应头回来后就报 `stream idle timeout`** | 首帧之前的静默是模型在思考（很长上下文可达数分钟），与「流卡住」共用同一个预算时会被判成死流并从头发起重试。错误文案里的 `before the first chunk` 表示超时落在这一段 | antigravity 首帧前有独立窗口（默认 240s，仍早于 undici 的 300s 传输判死）；用 `antigravityFirstOutputTimeoutMs` 调整，chunk 之间仍是 120s |
 
 ---
 

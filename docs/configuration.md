@@ -44,6 +44,7 @@
     noAnswerResume: {}                    # 开启无答案/无工具空结束自动续跑；设为 false 关闭
     reasoningCollapseGuard: false         # 推理复读塌缩熔断（默认关闭；传 {} 或参数对象开启）
     codexStreamIdleTimeoutMs: 120000      # Codex 流式传输空闲超时毫秒数
+    antigravityFirstOutputTimeoutMs: 240000  # antigravity 首个 chunk 之前的等待预算（思考期；chunk 之间仍按 120s）
     progressUpdates: true                 # 启用 progress_update 进展汇报（热生效）
     progressUpdatesNudgeThreshold: 8      # 连续多少步工具调用未汇报时温和提醒（1–50，热生效）
     progressUpdatesLanguage: auto         # auto | zh | en | ru（热生效）
@@ -73,6 +74,7 @@
 | `noAnswerResume` | `object \| false` | `{}`（开启） | 重载插件 | 模型未输出正文也未调工具即结束时自动补发续跑 |
 | `reasoningCollapseGuard` | `GuardOptions \| false` | `false`（关闭） | 重载插件 | 字面 + 语义双信号连续越线时切断退化推理流并续跑 |
 | `codexStreamIdleTimeoutMs` | 正整数（ms） | `120000` | 重载插件 | Codex Responses 流式传输活动空闲超时 |
+| `antigravityFirstOutputTimeoutMs` | 正整数（ms） | `240000` | 重载插件 | antigravity 线路「首个 chunk 之前」的空闲预算（思考期）；chunk 之间仍按共享 120s 判死，设为 `120000` 即回到单窗口 |
 | `progressUpdates` | `boolean` | `true` | **热生效（volatile）** | 是否启用 `progress_update` 工具与提示引导 |
 | `progressUpdatesNudgeThreshold` | `1..50` 整数 | `8` | **热生效（volatile）** | 连续未汇报工具步数的提醒阈值 |
 | `progressUpdatesLanguage` | `'auto' \| 'zh' \| 'en' \| 'ru'` | `'auto'` | **热生效（volatile）** | 进展汇报输出语言 |

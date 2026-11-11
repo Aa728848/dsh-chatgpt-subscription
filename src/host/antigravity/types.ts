@@ -9,6 +9,28 @@ export const PROVIDER_ID = 'antigravity'
  */
 export const STREAM_IDLE_TIMEOUT_MS = 120_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
+
+/**
+ * Budget for the wait before this route's FIRST chunk, when that wait is thinking
+ * rather than a dead connection.
+ *
+ * The shared two-minute budget stays in force for the gaps between chunks — there
+ * silence really is a stall. This route serves models that reason before they
+ * speak: with `thinkingConfig.includeThoughts` set (see `mapper.ts`), thought
+ * parts arrive only as the model chooses to emit them, and `gemini-4-carbon`
+ * (`-medium` / `-high`, the catalog's own `defaultAgentModelId`) answers a long
+ * prompt after minutes of silence. Under the shared budget those turns were
+ * reported as stalled streams and retried from the beginning, which pays the
+ * prefill again and arrives at the same silence.
+ *
+ * 240 s is the largest round value that still leaves a full minute inside the
+ * transport's own 300 s stream deadline, so a genuinely dead connection is still
+ * this route's verdict to report rather than undici's. It is a chosen bound, not
+ * a measurement of carbon: no per-model first-chunk timing has been recorded for
+ * this route yet, and the deployment can override it with
+ * `antigravityFirstOutputTimeoutMs`.
+ */
+export const STREAM_FIRST_OUTPUT_TIMEOUT_MS = 240_000
 export const DISCOVERY_TIMEOUT_MS = 8_000
 export const PROJECT_CACHE_TTL_MS = 30 * 60 * 1000
 export const MODEL_CACHE_TTL_MS = 30 * 60 * 1000

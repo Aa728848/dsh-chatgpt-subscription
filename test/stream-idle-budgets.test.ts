@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from '../src/host/common/idle-watchdog.ts'
-import { STREAM_IDLE_TIMEOUT_MS as ANTIGRAVITY } from '../src/host/antigravity/types.ts'
+import { STREAM_FIRST_OUTPUT_TIMEOUT_MS as ANTIGRAVITY_FIRST_OUTPUT, STREAM_IDLE_TIMEOUT_MS as ANTIGRAVITY } from '../src/host/antigravity/types.ts'
 import { STREAM_IDLE_TIMEOUT_MS as CLAUDE } from '../src/host/claude/types.ts'
 import { STREAM_IDLE_TIMEOUT_MS as COMMAND_CODE } from '../src/host/command-code/types.ts'
 import { STREAM_IDLE_TIMEOUT_MS as GLM } from '../src/host/glm-coding-plan/types.ts'
@@ -58,6 +58,14 @@ describe('every route fails a silent stream before the transport does', () => {
 
   it.each(SHARED_BUDGET_LINES)('keeps the %s budget on the shared value', (_line, value) => {
     expect(value).toBe(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+  })
+
+  it('gives the antigravity route a longer first-chunk window, still inside the transport deadline', () => {
+    // 首帧之前的静默是思考（gemini-4-carbon 这类慢模型），首帧之后仍按共享预算判死。
+    // 放宽的只是「还没出第一个 chunk」这一段，而且依然严格早于 undici 的判死点，
+    // 免得真死流最后报成传输层错误。
+    expect(ANTIGRAVITY_FIRST_OUTPUT).toBeGreaterThan(ANTIGRAVITY)
+    expect(ANTIGRAVITY_FIRST_OUTPUT).toBeLessThan(TRANSPORT_STREAM_TIMEOUT_MS)
   })
 
   it('keeps ollama longer than the shared budget, on purpose', () => {

@@ -20,6 +20,7 @@ import {
   PROVIDER_ID,
   PROVIDER_NAME,
   ROUTING,
+  STREAM_FIRST_OUTPUT_TIMEOUT_MS,
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
   TOOL_CALLING_MODE,
@@ -230,7 +231,13 @@ export class AntigravityAdapter extends LlmAdapter {
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
     private readonly preferences?: AntigravityPreferenceStore,
-    private readonly options: { fetchFn?: typeof fetch; attachments?: AttachmentImageReader; promptCache?: PromptCacheOverride } = {},
+    private readonly options: {
+      fetchFn?: typeof fetch
+      attachments?: AttachmentImageReader
+      promptCache?: PromptCacheOverride
+      /** Overrides {@link STREAM_FIRST_OUTPUT_TIMEOUT_MS}; equal to the idle budget collapses to one window. */
+      firstOutputTimeoutMs?: number
+    } = {},
     accountPool?: AccountPoolStore,
   ) {
     super()
@@ -346,6 +353,9 @@ export class AntigravityAdapter extends LlmAdapter {
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
       'Antigravity',
+      // The wait before the first chunk is the model thinking, not a stall; the
+      // gaps after it keep the shared budget.
+      this.options.firstOutputTimeoutMs ?? STREAM_FIRST_OUTPUT_TIMEOUT_MS,
     )
   }
 

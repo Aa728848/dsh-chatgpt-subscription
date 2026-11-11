@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[antigravity / 流式] 慢思考模型不再被空闲看门狗判成死流：首个 chunk 之前单独给 240s 窗口**
+  - **现象**：`gemini-4-carbon`（`-medium` / `-high`）跑长上下文时，响应头回来之后一个字节都不来，120s 后本轮报 `Antigravity stream idle timeout after 120000ms`，DSH 从头发起重试（线上连续出现 1/5、3/5），每次重试还要再付一次预填充。
+  - **判据本身没错**：看门狗按**传输层字节**计时，`: ping` 注释帧也会重新计时（`adapter.ts` 的 read 循环与每帧各一次 `activity.pulse()`），所以报超时就意味着确实 120s 零字节。缺的是把**模型还没开口**和**流已经卡住**分开：两段静默共用一个预算，而带思考的模型可以在首帧之前静默数分钟。
+  - **改法**：共享 seam `wrapStreamWithWatchdog` 新增可选首值窗口 `firstValueTimeoutMs`——首帧之前用长预算，首个 chunk 一出去立刻切回原有预算，因此放宽首帧窗口不会让真正卡住的流多等；两段看门狗的 signal 都融合进传输层，无论哪一段到点连接都会被中止（`test/idle-watchdog.test.ts` 里"超时身份要送到 source"的断言两段都覆盖）。超时文案区分 `before the first chunk` 与普通一句，下次复发一眼看出静默落在哪一段。antigravity 线路传 `STREAM_FIRST_OUTPUT_TIMEOUT_MS = 240_000`，并新增插件配置 `antigravityFirstOutputTimeoutMs`（与共享值相等即退回单窗口）。
+  - **240s 是选定的上界，不是实测**：它仍比 undici 的 300s 传输判死早一分钟，真死流依旧由本线路报 `TIMEOUT` 而不是报成断连；仓库里没有按模型量过的首帧时间，carbon 的真实思考时长未知，所以留了配置项供部署自行加长（天花板仍是 300s）。
+  - **刻意不做**：不动共享 `DEFAULT_STREAM_IDLE_TIMEOUT_MS`——`test/stream-idle-budgets.test.ts` 把"所有线路同一预算且严格小于 300s"当作契约；不改其它线路的窗口；不把 `TIMEOUT` 改成不重试的终态。
+  - **验证**：`test/idle-watchdog.test.ts` 新增 3 例（首帧窗口内存活、首帧之后仍按共享预算判死、零字节到底仍超时且文案点名窗口）；`test/stream-idle-budgets.test.ts` 断言 antigravity 首帧窗口大于共享值且小于传输层 300s；`test/stream-activity-idle.test.ts` 新增一条走真实适配器流的用例（静默 150s 后正常收尾，以及连 240s 都等不到仍 `TIMEOUT`）。**反向对照**：把 seam 临时改回单窗口后 3 例当场失败（`spends the first-value window…`、`names the first-value window…`、`survives silence longer than the shared idle budget…`），恢复后全绿。`npm run typecheck` 通过；全量 Vitest 为 384 文件通过 / 2 跳过（6996 例通过 / 9 例跳过 / 0 失败）；`npm run build` 通过，`lib/` 已重建。
+
 ## 0.68.1 - 2026-11-11
 
 - **[opendesign / 号池] 套餐不含某个模型不再判成密钥失效，并补回清除失效标记的入口**

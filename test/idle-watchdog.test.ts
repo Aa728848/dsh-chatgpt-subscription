@@ -153,6 +153,101 @@ describe('idle-watchdog', () => {
     expect(abortReason).toMatchObject({ code: 'TEST_TIMEOUT', timeoutMs: idleMs })
   })
 
+  it('spends the first-value window on the wait before the first chunk, then the idle one', async () => {
+    // 首帧之前的静默是模型在思考：比共享空闲预算长、仍在首帧窗口内，必须活下来；
+    // 首帧之后再按共享预算判死，两段窗口互不替代。
+    const idleMs = 60
+    const firstValueMs = 400
+    async function* thinksThenAnswers(): AsyncIterable<string> {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      yield 'first'
+      yield 'second'
+    }
+
+    const collected: string[] = []
+    for await (const chunk of wrapStreamWithWatchdog(
+      () => thinksThenAnswers(),
+      undefined,
+      idleMs,
+      'TEST_TIMEOUT',
+      'test',
+      firstValueMs,
+    )) {
+      collected.push(chunk)
+    }
+
+    expect(collected).toEqual(['first', 'second'])
+  })
+
+  it('keeps the idle budget for the gap after the first value even with a long first-value window', async () => {
+    async function* stallsAfterFirst(signal: AbortSignal): AsyncIterable<string> {
+      yield 'first'
+      // 首帧已经产出：这一段卡住就是真的卡住，不能拿首帧窗口去等它。
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 2_000)
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer)
+          reject(signal.reason)
+        })
+      })
+      yield 'second'
+    }
+
+    const collected: string[] = []
+    let caught: unknown
+    try {
+      for await (const chunk of wrapStreamWithWatchdog(
+        (sig) => stallsAfterFirst(sig),
+        undefined,
+        60,
+        'TEST_TIMEOUT',
+        'test',
+        5_000,
+      )) {
+        collected.push(chunk)
+      }
+    } catch (err) {
+      caught = err
+    }
+
+    expect(collected).toEqual(['first'])
+    expect(caught).toBeInstanceOf(LlmError)
+    expect((caught as LlmError).code).toBe('TIMEOUT')
+    expect((caught as LlmError).message).toContain('stream idle timeout after 60ms')
+    expect((caught as LlmError).message).not.toContain('before the first chunk')
+  })
+
+  it('names the first-value window when nothing arrives at all', async () => {
+    let abortReason: unknown
+    async function* neverAnswers(signal: AbortSignal): AsyncIterable<string> {
+      signal.addEventListener('abort', () => { abortReason = signal.reason })
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 2_000)
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer)
+          reject(signal.reason)
+        })
+      })
+      yield 'never'
+    }
+
+    let caught: unknown
+    try {
+      for await (const _chunk of wrapStreamWithWatchdog(neverAnswers, undefined, 60, 'TEST_TIMEOUT', 'test', 120)) {
+        // 一个值都不该到。
+      }
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught).toBeInstanceOf(LlmError)
+    expect((caught as LlmError).code).toBe('TIMEOUT')
+    // 两段窗口必须能从句子里分辨：这次是首帧窗口到点。
+    expect((caught as LlmError).message).toContain('stream idle timeout after 120ms before the first chunk')
+    // 到点的那一段照样要把超时身份送到传输层。
+    expect(abortReason).toMatchObject({ code: 'TEST_TIMEOUT', timeoutMs: 120 })
+  })
+
   async function settleWithin(promise: Promise<unknown>, ms: number): Promise<unknown> {
     let timer: ReturnType<typeof setTimeout> | undefined
     const guard = new Promise<'CLEANUP_HUNG'>((resolve) => {

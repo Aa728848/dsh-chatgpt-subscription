@@ -59,7 +59,12 @@ import { refreshHubVersion } from './host/antigravity/client-version.ts'
 import { configurePoolStorage } from './host/common/pool-storage.ts'
 import { PoolStorageSettings } from './host/common/pool-storage-settings.ts'
 import { asCredentialsSeam } from './host/common/credentials-compat.ts'
-import { ANTIGRAVITY_ABSENT_HEADERS, PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_PROVIDER_NAME } from './host/antigravity/types.ts'
+import {
+  ANTIGRAVITY_ABSENT_HEADERS,
+  PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID,
+  PROVIDER_NAME as ANTIGRAVITY_PROVIDER_NAME,
+  STREAM_FIRST_OUTPUT_TIMEOUT_MS as ANTIGRAVITY_FIRST_OUTPUT_TIMEOUT_MS,
+} from './host/antigravity/types.ts'
 import { CommandCodeAdapter } from './host/command-code/adapter.ts'
 import { CommandCodeAccountPool } from './host/command-code/account-pool.ts'
 import { registerCommandCodeRoutes } from './host/command-code/routes.ts'
@@ -428,6 +433,18 @@ export interface Config {
    */
   codexStreamIdleTimeoutMs?: number
   /**
+   * Budget for the wait before the antigravity route's first chunk, in milliseconds.
+   *
+   * That gap is thinking rather than silence: a model that reasons before it
+   * speaks can produce no bytes for minutes after the response headers, and the
+   * shared two-minute idle budget reported those turns as stalled streams and
+   * retried them from the beginning. Only the wait before the first chunk is
+   * relaxed — the gaps between chunks keep the shared budget, so a stream that
+   * really stalled is still called promptly. Setting it equal to the idle budget
+   * collapses the seam back to a single window.
+   */
+  antigravityFirstOutputTimeoutMs?: number
+  /**
    * Where every provider line's account pool is stored.
    *
    * `keyring` (default) is the platform store — DPAPI on Windows, the Keychain on
@@ -503,6 +520,17 @@ export interface ConfigInput {
   promptCacheOverrides?: Record<string, PromptCacheOverride>
   /** Idle budget for one Codex Responses stream, in milliseconds. */
   codexStreamIdleTimeoutMs?: number
+  /**
+   * Budget for the wait before the antigravity route's first chunk, in milliseconds.
+   *
+   * The gap that matters is thinking, not a stall: lines that reason before they
+   * speak can stay silent well past the shared two-minute idle budget, and that
+   * silence was reported as a dead stream and retried from the beginning. The
+   * budget between chunks stays the shared one, so this relaxation cannot delay
+   * the verdict on a stream that really did stall. Setting it equal to the shared
+   * budget collapses the seam back to a single window.
+   */
+  antigravityFirstOutputTimeoutMs?: number
   /**
    * 号池存储后端：`keyring`（默认，平台密钥环）或 `credentials`（DSH 凭据库，服务器推荐）。
    *
@@ -582,6 +610,12 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('按线路覆盖缓存语义（ttlMs、scope、coldStart、affinity、waitWarmup 等）；仅用于已有证据的部署，修改后重载插件。'),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  // The antigravity route serves thinking models (gemini-4-carbon), which can stay
+  // silent well past the shared budget before their first chunk while they reason.
+  // Still strictly inside the transport's 300 s stream deadline, so a dead
+  // connection ends with this line's verdict rather than undici's.
+  antigravityFirstOutputTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1)
+    .default(ANTIGRAVITY_FIRST_OUTPUT_TIMEOUT_MS),
   // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
   // Service），现有安装零变化；没有桌面密钥环的服务器要显式选 `credentials`，
   // 把号池放进 DSH 自己的凭据库——原先这里在 Linux 上硬编码 Secret Service，
@@ -1063,7 +1097,12 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       antigravityPreferences,
       // The route declares image input, so DSH hands it durable image blocks
       // that only the attachment service can turn into wire bytes.
-      { fetchFn: modelFetch.antigravity, attachments: ctx.attachments, promptCache: promptCacheOverrides.antigravity },
+      {
+        fetchFn: modelFetch.antigravity,
+        attachments: ctx.attachments,
+        promptCache: promptCacheOverrides.antigravity,
+        firstOutputTimeoutMs: pluginConfig.antigravityFirstOutputTimeoutMs,
+      },
       antigravityAccountPool,
     )
     const antigravityClaim = claimProviderRoute(ctx, {
