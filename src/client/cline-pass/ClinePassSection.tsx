@@ -3,7 +3,7 @@ import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../common/quota-follow-up.ts'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
-import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
+import { formatCapacity, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import {
   clinePassAccountQuota,
@@ -12,9 +12,7 @@ import {
   type ClinePassHistoryRowDto,
   type ClinePassLoginFlowDto,
   type ClinePassModelDto,
-  type ClinePassProbeResultDto,
   type ClinePassTestResultDto,
-  type ClinePassValidateResultDto,
   type ClinePassWebStatus,
 } from '../../shared/cline-pass-contracts.ts'
 import { ClinePassApi, quotaRefreshingOf, type ClinePassCatalogSearchItem } from './api.ts'
@@ -37,19 +35,8 @@ interface Props {
   loadModelDirectory?: () => void
 }
 
-interface PinDraft {
-  upstreams: string[]
-  exclude: string[]
-  pinMode: 'strict' | 'preferred'
-  sort: string
-  has: string[]
-}
-
 interface ModelResult {
-  probe?: ClinePassProbeResultDto
-  validate?: ClinePassValidateResultDto
   test?: ClinePassTestResultDto
-  pinWarnings?: string[]
   error?: string
 }
 
@@ -60,18 +47,10 @@ interface SettingsForm {
   maxConcurrentRequests: string
   streamIdleTimeoutMs: string
   historyLimit: string
-  pinSpelling: string
 }
 
 function detail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function statusTone(status: string): 'neutral' | 'ok' | 'warn' | 'danger' {
-  if (status === 'ok') return 'ok'
-  if (status === 'limited') return 'warn'
-  if (status === 'bad' || status === 'auth') return 'danger'
-  return 'neutral'
 }
 
 function settingsFormOf(status: ClinePassWebStatus): SettingsForm {
@@ -82,7 +61,6 @@ function settingsFormOf(status: ClinePassWebStatus): SettingsForm {
     maxConcurrentRequests: String(status.settings.maxConcurrentRequests),
     streamIdleTimeoutMs: String(status.settings.streamIdleTimeoutMs),
     historyLimit: String(status.settings.historyLimit),
-    pinSpelling: status.settings.pinSpelling,
   }
 }
 
@@ -92,7 +70,7 @@ function settingsFormOf(status: ClinePassWebStatus): SettingsForm {
  * The account card, its badges and the rotation picker are the shared
  * {@link AccountPoolSection}, so this line looks like every other provider tab
  * by construction. What is written here is only what is genuinely Cline Pass's:
- * pasting a key, the upstream channel panel, the official quota windows and the
+ * pasting a key, ordinary model tests, the official quota windows and the
  * in-process request history.
  */
 export function ClinePassSection(props: Props): React.ReactElement {
@@ -105,7 +83,6 @@ export function ClinePassSection(props: Props): React.ReactElement {
   const [keyBaseURL, setKeyBaseURL] = useState('')
   const [showKeyForm, setShowKeyForm] = useState(false)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
-  const [pinDrafts, setPinDrafts] = useState<Record<string, PinDraft>>({})
   const [results, setResults] = useState<Record<string, ModelResult>>({})
   const [settingsForm, setSettingsForm] = useState<SettingsForm | null>(null)
   const [history, setHistory] = useState<{ total: number; entries: ClinePassHistoryRowDto[] } | null>(null)
@@ -421,7 +398,6 @@ export function ClinePassSection(props: Props): React.ReactElement {
     void API.updateSettings({
       baseURL: settingsForm.baseURL,
       ...numbers,
-      pinSpelling: settingsForm.pinSpelling,
     }).then((next) => {
       applyStatus(next)
       setSettingsForm(settingsFormOf(next))
@@ -455,53 +431,6 @@ export function ClinePassSection(props: Props): React.ReactElement {
   }, [pool, status?.usage])
   const models = status?.models ?? []
   const busyAny = busy !== null
-
-  const pinDraftFor = useCallback((model: ClinePassModelDto): PinDraft => pinDrafts[model.id] ?? {
-    upstreams: [...model.pinned],
-    exclude: [...model.excluded],
-    pinMode: model.pinMode,
-    sort: model.sort,
-    // Absent on a host older than the `has` filter, which a newer client bundle
-    // can meet: the browser loads client assets on demand while the host loaded
-    // them at startup. Spreading an absent field would unmount the whole card.
-    has: [...(model.has ?? [])],
-  }, [pinDrafts])
-
-  const editPin = useCallback((model: ClinePassModelDto, patch: Partial<PinDraft>) => {
-    setPinDrafts((current) => ({
-      ...current,
-      [model.id]: { ...(current[model.id] ?? pinDraftFor(model)), ...patch },
-    }))
-  }, [pinDraftFor])
-
-  const savePin = useCallback((model: ClinePassModelDto) => {
-    const draft = pinDraftFor(model)
-    setBusy('pin:' + model.id)
-    setError(null)
-    void API.pinModel(model.id, draft).then((outcome) => {
-      applyStatus(outcome.status)
-      setPinDrafts((current) => {
-        const next = { ...current }
-        delete next[model.id]
-        return next
-      })
-      setResults((current) => ({ ...current, [model.id]: { ...current[model.id], pinWarnings: outcome.warnings } }))
-    }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
-  }, [pinDraftFor, applyStatus])
-
-  const resetPin = useCallback((model: ClinePassModelDto) => {
-    setBusy('pin:' + model.id)
-    setError(null)
-    void API.resetPin(model.id).then((outcome) => {
-      applyStatus(outcome.status)
-      setPinDrafts((current) => {
-        const next = { ...current }
-        delete next[model.id]
-        return next
-      })
-      setResults((current) => ({ ...current, [model.id]: {} }))
-    }).catch((cause) => setError(detail(cause))).finally(() => setBusy(null))
-  }, [applyStatus])
 
   return (
     <div className="dsha-page">
@@ -664,7 +593,7 @@ export function ClinePassSection(props: Props): React.ReactElement {
         </div>
         <p className="dsha-muted" style={{ fontSize: 12 }}>{t.modelsHint}</p>
         <form
-          className="dshcp-pin-row"
+          className="dshcp-search-row"
           onSubmit={(event) => {
             event.preventDefault()
             searchCatalog()
@@ -783,82 +712,29 @@ export function ClinePassSection(props: Props): React.ReactElement {
 
       <section className="dsha-group">
         <div className="dsha-grouphead">
-          <h3>{t.routingSection}</h3>
+          <h3>{t.testSection}</h3>
         </div>
-        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.routingHint}</p>
+        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.testHint}</p>
         {enabledModels.length === 0 && <div className="dsha-empty">{t.noModels}</div>}
         {enabledModels.map((model) => (
           <details className="dshcp-model" key={model.id}>
             <summary>
               <span className="dshcp-model-name" title={model.id}>{model.name}</span>
               <span className="dshcp-pill">{model.pipeline === '' ? '—' : model.pipeline}</span>
-              <span className="dshcp-pill" data-tone={model.pinned.length > 0 ? 'ok' : 'neutral'}>
-                {model.pinned.length === 0 ? t.pinAuto : `${t.pinPinned.replace('{list}', model.pinned.join(' > '))}`}
-              </span>
-              {model.excluded.length > 0 && <span className="dshcp-pill" data-tone="warn">{t.pinExcluded.replace('{list}', model.excluded.join(', '))}</span>}
             </summary>
-            <ChannelEditor
+            <ModelTestPanel
               model={model}
-              draft={pinDraftFor(model)}
               result={results[model.id] ?? {}}
               busy={busy}
               t={t}
-              // Channel names are a gateway-wide vocabulary: a name any other
-              // model discovered is a valid candidate here, which is how a
-              // channel can be pinned while this model's probe finds nothing.
-              suggestions={[...new Set(models.flatMap((entry) => entry.upstreams))]}
-              onToggleChannel={(upstream) => {
-                const draft = pinDraftFor(model)
-                editPin(model, {
-                  upstreams: draft.upstreams.includes(upstream)
-                    ? draft.upstreams.filter((name) => name !== upstream)
-                    : [...draft.upstreams, upstream],
-                  exclude: draft.exclude.filter((name) => name !== upstream),
-                })
-              }}
-              onToggleExclude={(upstream) => {
-                const draft = pinDraftFor(model)
-                editPin(model, {
-                  exclude: draft.exclude.includes(upstream)
-                    ? draft.exclude.filter((name) => name !== upstream)
-                    : [...draft.exclude, upstream],
-                  upstreams: draft.upstreams.filter((name) => name !== upstream),
-                })
-              }}
-              onPinMode={(pinMode) => editPin(model, { pinMode })}
-              onSort={(sort) => editPin(model, { sort })}
-              onHas={(has) => editPin(model, { has })}
-              onProbe={() => {
-                setBusy('probe:' + model.id)
-                setError(null)
-                void API.probe(model.id).then((outcome) => {
-                  applyStatus(outcome.status)
-                  setResults((current) => ({ ...current, [model.id]: { ...current[model.id], probe: outcome.result } }))
-                }).catch((cause) => setResults((current) => ({ ...current, [model.id]: { ...current[model.id], error: detail(cause) } }))).finally(() => setBusy(null))
-              }}
-              onValidate={() => {
-                setBusy('validate:' + model.id)
-                setError(null)
-                void API.validate(model.id).then((outcome) => {
-                  applyStatus(outcome.status)
-                  setResults((current) => ({ ...current, [model.id]: { ...current[model.id], validate: outcome.result } }))
-                }).catch((cause) => setResults((current) => ({ ...current, [model.id]: { ...current[model.id], error: detail(cause) } }))).finally(() => setBusy(null))
-              }}
               onTest={() => {
-                const draft = pinDraftFor(model)
                 setBusy('test-model:' + model.id)
                 setError(null)
-                void API.test(model.id, {
-                  ...(draft.upstreams.length === 0 ? {} : { upstreams: draft.upstreams }),
-                  ...(draft.exclude.length === 0 ? {} : { exclude: draft.exclude }),
-                  has: draft.has,
-                }).then((outcome) => {
+                void API.test(model.id).then((outcome) => {
                   applyStatus(outcome.status)
-                  setResults((current) => ({ ...current, [model.id]: { ...current[model.id], test: outcome.result } }))
-                }).catch((cause) => setResults((current) => ({ ...current, [model.id]: { ...current[model.id], error: detail(cause) } }))).finally(() => setBusy(null))
+                  setResults((current) => ({ ...current, [model.id]: { test: outcome.result } }))
+                }).catch((cause) => setResults((current) => ({ ...current, [model.id]: { error: detail(cause) } }))).finally(() => setBusy(null))
               }}
-              onSave={() => savePin(model)}
-              onReset={() => resetPin(model)}
             />
           </details>
         ))}
@@ -990,21 +866,6 @@ export function ClinePassSection(props: Props): React.ReactElement {
           </div>
           <div className="dsha-pref-row">
             <div>
-              <label htmlFor="cline-pass-pin-spelling"><strong>{t.pinSpelling}</strong></label>
-              <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>{t.pinSpellingHint}</p>
-            </div>
-            <select
-              id="cline-pass-pin-spelling"
-              className="dsha-select dshcp-adv-control"
-              value={settingsForm.pinSpelling}
-              onChange={(event) => setSettingsForm({ ...settingsForm, pinSpelling: event.target.value })}
-            >
-              <option value="both">{t.pinSpellingBoth}</option>
-              <option value="detected">{t.pinSpellingDetected}</option>
-            </select>
-          </div>
-          <div className="dsha-pref-row">
-            <div>
               <strong>{t.exposeTools}</strong>
               <p className="dsha-muted" style={{ fontSize: 12, marginTop: 2 }}>{t.exposeToolsHint}</p>
             </div>
@@ -1028,232 +889,29 @@ export function ClinePassSection(props: Props): React.ReactElement {
   )
 }
 
-interface ChannelEditorProps {
+interface ModelTestPanelProps {
   model: ClinePassModelDto
-  draft: PinDraft
   result: ModelResult
   busy: string | null
   t: typeof zh
-  /** Gateway-wide channel vocabulary discovered across all models, for manual entry. */
-  suggestions: string[]
-  onToggleChannel(upstream: string): void
-  onToggleExclude(upstream: string): void
-  onPinMode(mode: 'strict' | 'preferred'): void
-  onSort(sort: string): void
-  onHas(has: string[]): void
-  onProbe(): void
-  onValidate(): void
   onTest(): void
-  onSave(): void
-  onReset(): void
 }
 
-/** The per-model channel panel: probe, pin order, exclusions and a real test. */
-function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
-  const { model, draft, result, t } = props
-  const busyAny = props.busy !== null
-  const [manualChannel, setManualChannel] = useState('')
-  const [hasText, setHasText] = useState(draft.has.join(', '))
-  // Keyed on the VALUE, not the array identity: `projectModels` builds a fresh
-  // array on every status answer, so a 60-second poll used to rewrite a
-  // half-typed "vision, " back to "vision".
-  const hasValue = draft.has.join(', ')
-  useEffect(() => setHasText(hasValue), [model.id, hasValue])
-  const verdicts = new Map(model.upstreamStatus.map((entry) => [entry.upstream, entry]))
-  // Configured names that the last probe did not discover are still shown: a pin
-  // the gateway silently drops is exactly what this panel exists to expose.
-  const channels = [...new Set([...model.upstreams, ...draft.upstreams, ...draft.exclude])]
+/** Observed routing facts and one ordinary model test; no routing controls. */
+function ModelTestPanel(props: ModelTestPanelProps): React.ReactElement {
+  const { model, result, t } = props
   return (
     <div className="dshcp-body">
       <p className="dshcp-meta">
         {t.pipeline.replace('{pipeline}', model.pipeline === '' ? '—' : model.pipeline)}
-        {model.pinnable ? '' : ` · ${t.notPinnable}`}
         {model.lastProvider !== '' ? ` · ${t.lastServed.replace('{provider}', model.lastProvider).replace('{ms}', String(model.lastMs))}` : ''}
         {isClinePassAnonymousUpstream(model.lastProvider) ? ` · ⚠ ${t.anonymousChannel}` : ''}
-        {model.probedAt > 0 ? ` · ${t.probedAt.replace('{time}', formatDate(model.probedAt))}` : ''}
       </p>
-      {channels.length === 0 && <p className="dsha-muted" style={{ fontSize: 12 }}>{t.noChannels}</p>}
-      {channels.length > 0 && (
-        <>
-          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.channelHint}</p>
-          <div className="dshcp-channels">
-            {channels.map((upstream) => {
-              const verdict = verdicts.get(upstream)
-              const pinned = draft.upstreams.includes(upstream)
-              const excluded = draft.exclude.includes(upstream)
-              const anonymous = isClinePassAnonymousUpstream(upstream)
-              const baseTitle = verdict === undefined ? upstream : `${upstream}: ${verdict.status}${verdict.note === '' ? '' : ` — ${verdict.note}`}`
-              return (
-                <span
-                  key={upstream}
-                  className="dshcp-channel"
-                  data-pinned={pinned}
-                  data-excluded={excluded}
-                  data-status={verdict?.status ?? 'unknown'}
-                  data-anonymous={anonymous}
-                  role="button"
-                  tabIndex={0}
-                  title={anonymous ? `${baseTitle} — ${t.anonymousChannelHint}` : baseTitle}
-                  onClick={() => props.onToggleChannel(upstream)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') props.onToggleChannel(upstream)
-                  }}
-                >
-                  {anonymous ? `⚠ ${upstream}` : upstream}
-                  <button
-                    type="button"
-                    className="dshcp-exclude"
-                    aria-label={`${excluded ? 'include' : 'exclude'} ${upstream}`}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      props.onToggleExclude(upstream)
-                    }}
-                  >
-                    ⊘
-                  </button>
-                </span>
-              )
-            })}
-          </div>
-        </>
-      )}
-      <div className="dshcp-pin-row">
-        <input
-          className="dsha-input"
-          style={{ minWidth: 220 }}
-          list={`dshcp-known-${model.id}`}
-          placeholder={t.manualChannelPlaceholder}
-          value={manualChannel}
-          disabled={busyAny}
-          onChange={(event) => setManualChannel(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter') return
-            const name = manualChannel.trim().toLowerCase()
-            if (name === '') return
-            if (!draft.upstreams.includes(name)) props.onToggleChannel(name)
-            setManualChannel('')
-          }}
-        />
-        <datalist id={`dshcp-known-${model.id}`}>
-          {props.suggestions.map((name) => <option key={name} value={name} />)}
-        </datalist>
-        <button
-          className="dsha-btn"
-          disabled={busyAny || manualChannel.trim() === ''}
-          onClick={() => {
-            const name = manualChannel.trim().toLowerCase()
-            if (name === '') return
-            if (!draft.upstreams.includes(name)) props.onToggleChannel(name)
-            setManualChannel('')
-          }}
-        >
-          {t.addChannel}
-        </button>
-      </div>
-      <p className="dsha-muted" style={{ fontSize: 12 }}>{t.manualChannelHint}</p>
-      <div className="dshcp-pin-row">
-        <label>
-          {t.pinMode}
-          <select
-            className="dsha-select"
-            value={draft.pinMode}
-            disabled={busyAny}
-            onChange={(event) => props.onPinMode(event.target.value === 'preferred' ? 'preferred' : 'strict')}
-          >
-            <option value="strict">{t.modeStrict}</option>
-            <option value="preferred">{t.modePreferred}</option>
-          </select>
-        </label>
-        <label>
-          {t.sort}
-          <select
-            className="dsha-select"
-            value={draft.sort === '' ? 'none' : draft.sort}
-            disabled={busyAny}
-            onChange={(event) => props.onSort(event.target.value === 'none' ? '' : event.target.value)}
-          >
-            <option value="none">{t.sortNone}</option>
-            <option value="cost">{t.sortCost}</option>
-            <option value="ttft">{t.sortTtft}</option>
-            <option value="tps">{t.sortTps}</option>
-          </select>
-        </label>
-        <label style={{ flex: 1, minWidth: 260 }}>
-          {t.hasLabel}
-          <input
-            className="dsha-input"
-            style={{ flex: 1, minWidth: 180 }}
-            value={hasText}
-            disabled={busyAny}
-            placeholder="vision, implicit-caching"
-            onChange={(event) => {
-              const text = event.target.value
-              setHasText(text)
-              props.onHas([...new Set(text.split(/[\s,]+/).map((name) => name.trim()).filter((name) => name !== ''))])
-            }}
-          />
-        </label>
-      </div>
-      <p className="dsha-muted" style={{ fontSize: 12 }}>{t.hasHint}</p>
-      <p className="dshcp-meta">
-        {draft.upstreams.length === 0 ? t.pinAuto : t.pinPinned.replace('{list}', draft.upstreams.join(' > '))}
-        {draft.exclude.length === 0 ? '' : ` · ${t.pinExcluded.replace('{list}', draft.exclude.join(', '))}`}
-        {draft.has.length === 0 ? '' : ` · ${t.pinHas.replace('{list}', draft.has.join(', '))}`}
-      </p>
-      {draft.upstreams.some((name) => isClinePassAnonymousUpstream(name)) && (
-        <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', draft.upstreams.find((name) => isClinePassAnonymousUpstream(name)) ?? '')}</p>
-      )}
-      {draft.upstreams.length > 0
-        && !draft.upstreams.some((name) => isClinePassAnonymousUpstream(name))
-        && model.upstreams.length > 0
-        && model.upstreams.every((name) => isClinePassAnonymousUpstream(name)) && (
-        <p className="dshcp-warning">{t.pinLikelyIgnored}</p>
-      )}
       <div className="dshcp-actions">
-        <button className="dsha-btn" disabled={busyAny} onClick={props.onProbe}>
-          {props.busy === 'probe:' + model.id ? t.probing : t.probe}
-        </button>
-        <button className="dsha-btn" disabled={busyAny || model.upstreams.length === 0} onClick={props.onValidate}>
-          {props.busy === 'validate:' + model.id ? t.validating : t.validate}
-        </button>
-        <button className="dsha-btn" disabled={busyAny} onClick={props.onTest}>
-          {props.busy === 'test-model:' + model.id ? t.testingPin : t.testPin}
-        </button>
-        <button className="dsha-btn dsha-btn-primary" disabled={busyAny} onClick={props.onSave}>
-          {props.busy === 'pin:' + model.id ? t.savingPin : t.savePin}
-        </button>
-        <button className="dsha-btn" disabled={busyAny} onClick={props.onReset}>
-          {t.resetPin}
+        <button className="dsha-btn" disabled={props.busy !== null} onClick={props.onTest}>
+          {props.busy === 'test-model:' + model.id ? t.testingModel : t.testModel}
         </button>
       </div>
-      {result.pinWarnings !== undefined && result.pinWarnings.length > 0 && (
-        <div>
-          <p className="dshcp-warning">{t.warnings}</p>
-          {result.pinWarnings.map((warning) => <p className="dshcp-warning" key={warning}>{warning}</p>)}
-        </div>
-      )}
-      {result.probe !== undefined && (
-        <p className="dshcp-meta">
-          {t.probeResult}: {result.probe.ok ? `${result.probe.ms}ms · ${result.probe.pipeline || '—'} · ${result.probe.upstreams.length}` : result.probe.error}
-        </p>
-      )}
-      {result.validate !== undefined && (
-        <div>
-          <p className="dshcp-meta">
-            {t.validateSummary
-              .replace('{ok}', String(result.validate.summary.ok))
-              .replace('{limited}', String(result.validate.summary.limited))
-              .replace('{bad}', String(result.validate.summary.bad))
-              .replace('{auth}', String(result.validate.summary.auth))
-              .replace('{unknown}', String(result.validate.summary.unknown))}
-          </p>
-          {result.validate.results.map((entry) => (
-            <p className="dshcp-meta" key={entry.upstream} data-tone={statusTone(entry.status)}>
-              {entry.upstream}: {entry.status} ({entry.ms}ms){entry.note === '' ? '' : ` — ${entry.note}`}
-            </p>
-          ))}
-        </div>
-      )}
       {result.test !== undefined && (
         <div>
           <p className={result.test.ok ? 'dshcp-meta' : 'dshcp-warning'}>
@@ -1264,25 +922,10 @@ function ChannelEditor(props: ChannelEditorProps): React.ReactElement {
           {result.test.anonymous && (
             <p className="dshcp-warning">{t.anonymousServed.replace('{provider}', result.test.actual || 'openai-compatible-private')}</p>
           )}
-          {(result.test.has ?? []).length > 0 && (
-            <p className="dshcp-meta">{t.testHas.replace('{list}', (result.test.has ?? []).join(', '))}</p>
-          )}
           {result.test.fingerprint !== '' && (
             <p className="dshcp-meta">{t.fingerprintOk.replace('{fingerprint}', result.test.fingerprint)}</p>
           )}
-          {result.test.warnings.length > 0 && result.test.warnings.map((warning) => <p className="dshcp-warning" key={warning}>{warning}</p>)}
-          {result.test.trace.length > 0 && (
-            <>
-              <p className="dshcp-meta">{t.testTrace}</p>
-              <div className="dshcp-trace">
-                {result.test.trace.map((entry, index) => (
-                  <span key={`${entry.upstream}-${index}`}>
-                    {entry.upstream} → HTTP {entry.status} · {entry.ms}ms{entry.note === '' ? '' : ` — ${entry.note}`}
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
+          {result.test.warnings.map((warning) => <p className="dshcp-warning" key={warning}>{warning}</p>)}
         </div>
       )}
       {result.error !== undefined && <p className="dshcp-warning">{result.error}</p>}

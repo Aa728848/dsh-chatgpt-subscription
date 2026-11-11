@@ -2,9 +2,8 @@
  * The Cline Pass settings API.
  *
  * The surface is the same one every sibling line exposes — status, accounts,
- * models — plus the controls this line genuinely has: per-model upstream pins,
- * a channel probe/validate/test pair, the official quota reading and the
- * in-process request history.
+ * models — plus an ordinary model test, the official quota reading and the
+ * in-process request history. Upstream routing is owned by Cline.
  *
  * A status read never waits on Cline: it answers the cached quota snapshot and,
  * when that snapshot is missing or older than the line's TTL, schedules one
@@ -19,32 +18,27 @@ import { isSameOriginMutation } from '../common/same-origin.ts'
 import { QuotaRefresh } from '../common/quota-refresh.ts'
 import { fetchUsageLimits } from './client.ts'
 import { resolveModelInfo } from './catalog.ts'
-import { pinWarnings, normalizePinMode } from './protocol.ts'
 import type { ClinePassAccountPool } from './account-pool.ts'
 import type { ClinePassEngine } from './engine.ts'
 import type { ClinePassStore } from './store.ts'
 import type { ClinePassLoginManager } from './oauth.ts'
 import { bearerFor, listedClinePassCatalogModels, type ClinePassModelSettings, type ClinePassModelSettingsStore } from './token-store.ts'
-import { DEFAULT_MODELS, PROVIDER_ID, defaultPin, type ClinePassPinSettings } from './types.ts'
+import { DEFAULT_MODELS, PROVIDER_ID } from './types.ts'
 import { openPlatformBrowser } from '../step-code/routes.ts'
 import {
   CLINE_PASS_ROUTE_PREFIX,
   clinePassAccountQuota,
   clinePassWindowLabel,
-  isClinePassPinMode,
   type ClinePassCatalogBilling,
   type ClinePassAccountAction,
   type ClinePassAuthResult,
-  type ClinePassChannelVerdictDto,
   type ClinePassHistoryRowDto,
   type ClinePassLoginFlowDto,
   type ClinePassModelDto,
   type ClinePassPoolStatusDto,
-  type ClinePassProbeResultDto,
   type ClinePassTestResultDto,
   type ClinePassUsageAccountDto,
   type ClinePassUsageDto,
-  type ClinePassValidateResultDto,
   type ClinePassWebStatus,
 } from '../../shared/cline-pass-contracts.ts'
 
@@ -148,7 +142,6 @@ function projectModels(settings: ClinePassModelSettings, store: ClinePassStore):
   const enabledSet = settings.enabledModelIds === null ? null : new Set(settings.enabledModelIds)
   return known.map((id) => {
     const meta = store.metaOf(id)
-    const pin = settings.pins[id] ?? defaultPin(id)
     const base = resolveModelInfo(id, {
       displayName: 'Cline Pass',
       synced: settings.catalogModels,
@@ -162,15 +155,6 @@ function projectModels(settings: ClinePassModelSettings, store: ClinePassStore):
       defaultMaxTokens: settings.defaultMaxTokens,
       contextWindowOverride: settings.contextWindowOverrides[id],
     })
-    const verdicts = Object.entries(meta.upstreamStatus ?? {})
-      .map(([upstream, verdict]): ClinePassChannelVerdictDto => ({
-        upstream,
-        status: verdict.status,
-        ms: Number(verdict.ms ?? 0),
-        note: firstLine(verdict.note, 160),
-        checkedAt: Number(verdict.checkedAt ?? 0),
-      }))
-      .sort((left, right) => (meta.upstreams ?? []).indexOf(left.upstream) - (meta.upstreams ?? []).indexOf(right.upstream))
     return {
       id,
       name: info.displayName,
@@ -182,18 +166,8 @@ function projectModels(settings: ClinePassModelSettings, store: ClinePassStore):
       input: [...info.input],
       enabled: (enabledSet === null || enabledSet.has(id)) && !hidden.has(id),
       pipeline: String(meta.pipeline ?? ''),
-      pinnable: meta.pinnable === true,
-      pinned: pin.upstreams,
-      excluded: pin.exclude,
-      pinMode: normalizePinMode(pin.pinMode),
-      sort: pin.sort,
-      has: [...pin.has],
-      upstreams: (meta.upstreams ?? []).map(String),
-      upstreamStatus: verdicts,
       lastProvider: String(meta.lastProvider ?? ''),
       lastMs: Number(meta.lastMs ?? 0),
-      probedAt: Number(meta.probedAt ?? 0),
-      validatedAt: Number(meta.validatedAt ?? 0),
       ...(settings.contextWindowOverrides[id] === undefined ? {} : { contextWindowOverride: settings.contextWindowOverrides[id] }),
     }
   })
@@ -283,7 +257,6 @@ export async function getClinePassWebStatus(
       maxConcurrentRequests: settings.maxConcurrentRequests,
       streamIdleTimeoutMs: settings.streamIdleTimeoutMs,
       historyLimit: settings.historyLimit,
-      pinSpelling: settings.pinSpelling,
     },
   }
 }
@@ -297,10 +270,6 @@ const ROUTES = {
   'login/status': 'GET',
   'login/cancel': 'POST',
   models: 'GET|POST',
-  'models/pin': 'POST',
-  'models/reset': 'POST',
-  'models/probe': 'POST',
-  'models/validate': 'POST',
   'models/test': 'POST',
   'models/visibility': 'POST',
   'models/visibility-all': 'POST',
@@ -449,7 +418,6 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           }
           if (typeof body.exposeCatalog === 'boolean') patch.exposeCatalog = body.exposeCatalog
           if (typeof body.exposeTools === 'boolean') patch.exposeTools = body.exposeTools
-          if (typeof body.pinSpelling === 'string') patch.pinSpelling = body.pinSpelling === 'detected' ? 'detected' : 'both'
           let touched = false
           if (Object.keys(patch).length > 0) {
             await settingsStore.update(patch)
@@ -576,126 +544,28 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
           return sendJson(response, 200, { ok: true, value: await status() })
         }
 
-        if (path === 'models/pin') {
-          if (method !== 'POST') return sendMethodNotAllowed(response)
-          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
-          const model = typeof body.model === 'string' ? body.model.trim() : ''
-          if (model === '') return sendJson(response, 400, { ok: false, error: 'this action needs a model id' })
-          const current = (await settingsStore.read()).pins[model] ?? defaultPin(model)
-          const next: ClinePassPinSettings = {
-            upstreams: Array.isArray(body.upstreams) ? body.upstreams.map(String) : current.upstreams,
-            exclude: Array.isArray(body.exclude) ? body.exclude.map(String) : current.exclude,
-            pinMode: isClinePassPinMode(body.pinMode) ? body.pinMode : current.pinMode,
-            sort: body.sort === undefined ? current.sort : (body.sort === 'none' ? '' : String(body.sort)),
-            has: Array.isArray(body.has) ? body.has.map(String).map((name) => name.trim()).filter((name) => name !== '') : current.has,
-          }
-          await settingsStore.setPin(model, next)
-          const meta = store.metaOf(model)
-          const known = Array.isArray(meta.upstreams) ? meta.upstreams : []
-          const warnings = [...pinWarnings({ upstream: next.upstreams[0] ?? null, excludeList: next.exclude }, meta)]
-          const named = [...next.upstreams, ...next.exclude]
-          if (named.length > 0) {
-            if (known.length === 0) {
-              warnings.push(`unverifiedChannel: this model has no discovered channel list yet, so ${named.join(', ')} cannot be checked — probe it first`)
-            } else {
-              const unknown = named.filter((name) => !known.includes(name))
-              if (unknown.length > 0) warnings.push(`unknownChannel: ${unknown.join(', ')} is not in this model's discovered channel list (${known.join(', ')}); confirm with a test, because the gateway ignores a channel it cannot use rather than failing`)
-            }
-          }
-          return sendJson(response, 200, { ok: true, value: { pin: next, warnings, status: await status() } })
-        }
-
-        if (path === 'models/reset') {
-          if (method !== 'POST') return sendMethodNotAllowed(response)
-          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
-          const model = typeof body.model === 'string' ? body.model.trim() : ''
-          if (model === '') return sendJson(response, 400, { ok: false, error: 'this action needs a model id' })
-          await settingsStore.clearPin(model)
-          return sendJson(response, 200, { ok: true, value: { status: await status() } })
-        }
-
-        if (path === 'models/probe') {
-          if (method !== 'POST') return sendMethodNotAllowed(response)
-          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
-          const model = typeof body.model === 'string' ? body.model.trim() : ''
-          if (model === '') return sendJson(response, 400, { ok: false, error: 'this action needs a model id' })
-          const result = await engine.probe(model)
-          const value: ClinePassProbeResultDto = {
-            ok: result.ok,
-            model,
-            error: firstLine(result.error, 300),
-            ms: result.ms,
-            pipeline: result.pipeline,
-            pinnable: result.pinnable,
-            canonicalSlug: result.canonicalSlug,
-            lastProvider: result.lastProvider,
-            upstreams: result.upstreams,
-            availableProviders: result.availableProviders,
-            tier0: result.tier0,
-            fingerprint: result.fingerprint,
-            anonymous: result.anonymous,
-          }
-          return sendJson(response, 200, { ok: true, value: { result: value, status: await status() } })
-        }
-
-        if (path === 'models/validate') {
-          if (method !== 'POST') return sendMethodNotAllowed(response)
-          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
-          const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
-          const model = typeof body.model === 'string' ? body.model.trim() : ''
-          if (model === '') return sendJson(response, 400, { ok: false, error: 'this action needs a model id' })
-          const meta = store.metaOf(model)
-          if (!Array.isArray(meta.upstreams) || meta.upstreams.length === 0) {
-            return sendJson(response, 400, { ok: false, error: 'no known channels yet: probe this model first' })
-          }
-          const outcome = await engine.validate(model)
-          const value: ClinePassValidateResultDto = {
-            ok: true,
-            model,
-            error: '',
-            summary: outcome.summary,
-            upstreams: (store.metaOf(model).upstreams ?? []).map(String),
-            results: outcome.results.map((result) => ({ upstream: result.upstream, status: result.status, ms: result.ms, note: result.note })),
-          }
-          return sendJson(response, 200, { ok: true, value: { result: value, status: await status() } })
-        }
-
         if (path === 'models/test') {
           if (method !== 'POST') return sendMethodNotAllowed(response)
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           const body = await readRequestJson(request).catch((): Record<string, unknown> => ({}))
           const model = typeof body.model === 'string' ? body.model.trim() : ''
           if (model === '') return sendJson(response, 400, { ok: false, error: 'this action needs a model id' })
-          const result = await engine.test(model, {
-            upstreams: Array.isArray(body.upstreams) ? body.upstreams.map(String) : undefined,
-            exclude: Array.isArray(body.exclude) ? body.exclude.map(String) : undefined,
-            has: Array.isArray(body.has) ? body.has.map(String).map((name) => name.trim()).filter((name) => name !== '') : undefined,
-          })
+          const result = await engine.test(model)
           const value: ClinePassTestResultDto = {
             ok: result.ok,
             model,
             error: firstLine(result.error, 400),
             ms: result.ms,
-            targets: result.targets,
-            excluded: result.excluded,
             actual: result.actual,
             actualName: result.actualName,
             pipeline: result.pipeline,
-            pinnable: result.pinnable,
             canonicalSlug: result.canonicalSlug,
             account: result.account,
             content: result.content,
-            adopted: result.adopted,
-            adherence: result.adherence,
             plan: firstLine(result.plan, 300),
             fingerprint: result.fingerprint,
             anonymous: result.anonymous,
-            has: result.has,
             warnings: result.warnings,
-            trace: result.trace,
           }
           return sendJson(response, 200, { ok: true, value: { result: value, status: await status() } })
         }
@@ -907,7 +777,6 @@ export function registerClinePassRoutes(ctx: Context, options: ClinePassRouteOpt
             },
             error: entry.error,
             attempts: entry.attempts,
-            adherence: entry.adherence,
             fingerprint: entry.fingerprint,
             anonymous: entry.anonymous,
             warnings: entry.warnings,

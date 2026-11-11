@@ -1,10 +1,9 @@
 /**
  * The Cline Pass LLM adapter: an OpenAI-compatible `chat/completions` stream
- * with upstream pinning, per-account rotation, and pre-first-token failover.
+ * with per-account rotation and pre-first-token failover.
  *
- * Transport and mapping live in `client.ts` / `mapper.ts`; account selection and
- * probing live in `engine.ts`. This module owns the request loop: which account,
- * which channel, and when an attempt is abandoned.
+ * Transport and mapping live in `client.ts` / `mapper.ts`; account selection
+ * lives in `engine.ts`. Cline always chooses the upstream automatically.
  *
  * @module dsh-chatgpt-subscription/cline-pass-adapter
  */
@@ -36,7 +35,7 @@ import {
   type ClinePassDiscoveredModel,
 } from './types.ts'
 import { resolveModelInfo } from './catalog.ts'
-import { buildAttempts, injectPrefs, isRecord, pinAdherence, pinWarnings, parseRouting, unwrapEnvelope, type ClinePipeline } from './protocol.ts'
+import { isRecord, parseRouting, unwrapEnvelope, type ClinePipeline } from './protocol.ts'
 import {
   buildClinePassBody,
   parseServerSentEvents,
@@ -83,8 +82,8 @@ const ATTEMPT_TIMEOUT_MS = 180_000
  * Retries for a failure that happened BEFORE the request was sent.
  *
  * A TLS handshake to the gateway can fail intermittently on a network path
- * where curl succeeds (the pinned upstream is never contacted: the body with
- * `provider.only` has not left the host). Retrying is safe because no HTTP
+ * where curl succeeds (the gateway is never contacted: the request has not
+ * left the host). Retrying is safe because no HTTP
  * request reached the server, and it turns a one-in-two TLS failure into a rare
  * one. Errors after headers, or ambiguously mid-request, are never retried here.
  */
@@ -290,11 +289,8 @@ export class ClinePassAdapter extends LlmAdapter {
       maxTokens: settings.defaultMaxTokens,
       streamIdleTimeoutMs: settings.streamIdleTimeoutMs,
       maxConcurrentRequests: settings.maxConcurrentRequests,
-      pinSpelling: settings.pinSpelling,
     }
     const body = buildClinePassBody(options, connection, images)
-    const attempts = buildAttempts(this.engine.pinConfigFor(options.model))
-    const meta = this.store.metaOf(options.model)
     const startedAt = Date.now()
     const trace: string[] = []
     const refused = new Set<string>()
@@ -309,8 +305,10 @@ export class ClinePassAdapter extends LlmAdapter {
     // How many times an empty turn has been replayed so far.
     let emptyReplays = 0
 
-    while (attemptIndex < attempts.length) {
-      const attempt = attempts[attemptIndex++]
+    // One automatically routed request per usable account. Authentication and
+    // quota refusals reset this counter below so the next account gets its turn.
+    while (attemptIndex < 1) {
+      attemptIndex += 1
       let account: Awaited<ReturnType<ClinePassEngine['resolveAccount']>>
       try {
         account = await this.engine.resolveAccount(refused)
@@ -327,15 +325,14 @@ export class ClinePassAdapter extends LlmAdapter {
         throw error
       }
       const attemptStarted = Date.now()
-      const attemptLabel = attempt.upstream ?? '(auto)'
+      const attemptLabel = '(auto)'
       try {
-        const pinned = injectPrefs(body as unknown as Record<string, unknown>, meta, attempt)
         let response: Response | undefined
         let transportError: unknown
         for (let transportTry = 0; transportTry <= TRANSPORT_RETRIES; transportTry += 1) {
           const headerDeadline = withAttemptTimeout(upstream, this.options.headerTimeoutMs)
           try {
-            response = await this.engine.openStream(account, pinned, headerDeadline.signal)
+            response = await this.engine.openStream(account, body as unknown as Record<string, unknown>, headerDeadline.signal)
             // The 180 s budget belongs to the response-header wait only. Once the
             // gateway has answered, the stream's own idle watchdog takes over;
             // leaving this timer armed would kill a healthy long reasoning pass.
@@ -365,10 +362,9 @@ export class ClinePassAdapter extends LlmAdapter {
         if (response === undefined) {
           const note = errorChain(transportError)
           const hint = isPreConnectionFailure(transportError)
-            ? ` The request never reached the gateway, so the pinned upstream was not contacted: ${account.baseURL} failed during TLS/connect. Check the network, proxy or TUN, or set a custom proxy in the plugin.`
+            ? ` The request never reached the gateway: ${account.baseURL} failed during TLS/connect. Check the network, proxy or TUN, or set a custom proxy in the plugin.`
             : ''
           trace.push(attemptLabel)
-          this.store.learnUpstream(options.model, attempt.upstream, 'unknown', note, Date.now() - attemptStarted)
           lastError = new LlmError(note + hint, 'TRANSPORT', { cause: transportError })
           continue
         }
@@ -379,20 +375,15 @@ export class ClinePassAdapter extends LlmAdapter {
             const parsed = unwrapEnvelope(JSON.parse(raw))
             detail = errorMessage(parsed) || detail
           } catch { /* keep the raw text */ }
-          const ms = Date.now() - attemptStarted
           trace.push(attemptLabel)
-          this.store.learnUpstream(options.model, attempt.upstream, classifyVerdict(detail), detail, ms)
           const code = streamErrorCode(detail, response.status)
           lastError = new LlmError(`${detail || `HTTP ${response.status}`} [model=${options.model}]`, code, { status: response.status })
-          // A rejected pin or a busy upstream is worth another candidate. An
-          // account-level refusal is worth another ACCOUNT: that is the whole
-          // point of a pool, and with one account the next attempt simply finds
-          // nothing left and this error is raised unchanged.
+          // An account-level refusal is worth another ACCOUNT: that is the
+          // point of a pool. With one account, the next lookup raises unchanged.
           if (code === 'AUTH' || code === 'QUOTA') {
             refused.add(account.id)
             await this.standDown(account.id, code, detail)
-            // A spent account says nothing about this channel. Give the next
-            // account the full chain, including a lone auto route or strict pin.
+            // Give the next account the same automatically routed request.
             attemptIndex = 0
             this.store.record({
               model: options.model,
@@ -461,9 +452,7 @@ export class ClinePassAdapter extends LlmAdapter {
           if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: error })
           const note = error instanceof LlmError ? error.message : errorChain(error)
           const code = error instanceof LlmError ? error.code : 'TRANSPORT'
-          const ms = Date.now() - attemptStarted
           trace.push(attemptLabel)
-          this.store.learnUpstream(options.model, attempt.upstream, classifyVerdict(note), note, ms)
           // Content already reached the caller: this is the answer's failure, and
           // no retry can un-deliver it. Before any content, an account-level
           // refusal moves to the next account.
@@ -522,8 +511,7 @@ export class ClinePassAdapter extends LlmAdapter {
             if (signal.aborted) throw new LlmError('Cline Pass request aborted by caller', 'ABORTED', { cause: waitError })
             throw waitError
           }
-          // The SAME candidate serves the replay: the turn was empty, not
-          // refused, so another channel would answer the same way.
+          // Replay on the same account: the turn was empty, not refused.
           attemptIndex -= 1
           continue
         }
@@ -539,25 +527,14 @@ export class ClinePassAdapter extends LlmAdapter {
           yield finishChunk
         }
         delivered = true
-        const adherence = pinAdherence(attempt, { finalProvider: observed.provider })
-        const warnings = pinWarnings({ upstream: attempt.upstream, excludeList: attempt.excludeList }, meta)
-        // The pin verdict is only readable after the stream ends (the routing
-        // frame trails the content), so an ignored pin cannot be failed over —
-        // but it must be SAID, or a strict pin silently becomes the anonymous
-        // contributor route's answer.
-        if (adherence === 'not-adopted') {
-          warnings.push(`pinNotAdopted: the gateway served ${observed.provider ?? '(unknown)'} instead of the pinned ${attempt.upstream ?? '(auto)'}`)
-        } else if (adherence === 'violated') {
-          warnings.push(`pinViolated: an excluded channel served this request: ${observed.provider ?? '(unknown)'}`)
-        }
+        const warnings: string[] = []
         if (observed.anonymous) {
           warnings.push(`anonymousServed: this answer came from the gateway's anonymous contributor route (${observed.provider ?? 'openai-compatible-private'}) — it may be used for training and carries no zero-data-retention guarantee`)
         }
-        const ms = Date.now() - attemptStarted
         trace.push(attemptLabel)
         this.store.record({
           model: options.model,
-          provider: observed.provider ?? attempt.upstream ?? '',
+          provider: observed.provider ?? '',
           canonical: observed.canonical ?? '',
           attempts: trace.map(String),
           ms: Date.now() - startedAt,
@@ -567,7 +544,6 @@ export class ClinePassAdapter extends LlmAdapter {
           error: finishFailure?.message ?? '',
           code: finishFailure?.code ?? '',
           account: account.name,
-          adherence,
           fingerprint: observed.fingerprint ?? '',
           anonymous: observed.anonymous,
           warnings,
@@ -583,19 +559,13 @@ export class ClinePassAdapter extends LlmAdapter {
           })
         }
         void this.accountPool.recordModel(account.id, options.model)
-        // Only a pin the router actually honored proves the channel works.
-        // Marking it usable no matter who answered is how a false "available"
-        // reached the verdict map the exclusion allow-list is built from.
-        if (finishFailure === null && attempt.upstream !== null && adherence === 'adopted') {
-          this.store.learnUpstream(options.model, attempt.upstream, 'ok', '', ms)
-        }
         return
       } finally {
         release()
       }
     }
     if (!delivered) {
-      const message = lastError?.message ?? 'no pinned upstream could serve the request'
+      const message = lastError?.message ?? 'the gateway could not serve the request'
       this.store.record({
         model: options.model,
         provider: '',
@@ -709,15 +679,6 @@ function errorMessage(payload: Record<string, unknown>): string {
   if (typeof value === 'string') return value
   if (isRecord(value) && typeof value.message === 'string') return value.message
   return ''
-}
-
-/** One failed pin's verdict. */
-function classifyVerdict(detail: string): 'unknown' | 'limited' | 'bad' | 'auth' | 'ok' {
-  if (/empty response content/i.test(detail)) return 'ok'
-  if (/429|rate-?limited|temporarily rate/i.test(detail)) return 'limited'
-  if (/invalid_request|modelid|no allowed providers|no available providers|not found|unsupported/i.test(detail)) return 'bad'
-  if (/unauthorized|re\s*authenticate|invalid\s*(?:api\s*key|token)|\b401\b|\b403\b/i.test(detail)) return 'auth'
-  return 'unknown'
 }
 
 /**

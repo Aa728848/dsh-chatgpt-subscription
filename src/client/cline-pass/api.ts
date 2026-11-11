@@ -7,11 +7,9 @@ import {
   type ClinePassCatalogSearchItemDto,
   type ClinePassHistoryRowDto,
   type ClinePassLoginFlowDto,
-  type ClinePassProbeResultDto,
   type ClinePassSettingsUpdateDto,
   type ClinePassTestResultDto,
   type ClinePassUsageDto,
-  type ClinePassValidateResultDto,
   type ClinePassWebStatus,
 } from '../../shared/cline-pass-contracts.ts'
 
@@ -19,13 +17,6 @@ const api = createLineApi(CLINE_PASS_ROUTE_PREFIX, 'Cline Pass')
 
 /** One gateway-catalog search hit, as the card renders it. */
 export type ClinePassCatalogSearchItem = ClinePassCatalogSearchItemDto
-
-/** What one pin write answers with. */
-export interface ClinePassPinResult {
-  pin: { upstreams: string[]; exclude: string[]; pinMode: 'strict' | 'preferred'; sort: string; has: string[] }
-  warnings: string[]
-  status: ClinePassWebStatus
-}
 
 /**
  * Whether the host is refreshing the quota behind this answer.
@@ -102,27 +93,8 @@ export class ClinePassApi {
     return api.post<ClinePassWebStatus>('/models/context-window', { model, contextWindow })
   }
 
-  pinModel(
-    model: string,
-    pin: { upstreams?: string[]; exclude?: string[]; pinMode?: string; sort?: string; has?: string[] },
-  ): Promise<ClinePassPinResult> {
-    return api.post<ClinePassPinResult>('/models/pin', { model, ...pin })
-  }
-
-  resetPin(model: string): Promise<{ status: ClinePassWebStatus }> {
-    return api.post<{ status: ClinePassWebStatus }>('/models/reset', { model })
-  }
-
-  probe(model: string): Promise<{ result: ClinePassProbeResultDto; status: ClinePassWebStatus }> {
-    return api.post('/models/probe', { model })
-  }
-
-  validate(model: string): Promise<{ result: ClinePassValidateResultDto; status: ClinePassWebStatus }> {
-    return api.post('/models/validate', { model })
-  }
-
-  test(model: string, pin: { upstreams?: string[]; exclude?: string[]; has?: string[] } = {}): Promise<{ result: ClinePassTestResultDto; status: ClinePassWebStatus }> {
-    return api.post('/models/test', { model, ...pin })
+  test(model: string): Promise<{ result: ClinePassTestResultDto; status: ClinePassWebStatus }> {
+    return api.post('/models/test', { model })
   }
 
   setVisibility(model: string, visible: boolean): Promise<ClinePassWebStatus> {

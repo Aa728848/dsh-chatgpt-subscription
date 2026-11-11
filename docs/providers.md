@@ -264,15 +264,15 @@
 - **鉴权方式**：
   - 默认通过 **WorkOS 设备码 OAuth** 登录，聊天请求携带 `Authorization: Bearer workos:<accessToken>` 并支持 `refresh_token` 自动轮换续期；
   - 保留静态 API Key（设置页添加或环境变量 `CLINE_PASS_API_KEY`）作为兼容回退。
-- **渠道探测、钉住与防呆**：
+- **自动路由与防呆**：
   - OpenAI Chat Completions 协议，对零内容、零工具的空正常结束轮次按官方策略有界重试（最多 3 次，内容出现前缓冲防泄漏）；
-  - 支持对单模型**探测上游渠道**、逐渠道校验、按顺序钉住（`strict` / `preferred`，双写 `provider.*` 与 `providerOptions.gateway.*`），并从流式收尾帧 `provider_metadata` 回读真实服务渠道，识别网关静默忽略钉选的情况；
+  - 上游渠道完全由 Cline 网关自动选择，不发送 `provider` / `providerOptions` 钉选字段；只从响应 `provider_metadata` 读回真实服务渠道；
   - 对无 ZDR 保障的匿名贡献者路由（`openai-compatible-private`）在 UI 上显式给出 `⚠` 警示；
-  - 可选开启 8 个 `cline_pass_*` 管理工具（默认关闭以保持工具列表精简与缓存稳定，开启后重启 DSH 生效）。
+  - 可选开启 5 个 `cline_pass_*` 管理工具（默认关闭以保持工具列表精简与缓存稳定，开启后重启 DSH 生效）。
 
 ### 宿主路由（`/cline-pass/api`）
 
-`GET /status` · `POST /login/start` · `GET /login/status` · `POST /login/cancel` · `POST /settings` · `GET|POST /accounts` · `GET|POST /models` · `POST /models/pin` · `POST /models/reset` · `POST /models/probe` · `POST /models/validate` · `POST /models/test` · `POST /models/visibility` · `POST /models/visibility-all` · `POST /models/context-window` · `POST /catalog/refresh` · `GET|POST /usage` · `GET /history`
+`GET /status` · `POST /login/start` · `GET /login/status` · `POST /login/cancel` · `POST /settings` · `GET|POST /accounts` · `GET|POST /models` · `POST /models/test` · `POST /models/visibility` · `POST /models/visibility-all` · `POST /models/context-window` · `POST /catalog/refresh` · `GET|POST /usage` · `GET /history`
 
 ---
 

@@ -1,24 +1,21 @@
 /**
  * The model-facing `cline_pass_*` management tools.
  *
- * They read and write the same settings file the provider runs from, so a pin
- * written here takes effect on the very next model call. Registration is
- * optional and read at startup (see `exposeTools`): eight definitions are several
- * kilobytes of schema riding in every request's tool list, and a conversation
- * that never manages the route does not need them.
+ * They manage accounts, model visibility and diagnostics. Registration is
+ * optional and read at startup (see `exposeTools`) so a conversation that never
+ * manages the route does not carry these schemas in every request's tool list.
  *
  * @module dsh-chatgpt-subscription/cline-pass-tools
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { normalizePinMode, pinWarnings } from './protocol.ts'
 import type { ClinePassAccountPool } from './account-pool.ts'
 import type { ClinePassEngine } from './engine.ts'
 import type { ClinePassStore } from './store.ts'
 import type { ClinePassModelSettingsStore } from './token-store.ts'
 import { bearerFor, listedClinePassCatalogModels } from './token-store.ts'
-import { DEFAULT_MODELS, defaultPin, type ClinePassPinSettings } from './types.ts'
+import { DEFAULT_MODELS } from './types.ts'
 import type { ClinePassWebStatus } from '../../shared/cline-pass-contracts.ts'
 
 function text(value: string): ContentBlock[] {
@@ -28,18 +25,6 @@ function text(value: string): ContentBlock[] {
 function firstLine(value: unknown, max = 200): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max)
 }
-
-/** Human label for one upstream availability verdict. */
-const STATUS_LABEL: Record<string, string> = {
-  ok: 'available',
-  limited: 'rate-limited',
-  bad: 'not-pinnable',
-  auth: 'auth-failed',
-  'not-adopted': 'not-adopted',
-  unknown: 'unknown',
-}
-
-const statusLabel = (status: string): string => STATUS_LABEL[status] ?? String(status ?? 'unknown')
 
 const ACCOUNT_SCHEMA = {
   type: 'object',
@@ -54,28 +39,6 @@ const ACCOUNT_SCHEMA = {
   },
 } as const
 
-const TRACE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    upstream: { type: 'string', required: true },
-    status: { type: 'integer', required: true },
-    ms: { type: 'integer', required: true },
-    note: { type: 'string', required: true },
-  },
-} as const
-
-const VALIDATE_RESULT_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    upstream: { type: 'string', required: true },
-    status: { type: 'string', required: true },
-    ms: { type: 'integer', required: true },
-    note: { type: 'string', required: true },
-  },
-} as const
-
 const MODEL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -83,33 +46,9 @@ const MODEL_SCHEMA = {
     id: { type: 'string', required: true },
     displayName: { type: 'string', required: true },
     pipeline: { type: 'string', required: true },
-    pinnable: { type: 'boolean', required: true },
     hidden: { type: 'boolean', required: true },
-    pinMode: { type: 'string', required: true },
-    sort: { type: 'string', required: true },
-    has: { type: 'array', required: true, items: { type: 'string' } },
-    pinned: { type: 'array', required: true, items: { type: 'string' } },
-    excluded: { type: 'array', required: true, items: { type: 'string' } },
-    upstreams: { type: 'array', required: true, items: { type: 'string' } },
-    upstreamStatus: {
-      type: 'array',
-      required: true,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          upstream: { type: 'string', required: true },
-          status: { type: 'string', required: true },
-          ms: { type: 'integer', required: true },
-          note: { type: 'string', required: true },
-          checkedAt: { type: 'integer', required: true },
-        },
-      },
-    },
     lastProvider: { type: 'string', required: true },
     lastMs: { type: 'integer', required: true },
-    probedAt: { type: 'integer', required: true },
-    validatedAt: { type: 'integer', required: true },
   },
 } as const
 
@@ -121,25 +60,9 @@ function projectModel(status: ClinePassWebStatus, model: string) {
     id: entry.id,
     displayName: entry.name.replace(/^cline-pass\//, ''),
     pipeline: entry.pipeline,
-    pinnable: entry.pinnable,
     hidden: !entry.enabled,
-    pinMode: normalizePinMode(entry.pinMode),
-    sort: entry.sort,
-    has: entry.has,
-    pinned: entry.pinned,
-    excluded: entry.excluded,
-    upstreams: entry.upstreams,
-    upstreamStatus: entry.upstreamStatus.map((verdict) => ({
-      upstream: verdict.upstream,
-      status: verdict.status,
-      ms: Math.round(verdict.ms),
-      note: verdict.note,
-      checkedAt: Math.round(verdict.checkedAt),
-    })),
     lastProvider: entry.lastProvider,
     lastMs: Math.round(entry.lastMs),
-    probedAt: Math.round(entry.probedAt),
-    validatedAt: Math.round(entry.validatedAt),
   }
 }
 
@@ -160,13 +83,12 @@ export interface ClinePassToolsOptions {
 export function registerClinePassTools(ctx: Context, options: ClinePassToolsOptions): Array<() => void> {
   const { settings, accountPool, store, engine, status, serving } = options
   const disposers: Array<() => void> = []
-  const pinOf = async (model: string): Promise<ClinePassPinSettings> => (await settings.read()).pins[model] ?? defaultPin(model)
 
   // ── cline_pass_status ─────────────────────────────────────────────────────
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'cline_pass_status',
-    description: 'Report the Cline Pass provider state: route, accounts and whether each key is stored, account mode, model and pin counts. Read-only and free. Check this first when a Cline Pass model fails.',
+    description: 'Report the Cline Pass provider state: route, accounts, account mode and model count. Read-only and free. Check this first when a Cline Pass model fails.',
     parameters: {},
     isConcurrencySafe: () => true,
     timeoutMs: 30_000,
@@ -182,8 +104,6 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           accountMode: { type: 'string', required: true },
           accounts: { type: 'array', required: true, items: ACCOUNT_SCHEMA },
           knownModels: { type: 'integer', required: true },
-          pinnedModels: { type: 'integer', required: true },
-          probedModels: { type: 'integer', required: true },
         },
       },
       render: (_args, value) => text([
@@ -192,7 +112,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
         `accountMode=${value.accountMode}`,
         `accounts (${value.accounts.length}):`,
         ...value.accounts.map((account) => `  ${account.alias} (${account.id})${account.enabled ? '' : ' (disabled)'}${account.authStatus ? ` [${account.authStatus}]` : ''}`),
-        `models: known=${value.knownModels} pinned=${value.pinnedModels} probed=${value.probedModels}`,
+        `models: known=${value.knownModels}`,
       ].join('\n')),
     },
     async execute() {
@@ -212,8 +132,6 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           ...(account.authStatus === undefined ? {} : { authStatus: account.authStatus }),
         })),
         knownModels: current.models.length,
-        pinnedModels: current.models.filter((model) => model.pinned.length > 0).length,
-        probedModels: current.models.filter((model) => model.probedAt > 0).length,
       }
     },
   })))
@@ -222,7 +140,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'cline_pass_models',
-    description: 'List the Cline Pass models with their pipeline, discovered channels, per-channel verdicts, visibility and stored pin. Pass `model` to filter by substring, `refresh: true` to rescan the official model list, `model` + `visible` to show/hide one model in every picker, or `mode` to show/hide them all at once. Free unless `refresh` is set.',
+    description: 'List Cline Pass models with visibility and observed response routing. Pass `model` to filter by substring, `refresh: true` to rescan the official model list, `model` + `visible` to show/hide one model, or `mode` to change them all. Free unless `refresh` is set.',
     parameters: {
       model: { type: 'string', description: 'Only return models whose id contains this text, e.g. "glm-5.2".' },
       refresh: { type: 'boolean', description: 'Rescan the official model list first and adopt new ids.' },
@@ -245,18 +163,10 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
       },
       render: (_args, value) => {
         const blocks = value.models.map((model) => {
-          const lines = [
-            `${model.id}  pipeline=${model.pipeline || 'unknown'}${model.pinnable ? '' : ' (not pinnable)'}${model.hidden ? ' (hidden from pickers)' : ''}`,
-            `  pinned=${model.pinned.length === 0 ? '(auto)' : model.pinned.join(' > ')} mode=${model.pinMode}${model.sort === '' ? '' : ` sort=${model.sort}`}${model.excluded.length === 0 ? '' : ` excluded=${model.excluded.join(',')}`}`,
-          ]
-          if (model.upstreams.length > 0) {
-            const verdicts = new Map(model.upstreamStatus.map((entry) => [entry.upstream, entry.status]))
-            lines.push(`  upstreams: ${model.upstreams.map((upstream) => `${upstream}[${statusLabel(verdicts.get(upstream) ?? 'unknown')}]`).join(' ')}`)
-          } else {
-            lines.push('  upstreams: (unknown — run cline_pass_probe for this model)')
-          }
-          if (model.lastProvider !== '') lines.push(`  last=${model.lastProvider} (${model.lastMs}ms)`)
-          return lines.join('\n')
+          return [
+            `${model.id}  pipeline=${model.pipeline || 'unknown'}${model.hidden ? ' (hidden from pickers)' : ''}`,
+            model.lastProvider === '' ? '' : `  last=${model.lastProvider} (${model.lastMs}ms)`,
+          ].filter((line) => line !== '').join('\n')
         })
         const head = `${value.models.length} Cline Pass model(s); official catalog=${value.catalogCount}${value.catalogSources.length === 0 ? '' : ` via ${value.catalogSources.join(',')}`}`
         const added = value.added.length === 0 ? [] : [`newly adopted: ${value.added.join(', ')}`]
@@ -334,136 +244,13 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
     },
   })))
 
-  // ── cline_pass_probe ──────────────────────────────────────────────────────
-
-  disposers.push(ctx.tools.register(defineTool({
-    name: 'cline_pass_probe',
-    description: 'Detect how one model is routed and harvest its pinnable upstream channels, with one tiny real request. Run it before pinning, and again when a pin that used to work stops working.',
-    parameters: {
-      model: { type: 'string', required: true, description: 'Model id, e.g. "cline-pass/glm-5.2".' },
-    },
-    timeoutMs: 600_000,
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean', required: true },
-          model: { type: 'string', required: true },
-          error: { type: 'string', required: true },
-          ms: { type: 'integer', required: true },
-          pipeline: { type: 'string', required: true },
-          pinnable: { type: 'boolean', required: true },
-          canonicalSlug: { type: 'string', required: true },
-          lastProvider: { type: 'string', required: true },
-          upstreams: { type: 'array', required: true, items: { type: 'string' } },
-          availableProviders: { type: 'array', required: true, items: { type: 'string' } },
-          tier0: { type: 'array', required: true, items: { type: 'string' } },
-        },
-      },
-      render: (_args, value) => {
-        if (!value.ok) return text(`probe ${value.model} failed: ${value.error}`)
-        return text([
-          `probe ${value.model}: ok in ${value.ms}ms`,
-          `pipeline=${value.pipeline} pinnable=${value.pinnable} canonicalSlug=${value.canonicalSlug || '-'} lastProvider=${value.lastProvider || '-'}`,
-          value.upstreams.length === 0 ? 'upstreams: (none discovered)' : `upstreams (${value.upstreams.length}): ${value.upstreams.join(', ')}`,
-          value.tier0.length === 0 ? '' : `tier0: ${value.tier0.join(', ')}`,
-        ].filter((line) => line !== '').join('\n'))
-      },
-    },
-    async execute(args, exec) {
-      const model = String(args.model).trim()
-      const result = await engine.probe(model, { signal: exec.signal })
-      return {
-        ok: result.ok,
-        model,
-        error: firstLine(result.error, 400),
-        ms: Math.round(result.ms),
-        pipeline: result.pipeline,
-        pinnable: result.pinnable,
-        canonicalSlug: result.canonicalSlug,
-        lastProvider: result.lastProvider,
-        upstreams: result.upstreams,
-        availableProviders: result.availableProviders,
-        tier0: result.tier0,
-      }
-    },
-  })))
-
-  // ── cline_pass_validate ───────────────────────────────────────────────────
-
-  disposers.push(ctx.tools.register(defineTool({
-    name: 'cline_pass_validate',
-    description: 'Test every known channel of one model, one tiny real request each, and report a verdict per channel: available, rate-limited, not-pinnable, or auth-failed. This is the ground truth behind a pin. Probe the model first so its channel list exists.',
-    parameters: {
-      model: { type: 'string', required: true, description: 'Model id, e.g. "cline-pass/glm-5.2".' },
-    },
-    timeoutMs: 1_800_000,
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean', required: true },
-          model: { type: 'string', required: true },
-          error: { type: 'string', required: true },
-          summary: {
-            type: 'object',
-            required: true,
-            additionalProperties: false,
-            properties: {
-              ok: { type: 'integer', required: true },
-              limited: { type: 'integer', required: true },
-              bad: { type: 'integer', required: true },
-              auth: { type: 'integer', required: true },
-              unknown: { type: 'integer', required: true },
-            },
-          },
-          results: { type: 'array', required: true, items: VALIDATE_RESULT_SCHEMA },
-        },
-      },
-      render: (_args, value) => {
-        if (!value.ok) return text(`validate ${value.model} failed: ${value.error}`)
-        return text([
-          `validate ${value.model}: ${value.results.length} upstream(s)`,
-          `available=${value.summary.ok} rate-limited=${value.summary.limited} not-pinnable=${value.summary.bad} auth-failed=${value.summary.auth} unknown=${value.summary.unknown}`,
-          ...value.results.map((entry) => `${entry.upstream}: ${statusLabel(entry.status)} (${entry.ms}ms)${entry.note === '' ? '' : ` — ${entry.note}`}`),
-        ].join('\n'))
-      },
-    },
-    async execute(args, exec) {
-      const model = String(args.model).trim()
-      const meta = store.metaOf(model)
-      if (!Array.isArray(meta.upstreams) || meta.upstreams.length === 0) {
-        return {
-          ok: false,
-          model,
-          error: 'no known upstream channels: run cline_pass_probe for this model first',
-          summary: { ok: 0, limited: 0, bad: 0, auth: 0, unknown: 0 },
-          results: [],
-        }
-      }
-      const outcome = await engine.validate(model, { signal: exec.signal })
-      return {
-        ok: true,
-        model,
-        error: '',
-        summary: outcome.summary,
-        results: outcome.results.map((result) => ({ upstream: result.upstream, status: result.status, ms: Math.round(result.ms), note: result.note.slice(0, 160) })),
-      }
-    },
-  })))
-
   // ── cline_pass_test ───────────────────────────────────────────────────────
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'cline_pass_test',
-    description: 'Send one small real request through a pin and report which upstream served it, with the failover trace. `upstreams` and `exclude` override the stored pin for this call only; omit both to exercise it as stored. Nothing is persisted.',
+    description: 'Send one small, automatically routed request and report which upstream served it. No client-side routing fields are sent.',
     parameters: {
       model: { type: 'string', required: true, description: 'Model id, e.g. "cline-pass/glm-5.2".' },
-      upstreams: { type: 'array', items: { type: 'string' }, description: 'Ordered upstream candidates for this call only.' },
-      exclude: { type: 'array', items: { type: 'string' }, description: 'Upstream channels to exclude for this call only.' },
-      has: { type: 'array', items: { type: 'string' }, description: 'Vercel gateway capability filter for this call only.' },
     },
     timeoutMs: 600_000,
     output: {
@@ -478,30 +265,17 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
           actual: { type: 'string', required: true },
           pipeline: { type: 'string', required: true },
           account: { type: 'string', required: true },
-          adherence: { type: 'string', required: true },
-          has: { type: 'array', required: true, items: { type: 'string' } },
           warnings: { type: 'array', required: true, items: { type: 'string' } },
-          trace: { type: 'array', required: true, items: TRACE_SCHEMA },
         },
       },
-      render: (_args, value) => {
-        const trace = value.trace.map((entry) => `  ${entry.upstream} -> HTTP ${entry.status} in ${entry.ms}ms${entry.note === '' ? '' : ` — ${entry.note}`}`)
-        return text([
-          value.ok ? `test ${value.model}: ok in ${value.ms}ms via ${value.actual || '(unknown)'}` : `test ${value.model}: FAILED — ${value.error}`,
-          ...value.warnings.map((warning) => `⚠ ${warning}`),
-          trace.length === 0 ? '' : `attempts (${trace.length}):`,
-          ...trace,
-        ].filter((line) => line !== '').join('\n'))
-      },
+      render: (_args, value) => text([
+        value.ok ? `test ${value.model}: ok in ${value.ms}ms via ${value.actual || '(unknown)'}` : `test ${value.model}: FAILED — ${value.error}`,
+        ...value.warnings.map((warning) => `⚠ ${warning}`),
+      ].join('\n')),
     },
     async execute(args, exec) {
       const model = String(args.model).trim()
-      const result = await engine.test(model, {
-        upstreams: Array.isArray(args.upstreams) ? args.upstreams.map(String) : undefined,
-        exclude: Array.isArray(args.exclude) ? args.exclude.map(String) : undefined,
-        has: Array.isArray(args.has) ? args.has.map(String) : undefined,
-        signal: exec.signal,
-      })
+      const result = await engine.test(model, { signal: exec.signal })
       return {
         ok: result.ok,
         model,
@@ -510,83 +284,7 @@ export function registerClinePassTools(ctx: Context, options: ClinePassToolsOpti
         actual: result.actual,
         pipeline: result.pipeline,
         account: result.account,
-        adherence: result.adherence,
-        has: result.has,
         warnings: result.warnings,
-        trace: result.trace.map((entry) => ({ upstream: entry.upstream, status: entry.status, ms: Math.round(entry.ms), note: entry.note.slice(0, 160) })),
-      }
-    },
-  })))
-
-  // ── cline_pass_pin ────────────────────────────────────────────────────────
-
-  disposers.push(ctx.tools.register(defineTool({
-    name: 'cline_pass_pin',
-    description: 'Persist one model\'s upstream pin. `upstreams` is the ordered candidate list, primary first (an empty array returns the model to automatic routing); `exclude` lists channels that must never be used, compiled into an allow-list on the wire because the gateway ignores an ignore-field; `pinMode` is "strict" or "preferred"; `sort` orders candidates by "cost", "ttft" or "tps" ("none" clears it). Only the fields you supply change. Returns `warnings` when a name cannot be checked or an exclusion cannot be expressed.',
-    parameters: {
-      model: { type: 'string', required: true, description: 'Model id, e.g. "cline-pass/glm-5.2".' },
-      upstreams: { type: 'array', items: { type: 'string' }, description: 'Ordered pin list; an empty array clears pinning.' },
-      exclude: { type: 'array', items: { type: 'string' }, description: 'Channels that must never be used.' },
-      pinMode: { type: 'string', enum: ['strict', 'preferred'], description: 'How strictly to honor the pin list.' },
-      sort: { type: 'string', enum: ['cost', 'ttft', 'tps', 'none'], description: 'Reorder candidates by this metric; "none" clears it.' },
-      has: { type: 'array', items: { type: 'string' }, description: 'Vercel gateway capability filter; omit to keep the stored value, or pass an empty array to clear it.' },
-    },
-    timeoutMs: 30_000,
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          ok: { type: 'boolean', required: true },
-          model: { type: 'string', required: true },
-          pinned: { type: 'array', required: true, items: { type: 'string' } },
-          excluded: { type: 'array', required: true, items: { type: 'string' } },
-          pinMode: { type: 'string', required: true },
-          sort: { type: 'string', required: true },
-          has: { type: 'array', required: true, items: { type: 'string' } },
-          warnings: { type: 'array', required: true, items: { type: 'string' } },
-        },
-      },
-      render: (_args, value) => text([
-        `pinned ${value.model}`,
-        `upstreams: ${value.pinned.length === 0 ? '(auto)' : value.pinned.join(' > ')}`,
-        `exclude: ${value.excluded.length === 0 ? '(none)' : value.excluded.join(', ')}`,
-        `pinMode=${value.pinMode} sort=${value.sort === '' ? 'none' : value.sort} has=${value.has.length === 0 ? '(none)' : value.has.join(',')}`,
-        ...value.warnings.map((warning) => `⚠ ${warning}`),
-      ].join('\n')),
-    },
-    async execute(args) {
-      const model = String(args.model).trim()
-      const current = await pinOf(model)
-      const next: ClinePassPinSettings = {
-        upstreams: Array.isArray(args.upstreams) ? args.upstreams.map(String) : current.upstreams,
-        exclude: Array.isArray(args.exclude) ? args.exclude.map(String) : current.exclude,
-        pinMode: args.pinMode !== undefined ? (args.pinMode === 'preferred' ? 'preferred' : 'strict') : current.pinMode,
-        sort: args.sort === undefined ? current.sort : (args.sort === 'none' ? '' : String(args.sort)),
-        has: Array.isArray(args.has) ? args.has.map(String).map((name) => name.trim()).filter((name) => name !== '') : current.has,
-      }
-      await settings.setPin(model, next)
-      const meta = store.metaOf(model)
-      const known = Array.isArray(meta.upstreams) ? meta.upstreams.map(String) : []
-      const warnings = [...pinWarnings({ upstream: next.upstreams[0] ?? null, excludeList: next.exclude }, meta)]
-      const named = [...next.upstreams, ...next.exclude]
-      if (named.length > 0) {
-        if (known.length === 0) {
-          warnings.push(`unverifiedChannel: this model has no discovered channel list yet, so ${named.join(', ')} cannot be checked — run cline_pass_probe for it`)
-        } else {
-          const unknown = named.filter((name) => !known.includes(name))
-          if (unknown.length > 0) warnings.push(`unknownChannel: ${unknown.join(', ')} is not in this model's discovered channel list (${known.join(', ')}); confirm with cline_pass_test, because the gateway ignores a channel it cannot use rather than failing`)
-        }
-      }
-      return {
-        ok: true,
-        model,
-        pinned: next.upstreams,
-        excluded: next.exclude,
-        pinMode: normalizePinMode(next.pinMode),
-        sort: next.sort,
-        has: next.has,
-        warnings,
       }
     },
   })))

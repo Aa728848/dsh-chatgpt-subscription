@@ -49,7 +49,7 @@
 | **返回 `429` 但有的会自动换号、有的只原地退避重试** | 插件区分**账号级配额耗尽**（进入窗口冷却并自动切到号池下一个账号）与**全局引擎瞬时过载**（如 `engine is currently overloaded`，所有账号共享同一瓶颈，换号只会把号池抽干，因此原地退避重试） | 若所有账号均进入配额冷却，可在设置页或看板卡片查看最早重置倒计时，或补充新账号入池 |
 | **Kimi Code 报 `401 does not have access to k3` 或上下文受限** | 属于套餐档位权限限制而非登录失效（例如 `k3` 1M 窗口需 Allegretto 及以上，Moderato 上限 256K） | 换用 `kimi-for-coding` / `k3-256k`，或将该模型的「上下文窗口覆盖」调整为 `256K` |
 | **WorkBuddy 提示号池已暂停 30 分钟（`WORKBUDDY_POOL_PAUSED`）** | 上游返回 `11140` 账号受限，且 30 分钟内已有 2 个不同账号触发该风控，号池启动保护性熔断 | 等待 30 分钟自动解除整池暂停；被标记 `11140` 的受限账号需人工核查并重新登录后才会回到轮换 |
-| **Cline Pass 钉住了渠道但响应显示未被采纳** | 上游网关对不可用或策略改指的 `provider.only` 不报错而是静默回退其它渠道（如匿名路由） | 以卡片「测试」与请求历史回读的实际渠道为准；对于 `deepseek-v4.1-flash-1017` 等模型保留默认的 `has: [vision, implicit-caching]` 过滤条件 |
+| **Cline Pass 报 `client-supplied "providerOptions" model routing is not supported`** | 旧版客户端钉选字段不被 Cline 接受 | 升级到已移除上游钉选的版本；请求由网关自动路由，卡片只读回实际渠道 |
 | **MiniMax Code 额度面板提示需要官方客户端标识头** | 插件默认不伪造 MiniMax 第一方客户端签名头，因此用量接口拒绝读取（完全不影响模型对话） | 可直接在 MiniMax 官方控制台查看用量条；若接受携带第一方标识头的取舍，可设置 `DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION=1` 重启 DSH |
 | **长请求约 2 分钟无输出后自动报错重试** | 流式空闲看门狗（默认 120s，Ollama 为 300s）检测到响应头之后超过 2 分钟零字节到达，主动切断僵死连接触发重试 | 属于防挂死保护机制；Codex 线路若需调整可通过插件配置 `codexStreamIdleTimeoutMs` 修改 |
 

@@ -1,15 +1,10 @@
 /**
- * Runtime observation state: pipeline detection, discovered upstream channels,
- * per-channel verdicts, the last catalog scan, the last quota reading, and
- * request history.
- *
+ * Runtime observation state: the last catalog scan, quota reading, response
+ * routing facts and request history. Everything here is derived and in-memory.
  * Configuration lives in the settings file instead (see `token-store.ts`).
- * Everything here is derived data any probe can rebuild, so it is never
- * persisted.
  *
  * @module dsh-chatgpt-subscription/cline-pass-store
  */
-import { MAX_UPSTREAMS } from './types.ts'
 import type { ClinePipeline } from './protocol.ts'
 import type {
   ClinePassHistoryRowDto,
@@ -17,45 +12,15 @@ import type {
 } from '../../shared/cline-pass-contracts.ts'
 import { DEFAULT_HISTORY_LIMIT } from './types.ts'
 
-export type ClinePassVerdictStatus = 'ok' | 'limited' | 'bad' | 'auth' | 'not-adopted' | 'unknown'
-
-/** One upstream availability verdict. */
-export interface ClinePassUpstreamVerdict {
-  status: ClinePassVerdictStatus
-  note: string
-  ms: number
-  checkedAt: number
-}
-
-/** Per-upstream endpoint detail harvested from OpenRouter's public catalog. */
-export interface ClinePassUpstreamDetail {
-  slug: string
-  name: string
-  endpoints: number
-  context: number
-  uptime: number
-}
-
-/** Discovered metadata for one model. */
+/** Observed metadata for one model, unrelated to client-side routing control. */
 export interface ClinePassModelObservation {
   ok?: boolean
   pipeline?: ClinePipeline | null
-  pinnable?: boolean
   canonicalSlug?: string | null
-  openrouterSlug?: string | null
-  upstreams?: string[]
-  channels?: Partial<Record<ClinePipeline, string[]>>
-  upstreamStatus?: Record<string, ClinePassUpstreamVerdict>
-  upstreamDetail?: Record<string, ClinePassUpstreamDetail>
-  availableProviders?: string[]
-  tier0?: string[]
   lastProvider?: string | null
   /** The last answer's first-party DeepSeek fingerprint, when it carried one. */
   lastFingerprint?: string | null
   lastMs?: number
-  probedAt?: number
-  validatedAt?: number
-  staleAt?: number
   lastError?: string
 }
 
@@ -83,13 +48,9 @@ export interface ClinePassCatalogState {
   fetchedAt: number
 }
 
-function verdict(status: ClinePassVerdictStatus, note: unknown, ms: unknown): ClinePassUpstreamVerdict {
-  return { status, note: String(note ?? '').slice(0, 200), ms: Number(ms ?? 0), checkedAt: Date.now() }
-}
-
 /** Create the observation store. */
 export function createClinePassStore({ historyLimit = DEFAULT_HISTORY_LIMIT }: { historyLimit?: number } = {}) {
-  /** Model id -> discovered metadata. */
+  /** Model id -> observed response metadata. */
   const models = new Map<string, ClinePassModelObservation>()
   /** Newest first. */
   const history: ClinePassHistoryEntry[] = []
@@ -99,53 +60,25 @@ export function createClinePassStore({ historyLimit = DEFAULT_HISTORY_LIMIT }: {
   let usage: ClinePassUsageDto = { accounts: [], fetchedAt: 0 }
 
   return {
-    /** Discovered metadata for one model (never undefined). */
+    /** Observed metadata for one model (never undefined). */
     metaOf(model: string): ClinePassModelObservation {
       return models.get(model) ?? {}
     },
-    /** Every model with discovered metadata. */
+    /** Every model with observed metadata. */
     allMeta(): Array<ClinePassModelObservation & { id: string }> {
       return [...models.entries()].map(([id, meta]) => ({ id, ...meta }))
     },
-    /** Merge one discovery result into a model's metadata. */
+    /** Merge one response observation into a model's metadata. */
     learn(model: string, patch: Partial<ClinePassModelObservation>): ClinePassModelObservation {
-      const current = models.get(model) ?? {}
-      const next: ClinePassModelObservation = { ...current, ...patch }
-      if (patch.upstreamStatus !== undefined) {
-        next.upstreamStatus = { ...(current.upstreamStatus ?? {}), ...patch.upstreamStatus }
-      }
-      if (next.upstreams !== undefined) {
-        // Same bound as the protocol layer's merge: a tighter cap here would
-        // silently drop channels the probe just discovered.
-        next.upstreams = [...new Set(next.upstreams.map(String).filter((name) => name.length > 0))].slice(0, MAX_UPSTREAMS)
-      }
+      const next: ClinePassModelObservation = { ...(models.get(model) ?? {}), ...patch }
       models.set(model, next)
       return next
-    },
-    /** Record a verdict; explicit validation also replaces stale results with unknown. */
-    learnUpstream(
-      model: string,
-      upstream: string | null | undefined,
-      status: ClinePassVerdictStatus,
-      note: unknown,
-      ms: unknown,
-      { includeUnknown = false }: { includeUnknown?: boolean } = {},
-    ): void {
-      if (upstream === undefined || upstream === null || upstream === '') return
-      if (status === 'unknown' && !includeUnknown) return
-      const current = models.get(model) ?? {}
-      models.set(model, {
-        ...current,
-        upstreamStatus: { ...(current.upstreamStatus ?? {}), [upstream]: verdict(status, note, ms) },
-      })
     },
     /** Append one request-history row (newest first, bounded). */
     record(entry: ClinePassHistoryInput): void {
       historyRevision += 1
-      // A caller records only the facts it has (a transport failure has no
-      // usage frame and no serving channel). Normalize here so every reader gets
-      // the full row shape instead of a field that is present on some rows and
-      // absent on others.
+      // Normalize here so every reader gets the full row shape instead of a
+      // field that is present on some rows and absent on others.
       const row: ClinePassHistoryEntry = {
         ts: Date.now(),
         model: entry.model,
@@ -160,7 +93,6 @@ export function createClinePassStore({ historyLimit = DEFAULT_HISTORY_LIMIT }: {
         usage: entry.usage ?? null,
         error: entry.error ?? '',
         attempts: entry.attempts ?? [],
-        adherence: entry.adherence ?? '',
         fingerprint: entry.fingerprint ?? '',
         anonymous: entry.anonymous === true,
         warnings: entry.warnings ?? [],

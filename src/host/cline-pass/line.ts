@@ -21,7 +21,7 @@ import { getClinePassWebStatus, registerClinePassRoutes, CLINE_PASS_ROUTES } fro
 import { createClinePassStore, type ClinePassStore } from './store.ts'
 import { ClinePassModelSettingsStore, listedClinePassCatalogModels, type ClinePassModelSettings } from './token-store.ts'
 import { registerClinePassTools } from './tools.ts'
-import { DEFAULT_MODELS, PROVIDER_ID, PROVIDER_NAME, defaultPin } from './types.ts'
+import { DEFAULT_MODELS, PROVIDER_ID, PROVIDER_NAME } from './types.ts'
 import type { HubSummarySource } from '../hub-overview.ts'
 
 export interface ClinePassLineOptions {
@@ -80,10 +80,6 @@ export function createClinePassLine(ctx: Context, options: ClinePassLineOptions)
     ...(options.modelFetchFn === undefined ? {} : { streamFetchFn: options.modelFetchFn }),
     accountPool,
     store,
-    pinFor: (model) => ({
-      ...(modelSettings.status().pins[model] ?? defaultPin(model)),
-      spelling: modelSettings.status().pinSpelling,
-    }),
     baseURL: () => modelSettings.status().baseURL,
     logger: ctx.logger,
   })

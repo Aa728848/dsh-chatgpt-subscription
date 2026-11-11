@@ -85,17 +85,16 @@ function adapterWith(
 }
 
 describe('ClinePassAdapter', () => {
-  it('fails over from a refused pinned channel before the first chunk', async () => {
+  it('never sends legacy upstream routing fields in a live stream', async () => {
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
-    await settings.setPin(MODEL, { upstreams: ['baseten', 'deepseek'], exclude: [], pinMode: 'strict', sort: '', has: [] })
-    await settings.update({ enabledModelIds: [MODEL] })
+    await settings.write({
+      ...settings.status(),
+      enabledModelIds: [MODEL],
+      pins: { [MODEL]: { upstreams: ['deepseek'], exclude: [], has: ['vision'] } },
+      pinSpelling: 'both',
+    } as never)
     const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
-      calls.push(body)
-      const provider = body.provider as { only?: string[] } | undefined
-      if (provider?.only?.includes('baseten')) {
-        return Response.json({ error: { message: 'provider refused the pin' } }, { status: 429 })
-      }
+      calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
       return new Response(SSE_OK, { status: 200, headers: { 'content-type': 'text/event-stream' } })
     }) as typeof fetch
     const adapter = adapterWith(fetchFn)
@@ -107,14 +106,11 @@ describe('ClinePassAdapter', () => {
       signal: undefined,
     } as never)) chunks.push(chunk)
 
-    expect(calls).toHaveLength(2)
-    expect((calls[0]?.provider as { only: string[] }).only).toEqual(['baseten'])
-    expect((calls[1]?.provider as { only: string[] }).only).toEqual(['deepseek'])
-    expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => (chunk as { text: string }).text)).toEqual(['hello'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).not.toHaveProperty('provider')
+    expect(calls[0]).not.toHaveProperty('providerOptions')
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta')).toHaveLength(1)
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
-    // The history names both attempts, so a failover is visible after the fact.
-    const history = store.readHistory(5)
-    expect(history[0]?.attempts).toEqual(['baseten', 'deepseek'])
   })
 
   it('retries a failure that happened before the request was sent', async () => {
@@ -184,9 +180,8 @@ describe('ClinePassAdapter', () => {
     expect(POOL_COOLDOWN_MS).toBeGreaterThan(0)
   })
 
-  it('reads the serving channel off the terminal stream frame and marks the pin adopted', async () => {
+  it('reads the serving channel and fingerprint off the terminal stream frame', async () => {
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
-    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '', has: ['vision', 'implicit-caching'] })
     await settings.update({ enabledModelIds: [MODEL] })
     const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
@@ -205,22 +200,19 @@ describe('ClinePassAdapter', () => {
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
     } as never)) { /* drain */ }
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.providerOptions).toEqual({ gateway: { only: ['deepseek'], has: ['vision', 'implicit-caching'] } })
-    expect(calls[0]?.provider).toEqual({ only: ['deepseek'] })
+    expect(calls[0]).not.toHaveProperty('providerOptions')
+    expect(calls[0]).not.toHaveProperty('provider')
     const row = store.readHistory(1)[0]
     expect(row?.provider).toBe('deepseek')
-    expect(row?.adherence).toBe('adopted')
     expect(row?.fingerprint).toBe('fp_first_party')
     expect(row?.anonymous).toBe(false)
     expect(row?.warnings).toEqual([])
-    // A first-party answer proves the pinned channel works.
-    expect(store.metaOf(MODEL).upstreamStatus?.deepseek?.status).toBe('ok')
+    expect(store.metaOf(MODEL).lastProvider).toBe('deepseek')
     expect(store.metaOf(MODEL).lastFingerprint).toBe('fp_first_party')
   })
 
-  it('says when a strict pin is silently served by the anonymous contributor route', async () => {
+  it('warns when the automatic route serves the anonymous contributor route', async () => {
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
-    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '', has: [] })
     await settings.update({ enabledModelIds: [MODEL] })
     const fetchFn = (async () => new Response(
       sseWithRouting({
@@ -242,13 +234,10 @@ describe('ClinePassAdapter', () => {
     expect(chunks.filter((chunk) => chunk.type === 'text-delta')).toHaveLength(1)
     const row = store.readHistory(1)[0]
     expect(row?.provider).toBe('openai-compatible-private')
-    expect(row?.adherence).toBe('not-adopted')
     expect(row?.anonymous).toBe(true)
     expect(row?.fingerprint).toBe('')
-    expect(row?.warnings.some((warning) => warning.startsWith('pinNotAdopted:'))).toBe(true)
     expect(row?.warnings.some((warning) => warning.startsWith('anonymousServed:'))).toBe(true)
-    // A channel the pin never proved is not marked usable.
-    expect(store.metaOf(MODEL).upstreamStatus?.deepseek).toBeUndefined()
+    expect(store.metaOf(MODEL).lastProvider).toBe('openai-compatible-private')
   })
 
   it('clears the header deadline once the response starts streaming', async () => {

@@ -1,5 +1,5 @@
 /**
- * The Cline Pass settings API: envelope shape, account handling, pins,
+ * The Cline Pass settings API: envelope shape, account handling, model tests,
  * visibility and the no-secret boundary.
  *
  * Nothing here reaches Cline: the engine is a double, the pool and credential
@@ -164,19 +164,19 @@ describe('Cline Pass settings API', () => {
     expect(captured.raw).not.toContain('sk-new')
   })
 
-  it('persists a pin and reports it on the next status read', async () => {
+  it('removes the pin mutation route and exposes no pin fields in status', async () => {
     const model = DEFAULT_MODELS[0]!
     const captured = await call({
       url: '/cline-pass/api/models/pin',
       method: 'POST',
-      body: { model, upstreams: ['baseten'], exclude: ['deepseek'], pinMode: 'preferred', sort: 'cost', has: ['vision', 'implicit-caching'] },
+      body: { model, upstreams: ['baseten'] },
     })
-    expect(captured.status).toBe(200)
-    const value = captured.body.value as { pin: { upstreams: string[]; pinMode: string }; status: ClinePassWebStatus }
-    expect(value.pin).toMatchObject({ upstreams: ['baseten'], pinMode: 'preferred' })
+    expect(captured.status).toBe(404)
     const status = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
-    expect(status.models.find((entry) => entry.id === model)?.pinned).toEqual(['baseten'])
-    expect(status.models.find((entry) => entry.id === model)?.has).toEqual(['vision', 'implicit-caching'])
+    const projected = status.models.find((entry) => entry.id === model)
+    expect(projected).toBeDefined()
+    expect('pinned' in projected!).toBe(false)
+    expect('has' in projected!).toBe(false)
   })
 
   it('sizes a searched marketplace model from the gateway, without a refresh first', async () => {
@@ -262,16 +262,15 @@ describe('Cline Pass settings API', () => {
     expect((subAdded.body.value as ClinePassCatalogAddResultDto).billing).toBe('subscription')
   })
 
-  it('warns when a pin targets the anonymous contributor route', async () => {
+  it('keeps observed response routing in status without a pin control', async () => {
     const model = DEFAULT_MODELS[0]!
-    const captured = await call({
-      url: '/cline-pass/api/models/pin',
-      method: 'POST',
-      body: { model, upstreams: ['openai-compatible-private'] },
+    store.learn(model, { pipeline: 'planner', lastProvider: 'openai-compatible-private', lastMs: 42 })
+    const status = (await call({ url: '/cline-pass/api/status' })).body.value as ClinePassWebStatus
+    expect(status.models.find((entry) => entry.id === model)).toMatchObject({
+      pipeline: 'planner',
+      lastProvider: 'openai-compatible-private',
+      lastMs: 42,
     })
-    expect(captured.status).toBe(200)
-    const value = captured.body.value as { warnings: string[] }
-    expect(value.warnings.some((warning) => warning.startsWith('anonymousUpstream:'))).toBe(true)
   })
 
   it('shows and hides models without forgetting them', async () => {

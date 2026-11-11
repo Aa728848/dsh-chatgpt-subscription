@@ -11,9 +11,8 @@ import type {
  *
  * The line is API-key based: there is no OAuth flow, no token expiry, and no
  * per-account identity beyond the key and the alias a user gives it. What the
- * card does render beyond the shared account facts is the routing observation
- * this plugin makes about each model (pipeline, discovered channels, per-channel
- * verdicts) and the per-model pin the user stores. None of it is a credential.
+ * card does render beyond the shared account facts is response routing observed
+ * from each model. None of it is a credential, and none of it controls routing.
  */
 
 export const CLINE_PASS_PROVIDER_ID = 'cline-pass'
@@ -26,8 +25,8 @@ export const CLINE_PASS_ROUTE_PREFIX = '/cline-pass/api'
  * When Cline routes a model id onto the VMC fallback net, the serving channel
  * reports itself as `openai-compatible-private` and the resolved slug moves
  * under `private/…-contributor`. Answers from it may be used for training and
- * carry no zero-data-retention guarantee, so a pin landing there is a fact the
- * user must see, not a channel like any other.
+ * carry no zero-data-retention guarantee, so an answer served there is a fact
+ * the user must see.
  */
 export const CLINE_PASS_ANONYMOUS_UPSTREAMS: readonly string[] = Object.freeze(['openai-compatible-private'])
 
@@ -37,22 +36,6 @@ export function isClinePassAnonymousUpstream(name: unknown, canonicalSlug?: unkn
   if (CLINE_PASS_ANONYMOUS_UPSTREAMS.includes(value)) return true
   const slug = String(canonicalSlug ?? '').toLowerCase()
   return slug.startsWith('private/') || slug.includes('-contributor')
-}
-
-/** Authentication UI surface for this line: a pasted static key. */
-export type ClinePassPinMode = 'strict' | 'preferred'
-
-/** One channel availability verdict, as the card renders it. */
-export interface ClinePassChannelVerdictDto {
-  upstream: string
-  /** `ok` answered, `limited` refused with a rate limit, `bad` refused the pin,
-   * `auth` rejected the key, `not-adopted` answered from another channel,
-   * `unknown` could not be judged. */
-  status: 'ok' | 'limited' | 'bad' | 'auth' | 'not-adopted' | 'unknown'
-  ms: number
-  note: string
-  /** Unix milliseconds the verdict was recorded. */
-  checkedAt: number
 }
 
 /** One model as the card renders it: published facts plus live observations. */
@@ -69,23 +52,10 @@ export interface ClinePassModelDto {
   input: string[]
   /** Whether the route advertises this model to the picker. */
   enabled: boolean
-  /** `direct` (OpenRouter spelling) or `planner` (Vercel AI Gateway), once probed. */
+  /** Pipeline observed in the latest response, not a routing preference. */
   pipeline: string
-  pinnable: boolean
-  /** Ordered pin as stored, primary first. Empty means automatic routing. */
-  pinned: string[]
-  excluded: string[]
-  pinMode: ClinePassPinMode
-  sort: string
-  /** `providerOptions.gateway.has` capability filter stored with this pin. */
-  has: string[]
-  /** Discovered channels, highest confidence first. */
-  upstreams: string[]
-  upstreamStatus: ClinePassChannelVerdictDto[]
   lastProvider: string
   lastMs: number
-  probedAt: number
-  validatedAt: number
   /** Stored context-window override, absent when the published window applies. */
   contextWindowOverride?: number
 }
@@ -187,7 +157,6 @@ export interface ClinePassSettingsDto {
   maxConcurrentRequests: number
   streamIdleTimeoutMs: number
   historyLimit: number
-  pinSpelling: string
 }
 
 /** A settings patch; only the keys present change. */
@@ -199,7 +168,6 @@ export interface ClinePassSettingsUpdateDto {
   maxConcurrentRequests?: number
   streamIdleTimeoutMs?: number
   historyLimit?: number
-  pinSpelling?: string
   exposeTools?: boolean
 }
 
@@ -226,69 +194,24 @@ export interface ClinePassCatalogAddResultDto {
   status: ClinePassWebStatus
 }
 
-/** Outcome of probing one model's routing pipeline and channel list. */
-export interface ClinePassProbeResultDto {
-  ok: boolean
-  model: string
-  error: string
-  ms: number
-  pipeline: string
-  pinnable: boolean
-  canonicalSlug: string
-  lastProvider: string
-  upstreams: string[]
-  availableProviders: string[]
-  tier0: string[]
-  /** First-party DeepSeek fingerprint when the probe's answer carried one. */
-  fingerprint: string
-  /** Whether the probe's answer was served by the anonymous contributor route. */
-  anonymous: boolean
-}
-
-/** Outcome of testing every known channel of one model. */
-export interface ClinePassValidateResultDto {
-  ok: boolean
-  model: string
-  error: string
-  summary: { ok: number; limited: number; bad: number; auth: number; unknown: number }
-  upstreams: string[]
-  results: { upstream: string; status: string; ms: number; note: string }[]
-}
-
-/** One failover attempt, as the test result reports it. */
-export interface ClinePassAttemptTraceDto {
-  upstream: string
-  status: number
-  ms: number
-  note: string
-}
-
-/** Outcome of one small real request sent through a pin. */
+/** Outcome of one small, automatically routed model request. */
 export interface ClinePassTestResultDto {
   ok: boolean
   model: string
   error: string
   ms: number
-  targets: string[]
-  excluded: string[]
   actual: string
   actualName: string
   pipeline: string
-  pinnable: boolean
   canonicalSlug: string
   account: string
   content: string
-  adopted: boolean
-  adherence: string
   plan: string
   /** First-party DeepSeek fingerprint when the serving answer carried one. */
   fingerprint: string
   /** Whether the serving channel is the anonymous contributor route. */
   anonymous: boolean
-  /** The capability filter this test actually sent. */
-  has: string[]
   warnings: string[]
-  trace: ClinePassAttemptTraceDto[]
 }
 
 /** One row of the in-process request history. */
@@ -312,7 +235,6 @@ export interface ClinePassHistoryRowDto {
   }
   error: string
   attempts: string[]
-  adherence: string
   /** First-party DeepSeek fingerprint observed on the serving answer, if any. */
   fingerprint: string
   /** Whether the serving channel was the anonymous contributor route. */
@@ -337,11 +259,6 @@ export type ClinePassAccountAction =
   | 'delete'
   | 'clear-cooldown'
   | 'strategy'
-
-/** Whether a submitted pin mode names one of the two accepted modes. */
-export function isClinePassPinMode(value: unknown): value is ClinePassPinMode {
-  return value === 'strict' || value === 'preferred'
-}
 
 /** Human label for the gateway's quota-window spelling. */
 export function clinePassWindowLabel(type: string): string {
