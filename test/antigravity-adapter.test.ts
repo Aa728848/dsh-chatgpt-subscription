@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
+import { AntigravityAdapter, resolveDefaultReasoningEffort } from '../src/host/antigravity/adapter.ts'
 import { AccountPoolStore } from '../src/host/antigravity/account-pool.ts'
 import { FileCredentialStore, FileModelSettingsStore } from '../src/host/antigravity/token-store.ts'
 import { BlockAssembler, LlmError, createAssistantMessage, createToolResultMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -29,13 +29,13 @@ function poolWithLegacyAccount(store: FileCredentialStore): AccountPoolStore {
 }
 
 describe('AntigravityAdapter', () => {
-  it.each(['gemini-3.7-flash', 'gemini-3.8-flash'])('preserves %s IDs, thinking and usage through a complete tool execution round trip', async (modelId) => {
+  it.each(['gemini-4-carbon', 'gemini-3.8-flash'])('preserves %s IDs, thinking and usage through a complete tool execution round trip', async (modelId) => {
     const store = new FileCredentialStore()
     vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })
     const modelSettings = new FileModelSettingsStore()
-    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: ['gemini-3.7-flash'], catalogModels: [], defaultReasoningEffort: 'low' })
+    vi.spyOn(modelSettings, 'read').mockResolvedValue({ enabledModelIds: [modelId], catalogModels: [], defaultReasoningEffort: 'low' })
     const preferences = {
-      status: () => ({ enabledModelIds: ['gemini-3.7-flash'], catalogModels: [], defaultReasoningEffort: 'high' as const }),
+      status: () => ({ enabledModelIds: [modelId], catalogModels: [], defaultReasoningEffort: 'high' as const }),
       update: vi.fn(),
     }
     const adapter = new AntigravityAdapter(store, modelSettings, preferences)
@@ -90,11 +90,11 @@ describe('AntigravityAdapter', () => {
       ])
       expect(captured[1].request.contents[2].parts[0].functionResponse).toEqual({ id: 'run-1', name: 'run_code', response: { output: '1' } })
       // 3.8 is served through its tiered runtime, which takes the level in the
-      // request; 3.7 has no tiered runtime in the catalog and encodes the level
-      // in its runtime id instead.
+      // request; Carbon has no tiered runtime in the catalog and encodes the
+      // level in its runtime id instead.
       const expected = modelId === 'gemini-3.8-flash'
         ? { model: 'gemini-3.8-flash-tiered', thinkingConfig: { thinkingLevel: 'HIGH', includeThoughts: true } }
-        : { model: 'gemini-3.7-flash-high', thinkingConfig: { includeThoughts: true } }
+        : { model: 'gemini-4-carbon-high', thinkingConfig: { includeThoughts: true } }
       for (const body of captured) {
         expect(body.model).toBe(expected.model)
         expect(body.request.generationConfig.thinkingConfig).toEqual(expected.thinkingConfig)
@@ -131,13 +131,22 @@ describe('AntigravityAdapter', () => {
 
     const models = await adapter.listModels('antigravity')
     expect(models.length).toBeGreaterThan(0)
+    expect(models.some((m) => m.id === 'gemini-4-carbon')).toBe(true)
+    expect(models.some((m) => m.id === 'gemini-4-argon')).toBe(true)
     expect(models.some((m) => m.id === 'gemini-3.8-flash')).toBe(true)
-    expect(models.some((m) => m.id === 'gemini-3.7-flash')).toBe(true)
     expect(models.some((m) => m.id === 'claude-opus-5-5')).toBe(true)
     expect(models.some((m) => m.id === 'gemini-3.5-flash-lite')).toBe(true)
     expect(models.some((m) => m.id === 'gemini-3.1-flash-lite')).toBe(true)
     // Gone from the service catalog, or unusable through a text-only chat route.
-    for (const removed of ['claude-opus-4-6', 'claude-sonnet-4-6', 'gemini-3.1-flash-image']) {
+    for (const removed of [
+      'claude-opus-4-6',
+      'claude-sonnet-4-6',
+      'gemini-3.7-flash',
+      'gemini-3.6-flash',
+      'gemini-3.5-flash',
+      'gemini-3.1-pro',
+      'gemini-3.1-flash-image',
+    ]) {
       expect(models.some((m) => m.id === removed)).toBe(false)
     }
 
@@ -171,48 +180,40 @@ describe('AntigravityAdapter', () => {
     expect((list[0] as unknown as { context?: { contextWindow?: number } }).context?.contextWindow).toBe(524288)
   })
 
-  it('sanitizes defaultEffort for models like gemini-3.1-pro whose efforts do not include medium', async () => {
-    const store = new FileCredentialStore()
-    const modelSettings = new FileModelSettingsStore()
-    vi.spyOn(modelSettings, 'read').mockResolvedValue({
-      enabledModelIds: ['gemini-3.1-pro'],
-      catalogModels: [],
-      // defaultReasoningEffort 未指定，按以往逻辑会 fallback 到 medium
-    })
-
-    const adapter = new AntigravityAdapter(store, modelSettings)
-    const resolved = await adapter.resolveModel('antigravity', 'gemini-3.1-pro')
-    expect(resolved.id).toBe('gemini-3.1-pro')
-    const efforts = resolved.reasoning?.efforts.map((e) => e.name) ?? []
-    expect(efforts).toEqual(['low', 'high'])
-    // defaultEffort 必须包含在 efforts 中，绝不能是 'medium'
-    expect(efforts).toContain(resolved.reasoning?.defaultEffort)
-    expect(resolved.reasoning?.defaultEffort).toBe('low')
+  it('sanitizes defaultEffort for effort sets that omit medium', () => {
+    // Regression guard for Issue #4: defaultEffort must always belong to the
+    // declared effort set, falling back to 'low' or the first declared tier
+    // when 'medium' is absent.
+    expect(resolveDefaultReasoningEffort(['low', 'high'])).toBe('low')
+    expect(resolveDefaultReasoningEffort(['low', 'high'], 'medium')).toBe('low')
+    expect(resolveDefaultReasoningEffort(['low', 'high'], 'high')).toBe('high')
+    expect(resolveDefaultReasoningEffort(['high'])).toBe('high')
+    expect(resolveDefaultReasoningEffort([])).toBeUndefined()
   })
 
-  it('honors configured defaultReasoningEffort when supported by model, and falls back safely when not supported', async () => {
+  it('honors configured defaultReasoningEffort when supported by model, and defaults to medium otherwise', async () => {
     const store = new FileCredentialStore()
     const modelSettings = new FileModelSettingsStore()
 
-    // 1. 用户配置 high，gemini-3.1-pro 支持 high
+    // 1. 用户配置 high，gemini-4-carbon 支持 high
     vi.spyOn(modelSettings, 'read').mockResolvedValue({
-      enabledModelIds: ['gemini-3.1-pro'],
+      enabledModelIds: ['gemini-4-carbon'],
       catalogModels: [],
       defaultReasoningEffort: 'high',
     })
     const adapter1 = new AntigravityAdapter(store, modelSettings)
-    const resolved1 = await adapter1.resolveModel('antigravity', 'gemini-3.1-pro')
+    const resolved1 = await adapter1.resolveModel('antigravity', 'gemini-4-carbon')
     expect(resolved1.reasoning?.defaultEffort).toBe('high')
 
-    // 2. 用户配置 medium，gemini-3.1-pro 不支持 medium，安全兜底到 low
+    // 2. 用户未配置 defaultReasoningEffort，默认采用 medium
     vi.spyOn(modelSettings, 'read').mockResolvedValue({
-      enabledModelIds: ['gemini-3.1-pro'],
+      enabledModelIds: ['gemini-4-carbon'],
       catalogModels: [],
-      defaultReasoningEffort: 'medium',
+      defaultReasoningEffort: null,
     })
     const adapter2 = new AntigravityAdapter(store, modelSettings)
-    const resolved2 = await adapter2.resolveModel('antigravity', 'gemini-3.1-pro')
-    expect(resolved2.reasoning?.defaultEffort).toBe('low')
+    const resolved2 = await adapter2.resolveModel('antigravity', 'gemini-4-carbon')
+    expect(resolved2.reasoning?.defaultEffort).toBe('medium')
   })
 
   it('verifies that all MODELS pass official dsh-llm reasoning metadata validation', async () => {
@@ -320,7 +321,7 @@ describe('AntigravityAdapter', () => {
       const reqModel = body.model
       fetchCalls.push({ url: String(url), model: reqModel })
 
-      if (reqModel === 'gemini-3.6-flash-high') {
+      if (reqModel === 'gemini-4-argon-high') {
         return new Response('runtime model not found', { status: 404 })
       }
 
@@ -340,7 +341,7 @@ describe('AntigravityAdapter', () => {
       const run = async () => {
         for await (const _chunk of adapter.stream({
           provider: 'antigravity',
-          model: 'gemini-3.6-flash',
+          model: 'gemini-4-argon',
           reasoningEffort: 'high',
           messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
         } as unknown as GenerateOptions)) { /* drain */ }
@@ -348,7 +349,7 @@ describe('AntigravityAdapter', () => {
 
       await expect(run()).rejects.toMatchObject({ code: 'PROVIDER_ERROR', failure: { status: 404 } })
       // The user picked High: a rejected High is reported, never quietly served as Low.
-      expect(fetchCalls.map((call) => call.model)).toEqual(['gemini-3.6-flash-high'])
+      expect(fetchCalls.map((call) => call.model)).toEqual(['gemini-4-argon-high'])
     } finally {
       globalThis.fetch = originalFetch
     }

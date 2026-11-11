@@ -204,14 +204,14 @@ function antigravityAdapter(fetchFn: typeof fetch): AntigravityAdapter {
   vi.spyOn(store, 'read').mockResolvedValue({ access: 'test-token', expires: Date.now() + 3_600_000 })
   const modelSettings = new AntigravityModelSettings()
   vi.spyOn(modelSettings, 'read').mockResolvedValue({
-    enabledModelIds: ['gemini-3.7-flash'], catalogModels: [], defaultReasoningEffort: null,
+    enabledModelIds: ['gemini-3.8-flash'], catalogModels: [], defaultReasoningEffort: null,
   })
   return new AntigravityAdapter(store, modelSettings, undefined, { fetchFn })
 }
 
 const antigravityOptions = {
   provider: 'antigravity',
-  model: 'gemini-3.7-flash',
+  model: 'gemini-3.8-flash',
   messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
 } as never
 

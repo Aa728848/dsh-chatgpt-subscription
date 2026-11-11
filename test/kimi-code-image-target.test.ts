@@ -95,7 +95,7 @@ describe('kimi-code image request target', () => {
 
   it('leaves every other route on the shared 1024 px ceiling', () => {
     const antigravity = new AntigravityAdapter()
-    expect(antigravity.imageRequestTarget('antigravity', 'gemini-3.7-flash', ref({ width: 2048, height: 1024 })))
+    expect(antigravity.imageRequestTarget('antigravity', 'gemini-3.8-flash', ref({ width: 2048, height: 1024 })))
       .toEqual({ width: 1024, height: 512, maxPixels: 524_288, maxBytes: VERSION_MAX_BYTES })
   })
 })

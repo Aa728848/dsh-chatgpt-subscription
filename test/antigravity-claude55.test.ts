@@ -48,8 +48,16 @@ describe('Antigravity Claude 5.5', () => {
   it.each(ids)('lists and resolves %s with the three supported efforts', async (id) => {
     const { adapter } = harness()
     expect(await adapter.listModels()).toContainEqual(expect.objectContaining({ id, reasoningEfforts: ['low', 'medium', 'high'] }))
-    expect(MODELS.find(m => m.id === id)?.inputModalities).toEqual(['text', 'image'])
-    expect(await adapter.resolveModel('antigravity', id)).toMatchObject({ id })
+    expect(MODELS.find(m => m.id === id)).toMatchObject({
+      inputModalities: ['text', 'image'],
+      contextWindow: 1000000,
+      maxTokens: 128000,
+    })
+    expect(await adapter.resolveModel('antigravity', id)).toMatchObject({
+      id,
+      context: { contextWindow: 1000000 },
+      defaultMaxTokens: 128000,
+    })
     expect(Object.keys(ROUTING[id])).toEqual(['off', 'routing', 'defaultRequestId'])
   })
 
@@ -60,7 +68,7 @@ describe('Antigravity Claude 5.5', () => {
   ].map(([effort, suffix]) => ({ id, effort, suffix }))))('routes $id / $effort to $suffix', async ({ id, effort, suffix }) => {
     const { adapter, fetchFn } = harness()
     const options = {
-      provider: 'antigravity', model: id, reasoningEffort: effort, maxTokens: 100000,
+      provider: 'antigravity', model: id, reasoningEffort: effort, maxTokens: 200000,
       messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
     } as GenerateOptions
     const chunks = []
@@ -70,7 +78,7 @@ describe('Antigravity Claude 5.5', () => {
     const init = (fetchFn.mock.calls[0] as unknown as [string, RequestInit])[1]
     const body = JSON.parse(String(init.body))
     expect(body.model).toBe(id + '-' + suffix)
-    expect(body.request.generationConfig).toEqual({ maxOutputTokens: 64000 })
+    expect(body.request.generationConfig).toEqual({ maxOutputTokens: 128000 })
     expect(init.headers).toMatchObject({ 'anthropic-beta': 'interleaved-thinking-2025-05-14' })
   })
 

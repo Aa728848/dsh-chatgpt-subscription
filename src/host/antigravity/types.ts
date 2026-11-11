@@ -47,8 +47,8 @@ export const ONBOARD_POLL_INTERVAL_MS = 1_000
  * above the reference implementations' minimum, and refresh it together with
  * `HUB_RELEASE_CHANGELISTS` (see `client-version.ts`).
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = '2.29.0'
-export const DEFAULT_ANTIGRAVITY_CL = '1013060670'
+export const DEFAULT_ANTIGRAVITY_VERSION = '2.31.0'
+export const DEFAULT_ANTIGRAVITY_CL = '1017595969'
 
 /**
  * The two identity fields the Hub adds on `onboardUser` control-plane calls.
@@ -131,9 +131,9 @@ export const TOOL_CALLING_MODE = {
  * did not pick without telling them, which the official client never does. A
  * runtime id the service rejects now surfaces as that rejection.
  *
- * The runtime ids are the ones `fetchAvailableModels` lists (snapshot of
- * 2026-10-14, client 2.23.0); the display names it publishes beside them are
- * quoted where the mapping is not obvious.
+ * The runtime ids are the ones `fetchAvailableModels` lists (verified through
+ * 2026-11-11, clients 2.29.0 / 2.31.0); the display names it publishes beside
+ * them are quoted where the mapping is not obvious.
  */
 export interface AntigravityRoutingEntry {
   off: string
@@ -142,6 +142,21 @@ export interface AntigravityRoutingEntry {
 }
 
 export const ROUTING: Record<string, AntigravityRoutingEntry> = {
+  // Verified against fetchAvailableModels (clients 2.29.0 / 2.31.0): Gemini 4
+  // Carbon has no bare or `-tiered` runtime (both return 404); the catalog lists
+  // the three suffixed tiers (`maxOutputTokens: 262144`) and names
+  // `gemini-4-carbon-medium` as `defaultAgentModelId`.
+  'gemini-4-carbon': {
+    off: 'gemini-4-carbon-low',
+    routing: {
+      minimal: 'gemini-4-carbon-low',
+      low: 'gemini-4-carbon-low',
+      medium: 'gemini-4-carbon-medium',
+      high: 'gemini-4-carbon-high',
+      xhigh: 'gemini-4-carbon-high',
+    },
+    defaultRequestId: 'gemini-4-carbon-medium',
+  },
   // Verified against fetchAvailableModels (client 2.23.0): Gemini 4 Argon has
   // no `-tiered` runtime; the catalog lists the three suffixed tiers and names
   // `gemini-4-argon-medium` as `defaultAgentModelId`.
@@ -194,46 +209,6 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
     },
     defaultRequestId: 'claude-sonnet-5-5-medium',
   },
-  // The catalog lists no `gemini-3.7-flash-tiered`; it lists the three suffixed
-  // tiers, so 3.7 routes like 3.6 rather than through an id the service no
-  // longer advertises.
-  'gemini-3.7-flash': {
-    off: 'gemini-3.7-flash-low',
-    routing: {
-      minimal: 'gemini-3.7-flash-low',
-      low: 'gemini-3.7-flash-low',
-      medium: 'gemini-3.7-flash-medium',
-      high: 'gemini-3.7-flash-high',
-      xhigh: 'gemini-3.7-flash-high',
-    },
-    defaultRequestId: 'gemini-3.7-flash-medium',
-  },
-  'gemini-3.6-flash': {
-    off: 'gemini-3.6-flash-low',
-    routing: {
-      minimal: 'gemini-3.6-flash-low',
-      low: 'gemini-3.6-flash-low',
-      medium: 'gemini-3.6-flash-medium',
-      high: 'gemini-3.6-flash-high',
-      xhigh: 'gemini-3.6-flash-high',
-    },
-    defaultRequestId: 'gemini-3.6-flash-high',
-  },
-  // The 3.5 runtime ids are offset by one from their names. The catalog
-  // publishes `gemini-3.5-flash-extra-low` as "Gemini 3.5 Flash (Low)",
-  // `gemini-3.5-flash-low` as "(Medium)" and `gemini-3-flash-agent` as "(High)",
-  // so each effort is routed by the published display name, not by the suffix.
-  'gemini-3.5-flash': {
-    off: 'gemini-3.5-flash-extra-low',
-    routing: {
-      minimal: 'gemini-3.5-flash-extra-low',
-      low: 'gemini-3.5-flash-extra-low',
-      medium: 'gemini-3.5-flash-low',
-      high: 'gemini-3-flash-agent',
-      xhigh: 'gemini-3-flash-agent',
-    },
-    defaultRequestId: 'gemini-3-flash-agent',
-  },
   'gemini-3.5-flash-lite': {
     off: 'gemini-3.5-flash-lite',
     routing: {
@@ -244,18 +219,6 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
       xhigh: 'gemini-3.5-flash-lite',
     },
     defaultRequestId: 'gemini-3.5-flash-lite',
-  },
-  // `gemini-pro-agent` is published as "Gemini 3.1 Pro (High)".
-  'gemini-3.1-pro': {
-    off: 'gemini-3.1-pro-low',
-    routing: {
-      minimal: 'gemini-3.1-pro-low',
-      low: 'gemini-3.1-pro-low',
-      medium: 'gemini-pro-agent',
-      high: 'gemini-pro-agent',
-      xhigh: 'gemini-pro-agent',
-    },
-    defaultRequestId: 'gemini-pro-agent',
   },
   'gemini-3.1-flash-lite': {
     off: 'gemini-3.1-flash-lite',
@@ -315,38 +278,26 @@ export const ROUTING: Record<string, AntigravityRoutingEntry> = {
 }
 
 export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  'gemini-4-carbon': 262144,
+  'gemini-4-carbon-low': 262144,
+  'gemini-4-carbon-medium': 262144,
+  'gemini-4-carbon-high': 262144,
   'gemini-4-argon': 65536,
   'gemini-4-argon-low': 65536,
   'gemini-4-argon-medium': 65536,
   'gemini-4-argon-high': 65536,
   'gemini-3.8-flash': 65536,
   'gemini-3.8-flash-tiered': 65536,
-  'gemini-3.7-flash': 65536,
-  'gemini-3.7-flash-low': 65536,
-  'gemini-3.7-flash-medium': 65536,
-  'gemini-3.7-flash-high': 65536,
-  'gemini-3.6-flash': 65536,
-  'gemini-3.6-flash-low': 65536,
-  'gemini-3.6-flash-medium': 65536,
-  'gemini-3.6-flash-high': 65536,
-  'gemini-3.5-flash': 65536,
-  'gemini-3.5-flash-extra-low': 65536,
-  'gemini-3.5-flash-low': 65536,
-  'gemini-3-flash-agent': 65536,
   'gemini-3.5-flash-lite': 65536,
   'gemini-3.1-flash-lite': 65536,
-  'gemini-3.1-pro': 65535,
-  'gemini-3.1-pro-low': 65535,
-  'gemini-3.1-pro-high': 65535,
-  'gemini-pro-agent': 65535,
-  'claude-opus-5-5': 64000,
-  'claude-opus-5-5-low': 64000,
-  'claude-opus-5-5-medium': 64000,
-  'claude-opus-5-5-high': 64000,
-  'claude-sonnet-5-5': 64000,
-  'claude-sonnet-5-5-low': 64000,
-  'claude-sonnet-5-5-medium': 64000,
-  'claude-sonnet-5-5-high': 64000,
+  'claude-opus-5-5': 128000,
+  'claude-opus-5-5-low': 128000,
+  'claude-opus-5-5-medium': 128000,
+  'claude-opus-5-5-high': 128000,
+  'claude-sonnet-5-5': 128000,
+  'claude-sonnet-5-5-low': 128000,
+  'claude-sonnet-5-5-medium': 128000,
+  'claude-sonnet-5-5-high': 128000,
   'gpt-oss-120b': 32768,
   'gpt-oss-120b-medium': 32768,
 }
@@ -361,6 +312,14 @@ export interface AntigravityModelDef {
 }
 
 export const MODELS: AntigravityModelDef[] = [
+  {
+    id: 'gemini-4-carbon',
+    name: 'Gemini 4 Carbon',
+    inputModalities: ['text', 'image'],
+    contextWindow: 1048576,
+    maxTokens: 262144,
+    reasoningEfforts: ['low', 'medium', 'high'],
+  },
   {
     id: 'gemini-4-argon',
     name: 'Gemini 4 Argon',
@@ -378,43 +337,11 @@ export const MODELS: AntigravityModelDef[] = [
     reasoningEfforts: ['low', 'medium', 'high'],
   },
   {
-    id: 'gemini-3.7-flash',
-    name: 'Gemini 3.7 Flash',
-    inputModalities: ['text', 'image'],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-    reasoningEfforts: ['low', 'medium', 'high'],
-  },
-  {
-    id: 'gemini-3.6-flash',
-    name: 'Gemini 3.6 Flash',
-    inputModalities: ['text', 'image'],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-    reasoningEfforts: ['low', 'medium', 'high'],
-  },
-  {
-    id: 'gemini-3.5-flash',
-    name: 'Gemini 3.5 Flash',
-    inputModalities: ['text', 'image'],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-    reasoningEfforts: ['low', 'medium', 'high'],
-  },
-  {
     id: 'gemini-3.5-flash-lite',
     name: 'Gemini 3.5 Flash Lite',
     inputModalities: ['text', 'image'],
     contextWindow: 1048576,
     maxTokens: 65536,
-  },
-  {
-    id: 'gemini-3.1-pro',
-    name: 'Gemini 3.1 Pro',
-    inputModalities: ['text', 'image'],
-    contextWindow: 1048576,
-    maxTokens: 65535,
-    reasoningEfforts: ['low', 'high'],
   },
   {
     id: 'gemini-3.1-flash-lite',
@@ -449,31 +376,32 @@ export const MODELS: AntigravityModelDef[] = [
     contextWindow: 1048576,
     maxTokens: 65536,
   },
-  // Retain the existing Antigravity Claude window/output defaults until the
-  // service publishes limits for 5.5; these are not direct-Anthropic limits.
-  // Claude Opus 4.6 / Sonnet 4.6 were removed: the catalog of 2026-10-12 lists
-  // only the 5.5 runtime ids for the Claude family.
+  // Verified against fetchAvailableModels (client 2.31.0, 2026-11-11):
+  // Claude Opus 5.5 / Sonnet 5.5 advertise maxTokens 1000000 and maxOutputTokens
+  // 128000; gpt-oss-120b-medium advertises maxTokens 131072 and maxOutputTokens
+  // 32768. Claude Opus 4.6 / Sonnet 4.6 were removed earlier when the catalog
+  // dropped them in favour of 5.5.
   {
     id: 'claude-opus-5-5',
     name: 'Claude Opus 5.5',
     inputModalities: ['text', 'image'],
-    contextWindow: 1048576,
-    maxTokens: 64000,
+    contextWindow: 1000000,
+    maxTokens: 128000,
     reasoningEfforts: ['low', 'medium', 'high'],
   },
   {
     id: 'claude-sonnet-5-5',
     name: 'Claude Sonnet 5.5',
     inputModalities: ['text', 'image'],
-    contextWindow: 1048576,
-    maxTokens: 64000,
+    contextWindow: 1000000,
+    maxTokens: 128000,
     reasoningEfforts: ['low', 'medium', 'high'],
   },
   {
     id: 'gpt-oss-120b',
     name: 'GPT-OSS 120B',
     inputModalities: ['text'],
-    contextWindow: 262144,
+    contextWindow: 131072,
     maxTokens: 32768,
     reasoningEfforts: ['low', 'medium', 'high'],
   },

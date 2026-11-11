@@ -107,7 +107,7 @@ function kimiOptions(messages: Message[]): GenerateOptions {
 }
 
 function agOptions(messages: Message[]): GenerateOptions {
-  return { provider: 'antigravity', model: 'gemini-3.7-flash', messages } as unknown as GenerateOptions
+  return { provider: 'antigravity', model: 'gemini-3.8-flash', messages } as unknown as GenerateOptions
 }
 
 /**
@@ -134,7 +134,7 @@ function currentGenerationMessages(content: readonly unknown[]): Message[] {
   }).messages
 }
 
-const agModel = AG_MODELS.find((m) => m.id === 'gemini-3.7-flash')!
+const agModel = AG_MODELS.find((m) => m.id === 'gemini-3.8-flash')!
 
 /** The single `tool_result` block a body carries, wherever it landed. */
 function toolResultBlock(body: Record<string, unknown>): Record<string, unknown> {
@@ -293,7 +293,7 @@ describe('antigravity tool-result images', () => {
   it('appends inlineData parts to the same user content as the functionResponse', async () => {
     const options = agOptions(toolResultMessages())
     const images = await agResolve(options, reader())
-    const body = agRequest(options, agModel, 'project', 'gemini-3.7-flash', undefined, images)
+    const body = agRequest(options, agModel, 'project', 'gemini-3.8-flash-tiered', undefined, images)
     const contents = ((body.request as Record<string, unknown>).contents) as Array<Record<string, unknown>>
     const turn = contents[contents.length - 1]!
     const parts = turn.parts as Array<Record<string, unknown>>
@@ -305,7 +305,7 @@ describe('antigravity tool-result images', () => {
   })
 
   it('keeps the parts array unchanged for a tool result without an image', () => {
-    const body = agRequest(agOptions(plainToolResultMessages()), agModel, 'project', 'gemini-3.7-flash')
+    const body = agRequest(agOptions(plainToolResultMessages()), agModel, 'project', 'gemini-3.8-flash-tiered')
     const contents = ((body.request as Record<string, unknown>).contents) as Array<Record<string, unknown>>
     const parts = contents[contents.length - 1]!.parts as Array<Record<string, unknown>>
     expect(parts).toHaveLength(1)
@@ -319,7 +319,7 @@ describe('antigravity tool-result images', () => {
       { type: 'image', attachment: ATTACHMENT },
     ]))
     const images = await agResolve(options, reader())
-    const body = agRequest(options, agModel, 'project', 'gemini-3.7-flash', undefined, images)
+    const body = agRequest(options, agModel, 'project', 'gemini-3.8-flash-tiered', undefined, images)
     const contents = ((body.request as Record<string, unknown>).contents) as Array<Record<string, unknown>>
     const turn = contents[contents.length - 1]!
     const parts = turn.parts as Array<Record<string, unknown>>

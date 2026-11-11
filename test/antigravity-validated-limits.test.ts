@@ -13,6 +13,7 @@ import {
 } from '../src/host/antigravity/token-store.ts'
 import { MODELS } from '../src/host/antigravity/types.ts'
 
+const CARBON = MODELS.find((model) => model.id === 'gemini-4-carbon')!
 const OPUS = MODELS.find((model) => model.id === 'claude-opus-5-5')!
 const FLASH = MODELS.find((model) => model.id === 'gemini-3.8-flash')!
 
@@ -67,7 +68,7 @@ describe('Claude VALIDATED tool calling', () => {
 
 function harness(catalogModels: AntigravityCatalogModel[] = []) {
   const settings = new FileModelSettingsStore()
-  vi.spyOn(settings, 'read').mockResolvedValue({ enabledModelIds: [OPUS.id, FLASH.id], catalogModels })
+  vi.spyOn(settings, 'read').mockResolvedValue({ enabledModelIds: [CARBON.id, OPUS.id, FLASH.id], catalogModels })
   const pool = new AccountPoolStore()
   vi.spyOn(pool, 'getEffectiveAccount').mockResolvedValue({
     account: { id: 'test' }, token: 'test-token', projectId: 'test-project',
@@ -161,5 +162,34 @@ describe('Catalog-reported limits', () => {
     const { adapter, fetchFn } = harness()
     await drain(adapter, options({ tools: undefined }))
     expect((sentBodies(fetchFn)[0]!.request as { generationConfig: unknown }).generationConfig).toEqual({ maxOutputTokens: OPUS.maxTokens })
+  })
+
+  it('dispatches Gemini 4 Carbon tiers end-to-end, including the off tier fallback', async () => {
+    const { adapter, fetchFn } = harness()
+    expect(await adapter.resolveModel('antigravity', CARBON.id)).toMatchObject({
+      id: 'gemini-4-carbon',
+      name: 'Gemini 4 Carbon',
+      context: { contextWindow: 1048576 },
+      defaultMaxTokens: 262144,
+    })
+
+    await drain(adapter, options({ model: CARBON.id, tools: undefined }))
+    await drain(adapter, options({ model: CARBON.id, tools: undefined, reasoningEffort: 'high' }))
+    await drain(adapter, options({ model: CARBON.id, tools: undefined, reasoningEffort: 'off' }))
+
+    const bodies = sentBodies(fetchFn)
+    expect(bodies.map((b) => b.model)).toEqual([
+      'gemini-4-carbon-medium',
+      'gemini-4-carbon-high',
+      'gemini-4-carbon-low',
+    ])
+    expect((bodies[0]!.request as { generationConfig: unknown }).generationConfig).toEqual({
+      maxOutputTokens: 262144,
+      thinkingConfig: { includeThoughts: true },
+    })
+    expect((bodies[2]!.request as { generationConfig: unknown }).generationConfig).toEqual({
+      maxOutputTokens: 262144,
+      thinkingConfig: { includeThoughts: false },
+    })
   })
 })

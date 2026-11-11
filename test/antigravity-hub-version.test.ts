@@ -99,7 +99,20 @@ describe('Antigravity Hub release discovery', () => {
   })
 
   it('keeps the release table in step with the built-in release', () => {
+    expect(DEFAULT_ANTIGRAVITY_VERSION).toBe('2.31.0')
+    expect(DEFAULT_ANTIGRAVITY_CL).toBe('1017595969')
     expect(HUB_RELEASE_CHANGELISTS[DEFAULT_ANTIGRAVITY_VERSION]).toBe(DEFAULT_ANTIGRAVITY_CL)
+  })
+
+  it('includes the attested changelist when the manifest publishes 2.31.0', async () => {
+    const fetchFn = vi.fn(async () => new Response('version: 2.31.0\n', { status: 200 })) as unknown as typeof fetch
+
+    await refreshHubVersion(fetchFn)
+
+    expect(currentHubVersion()).toBe('2.31.0')
+    expect(hubChangelist()).toBe('1017595969')
+    expect(defaultUserAgent()).toContain('antigravity/hub/2.31.0')
+    expect(defaultUserAgent()).toContain('cl=1017595969')
   })
 
   it('asks loadCodeAssist with ideType alone, as the Hub does', async () => {

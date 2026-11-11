@@ -361,7 +361,9 @@ export class AntigravityAdapter extends LlmAdapter {
     const routing = ROUTING[model.id]
     // Exactly one runtime id: a request is never retried on a different model
     // than the one the user picked (see AntigravityRoutingEntry).
-    const runtimeModel = routing?.routing[effort] || routing?.defaultRequestId || model.id
+    const runtimeModel = ((effort === 'off' || effort === 'none') ? routing?.off : routing?.routing[effort])
+      || routing?.defaultRequestId
+      || model.id
     const family = quotaFamilyForModel(model.id)
     const runtimeMaxOutput = catalogMaxOutputFor(runtimeModel, catalog)
 

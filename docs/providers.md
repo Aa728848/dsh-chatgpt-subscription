@@ -155,7 +155,7 @@
   - 通过 Google OAuth 登录（可在 Web 设置页发起，或在终端运行随包 CLI `npx antigravity-login` / `npx antigravity-login --logout`）；
   - 默认按官方客户端顺序优先请求 `https://daily-cloudcode-pa.googleapis.com`，回退 `https://cloudcode-pa.googleapis.com`（支持 `DSH_ANTIGRAVITY_ENDPOINT` 覆盖），自动完成项目发现与 onboard。
 - **模型与多模态能力**：
-  - 内置 Gemini 4 Argon、Gemini 3.8 / 3.7 / 3.6 / 3.5 / 3.1 Flash & Pro、Claude Opus 5.5 / Sonnet 5.5（Code Assist 托管）、`gpt-oss-120b` 等模型路由，严格一对一映射运行时 ID（不做静默跨模型降级）；
+  - 内置 Gemini 4 Carbon、Gemini 4 Argon、Gemini 3.8 Flash、Gemini 3.5 / 3.1 Flash Lite、Gemini 3 Flash、Gemini 2.5 Pro / Flash、Claude Opus 5.5 / Sonnet 5.5（Code Assist 托管）、`gpt-oss-120b` 等模型路由，严格一对一映射运行时 ID（不做静默跨模型降级）；
   - 支持图片输入（单次请求 base64 负载上限 **12 MiB**，超限按最旧优先替换为文本占位）；
   - 工具往返完整保留 Gemini 原始思考签名（thought signature）；
   - 注册 `antigravity_image_generate` 工具，支持通过已登录的 Antigravity 账号直接生成图片并存入 DSH 附件系统；可选 14 种比例与 0.5K/1K/2K/4K 分辨率，新参数仅在显式提供时发送，上游拒绝时明确报错。

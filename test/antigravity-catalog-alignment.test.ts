@@ -7,21 +7,18 @@ import { parseDurationMs, retryDelayMs } from '../src/host/antigravity/adapter.t
 import { quotaFamilyForModel } from '../src/host/antigravity/account-pool.ts'
 
 /**
- * Runtime ids `fetchAvailableModels` listed on 2026-10-14 with Antigravity
- * 2.23.0 (cl=998057262; internal `tab_*` completion models omitted). Every id
- * the routing table sends must be one of them: an id the service does not
- * advertise is how 3.7 Flash ended up routed through `gemini-3.7-flash-tiered`
- * with a silent fallback to 3.6.
+ * Runtime ids `fetchAvailableModels` listed on 2026-11-11 with Antigravity
+ * 2.31.0 (internal `chat_*` / `tab_*` completion models omitted). Every id the
+ * routing table sends must be one of them: an id the service no longer
+ * advertises returns 404 or a retirement notice on `streamGenerateContent`.
  */
-const CATALOG_2026_10_12 = new Set([
+const CATALOG_2026_11_11 = new Set([
+  'gemini-4-carbon-low', 'gemini-4-carbon-medium', 'gemini-4-carbon-high',
   'gemini-4-argon-low', 'gemini-4-argon-medium', 'gemini-4-argon-high',
   'gemini-2.5-flash-thinking', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-pro',
-  'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3-flash-agent',
-  'gemini-3.5-flash-extra-low', 'gemini-3.5-flash-low',
-  'gemini-3.6-flash-low', 'gemini-3.6-flash-medium', 'gemini-3.6-flash-high',
-  'gemini-3.7-flash-low', 'gemini-3.7-flash-medium', 'gemini-3.7-flash-high',
+  'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3-flash',
   'gemini-3.8-flash-tiered', 'gemini-3.8-flash-low', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-high',
-  'gemini-3.1-pro-low', 'gemini-3.1-pro-high', 'gemini-pro-agent', 'gemini-3.1-flash-image',
+  'gemini-3.1-flash-image',
   'claude-opus-5-5-low', 'claude-opus-5-5-medium', 'claude-opus-5-5-high',
   'claude-sonnet-5-5-low', 'claude-sonnet-5-5-medium', 'claude-sonnet-5-5-high',
   'gpt-oss-120b-medium',
@@ -51,17 +48,60 @@ describe('Antigravity catalog alignment', () => {
       const routing = ROUTING[entry.id]
       expect(routing, entry.id).toBeDefined()
       for (const runtime of new Set([routing!.off, routing!.defaultRequestId, ...Object.values(routing!.routing)])) {
-        expect(CATALOG_2026_10_12.has(runtime), `${entry.id} -> ${runtime}`).toBe(true)
+        expect(CATALOG_2026_11_11.has(runtime), `${entry.id} -> ${runtime}`).toBe(true)
       }
     }
   })
 
-  it('offers neither retired Claude 4.6 models nor the chat-unusable image model', () => {
+  it('offers neither retired Claude 4.6 / Gemini 3.x models nor the chat-unusable image model', () => {
     const ids = MODELS.map((entry) => entry.id)
-    expect(ids).not.toContain('claude-opus-4-6')
-    expect(ids).not.toContain('claude-sonnet-4-6')
-    expect(ids).not.toContain('gemini-3.1-flash-image')
-    expect(ids).toEqual(expect.arrayContaining(['gemini-4-argon', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']))
+    for (const retired of [
+      'claude-opus-4-6',
+      'claude-sonnet-4-6',
+      'gemini-3.7-flash',
+      'gemini-3.6-flash',
+      'gemini-3.5-flash',
+      'gemini-3.1-pro',
+      'gemini-3.1-flash-image',
+    ]) {
+      expect(ids).not.toContain(retired)
+      expect(ROUTING[retired]).toBeUndefined()
+    }
+    expect(ids[0]).toBe('gemini-4-carbon')
+    expect(ids).toEqual(expect.arrayContaining(['gemini-4-carbon', 'gemini-4-argon', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']))
+  })
+
+  it('routes Gemini 4 Carbon through its suffixed tiers with medium as default and 256K maxOutputTokens', () => {
+    const carbon = model('gemini-4-carbon')
+    expect(carbon).toEqual({
+      id: 'gemini-4-carbon',
+      name: 'Gemini 4 Carbon',
+      inputModalities: ['text', 'image'],
+      contextWindow: 1048576,
+      maxTokens: 262144,
+      reasoningEfforts: ['low', 'medium', 'high'],
+    })
+    expect(ROUTING['gemini-4-carbon']).toEqual({
+      off: 'gemini-4-carbon-low',
+      routing: {
+        minimal: 'gemini-4-carbon-low',
+        low: 'gemini-4-carbon-low',
+        medium: 'gemini-4-carbon-medium',
+        high: 'gemini-4-carbon-high',
+        xhigh: 'gemini-4-carbon-high',
+      },
+      defaultRequestId: 'gemini-4-carbon-medium',
+    })
+    const carbonReq = buildRequest(options('gemini-4-carbon'), carbon, 'p', 'gemini-4-carbon-medium', 'medium')
+    expect((carbonReq.request as any).generationConfig).toEqual({
+      maxOutputTokens: 262144,
+      thinkingConfig: { includeThoughts: true },
+    })
+    const carbonOff = buildRequest(options('gemini-4-carbon'), carbon, 'p', 'gemini-4-carbon-low', 'off')
+    expect((carbonOff.request as any).generationConfig).toEqual({
+      maxOutputTokens: 262144,
+      thinkingConfig: { includeThoughts: false },
+    })
   })
 
   it('routes Gemini 4 Argon through its suffixed tiers with medium as default', () => {
@@ -82,21 +122,17 @@ describe('Antigravity catalog alignment', () => {
     expect((argonOff.request as any).generationConfig.thinkingConfig).toEqual({ includeThoughts: false })
   })
 
-  it('maps Gemini 3.5 Flash efforts by the published display names', () => {
-    // extra-low is "(Low)", 3.5-flash-low is "(Medium)", 3-flash-agent is "(High)".
-    expect(ROUTING['gemini-3.5-flash']!.routing).toMatchObject({
-      low: 'gemini-3.5-flash-extra-low',
-      medium: 'gemini-3.5-flash-low',
-      high: 'gemini-3-flash-agent',
-    })
-  })
-
-  it('routes Gemini 3.7 Flash through its suffixed tiers', () => {
-    expect(ROUTING['gemini-3.7-flash']!.routing).toMatchObject({
-      low: 'gemini-3.7-flash-low',
-      medium: 'gemini-3.7-flash-medium',
-      high: 'gemini-3.7-flash-high',
-    })
+  it('matches the published static fallback limits for Claude 5.5 and gpt-oss-120b', () => {
+    for (const id of ['claude-opus-5-5', 'claude-sonnet-5-5']) {
+      const claude = model(id)
+      expect(claude).toMatchObject({ contextWindow: 1000000, maxTokens: 128000 })
+      const req = buildRequest(options(id), claude, 'p', `${id}-medium`, 'medium')
+      expect((req.request as any).generationConfig).toEqual({ maxOutputTokens: 128000 })
+    }
+    const gptOss = model('gpt-oss-120b')
+    expect(gptOss).toMatchObject({ contextWindow: 131072, maxTokens: 32768 })
+    const gptReq = buildRequest(options('gpt-oss-120b'), gptOss, 'p', 'gpt-oss-120b-medium', 'medium')
+    expect((gptReq.request as any).generationConfig).toEqual({ maxOutputTokens: 32768 })
   })
 
   it('filters the editor tab-completion models out of the catalog', () => {
@@ -179,6 +215,7 @@ describe('Antigravity 429 handling helpers', () => {
   it('assigns models to the quota groups the service meters separately', () => {
     expect(quotaFamilyForModel('claude-opus-5-5')).toBe('claude-gpt')
     expect(quotaFamilyForModel('gpt-oss-120b')).toBe('claude-gpt')
+    expect(quotaFamilyForModel('gemini-4-carbon')).toBe('gemini')
     expect(quotaFamilyForModel('gemini-4-argon')).toBe('gemini')
     expect(quotaFamilyForModel('gemini-3.8-flash')).toBe('gemini')
   })

@@ -41,6 +41,7 @@ export const HUB_RELEASE_CHANGELISTS: Readonly<Record<string, string>> = {
   '2.23.0': '998057262',
   '2.24.0': '1000335682',
   '2.29.0': '1013060670',
+  '2.31.0': '1017595969',
 }
 
 const MANIFEST_TIMEOUT_MS = 5_000

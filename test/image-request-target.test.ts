@@ -24,7 +24,7 @@ const KIMI_LARGE_TARGET = { width: 2000, height: 1000, maxPixels: 2_000_000, max
 
 describe('adapter image request targets', () => {
   for (const [provider, model, adapter, largeTarget] of [
-    ['antigravity', 'gemini-3.7-flash', new AntigravityAdapter(), SHARED_LARGE_TARGET],
+    ['antigravity', 'gemini-3.8-flash', new AntigravityAdapter(), SHARED_LARGE_TARGET],
     ['kimi-code', 'k3', new KimiCodeAdapter(), KIMI_LARGE_TARGET],
     ['minimax-code', 'MiniMax-M3.1-Flash', new MinimaxCodeAdapter(), SHARED_LARGE_TARGET],
     ['step-code', 'step-3.5-flash', new StepCodeAdapter(), SHARED_LARGE_TARGET],

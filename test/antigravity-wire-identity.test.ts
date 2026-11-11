@@ -45,12 +45,12 @@ function withLegacyFlag<T>(value: string | undefined, run: () => T): T {
 function chatRequest(system?: string): Record<string, unknown> {
   const options = {
     provider: 'antigravity',
-    model: 'gemini-3.7-flash',
+    model: 'gemini-3.8-flash',
     ...(system === undefined ? {} : { system }),
     messages: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
   } as unknown as GenerateOptions
-  const model = MODELS.find((m) => m.id === 'gemini-3.7-flash')!
-  return buildRequest(options, model, FALLBACK_PROJECT_ID, 'gemini-3.7-flash-tiered', 'medium')
+  const model = MODELS.find((m) => m.id === 'gemini-3.8-flash')!
+  return buildRequest(options, model, FALLBACK_PROJECT_ID, 'gemini-3.8-flash-tiered', 'medium')
 }
 
 function partsOf(request: Record<string, unknown>): Array<{ text: string }> {

@@ -25,7 +25,7 @@ import { offloadOldestRequestImages as sharedOffload } from '../src/host/common/
 const offloadOldestRequestImages = (options: GenerateOptions) => sharedOffload(options, MAX_REQUEST_IMAGE_BYTES)
 
 describe('Antigravity Mapper', () => {
-  const testModel = MODELS.find((m) => m.id === 'gemini-3.7-flash')!
+  const testModel = MODELS.find((m) => m.id === 'gemini-3.8-flash')!
 
   it('strips json schema meta keywords correctly', () => {
     const rawSchema = {
@@ -43,7 +43,7 @@ describe('Antigravity Mapper', () => {
   it('builds request with system instructions and converted tools', () => {
     const options: GenerateOptions = {
       provider: 'antigravity',
-      model: 'gemini-3.7-flash',
+      model: 'gemini-3.8-flash',
       system: 'Custom developer instructions',
       messages: [
         { role: 'user', content: [{ type: 'text', text: 'Hello AI' }] },
@@ -61,9 +61,9 @@ describe('Antigravity Mapper', () => {
       ],
     } as unknown as GenerateOptions
 
-    const request = buildRequest(options, testModel, 'test-project-123', 'gemini-3.7-flash-tiered', 'high')
+    const request = buildRequest(options, testModel, 'test-project-123', 'gemini-3.8-flash-tiered', 'high')
     expect(request.project).toBe('test-project-123')
-    expect(request.model).toBe('gemini-3.7-flash-tiered')
+    expect(request.model).toBe('gemini-3.8-flash-tiered')
 
     const reqData = request.request as Record<string, unknown>
     const sysInst = reqData.systemInstruction as { parts: Array<{ text: string }> }
@@ -121,7 +121,7 @@ describe('Antigravity Mapper', () => {
     // composed tool schema outright (#39).
     expect(declared(convertTools(tools, claudeModel.id, 'claude-opus-5-5-medium'))).toEqual(folded)
     // Gemini ignores anyOf, so its declarations keep the composed form.
-    expect(declared(convertTools(tools, testModel.id, 'gemini-3.7-flash-tiered'))).toEqual({
+    expect(declared(convertTools(tools, testModel.id, 'gemini-3.8-flash-tiered'))).toEqual({
       type: 'object',
       properties: { at: { anyOf: parameters.properties.at.oneOf } },
     })
@@ -137,25 +137,25 @@ describe('Antigravity Mapper', () => {
   it('does not inject progress text instructions when tools are present', () => {
     const withoutTools = {
       provider: 'antigravity',
-      model: 'gemini-3.7-flash',
+      model: 'gemini-3.8-flash',
       messages: [],
     } as unknown as GenerateOptions
-    const reqWithoutTools = buildRequest(withoutTools, testModel, 'test-project', 'gemini-3.7-flash')
+    const reqWithoutTools = buildRequest(withoutTools, testModel, 'test-project', 'gemini-3.8-flash-tiered')
     const sysWithoutTools = (reqWithoutTools.request as Record<string, unknown>).systemInstruction as { parts: Array<{ text: string }> }
 
     const withTools = {
       provider: 'antigravity',
-      model: 'gemini-3.7-flash',
+      model: 'gemini-3.8-flash',
       tools: [{ name: 'read_file', description: 'Read', parameters: { type: 'object' } }],
       messages: [],
     } as unknown as GenerateOptions
-    const reqWithTools = buildRequest(withTools, testModel, 'test-project', 'gemini-3.7-flash')
+    const reqWithTools = buildRequest(withTools, testModel, 'test-project', 'gemini-3.8-flash-tiered')
     const sysWithTools = (reqWithTools.request as Record<string, unknown>).systemInstruction as { parts: Array<{ text: string }> }
     expect(sysWithTools).toEqual(sysWithoutTools)
     expect(sysWithTools.parts.some((p) => p.text.includes('Progress and tool execution rule'))).toBe(false)
   })
 
-  it('configures thinkingConfig correctly across Gemini 3.x and Gemini 2.5 models', () => {
+  it('configures thinkingConfig correctly across Gemini 4, Gemini 3.x and Gemini 2.5 models', () => {
     const options: GenerateOptions = {
       provider: 'antigravity',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
@@ -168,17 +168,16 @@ describe('Antigravity Mapper', () => {
       thinkingConfig: { thinkingLevel: 'MEDIUM', includeThoughts: true },
     })
 
-    // Gemini 3.6 Flash (low effort) - 档位在模型名中，思考配置只补 includeThoughts
-    const m36 = MODELS.find((m) => m.id === 'gemini-3.6-flash')!
-    const req36 = buildRequest(options, m36, 'p1', 'gemini-3.6-flash-low', 'low')
-    expect((req36.request as Record<string, unknown>).generationConfig).toMatchObject({
+    // Gemini 4 Argon (low effort) - 档位在模型名中，思考配置只补 includeThoughts
+    const mArgon = MODELS.find((m) => m.id === 'gemini-4-argon')!
+    const reqArgon = buildRequest(options, mArgon, 'p1', 'gemini-4-argon-low', 'low')
+    expect((reqArgon.request as Record<string, unknown>).generationConfig).toMatchObject({
       thinkingConfig: { includeThoughts: true },
     })
 
-    // Gemini 3.7 Flash (off / none)
-    const m37 = MODELS.find((m) => m.id === 'gemini-3.7-flash')!
-    const req37Off = buildRequest(options, m37, 'p1', 'gemini-3.7-flash-tiered', 'off')
-    expect((req37Off.request as Record<string, unknown>).generationConfig).toMatchObject({
+    // Gemini 3.8 Flash (off / none)
+    const req38Off = buildRequest(options, m38, 'p1', 'gemini-3.8-flash-tiered', 'off')
+    expect((req38Off.request as Record<string, unknown>).generationConfig).toMatchObject({
       thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: false },
     })
 
@@ -197,15 +196,15 @@ describe('Antigravity Mapper', () => {
     })
   })
 
-  it.each(['gemini-3.8-flash', 'gemini-3.7-flash'])('uses supported thinking levels for %s, including legacy efforts', (modelId) => {
-    const model = MODELS.find((entry) => entry.id === modelId)!
-    const options = { provider: 'antigravity', model: modelId, messages: [] } as GenerateOptions
+  it('uses supported thinking levels for gemini-3.8-flash tiered runtime, including legacy efforts', () => {
+    const model = MODELS.find((entry) => entry.id === 'gemini-3.8-flash')!
+    const options = { provider: 'antigravity', model: model.id, messages: [] } as GenerateOptions
     const efforts = [
       ['off', 'LOW', false], ['none', 'LOW', false], ['minimal', 'LOW', true],
       ['low', 'LOW', true], ['medium', 'MEDIUM', true], ['high', 'HIGH', true], ['xhigh', 'HIGH', true],
     ] as const
     for (const [effort, thinkingLevel, includeThoughts] of efforts) {
-      const request = buildRequest(options, model, 'project', `${modelId}-tiered`, effort)
+      const request = buildRequest(options, model, 'project', 'gemini-3.8-flash-tiered', effort)
       expect((request.request as any).generationConfig.thinkingConfig).toEqual({ thinkingLevel, includeThoughts })
     }
   })
@@ -218,13 +217,13 @@ describe('Antigravity Mapper', () => {
     } as unknown as GenerateOptions
 
     // tiered 运行时：思考档位来自 effort，同时必须请求返回思考内容
-    const tiered = buildRequest(options, testModel, 'p', 'gemini-3.7-flash-tiered', 'high')
+    const tiered = buildRequest(options, testModel, 'p', 'gemini-3.8-flash-tiered', 'high')
     expect((tiered.request as Record<string, unknown>).generationConfig).toMatchObject({
       thinkingConfig: { thinkingLevel: 'HIGH', includeThoughts: true },
     })
 
     // 档位后缀运行时：档位在模型名里，只补 includeThoughts
-    const suffixed = buildRequest(options, testModel, 'p', 'gemini-3.6-flash-high', 'medium')
+    const suffixed = buildRequest(options, testModel, 'p', 'gemini-4-carbon-high', 'medium')
     expect((suffixed.request as Record<string, unknown>).generationConfig).toMatchObject({
       thinkingConfig: { includeThoughts: true },
     })
@@ -270,7 +269,7 @@ describe('Antigravity Mapper', () => {
     // 场景 A: 包含没有签名的 tool-call，自动填充 skip_thought_signature_validator
     const optionsWithoutSig: GenerateOptions = {
       provider: 'antigravity',
-      model: 'gemini-3.7-flash',
+      model: 'gemini-3.8-flash',
       messages: [
         {
           role: 'assistant',
@@ -296,7 +295,7 @@ describe('Antigravity Mapper', () => {
       ],
     } as unknown as GenerateOptions
 
-    const reqA = buildRequest(optionsWithoutSig, testModel, 'test-proj', 'gemini-3.7-flash-tiered', 'high')
+    const reqA = buildRequest(optionsWithoutSig, testModel, 'test-proj', 'gemini-3.8-flash-tiered', 'high')
     const contentsA = (reqA.request as Record<string, unknown>).contents as Array<any>
     const assistantPartA = contentsA[0].parts[0]
     expect(assistantPartA.functionCall.name).toBe('default_api:run_code')
@@ -307,7 +306,7 @@ describe('Antigravity Mapper', () => {
     // 场景 B: 携带真实签名的 tool-call，优先原样保留
     const optionsWithSig: GenerateOptions = {
       provider: 'antigravity',
-      model: 'gemini-3.7-flash',
+      model: 'gemini-3.8-flash',
       messages: [
         {
           role: 'assistant',
@@ -334,7 +333,7 @@ describe('Antigravity Mapper', () => {
       ],
     } as unknown as GenerateOptions
 
-    const reqB = buildRequest(optionsWithSig, testModel, 'test-proj', 'gemini-3.7-flash-tiered', 'high')
+    const reqB = buildRequest(optionsWithSig, testModel, 'test-proj', 'gemini-3.8-flash-tiered', 'high')
     const contentsB = (reqB.request as Record<string, unknown>).contents as Array<any>
     const assistantPartB = contentsB[0].parts[0]
     expect(assistantPartB.functionCall.name).toBe('default_api:run_code')
@@ -349,11 +348,11 @@ describe('Antigravity Mapper', () => {
     // answers to name the functionResponse and carry the wire id.
     const options = normalizeGenerateOptions({
       provider: 'antigravity',
-      model: 'gemini-3.7-flash',
+      model: 'gemini-3.8-flash',
       messages: [
         createAssistantMessage({
           content: [{ type: 'tool-call', id: ToolCallId('call-1'), name: 'default_api:run_code', arguments: '{"code":"print(1)"}' }],
-          source: { provider: 'antigravity', model: 'gemini-3.7-flash' },
+          source: { provider: 'antigravity', model: 'gemini-3.8-flash' },
         }),
         createToolResultMessage({
           callId: ToolCallId('call-1'),
@@ -363,7 +362,7 @@ describe('Antigravity Mapper', () => {
       ],
     })
 
-    const request = buildRequest(options, testModel, 'test-proj', 'gemini-3.7-flash-tiered', 'high')
+    const request = buildRequest(options, testModel, 'test-proj', 'gemini-3.8-flash-tiered', 'high')
     const contents = (request.request as Record<string, unknown>).contents as Array<any>
     expect(contents[0].parts[0].functionCall.id).toBe('call-1')
     expect(contents[0].parts[0].thoughtSignature).toBe('skip_thought_signature_validator')

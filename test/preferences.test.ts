@@ -234,11 +234,11 @@ describe('subscription preferences', () => {
   it('hydrates every provider preference fallback from its settings file', async () => {
     const emptySettings = {}
 
-    await new AntigravityModelSettingsStore().updateSettings({ enabled: false, enabledModelIds: ['gemini-3.7-flash'] })
+    await new AntigravityModelSettingsStore().updateSettings({ enabled: false, enabledModelIds: ['gemini-3.8-flash'] })
     const antigravity = registerAntigravityPreferenceStore(emptySettings)
     await vi.waitFor(() => expect(antigravity.status()).toMatchObject({
       enabled: false,
-      enabledModelIds: ['gemini-3.7-flash'],
+      enabledModelIds: ['gemini-3.8-flash'],
     }))
 
     await new CommandCodeModelSettingsStore().updateSettings({ enabled: false, enabledModelIds: ['command-code-pick'] })

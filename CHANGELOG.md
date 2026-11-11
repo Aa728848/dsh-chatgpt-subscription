@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **[antigravity] 新增 Gemini 4 Carbon、同步官方 2.31.0 客户端标识并对齐上游模型目录（2026-11-11 线上实测）**
+  - **客户端版本与构建号对齐**：从官方最新更新清单发布的 `2.31.0` 归档（`language_server` 构建元数据）核实并同步 `DEFAULT_ANTIGRAVITY_VERSION = '2.31.0'`、`DEFAULT_ANTIGRAVITY_CL = '1017595969'` 与 `HUB_RELEASE_CHANGELISTS['2.31.0']`，确保首轮请求与运行期读取到 `2.31.0` 清单后的 `User-Agent` 均完整携带对应 `cl=1017595969`。
+  - **新增 Gemini 4 Carbon 与关闭思考回退**：对齐上游 `/v1internal:fetchAvailableModels`（`defaultAgentModelId: "gemini-4-carbon-medium"`），在可选模型目录首位新增 `gemini-4-carbon`（`Gemini 4 Carbon`，上下文窗口 `1048576`，最大输出 `262144`，支持文本与图片输入及 `low` / `medium` / `high` 三档思考，归属 `gemini` 配额组）；线上实测裸 `gemini-4-carbon` 与 `gemini-4-carbon-tiered` 均返回 `404 NOT_FOUND`，路由一对一映射至 `gemini-4-carbon-low` / `gemini-4-carbon-medium` / `gemini-4-carbon-high`（默认 `gemini-4-carbon-medium`），并修正适配器在显式收到 `off` / `none` 思考档位时命中 `ROUTING[model].off`（`gemini-4-carbon-low`）且附带 `includeThoughts: false`。
+  - **清理已下线旧模型与同步静态限额**：移除上游目录已下线且调用返回 `404` / 下线提示的 4 个旧 Gemini 3.x 模型（`gemini-3.7-flash`、`gemini-3.6-flash`、`gemini-3.5-flash`、`gemini-3.1-pro`）；同步上游目录公布的静态兜底限额：Claude Opus 5.5 / Sonnet 5.5 更新为 `contextWindow: 1000000`、`maxTokens: 128000`，`gpt-oss-120b` 更新为 `contextWindow: 131072`、`maxTokens: 32768`。
+
 ## 0.67.0 - 2026-11-10
 
 - **[dispatch / Code Mode] 统一 K31P 通用工具入口并切断进展更新空转**

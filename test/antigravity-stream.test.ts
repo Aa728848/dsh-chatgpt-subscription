@@ -6,7 +6,7 @@ import { toToolCallId } from '../src/host/common/brand-compat.ts'
 import { buildRequest, closeStream, createStreamState, processStreamLine } from '../src/host/antigravity/mapper.ts'
 import { MODELS, ROUTING } from '../src/host/antigravity/types.ts'
 
-const model = MODELS.find((entry) => entry.id === 'gemini-3.7-flash')!
+const model = MODELS.find((entry) => entry.id === 'gemini-3.8-flash')!
 const line = (value: unknown) => `data: ${JSON.stringify(value)}`
 const frame = (parts: unknown[], rest = {}) => ({ response: { candidates: [{ content: { parts } }], ...rest } })
 
@@ -25,7 +25,7 @@ function requestParts(assembler: BlockAssembler): Array<Record<string, unknown>>
   // before any mapper sees it, so a mapper test enters the same way.
   const request = buildRequest(normalizeGenerateOptions({
     provider: 'antigravity', model: model.id, messages: [message],
-  }), model, 'project', 'gemini-3.7-flash-tiered', 'high')
+  }), model, 'project', 'gemini-3.8-flash-tiered', 'high')
   return (request.request as { contents: Array<{ parts: Array<Record<string, unknown>> }> }).contents[0].parts
 }
 
@@ -98,7 +98,10 @@ describe('Antigravity final usage and thought replay', () => {
     ])
   })
 
-  it.each(['gemini-3.8-flash', 'gemini-3.7-flash'])('preserves opaque parallel call IDs and matches reordered results for %s', (modelId) => {
+  it.each([
+    ['gemini-3.8-flash', 'gemini-3.8-flash-tiered'],
+    ['gemini-4-carbon', 'gemini-4-carbon-medium'],
+  ] as const)('preserves opaque parallel call IDs and matches reordered results for %s', (modelId, runtimeId) => {
     const ids = ['call/1', 'call:1', `provider:${'x'.repeat(80)}`]
     const state = createStreamState()
     const chunks = processStreamLine(line({ candidates: [{ content: { parts: ids.map((id, index) => ({
@@ -115,7 +118,7 @@ describe('Antigravity final usage and thought replay', () => {
       role: 'user', content: [...calls].reverse().map((call) => ({
         type: 'tool-result', toolCallId: call.id, content: [{ type: 'text', text: `result for ${call.id}` }],
       })),
-    }] } as unknown as GenerateOptions, MODELS.find((entry) => entry.id === modelId)!, 'project', `${modelId}-tiered`)
+    }] } as unknown as GenerateOptions, MODELS.find((entry) => entry.id === modelId)!, 'project', runtimeId)
     const contents = (request.request as any).contents
     expect(contents[0].parts.map((part: any) => part.functionCall.id)).toEqual(ids)
     expect(contents[1].parts.map((part: any) => part.functionResponse)).toEqual([...ids].reverse().map((id) => ({
@@ -133,7 +136,7 @@ describe('Antigravity final usage and thought replay', () => {
     })
     const request = buildRequest({ provider: 'antigravity', model: model.id, messages: [assistant, {
       role: 'user', content: [{ type: 'tool-result', toolCallId: 'old_call_1', content: [{ type: 'text', text: 'ok' }] }],
-    }] } as unknown as GenerateOptions, model, 'project', 'gemini-3.7-flash-tiered')
+    }] } as unknown as GenerateOptions, model, 'project', 'gemini-3.8-flash-tiered')
     const contents = (request.request as any).contents
     expect(contents[0].parts[0]).toEqual({
       functionCall: { id: 'old/call:1', name: 'run_code', args: {} }, thoughtSignature: 'old-signature',
@@ -157,7 +160,7 @@ describe('Antigravity final usage and thought replay', () => {
       role: 'user', content: calls.map((call) => ({
         type: 'tool-result', toolCallId: call.id, content: [{ type: 'text', text: 'ok' }],
       })),
-    }] } as unknown as GenerateOptions, model, 'project', 'gemini-3.7-flash-tiered')
+    }] } as unknown as GenerateOptions, model, 'project', 'gemini-3.8-flash-tiered')
     const contents = (request.request as any).contents
     for (const part of contents[0].parts) expect(part.functionCall).not.toHaveProperty('id')
     for (const part of contents[1].parts) expect(part.functionResponse).not.toHaveProperty('id')
@@ -183,7 +186,7 @@ describe('Antigravity final usage and thought replay', () => {
         } },
       })],
     })
-    const request = buildRequest(options, model, 'project', 'gemini-3.7-flash-tiered')
+    const request = buildRequest(options, model, 'project', 'gemini-3.8-flash-tiered')
     expect((request.request as any).contents[0].parts).toEqual([
       { thought: true, text: 'Plan', thoughtSignature: 'old-signature' },
       { thought: true, text: 'Next' },

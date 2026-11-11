@@ -94,10 +94,10 @@ async function mountPlugin() {
   vi.spyOn(FileCredentialStore.prototype, 'read').mockImplementation(async () => credentials)
   vi.spyOn(FileCredentialStore.prototype, 'write').mockImplementation(async (value) => { credentials = value })
   vi.spyOn(FileModelSettingsStore.prototype, 'read').mockResolvedValue({
-    enabledModelIds: ['gemini-3.7-flash'], catalogModels: [],
+    enabledModelIds: ['gemini-3.8-flash'], catalogModels: [],
   })
   vi.spyOn(FileModelSettingsStore.prototype, 'setCatalogModels').mockResolvedValue({
-    enabledModelIds: ['gemini-3.7-flash'], catalogModels: [],
+    enabledModelIds: ['gemini-3.8-flash'], catalogModels: [],
   })
   const codexStore = new MemoryTokenStore()
   await codexStore.save({ accessToken: 'test-codex-access', refreshToken: 'test-codex-refresh', expiresAt: Date.now() + 3_600_000 })
@@ -179,7 +179,7 @@ function geminiResponse() {
   return new Response('data: {"response":{"candidates":[{"content":{"parts":[{"text":"connected"}]},"finishReason":"STOP"}]}}\n\n')
 }
 
-async function generate(adapter: LlmAdapter, provider = 'antigravity', model = 'gemini-3.7-flash') {
+async function generate(adapter: LlmAdapter, provider = 'antigravity', model = 'gemini-3.8-flash') {
   const chunks: StreamChunk[] = []
   for await (const chunk of adapter.stream({
     provider, model, messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Test connection' }] })],
