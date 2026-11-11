@@ -26,9 +26,12 @@ import { createRetention } from '../src/host/codemode/retention.ts'
 import {
   CodeResetFailedError,
   CodeRunFailedError,
+  PTC_IMAGE_TAG,
+  PtcImageLike,
   ToolCallLimitExceededError,
   createTransportDefinition,
   normalizeSubCallArgs,
+  sanitizeReplTopLevelReturn,
 } from '../src/host/codemode/transport.ts'
 import { apply as applyCodemode } from '../src/entry-codemode.ts'
 
@@ -987,6 +990,7 @@ describe('子调用回放', () => {
 
 describe('DSH 内核 PTC 机制对齐与宿主层入参别名容错', () => {
   const rules = createRules({ maxSubCalls: 2 })
+  const catalog = [{ name: 'read', description: 'read', parameters: {}, isConcurrencySafe: () => true }]
 
   it('宿主层入参别名容错：read/edit/write/read_image/glob/grep/win_bash/job_output 自动映射常见错键', () => {
     expect(normalizeSubCallArgs({ name: 'read', description: '', parameters: {} }, { path: 'src/a.ts', offset: 1, limit: 50 }))
@@ -1260,5 +1264,244 @@ describe('DSH 内核 PTC 机制对齐与宿主层入参别名容错', () => {
 
     runtime.retainsState = false
     await expect(capturedExecutor!.reset!({ session: { id: 's1' } })).rejects.toBeInstanceOf(CodeResetFailedError)
+  })
+
+  it('DSH 0.2.2-rc.2 scoped-repl：说明段采用 REPL 形态，且传输层自动剥离末尾顶层 return', async () => {
+    const section = buildCodemodeSectionText({
+      runToolName: 'code_run',
+      metaTools: ['code_tools_list', 'code_tools_search', 'code_tools_describe'],
+      language: 'typescript',
+      programFormat: 'scoped-repl',
+    })
+    expect(section).toContain('retained TypeScript REPL')
+    expect(section).not.toContain('return pages.flatMap')
+    expect(section).toContain('pages.flatMap')
+    expect(section).toContain('inspect(...values)')
+
+    expect(sanitizeReplTopLevelReturn('const x = 1;\nreturn x + 2;', 'scoped-repl', 'typescript'))
+      .toBe('const x = 1;\nx + 2')
+    expect(sanitizeReplTopLevelReturn('const a = 1;\nreturn { a, b: 2 };\n', 'scoped-repl', 'typescript'))
+      .toBe('const a = 1;\n({ a, b: 2 })\n')
+    expect(sanitizeReplTopLevelReturn('const a = 1;\nreturn;\n', 'repl', 'typescript'))
+      .toBe('const a = 1;\nundefined\n')
+    // 函数内部的 return 不受影响
+    const withInnerFn = 'const fn = () => { return { ok: true } };\nfn()'
+    expect(sanitizeReplTopLevelReturn(withInnerFn, 'scoped-repl', 'typescript')).toBe(withInnerFn)
+    // function-body 或 python 不改写
+    expect(sanitizeReplTopLevelReturn('return 42', 'function-body', 'typescript')).toBe('return 42')
+    expect(sanitizeReplTopLevelReturn('return 42', 'scoped-repl', 'python')).toBe('return 42')
+
+    const seenPrograms: string[] = []
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+      runtime: () => ({
+        language: 'typescript',
+        programFormat: 'scoped-repl',
+        async run(req: { program: string }) {
+          seenPrograms.push(req.program)
+          return { output: [{ type: 'text' as const, text: 'done\n' }], value: 'done' }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const out = await (definition.execute as (args: unknown, exec: unknown) => Promise<{ logs: string[]; result?: unknown }>)({
+      code: 'const v = await tools.read({ file_path: "a.ts" });\nreturn { v };',
+      description: 'scoped-repl return recovery',
+    }, { callId: 'c-repl', signal: new AbortController().signal })
+    expect(seenPrograms).toEqual(['const v = await tools.read({ file_path: "a.ts" });\n({ v })'])
+    expect(out.logs).toEqual(['done'])
+    // output 文本与 result 文本一致时不重复渲染两遍
+    const rendered = definition.output.render({}, out)
+    expect(rendered).toEqual([{ type: 'text', text: 'done' }])
+  })
+
+  it('DSH 0.2.2-rc.2 有序图文流 result.output 与 projectContent（成功与报错现场保留图片）', async () => {
+    const imgRef = {
+      kind: 'image-attachment' as const,
+      attachmentId: 'img_1',
+      mediaType: 'image/png',
+      width: 100,
+      height: 80,
+      byteLength: 512,
+    }
+    let shouldFail = false
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+      runtime: () => ({
+        language: 'typescript',
+        programFormat: 'scoped-repl',
+        async run() {
+          if (shouldFail) {
+            return {
+              output: [
+                { type: 'text' as const, text: 'before crash\n' },
+                { type: 'image' as const, attachment: imgRef },
+              ],
+              error: { kind: 'exception', message: 'AssertionError: bad' },
+            }
+          }
+          return {
+            output: [
+              { type: 'text' as const, text: 'step 1\n' },
+              { type: 'text' as const, text: 'step 2\n' },
+              { type: 'image' as const, attachment: imgRef },
+              { type: 'text' as const, text: 'after image\n' },
+            ],
+          }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    const execOk = { callId: 'c-img-ok', signal: new AbortController().signal }
+    const out = await (definition.execute as (args: unknown, exec: unknown) => Promise<{ logs: string[] }>)({
+      code: 'inspect("step 1"); inspect("step 2"); inspect(img); inspect("after image")',
+      description: 'interleaved output',
+    }, execOk)
+    expect(out.logs).toEqual(['step 1', 'step 2', 'after image'])
+    const projectedOk = definition.projectContent(execOk, { isError: false, content: [] })
+    expect(projectedOk).toEqual([
+      { type: 'text', text: 'step 1\nstep 2\n' },
+      { type: 'image', attachment: imgRef },
+      { type: 'text', text: 'after image\n' },
+    ])
+    // 消费一次后即清理 WeakMap
+    expect(definition.projectContent(execOk, { isError: false, content: [] })).toBeUndefined()
+
+    shouldFail = true
+    const execFail = { callId: 'c-img-fail', signal: new AbortController().signal }
+    let caught: unknown
+    try {
+      await (definition.execute as (args: unknown, exec: unknown) => Promise<unknown>)({
+        code: 'inspect("before crash"); inspect(img); throw new Error("bad")',
+        description: 'failing with image',
+      }, execFail)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(CodeRunFailedError)
+    // 含有图片块时错误文本不重复拼接 Captured output:，交由 projectContent 按序附在错误块后
+    expect((caught as Error).message).toBe('program failed (exception): AssertionError: bad')
+    const projectedFail = definition.projectContent(execFail, {
+      isError: true,
+      content: [{ type: 'text', text: (caught as Error).message }],
+    })
+    expect(projectedFail).toEqual([
+      { type: 'text', text: 'program failed (exception): AssertionError: bad' },
+      { type: 'text', text: 'before crash\n' },
+      { type: 'image', attachment: imgRef },
+    ])
+  })
+
+  it('PtcImage 一等公民绑定与未 inspect 图片自动 deferContext 零丢图兜底', async () => {
+    const img1 = {
+      kind: 'image-attachment' as const,
+      attachmentId: 'img_inspected',
+      mediaType: 'image/png',
+      width: 64,
+      height: 64,
+      byteLength: 256,
+    }
+    const img2 = {
+      kind: 'image-attachment' as const,
+      attachmentId: 'img_forgotten',
+      mediaType: 'image/jpeg',
+      width: 120,
+      height: 90,
+      byteLength: 1024,
+    }
+    const deferred: unknown[] = []
+    const receivedByProgram: unknown[] = []
+    const host = {
+      catalog: () => [
+        ...catalog,
+        { name: 'read_image', description: 'read image', parameters: {}, isConcurrencySafe: () => true },
+      ],
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      programImage: (attachment: unknown, fallbackPath?: string) =>
+        new PtcImageLike(fallbackPath ?? '/tmp/img.png', attachment as typeof img1),
+      createImageContext: (content: readonly unknown[]) => ({ kind: 'deferred-image', content }),
+      async callTool(req: { name: string; args: { file_path?: string } }) {
+        const isFirst = req.args.file_path === 'a.png'
+        const ref = isFirst ? img1 : img2
+        return {
+          value: { path: req.args.file_path, attachmentId: ref.attachmentId },
+          content: [{ type: 'image', attachment: ref }],
+        }
+      },
+      runtime: () => ({
+        language: 'typescript',
+        programFormat: 'scoped-repl',
+        async run(spec: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          const readImage = spec.bindings[0]!.functions['read_image']!
+          const first = await readImage({ file_path: 'a.png' })
+          const second = await readImage({ file_path: 'b.jpg' })
+          receivedByProgram.push(first, second)
+          // 程序只显式 inspect 了第一张图，漏掉了第二张图
+          return {
+            output: [{ type: 'image' as const, attachment: img1 }],
+          }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    await (definition.execute as (args: unknown, exec: unknown) => Promise<unknown>)({
+      code: 'const a = await tools.read_image({ file_path: "a.png" }); inspect(a)',
+      description: 'ptc image fallback',
+    }, {
+      callId: 'c-ptc-img',
+      signal: new AbortController().signal,
+      deferContext: (msg: unknown) => { deferred.push(msg) },
+    })
+    expect(receivedByProgram).toHaveLength(2)
+    expect((receivedByProgram[0] as Record<symbol, unknown>)[PTC_IMAGE_TAG]).toBe(true)
+    expect((receivedByProgram[0] as PtcImageLike).path).toBe('a.png')
+    expect((receivedByProgram[0] as PtcImageLike).width).toBe(64)
+    // 第一张图已被 inspect，不走 deferContext；第二张图未被 inspect，自动由 deferContext 兜底补发
+    expect(deferred).toEqual([
+      { kind: 'deferred-image', content: [{ type: 'image', attachment: img2 }] },
+    ])
+  })
+
+  it('子调用参数双快照隔离（工具原地修改 args 不污染回放日志）且审批等待期响应取消', async () => {
+    const loggedEvents: { type: string; data: unknown }[] = []
+    const agent = {
+      session: {
+        id: 'sess-iso',
+        append(type: string, data: unknown) {
+          loggedEvents.push({ type, data })
+        },
+      },
+    }
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      async callTool(req: { args: Record<string, unknown> }) {
+        // 模拟工具实现原地篡改入参对象
+        req.args['file_path'] = 'MUTATED_BY_TOOL'
+        req.args['injected'] = 'bad'
+        return { value: 'ok', content: [{ type: 'text', text: 'ok' }] }
+      },
+      runtime: () => ({
+        async run(spec: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          await spec.bindings[0]!.functions['read']!({ path: 'original.ts' })
+          return { output: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, rules)
+    await (definition.execute as (args: unknown, exec: unknown) => Promise<unknown>)({
+      code: 'await tools.read({ path: "original.ts" })',
+      description: 'arg isolation',
+    }, { callId: 'c-iso', signal: new AbortController().signal, agent })
+    const settled = loggedEvents.find((e) => e.type === 'tool/ptc-dispatch')?.data as { arguments: unknown }
+    expect(settled.arguments).toEqual({ file_path: 'original.ts' })
   })
 })

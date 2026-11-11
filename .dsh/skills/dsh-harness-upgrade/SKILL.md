@@ -6,7 +6,7 @@ description: Use when the DSH harness this plugin supports moves to a new releas
 # Keeping this plugin working across DSH generations
 
 This plugin ships **one code base for every supported harness generation**
-(0.1.2-alpha.5 through 0.2.2-rc.1 today). Users are
+(0.1.2-alpha.5 through 0.2.2-rc.2 today). Users are
 spread across `latest` / `next` / `alpha`, so a new harness release never licenses
 dropping an old one: every breaking change gets bridged at a boundary, and both
 generations keep passing tests. This skill is the procedure, the seams, and the
@@ -465,6 +465,7 @@ next upgrade starts by reading the newest file in `references/`.
   forks remain necessary, model-switch compaction, the subagent parent-route and description changes, official
   Russian locales, the vendor bump, and the exact alpha.3/rc.5/old-generation verification boundaries.
   `references/0.2.2-rc.1.md` covers 0.2.2-rc.1: zero non-`package.json` source delta from 0.2.2-alpha.3, promotion of Cordis `4.1.0` / Loader `1.1.0` / Schemastery `3.19.0`, resolution of the upstream `dsh-tool-pwsh-persistent` npm closure, identical 0.2.2-alpha.3 and 0.2.1-rc.5 clean-room outcomes, and isolated 0.2.2-rc.1 Web Host smoke verification.
+  `references/0.2.2-rc.2.md` covers 0.2.2-rc.2 and `master` PTC upgrades: ordered mixed text/image `result.output` (`PtcOutput[]`) alongside legacy `result.logs`, `projectContent(exec, result)` inline image projection on both success and failure, `scoped-repl` default program format recognition plus automatic top-level trailing `return` sanitization, first-class `PtcImage` binding for `read_image`/`cua` with automatic `deferContext` fallback for uninspected images, dual-snapshot sub-call argument normalization, early `trackRun` registration covering approval waits, and client `CodeRunToolView` newline-aware output flattening.
   `references/cache-warmup-retrieval.md` is likewise not a harness round: it freezes the cache-warmup state machine, default-on retrieval behavior, PTC/Read JSON and PostToolDecision seams, reminder-only user-event handling, and the runtime/four-request evidence. Latest full run for that work: **310 files passed / 2 skipped; 5166 passed / 9 skipped**, plus **112 focused default-on tests**.
   `references/codex-wire-surface.md` is not a harness round but belongs in this
   list because it rewrites a compatibility seam: the Codex subscription line now

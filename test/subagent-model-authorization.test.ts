@@ -624,6 +624,15 @@ describe('subagent model authorization', () => {
     const props = (rewritten.tools[1]!.parameters as { properties: Record<string, { description: string }> }).properties
     expect(props['provider']!.description).toContain('Required in this Session: pass an authorized provider id')
     expect(props['model']!.description).toContain('Required in this Session: pass the authorized model id (without the provider/ prefix)')
+    // 0.2.2-rc.2 wording (`Omit provider, model, and reasoning_effort...` and `; requires model`/`provider`).
+    expect(rewriteAuthorizedToolDescriptions(
+      'Omit `provider`, `model`, and `reasoning_effort` to use child defaults, falling back to compatible parent values.',
+      [MINIMAX],
+    )).toContain('Child LLM selection is required in this Session')
+    expect(rewriteAuthorizedToolDescriptions('Child LLM provider id; requires `model`.', [MINIMAX]))
+      .toContain('Required in this Session: pass an authorized provider id')
+    expect(rewriteAuthorizedToolDescriptions('Model id within that provider; requires `provider`.', [MINIMAX]))
+      .toContain('Required in this Session: pass the authorized model id (without the provider/ prefix)')
     // Unrestricted sessions keep the original assembly reference untouched.
     expect(rewriteAuthorizedPromptAssembly(assembly, [])).toBe(assembly)
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **[codemode / 兼容] 对齐 DSH 0.2.2-rc.2：升级 `code_run` 图文混排投影、`scoped-repl` 顶层 `return` 自愈、一等 `PtcImage` 绑定与子代理血缘守卫**
+  - **有序图文输出与 `projectContent` 内联投影**：兼容 DSH `0.2.2-rc.2` 的 `PtcRunResult.output: PtcOutputBlock[]` 与旧代 `result.logs: string[]` 双轨协议；`code_run` 实现 `ToolDefinition.projectContent(exec, result)`，在成功时按 `inspect(...)` 顺序把文本与图片直接投射为 `ToolResultMessage.content` 中的有序多模态块，在程序报错时将报错前已 `inspect` 的文本和图片追加在错误块之后保留现场。
+  - **`scoped-repl` 默认格式识别与末尾顶层 `return` 自动修复**：`rules.ts` 与 `transport.ts` 将 `'scoped-repl'` / `'script'` 归入 REPL 格式（生成无 `return` 的 REPL 示例并补充 `inspect(...values)` 指引）；新增词法状态机 `sanitizeReplTopLevelReturn`，在 TypeScript REPL 模式下自动剥离末尾顶层 `return <expr>`（对象字面量自动包 `({...})`），避免模型沿用 `function-body` 习惯导致 `SyntaxError: Return statement is not allowed here`。
+  - **一等 `PtcImage` 绑定与未检视图片兜底**：当宿主暴露 `resolveImageAttachmentAccess` 且当前运行时支持 `inspect` 时，`read_image` 与 `cua` 返回的图片封装为 `PtcImageLike`（`Symbol.for('dsh.ptc.image') === true`）；若程序结束前未调用 `inspect(img)`，`transport.ts` 自动通过 `exec.deferContext(createImageContext(...))` 延迟注入，确保图片不丢失。
+  - **双快照子调用参数隔离与提前注册运行句柄**：`normalizeSubCallArgsPair` 为工具执行与 `tool/ptc-dispatch` 审计日志分别生成独立深拷贝快照；`host.trackRun` 提前至工作目录准备与沙箱提权弹窗之前注册，确保等待审批期间切沙箱或重置能立即中止。
+  - **子代理血缘与白名单提示词兼容 `0.2.2-rc.2`**：适配上游移除 `ctx.agents.roots()` / `isOwnedBy()` 的变更，`entry-plan-mode-pipeline.ts`（`assertLiveRoot`）与 `dispatch-execution-guard.ts`（`isDelegatedCaller` / `hasRunningChildSubagent`）优先通过 `session.header.origin === 'subagent'`、`session.header.parentSession` 及 `ctx.subagents.rootOf(agent)` 判定子代理身份与运行中子代，保留老代 `agents.roots()` 回退；`subagent-model-authorization.ts` 同步兼容 `0.2.2-rc.2` 的 `tool-subagent` 描述文案重写；`package.json` `peerDependencies` 扩展至 `0.2.2-rc.2`。
+
 - **[antigravity / 流式] 慢思考模型不再被空闲看门狗判成死流：首个 chunk 之前单独给 240s 窗口**
   - **现象**：`gemini-4-carbon`（`-medium` / `-high`）跑长上下文时，响应头回来之后一个字节都不来，120s 后本轮报 `Antigravity stream idle timeout after 120000ms`，DSH 从头发起重试（线上连续出现 1/5、3/5），每次重试还要再付一次预填充。
   - **判据本身没错**：看门狗按**传输层字节**计时，`: ping` 注释帧也会重新计时（`adapter.ts` 的 read 循环与每帧各一次 `activity.pulse()`），所以报超时就意味着确实 120s 零字节。缺的是把**模型还没开口**和**流已经卡住**分开：两段静默共用一个预算，而带思考的模型可以在首帧之前静默数分钟。

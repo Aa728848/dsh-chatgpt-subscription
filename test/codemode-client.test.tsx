@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { apply as applyClient } from '../src/client/index.tsx'
-import { CodeRunToolView } from '../src/client/codemode/CodeRunToolView.tsx'
+import { CodeRunToolView, flattenCodeRunOutput } from '../src/client/codemode/CodeRunToolView.tsx'
 import { SHIKI_TOKEN_COLORS, tokenizeCodeLines } from '../src/client/codemode/highlight.ts'
 import { CODE_RUN_TOOL_NAME } from '../src/client/codemode/tool-name.ts'
 import { TRANSPORT_TOOL_NAME } from '../src/host/codemode/transport.ts'
@@ -189,5 +189,16 @@ describe('code_run 客户端语法高亮与槽位对齐', () => {
     const summary = container.querySelector('.dshc-code-summary')
     expect(summary?.getAttribute('data-state')).toBe('error')
     expect(summary?.textContent).toBe('program failed (runtime): bad')
+  })
+
+  it('flattenCodeRunOutput：对齐 DSH 0.2.2-rc.2 resultText，带末尾换行符的相邻块不产生双空行', () => {
+    const out = flattenCodeRunOutput({
+      kind: 'tool-result',
+      content: [
+        { type: 'text', text: 'first line\n' },
+        { type: 'text', text: 'second line\n' },
+      ],
+    })
+    expect(out).toBe('first line\nsecond line\n')
   })
 })

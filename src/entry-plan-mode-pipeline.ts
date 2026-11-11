@@ -299,14 +299,16 @@ const DELEGATED_TEXT = 'plan mode control is unavailable while the calling agent
 /**
  * 校验调用方是这个会话**现在的**那个存活根 agent，按宿主所能提供的信息**三级降级**：
  *
- * 1. `agents` 在、`agents.roots()` 可用 —— 全量校验（存活 + 根判定，照抄 harness 的
- *    `user-questions`）；确认不是根时抛 `DELEGATED_CALLER`，这是它**唯一**的抛出点。
- * 2. `agents` 在、`roots` 不可用（老代上未必有）—— 只判存活（`agents.get(id) === agent`）
- *    就放行：判不了根不等于确认是子代理，而 `planMode.set()` 本身不需要根身份。
+ * 1. `agents` 在且调用方存活：
+ *    - `0.2.2-rc.2+`：优先读持久会话头 `agent.session.header.origin === 'subagent'`（对齐
+ *      官方 `user-questions` / `action-cards` 的 `assertLiveRoot`），以及 `subagents.rootOf(agent)`；
+ *    - `0.2.0` ~ `0.2.2-rc.1`：读 `agents.roots()`；
+ *    只要任一信号确认不是根，就抛 `DELEGATED_CALLER`。
+ * 2. `agents` 在，但既无会话血缘/`subagents.rootOf`、也无 `roots`（老代）—— 只判存活
+ *    （`agents.get(id) === agent`）就放行：判不了根不等于确认是子代理，而 `planMode.set()`
+ *    本身不需要根身份。
  * 3. `agents` 服务缺失 —— 存活与根都无从判定，直接放行（同样不需要 agents）。
  *
- * 降级的代价：老代上识别不出子代理，子代理可能自己进入它自己的计划模式；那边没有
- * `exit_plan_mode` 审批出口可用，所以这是可接受的降级，好过让切换在整个老代上永久失败。
  * @param ctx - 宿主上下文。
  * @param agent - `exec.agent`。
  * @throws {PlanModePipelineError} `CALLER_MISSING` / `CALLER_NOT_LIVE` / `DELEGATED_CALLER`。
@@ -332,6 +334,28 @@ function assertLiveRoot(ctx: Context, agent: unknown): void {
   if (current !== agent) {
     throw new PlanModePipelineError(NOT_LIVE_TEXT, 'CALLER_NOT_LIVE')
   }
+  // 0.2.2-rc.2+ 移除 agents.roots() 后，官方统一以 session.header.origin === 'subagent'
+  // 及 subagents.rootOf(agent) 判定子代理身份。
+  const origin = (agent as { session?: { header?: { origin?: unknown } } }).session?.header?.origin
+  if (origin === 'subagent') {
+    throw new PlanModePipelineError(DELEGATED_TEXT, 'DELEGATED_CALLER')
+  }
+  const subagents = serviceOf<{ rootOf?: (caller: unknown) => unknown }>(ctx, 'subagents')
+  if (typeof subagents?.rootOf === 'function') {
+    let root: unknown
+    try {
+      root = subagents.rootOf(agent)
+    } catch (error: unknown) {
+      if (typeof error === 'object' && error !== null
+        && (error as { code?: unknown }).code === 'UNAUTHORIZED') {
+        throw new PlanModePipelineError(DELEGATED_TEXT, 'DELEGATED_CALLER')
+      }
+      root = undefined
+    }
+    if (root !== undefined && root !== agent) {
+      throw new PlanModePipelineError(DELEGATED_TEXT, 'DELEGATED_CALLER')
+    }
+  }
   let roots: readonly unknown[] | undefined
   if (typeof agents.roots === 'function') {
     try {
@@ -340,9 +364,9 @@ function assertLiveRoot(ctx: Context, agent: unknown): void {
       roots = undefined
     }
   }
-  // 第二级：有 agents 但 roots 不可用（老代）—— 只判存活，判不了根就放行。
+  // 第二级：有 agents 但 roots 不可用（老代，且无会话血缘）—— 只判存活，判不了根就放行。
   if (!Array.isArray(roots)) return
-  // 第一级：roots 可用且确实不含该 agent —— 这是 DELEGATED_CALLER 唯一的抛出点。
+  // 第一级（0.2.0 ~ 0.2.2-rc.1）：roots 可用且确实不含该 agent。
   if (!roots.includes(agent)) {
     throw new PlanModePipelineError(DELEGATED_TEXT, 'DELEGATED_CALLER')
   }

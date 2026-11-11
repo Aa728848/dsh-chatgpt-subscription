@@ -149,7 +149,10 @@ export function flattenCodeRunOutput(block: CodeRunBlock): string | null {
     const errCode = block.error.code ?? 'UNKNOWN'
     parts.push(`${errName}: ${errCode}`)
   }
-  const joined = parts.join('\n')
+  const joined = parts.reduce(
+    (text, part, index) => text + (index === 0 || text.endsWith('\n') ? '' : '\n') + part,
+    '',
+  )
   return joined === '' ? null : joined
 }
 

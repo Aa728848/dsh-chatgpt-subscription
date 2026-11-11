@@ -287,7 +287,7 @@ export interface SectionInput {
  */
 export function buildCodemodeSectionText(input: SectionInput): string {
   const python = input.language === 'python'
-  const retained = input.programFormat === 'repl'
+  const retained = input.programFormat === 'repl' || input.programFormat === 'scoped-repl' || input.programFormat === 'script'
   const listTool = input.metaTools[0] ?? 'code_tools_list'
   const searchTool = input.metaTools[1] ?? 'code_tools_search'
   const describeTool = input.metaTools[2] ?? 'code_tools_describe'
@@ -349,7 +349,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
       : (retained
         ? '- A retained TypeScript REPL: top-level declarations, await, and a final expression. Its variables and imported modules survive into your later programs in this session.'
         : '- Erasable TypeScript, run as the body of an async function: top-level await and return work.'),
-    '- Only what you return or console.log reaches the conversation; every intermediate result stays in the program, so filter and aggregate there instead of returning raw payloads.',
+    '- Only what you inspect(...values), return, or console.log reaches the conversation; every intermediate result stays in the program, so filter and aggregate there instead of returning raw payloads.',
     '- File, search, and shell tool results are named-field objects, never bare strings — read the field, not the envelope (`job_list` and `list_agents` are the only bare arrays):',
     '  `read` → `{ path, offset, lines: [{ number, text }], totalLines }` · `glob` → `{ root, paths }` · `grep` → `{ matches: [{ path, lineNumber, line }] }` · `edit` → `{ path, before, after }` · `write` → `{ path, operation, before, after }` · `win_bash` → `{ stdout, stderr, exitCode }` · `web_fetch` → `{ url, statusCode, body, truncated }` · `job_output` → `{ text, job }` · `read_image` → `{ path, image }` · `skill` → `{ name, content }`.',
     python
@@ -357,7 +357,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
       : '- Read the field: `r.lines.map((l) => l.text)`. Calling `.map`, `.filter`, `.split` or `in` on the envelope itself is always wrong.',
     '- Anything not listed above (MCP tools, hidden plugin tools) answers with its **declared output schema**: call `' + describeTool + '({ name })` and read the top-level keys before picking a field. One discovery call is far cheaper than the `TypeError` that loses the whole program.',
     '- Discovery returns whole objects too: `' + listTool + '` answers `{ tools: [{ name, description, namespace }] }`, `' + searchTool + '` answers `{ tools: [{ name, namespace, description, parameters, output? }], fallback? }`, and `' + describeTool + '` answers `{ found, name?, namespace?, description?, parameters?, output? }`.',
-    '- Tool argument objects and `return` values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or print it with `console.log`.',
+    '- Tool argument objects and `return` values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or print it with `inspect` / `console.log`.',
     '- Parameter keys: `read`, `edit`, `write`, and `read_image` take `file_path` (not `path`); `glob` and `grep` take `path`; `win_bash` takes `workdir` (not `cwd`).',
     // 程序文本本身的两类陷阱：写错了连求值都进不去，报错还没有行号。措辞只描述事实，不给自动改写。
     ...(python ? [] : [

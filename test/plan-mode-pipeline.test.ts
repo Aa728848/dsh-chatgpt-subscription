@@ -335,6 +335,17 @@ describe('the live-root check, in the three levels the hosts offer', () => {
     expect(planMode.set).not.toHaveBeenCalled()
   })
 
+  it('rejects a live child on 0.2.2-rc.2+ where agents.roots() is gone and session.header.origin is subagent', async () => {
+    const planMode = fakePlanMode('committed')
+    const subagent = { id: 'child', session: { header: { id: 'child', origin: 'subagent' } } }
+    const host = fakeHost({ planMode: planMode.service, agents: fakeAgents({ root: ROOT, child: subagent }) })
+
+    apply(host.ctx)
+    await expect(callTool(host, ENTER_PLAN_MODE_TOOL, { agent: subagent })).rejects.toMatchObject({ code: 'DELEGATED_CALLER' })
+    await expect(callTool(host, LEAVE_PLAN_MODE_TOOL, { agent: subagent })).rejects.toMatchObject({ code: 'DELEGATED_CALLER' })
+    expect(planMode.set).not.toHaveBeenCalled()
+  })
+
   it('lets the call through where agents has no roots function (old generation)', async () => {
     // 第二级：只判存活。判不了根不等于确认是子代理，而 set() 本身不需要根身份。
     const planMode = fakePlanMode('committed')

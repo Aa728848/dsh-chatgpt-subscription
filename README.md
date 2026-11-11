@@ -5,7 +5,7 @@
 插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **13 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
 
 - **跨平台支持**：Windows、macOS、Linux（含无桌面密钥环的远程服务器部署模式）
-- **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.1** 全系列版本
+- **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.2** 全系列版本
 - **全栈多语言**：Web 设置中心与宿主侧提示/报错完整支持 **简体中文（`zh`）/ English（`en`）/ Русский（`ru`）**
 
 ---
@@ -76,7 +76,7 @@
 
 - **操作系统**：Windows（需内置 PowerShell 以支持 CurrentUser DPAPI）、macOS 或 Linux
 - **运行时**：Node.js **≥ 22.19**（内置 `undici` 8 的下限，已写入 `package.json` 的 `engines`；建议 24 LTS）与 npm
-- **宿主版本**：DeepSeek Harness `@deepseek-ai/dsh` `0.1.2-alpha.5` 至 `0.2.2-rc.1`
+- **宿主版本**：DeepSeek Harness `@deepseek-ai/dsh` `0.1.2-alpha.5` 至 `0.2.2-rc.2`
 
 ---
 

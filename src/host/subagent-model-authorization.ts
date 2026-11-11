@@ -1080,7 +1080,7 @@ export function rewriteAuthorizedToolDescriptions(
       required,
     )
     .replace(
-      /Supply `provider` and `model` together\. Omitted values use child defaults, falling back to (?:this backend's route defaults|compatible parent values)\./g,
+      /(?:Supply `provider` and `model` together\.\s*Omitted values|Omit `?provider`?, `?model`?, and `?reasoning_effort`? to) use child defaults, falling back to (?:this backend's route defaults|compatible parent values)\./g,
       required,
     )
     .replace(
@@ -1091,12 +1091,12 @@ export function rewriteAuthorizedToolDescriptions(
       /Supply together with provider; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit when the child provider matches the parent provider\./g,
       'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
     )
-    .replaceAll(
-      'Child LLM provider id.',
+    .replace(
+      /Child LLM provider id(?:; requires `?model`?)?\./g,
       `Required in this Session: pass an authorized provider id from list_subagent_models (${routes}).`,
     )
-    .replaceAll(
-      'Model id within that provider.',
+    .replace(
+      /Model id within that provider(?:; requires `?provider`?)?\./g,
       'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
     )
 }

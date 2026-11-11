@@ -203,6 +203,12 @@ export interface CodemodeHost {
    */
   createImageContext?(content: readonly unknown[]): unknown
   /**
+   * 将图片附件包装成程序内可操作的一等公民 `PtcImage` 对象（DSH 0.2.2-rc.2+ TypeScript 运行时）。
+   *
+   * 返回 `undefined` 时保持工具原始返回值，并通过 `deferContext` 直接附带图片上下文。
+   */
+  programImage?(attachment: unknown, fallbackPath?: string): unknown
+  /**
    * 重写一条子调用回放记录的内容块（内核 `tools/ptc-dispatch-log` 瀑布）。
    *
    * 实现**必须**自己吞掉监听器的失败并回落到原始内容（内核 `ptc.ts` 同此）：这里决定的
@@ -311,12 +317,19 @@ export interface PtcSandboxSummary {
   readonly enforcement?: 'full' | 'partial'
 }
 
-/** 一次程序运行的结果。 */
+/** 运行时有序输出流中的单个输出块（DSH 0.2.2-rc.2+ `inspect` / `console` / `PtcImage`）。 */
+export type PtcOutputBlock =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly attachment: unknown }
+
+/** 一次程序运行的结果（同时兼容旧代 `logs: string[]` 与新代 `output: PtcOutputBlock[]`）。 */
 export interface PtcRunResultLike {
   /** 程序返回值。 */
   readonly value?: unknown
-  /** 捕获的输出。 */
-  readonly logs: readonly string[]
+  /** 旧代（<= 0.2.2-rc.1）捕获的日志行。 */
+  readonly logs?: readonly string[]
+  /** 新代（0.2.2-rc.2+）有序图文混排输出块。 */
+  readonly output?: readonly PtcOutputBlock[]
   /** 失败信息。 */
   readonly error?: { readonly kind: string; readonly message: string }
   /** 文件策略与观察到的拒绝。 */
@@ -331,6 +344,64 @@ export interface TransportOutput {
   readonly result?: unknown
   /** 文件沙箱观察。 */
   readonly sandbox?: PtcSandboxSummary
+}
+
+/** 与 `@deepseek-ai/dsh-ptc-runtime` 的 `PTC_IMAGE_TAG` 对齐的跨包协议符号。 */
+export const PTC_IMAGE_TAG = Symbol.for('dsh.ptc.image')
+
+/** 图片附件引用结构（对齐 `@deepseek-ai/dsh-llm` 的 `ImageAttachmentRef`）。 */
+export interface PtcImageAttachmentRefLike {
+  readonly kind: 'image-attachment'
+  readonly attachmentId: string
+  readonly mediaType: string
+  readonly width: number
+  readonly height: number
+  readonly byteLength: number
+}
+
+/**
+ * 程序内一等公民图片句柄（协议兼容 `@deepseek-ai/dsh-ptc-runtime` 的 `PtcImage`）。
+ *
+ * `ptc-runtime-node` 的 `encodeWireValue` 通过 `Symbol.for('dsh.ptc.image') === true` + `path` + `attachment`
+ * 判定图片句柄并在 worker 侧还原为 `PtcImage` 实例，使程序可读 `.path` / `.width` / `.height` 并传给 `inspect(img)`。
+ */
+export class PtcImageLike {
+  readonly [PTC_IMAGE_TAG] = true
+  readonly path: string
+  readonly attachment: PtcImageAttachmentRefLike
+
+  constructor(path: string, attachment: PtcImageAttachmentRefLike) {
+    this.path = path
+    this.attachment = attachment
+  }
+
+  get attachmentId(): string {
+    return this.attachment.attachmentId
+  }
+
+  get mediaType(): string {
+    return this.attachment.mediaType
+  }
+
+  get width(): number {
+    return this.attachment.width
+  }
+
+  get height(): number {
+    return this.attachment.height
+  }
+}
+
+/** 判定一个值是否为合法的 `ImageAttachmentRef`。 */
+export function isImageAttachmentRefLike(value: unknown): value is PtcImageAttachmentRefLike {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Record<string, unknown>
+  return candidate['kind'] === 'image-attachment'
+    && typeof candidate['attachmentId'] === 'string' && candidate['attachmentId'].length > 0
+    && typeof candidate['mediaType'] === 'string' && candidate['mediaType'].length > 0
+    && typeof candidate['width'] === 'number' && Number.isInteger(candidate['width']) && candidate['width'] > 0
+    && typeof candidate['height'] === 'number' && Number.isInteger(candidate['height']) && candidate['height'] > 0
+    && typeof candidate['byteLength'] === 'number' && Number.isInteger(candidate['byteLength']) && candidate['byteLength'] > 0
 }
 
 /** 语言相关的工具描述与 `code` 参数描述（对齐内核 `ptc.ts`）。 */
@@ -374,9 +445,13 @@ const PYTHON_FLAVOR = buildFlavor('Python', {
   codeDescription: "The Python program to execute, following this tool's execution instructions.",
 })
 
+export function isReplFormat(programFormat: string | undefined): boolean {
+  return programFormat === 'repl' || programFormat === 'scoped-repl' || programFormat === 'script'
+}
+
 function resolveFlavor(runtime: PtcRuntimeLike | undefined): TransportFlavor {
   if (runtime?.language === 'python') return PYTHON_FLAVOR
-  if (runtime?.language === 'typescript' && runtime.programFormat === 'repl') return TYPESCRIPT_REPL_FLAVOR
+  if (runtime?.language === 'typescript' && isReplFormat(runtime.programFormat)) return TYPESCRIPT_REPL_FLAVOR
   return TYPESCRIPT_FUNCTION_FLAVOR
 }
 
@@ -435,6 +510,8 @@ function buildTransportParameters(runtime: PtcRuntimeLike | undefined): Record<s
  */
 export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRules) {
   const runToolName = rules.options.runToolName
+  const inspections = new WeakMap<object, { readonly blocks: readonly unknown[]; readonly appendToError?: boolean }>()
+  const structuredOutputs = new WeakMap<object, readonly PtcOutputBlock[]>()
   const definition = {
     name: runToolName,
     description: buildTransportDescription(undefined),
@@ -460,6 +537,16 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
         },
       },
       render: (_args: unknown, value: TransportOutput) => {
+        const structured = typeof value === 'object' && value !== null ? structuredOutputs.get(value) : undefined
+        if (structured !== undefined) {
+          return renderStructuredOutputBlocks(
+            structured,
+            value.result,
+            value.sandbox,
+            host.runtime()?.sandboxMode,
+            runToolName,
+          )
+        }
         const logs = (value.logs ?? []).join('\n')
         const rendered = value.result === undefined ? '' : renderProgramValue(value.result)
         const parts = [logs, rendered].filter((part) => part.length > 0)
@@ -476,6 +563,19 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
         const language = host.runtime()?.language === 'python' ? 'python' : 'typescript'
         return { language }
       },
+    },
+    projectContent(exec: unknown, toolResult: unknown) {
+      if (typeof exec !== 'object' || exec === null) return undefined
+      const inspection = inspections.get(exec)
+      if (inspection === undefined) return undefined
+      inspections.delete(exec)
+      if (inspection.appendToError === true) {
+        const existing = typeof toolResult === 'object' && toolResult !== null && Array.isArray((toolResult as { content?: unknown }).content)
+          ? ((toolResult as { content: readonly unknown[] }).content)
+          : []
+        return [...existing, ...inspection.blocks]
+      }
+      return [...inspection.blocks]
     },
     presentCall(args: unknown) {
       // 卡片标题走与执行同一条解析路径：融合参数、别名键、纯程序文本都能显示正确标题。
@@ -512,6 +612,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
       const owner = host.stateOwner(exec.agent)
       let maxSubCalls: number = rules.options.maxSubCalls
       let attempts = 0
+      const deferredProgramImages: { readonly attachmentId?: string; readonly content: readonly unknown[] }[] = []
       const lane = createCommitLane(rules.options.maxParallelSubCalls, () => runController.signal.aborted)
       const definitions = new Map<string, CatalogEntry>()
       for (const entry of catalog) definitions.set(entry.name, entry)
@@ -533,8 +634,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             runController.abort(limitErr)
             throw limitErr
           }
-          const parsed = normalizeSubCallArgs(definitions.get(entry.name), losslessArgs(rawArgs))
-          const loggedArgs = losslessArgs(parsed)
+          const { dispatched: parsed, logged: loggedArgs } = normalizeSubCallArgsPair(definitions.get(entry.name), rawArgs)
           const callId = String(exec.callId) + NESTED_CALL_ID_MARKER + String(n)
           const dispatchLog = createDispatchLog(exec.agent, {
             rootCallId: rootCallIdOf(String(exec.callId)),
@@ -577,7 +677,29 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
               }
               const outcome = parked.value
               const isError = outcome.error !== undefined
-              if (!isError && Array.isArray(outcome.content) && hasImageBlock(outcome.content)) {
+              let programImageValue: unknown
+              if (
+                !isError
+                && (entry.name === 'read_image' || entry.name === 'cua')
+                && runtime.language !== 'python'
+                && typeof host.programImage === 'function'
+                && Array.isArray(outcome.content)
+              ) {
+                const imageRef = firstImageAttachmentOf(outcome.content)
+                if (imageRef !== undefined) {
+                  const fallbackPath = isRecord(outcome.value) && typeof outcome.value['path'] === 'string'
+                    ? outcome.value['path']
+                    : (isRecord(parsed) && typeof parsed['file_path'] === 'string' ? parsed['file_path'] : undefined)
+                  programImageValue = host.programImage(imageRef, fallbackPath)
+                  if (programImageValue !== undefined) {
+                    deferredProgramImages.push({
+                      attachmentId: imageRef.attachmentId,
+                      content: outcome.content,
+                    })
+                  }
+                }
+              }
+              if (!isError && programImageValue === undefined && Array.isArray(outcome.content) && hasImageBlock(outcome.content)) {
                 const imageMsg = host.createImageContext?.(outcome.content)
                 if (imageMsg !== undefined) exec.deferContext?.(imageMsg)
               }
@@ -603,6 +725,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
                 throw new Error(runToolName + ' run is over; ' + entry.name + ' result discarded')
               }
               if (outcome.error !== undefined) throw new Error(outcome.error)
+              if (programImageValue !== undefined) return programImageValue
               return outcome.value !== undefined ? outcome.value : outcome.text ?? null
             },
             abandon(): never {
@@ -626,11 +749,26 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
          * `stateOwner`，避免把单次授权固化到常驻环境中（对齐内核 `ptc.ts`）。
          */
         let approvedEscalatedMode: EscalationTargetMode | undefined
-        /** 这次运行在入口那边的登记；结算时释放（重跑原位更新 mode，外层 finally 统一释放）。 */
-        let untrackRun: () => void = () => {}
+        /** 提前登记在飞调用，使目录解析与沙箱提权审批等待期也能响应 `reset()` 与 `sandbox/mode` 变更。 */
+        let untrackRun: () => void = host.trackRun?.({
+          agent: exec.agent,
+          controller: runController,
+          signal: nestedSignal,
+        }) ?? (() => {})
+        const sanitizedCode = sanitizeReplTopLevelReturn(input.code, runtime.programFormat, runtime.language)
         const attempt = async (): Promise<PtcRunResultLike> => {
+          deferredProgramImages.length = 0
           const authority = await host.runAuthority?.(exec.agent, nestedSignal)
           const standingPolicy = authority?.sandboxPolicy
+          const standingMode = modeOfPolicy(standingPolicy)
+          if (standingMode !== undefined) {
+            untrackRun = host.trackRun?.({
+              agent: exec.agent,
+              controller: runController,
+              signal: nestedSignal,
+              mode: standingMode,
+            }) ?? untrackRun
+          }
           let effectivePolicy = standingPolicy
           let escalated = false
           if (input.sandboxPermissions !== undefined && input.justification !== undefined) {
@@ -645,7 +783,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
                 agent: exec.agent,
                 callId: String(exec.callId),
                 toolName: runToolName,
-                signal: exec.signal,
+                signal: nestedSignal,
               })
               effectivePolicy = nextPolicy
               approvedEscalatedMode = modeOfPolicy(nextPolicy) as EscalationTargetMode | undefined
@@ -654,15 +792,17 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             }
             escalated = modeOfPolicy(effectivePolicy) !== modeOfPolicy(standingPolicy)
           }
-          const runMode = modeOfPolicy(effectivePolicy)
-          untrackRun = host.trackRun?.({
-            agent: exec.agent,
-            controller: runController,
-            signal: nestedSignal,
-            ...runMode === undefined ? {} : { mode: runMode },
-          }) ?? (() => {})
+          const runMode = standingMode ?? modeOfPolicy(effectivePolicy)
+          if (runMode !== undefined) {
+            untrackRun = host.trackRun?.({
+              agent: exec.agent,
+              controller: runController,
+              signal: nestedSignal,
+              mode: runMode,
+            }) ?? untrackRun
+          }
           const request: PtcRunRequestLike = {
-            program: input.code,
+            program: sanitizedCode,
             bindings: [{
               global: 'tools',
               functions,
@@ -698,6 +838,24 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
           untrackRun()
         }
 
+        const hasStructuredOutput = Array.isArray(result.output)
+        const outputBlocks: readonly PtcOutputBlock[] = hasStructuredOutput ? result.output! : []
+        const hasImages = outputBlocks.some((block) => block.type === 'image')
+        // 兜底未被 `inspect(img)` 显式消费的 `PtcImage`：自动通过 `deferContext` 补发，杜绝模型漏写 `inspect` 时丢图。
+        if (deferredProgramImages.length > 0) {
+          const inspectedIds = new Set<string>()
+          for (const block of outputBlocks) {
+            if (block.type === 'image' && isImageAttachmentRefLike(block.attachment)) {
+              inspectedIds.add(block.attachment.attachmentId)
+            }
+          }
+          for (const pending of deferredProgramImages) {
+            if (pending.attachmentId !== undefined && inspectedIds.has(pending.attachmentId)) continue
+            const imageMsg = host.createImageContext?.(pending.content)
+            if (imageMsg !== undefined) exec.deferContext?.(imageMsg)
+          }
+        }
+
         if (result.error !== undefined) {
           const limitError = runController.signal.reason instanceof ToolCallLimitExceededError
             ? runController.signal.reason
@@ -708,8 +866,15 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             abortError.name = 'AbortError'
             throw abortError
           }
-          const logsText = Array.isArray(result.logs) && result.logs.length > 0
-            ? '\nCaptured output:\n' + result.logs.join('\n')
+          if (hasImages && typeof exec === 'object' && exec !== null) {
+            inspections.set(exec, {
+              blocks: renderFailureOutputBlocks(outputBlocks),
+              appendToError: true,
+            })
+          }
+          const capturedLogs = extractCapturedErrorText(result, hasImages)
+          const logsText = capturedLogs.length > 0
+            ? '\nCaptured output:\n' + capturedLogs
             : ''
           const sandboxText = result.sandbox === undefined
             ? ''
@@ -722,8 +887,9 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             : `${limitError.message}\n${result.error.message}`
           throw new CodeRunFailedError('program failed (' + result.error.kind + '): ' + failureText + logsText + sandboxText + hint)
         }
+        const logs = extractLogsList(result)
         const output: TransportOutput = {
-          logs: [...(result.logs ?? [])],
+          logs,
           ...(result.value === undefined ? {} : { result: result.value }),
           ...(result.sandbox === undefined
             ? {}
@@ -734,6 +900,20 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
                   ...(result.sandbox.enforcement === undefined ? {} : { enforcement: result.sandbox.enforcement }),
                 },
               }),
+        }
+        if (hasStructuredOutput) {
+          structuredOutputs.set(output, outputBlocks)
+          if (hasImages && typeof exec === 'object' && exec !== null) {
+            inspections.set(exec, {
+              blocks: renderStructuredOutputBlocks(
+                outputBlocks,
+                result.value,
+                output.sandbox,
+                runtime.sandboxMode,
+                runToolName,
+              ),
+            })
+          }
         }
         return output
       } finally {
@@ -777,6 +957,133 @@ function modeOfPolicy(policy: unknown): string | undefined {
 
 function hasImageBlock(content: readonly unknown[]): boolean {
   return content.some((block) => typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'image')
+}
+
+function firstImageAttachmentOf(content: readonly unknown[]): PtcImageAttachmentRefLike | undefined {
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue
+    const record = block as { readonly type?: unknown; readonly attachment?: unknown }
+    if (record.type === 'image' && isImageAttachmentRefLike(record.attachment)) {
+      return record.attachment
+    }
+  }
+  return undefined
+}
+
+/**
+ * 从运行结果提取面向 `TransportOutput.logs` 的字符串数组（兼容旧代 `logs` 与新代 `output`）。
+ */
+function extractLogsList(result: PtcRunResultLike): string[] {
+  if (Array.isArray(result.logs)) return [...result.logs]
+  if (!Array.isArray(result.output)) return []
+  const logs: string[] = []
+  for (const block of result.output) {
+    if (block.type !== 'text' || typeof block.text !== 'string') continue
+    const trimmed = block.text.endsWith('\n') ? block.text.slice(0, -1) : block.text
+    if (trimmed.length > 0) logs.push(trimmed)
+  }
+  return logs
+}
+
+/**
+ * 提取运行失败时内联在 `CodeRunFailedError.message` 中的已捕获文本。
+ *
+ * 当新代 `result.output` 含有图片块时，报错前的文本与图片已通过 `projectContent` 按序附在
+ * 错误内容块之后，错误消息本身不再重复拼接 `Captured output:`（对齐内核 `ptc.ts:783`）。
+ */
+function extractCapturedErrorText(result: PtcRunResultLike, hasImages: boolean): string {
+  if (hasImages) return ''
+  if (Array.isArray(result.logs) && result.logs.length > 0) {
+    return result.logs.join('\n')
+  }
+  if (!Array.isArray(result.output) || result.output.length === 0) return ''
+  const joined = result.output
+    .filter((block): block is { readonly type: 'text'; readonly text: string } => block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('')
+  return joined.endsWith('\n') ? joined.slice(0, -1) : joined
+}
+
+/**
+ * 将新代 `result.output` 渲染为有序图文内容块列表（对齐内核 `ptc.ts` 的 `renderRunOutput`）。
+ */
+function renderStructuredOutputBlocks(
+  blocks: readonly PtcOutputBlock[],
+  resultValue: unknown,
+  sandbox: PtcSandboxSummary | undefined,
+  sandboxMode: unknown,
+  runToolName: string,
+): { readonly type: string; readonly [key: string]: unknown }[] {
+  const out: { readonly type: string; readonly [key: string]: unknown }[] = []
+  let pendingText = ''
+  for (const block of blocks) {
+    if (block.type === 'text' && typeof block.text === 'string') {
+      pendingText += block.text
+    } else if (block.type === 'image' && block.attachment !== undefined) {
+      if (pendingText.length > 0) {
+        out.push({ type: 'text', text: pendingText })
+        pendingText = ''
+      }
+      out.push({ type: 'image', attachment: block.attachment })
+    }
+  }
+  const renderedValue = resultValue === undefined ? '' : renderProgramValue(resultValue)
+  if (renderedValue.length > 0) {
+    const trimmedPending = pendingText.endsWith('\n') ? pendingText.slice(0, -1) : pendingText
+    if (trimmedPending !== renderedValue) {
+      pendingText = pendingText.length === 0
+        ? renderedValue
+        : (pendingText.endsWith('\n') ? pendingText + renderedValue : pendingText + '\n' + renderedValue)
+    }
+  }
+  const sandboxNotes: string[] = []
+  if (sandbox?.enforcement === 'partial') {
+    sandboxNotes.push('File sandbox enforcement is partial on this host.')
+  }
+  if (sandbox?.denied === true) {
+    sandboxNotes.push('The ' + sandbox.mode + ' file sandbox denied an operation.' + escalationGuidance(sandboxMode))
+  }
+  if (sandboxNotes.length > 0) {
+    const noteText = sandboxNotes.join('\n')
+    pendingText = pendingText.length === 0
+      ? noteText
+      : (pendingText.endsWith('\n') ? pendingText + noteText : pendingText + '\n' + noteText)
+  }
+  if (out.length === 0 && pendingText.endsWith('\n')) {
+    pendingText = pendingText.slice(0, -1)
+  }
+  if (pendingText.length > 0) {
+    out.push({ type: 'text', text: pendingText })
+  }
+  if (out.length === 0) {
+    return [{ type: 'text', text: '(' + runToolName + ' completed with no output)' }]
+  }
+  return out
+}
+
+/**
+ * 将失败运行已捕获的图文输出块合并为追加在错误块之后的投影块（对齐内核 `ptc.ts`）。
+ */
+function renderFailureOutputBlocks(
+  blocks: readonly PtcOutputBlock[],
+): { readonly type: string; readonly [key: string]: unknown }[] {
+  const out: { readonly type: string; readonly [key: string]: unknown }[] = []
+  let pendingText = ''
+  for (const block of blocks) {
+    if (block.type === 'text' && typeof block.text === 'string') {
+      pendingText += block.text
+    } else if (block.type === 'image' && block.attachment !== undefined) {
+      if (pendingText.length > 0) {
+        out.push({ type: 'text', text: pendingText })
+        pendingText = ''
+      }
+      out.push({ type: 'image', attachment: block.attachment })
+    }
+  }
+  if (pendingText.length > 0) {
+    out.push({ type: 'text', text: pendingText })
+  }
+  return out
 }
 
 function resolveSubCallBudget(spec: PtcRunRequestLike, rules: CodemodeRules): number {
@@ -1334,6 +1641,231 @@ function losslessArgs(value: unknown): unknown {
   } catch {
     throw new Error('codemode: tool arguments must be lossless JSON')
   }
+}
+
+/**
+ * 归一化子调用参数并生成两份独立深拷贝（`dispatched` 供工具执行，`logged` 供回放落盘），
+ * 防止工具内部原地修改 `args` 对象污染 `tool/ptc-dispatch` 回放日志（对齐内核 `ptc.ts:864`）。
+ */
+function normalizeSubCallArgsPair(
+  entry: CatalogEntry | undefined,
+  rawArgs: unknown,
+): { readonly dispatched: unknown; readonly logged: unknown } {
+  const normalized = normalizeSubCallArgs(entry, losslessArgs(rawArgs))
+  const serialized = JSON.stringify(normalized)
+  return {
+    dispatched: JSON.parse(serialized) as unknown,
+    logged: JSON.parse(serialized) as unknown,
+  }
+}
+
+/**
+ * 在常驻 REPL（`repl` / `scoped-repl` / `script`）模式下自动剥离模型误写的末尾顶层 `return`。
+ *
+ * DSH 0.2.2-rc.2 起常驻模式默认使用 `scoped-repl`（直接作为顶层脚本求值，不再套外层 `async function`），
+ * 顶层 `return` 会触发编译期 `SyntaxError: Return statement is not allowed here`。此函数仅在最后一条
+ * 顶层语句（括号深度为 0）以 `return` 开头且其后无其他顶层语句时，将其安全改写为顶层末尾表达式（若以
+ * `{` 开头则包裹 `(...)` 避免被解析为代码块），既保住顶层绑定跨调用存活，又保留末尾表达式的完成值。
+ */
+export function sanitizeReplTopLevelReturn(
+  code: string,
+  programFormat: string | undefined,
+  language: string | undefined,
+): string {
+  if (language === 'python' || !isReplFormat(programFormat)) return code
+  let depth = 0
+  let lastTopReturn = -1
+  let i = 0
+  const len = code.length
+  while (i < len) {
+    const ch = code[i]!
+    if (ch === '/' && code[i + 1] === '/') {
+      i += 2
+      while (i < len && code[i] !== '\n') i += 1
+      continue
+    }
+    if (ch === '/' && code[i + 1] === '*') {
+      i += 2
+      while (i < len && !(code[i] === '*' && code[i + 1] === '/')) i += 1
+      i += 2
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      i = skipQuotedLiteral(code, i)
+      continue
+    }
+    if (ch === '`') {
+      i = skipTemplateLiteral(code, i + 1)
+      continue
+    }
+    if (ch === '{' || ch === '(' || ch === '[') {
+      depth += 1
+      i += 1
+      continue
+    }
+    if (ch === '}' || ch === ')' || ch === ']') {
+      if (depth > 0) depth -= 1
+      i += 1
+      continue
+    }
+    if (depth === 0 && ch === 'r' && code.startsWith('return', i)) {
+      const prev = i > 0 ? code[i - 1]! : ''
+      const next = i + 6 < len ? code[i + 6]! : ''
+      if (!isIdentOrDotChar(prev) && !isIdentChar(next)) {
+        lastTopReturn = i
+        i += 6
+        continue
+      }
+    }
+    i += 1
+  }
+
+  if (lastTopReturn < 0) return code
+  const tail = analyzeTopLevelReturnTail(code, lastTopReturn + 6)
+  if (tail === undefined) return code
+
+  const expr = code.slice(tail.exprStart, tail.exprEnd).trim()
+  const prefix = code.slice(0, lastTopReturn)
+  const suffix = code.slice(tail.statementEnd)
+  if (expr.length === 0) {
+    return prefix + 'undefined' + suffix
+  }
+  if (expr.startsWith('{')) {
+    return prefix + '(' + expr + ')' + suffix
+  }
+  return prefix + expr + suffix
+}
+
+function isIdentChar(ch: string): boolean {
+  return ch.length > 0 && /[A-Za-z0-9_$]/.test(ch)
+}
+
+function isIdentOrDotChar(ch: string): boolean {
+  return ch === '.' || isIdentChar(ch)
+}
+
+function skipQuotedLiteral(code: string, start: number): number {
+  const quote = code[start]!
+  let i = start + 1
+  while (i < code.length) {
+    if (code[i] === '\\') {
+      i += 2
+      continue
+    }
+    if (code[i] === quote) return i + 1
+    i += 1
+  }
+  return i
+}
+
+function skipTemplateLiteral(code: string, startAfterBacktick: number): number {
+  let i = startAfterBacktick
+  const len = code.length
+  while (i < len) {
+    const ch = code[i]!
+    if (ch === '\\') {
+      i += 2
+      continue
+    }
+    if (ch === '`') return i + 1
+    if (ch === '$' && code[i + 1] === '{') {
+      i += 2
+      let braceDepth = 1
+      while (i < len && braceDepth > 0) {
+        const inner = code[i]!
+        if (inner === "'" || inner === '"') {
+          i = skipQuotedLiteral(code, i)
+          continue
+        }
+        if (inner === '`') {
+          i = skipTemplateLiteral(code, i + 1)
+          continue
+        }
+        if (inner === '{') braceDepth += 1
+        else if (inner === '}') braceDepth -= 1
+        i += 1
+      }
+      continue
+    }
+    i += 1
+  }
+  return i
+}
+
+function analyzeTopLevelReturnTail(
+  code: string,
+  afterReturn: number,
+): { readonly exprStart: number; readonly exprEnd: number; readonly statementEnd: number } | undefined {
+  const len = code.length
+  let i = afterReturn
+  while (i < len && (code[i] === ' ' || code[i] === '\t')) i += 1
+  const exprStart = i
+  let depth = 0
+  let semiPos = -1
+  while (i < len) {
+    const ch = code[i]!
+    if (ch === '/' && code[i + 1] === '/') {
+      i += 2
+      while (i < len && code[i] !== '\n') i += 1
+      continue
+    }
+    if (ch === '/' && code[i + 1] === '*') {
+      i += 2
+      while (i < len && !(code[i] === '*' && code[i + 1] === '/')) i += 1
+      i += 2
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      i = skipQuotedLiteral(code, i)
+      continue
+    }
+    if (ch === '`') {
+      i = skipTemplateLiteral(code, i + 1)
+      continue
+    }
+    if (ch === '{' || ch === '(' || ch === '[') {
+      depth += 1
+      i += 1
+      continue
+    }
+    if (ch === '}' || ch === ')' || ch === ']') {
+      if (depth === 0) return undefined
+      depth -= 1
+      i += 1
+      continue
+    }
+    if (depth === 0 && ch === ';') {
+      semiPos = i
+      i += 1
+      break
+    }
+    i += 1
+  }
+  if (depth !== 0) return undefined
+  if (semiPos >= 0) {
+    // 顶层分号之后只允许空白与注释；若还有其他语句，说明该 return 不是末尾唯一语句。
+    while (i < len) {
+      const ch = code[i]!
+      if (/\s/.test(ch)) {
+        i += 1
+        continue
+      }
+      if (ch === '/' && code[i + 1] === '/') {
+        i += 2
+        while (i < len && code[i] !== '\n') i += 1
+        continue
+      }
+      if (ch === '/' && code[i + 1] === '*') {
+        i += 2
+        while (i < len && !(code[i] === '*' && code[i + 1] === '/')) i += 1
+        i += 2
+        continue
+      }
+      return undefined
+    }
+    return { exprStart, exprEnd: semiPos, statementEnd: semiPos + 1 }
+  }
+  return { exprStart, exprEnd: len, statementEnd: len }
 }
 
 /** 内置按单文件 `file_path` 寻址的工具名。 */

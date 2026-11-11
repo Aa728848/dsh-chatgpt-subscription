@@ -146,7 +146,7 @@
 
 ## 6. 跨代际 DSH Harness 兼容策略
 
-**单一代码库同时兼容 `@deepseek-ai/dsh*` 从 `0.1.2-alpha.5` 到 `0.2.2-rc.1` 的全部代际**（详见 `package.json` 的 `peerDependencies`）。核心兼容边界包括：
+**单一代码库同时兼容 `@deepseek-ai/dsh*` 从 `0.1.2-alpha.5` 到 `0.2.2-rc.2` 的全部代际**（详见 `package.json` 的 `peerDependencies`）。核心兼容边界包括：
 
 1. **消息与工具结果模型（0.1.7 分界）**：`<= 0.1.6` 将工具结果放在 user 消息的 `tool-result` 内容块中；`>= 0.1.7` 改为独立 `role: 'tool'` 消息（且 `toolCallId` 可能位于顶层、`source.callId` 或内部块上）。所有适配器统一经 `llm-compat` 归一化，严禁假设单一形态。
 2. **偏好设置持久化（0.1.7 分界）**：`<= 0.1.6` 使用 `settings.register`；`>= 0.1.7` 改用插件自持 `<dshHome>/storages/*` 原子 JSON 存储并在首次启动时无感迁移旧配置。

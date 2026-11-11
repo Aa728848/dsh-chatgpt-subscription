@@ -23,6 +23,7 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/codemode
  */
 
+import * as dshLlm from '@deepseek-ai/dsh-llm'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 
@@ -42,6 +43,8 @@ import {
   CodeResetFailedError,
   createTransportDefinition,
   currentCatalogSnapshot,
+  isImageAttachmentRefLike,
+  PtcImageLike,
   type CallToolOutcome,
   type CallToolRequest,
   type CatalogEntry,
@@ -333,6 +336,29 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
         content: content as ContentBlock[],
         source: { kind: PLUGIN_MESSAGE_SOURCE_KIND },
       })
+    },
+    programImage(attachment: unknown, fallbackPath?: string): unknown {
+      const runtime = runtimeOf()
+      if (runtime === undefined || runtime.language === 'python') return undefined
+      if (typeof runtime.executionInstructions !== 'string' || !runtime.executionInstructions.includes('inspect')) {
+        return undefined
+      }
+      if (!isImageAttachmentRefLike(attachment)) return undefined
+      const resolveAccess = (dshLlm as Record<string, unknown>)['resolveImageAttachmentAccess']
+      if (typeof resolveAccess === 'function') {
+        try {
+          const access = (resolveAccess as (ref: unknown) => { readonly readonlyPath?: unknown } | undefined)(attachment)
+          if (typeof access?.readonlyPath === 'string' && access.readonlyPath.length > 0) {
+            return new PtcImageLike(access.readonlyPath, attachment)
+          }
+        } catch {
+          // 回退到工具自身的路径字段。
+        }
+      }
+      if (typeof fallbackPath === 'string' && fallbackPath.length > 0) {
+        return new PtcImageLike(fallbackPath, attachment)
+      }
+      return undefined
     },
     trackRun: (run) => retention.trackRun(run),
     shapeDispatchLog,

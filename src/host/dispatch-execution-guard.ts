@@ -247,22 +247,36 @@ export function isDelegatedCaller(agent: unknown, ctx?: unknown): boolean {
     if (isRecord(header) && header['origin'] === 'subagent') return true
   }
 
-  // 第二级：宿主存活根。
+  // 先核对是否为当前登记的存活 agent：已过期或被顶替的对象不按子代理拦。
   const agents = readService(ctx, 'agents')
+  if (isRecord(agents)) {
+    const id = idOf(agent)
+    if (typeof id === 'string' && typeof agents['get'] === 'function') {
+      let live: unknown
+      try {
+        live = (agents['get'] as (id: string) => unknown).call(agents, id)
+      } catch {
+        live = undefined
+      }
+      if (live !== agent) return false
+    }
+  }
+
+  // 第二级（0.2.2-rc.2+）：subagents.rootOf(agent) 树根归属判定。
+  const subagents = readService(ctx, 'subagents')
+  if (isRecord(subagents) && typeof subagents['rootOf'] === 'function') {
+    try {
+      const root = (subagents['rootOf'] as (caller: unknown) => unknown).call(subagents, agent)
+      if (root !== undefined && root !== agent) return true
+    } catch (error: unknown) {
+      if (isRecord(error) && error['code'] === 'UNAUTHORIZED') return true
+    }
+  }
+
+  // 第三级（0.2.0 ~ 0.2.2-rc.1）：宿主存活根集合。
   if (!isRecord(agents)) return false
   const roots = rootsOf(agents)
   if (roots === undefined) return false
-  const id = idOf(agent)
-  if (typeof id === 'string' && typeof agents['get'] === 'function') {
-    let live: unknown
-    try {
-      live = (agents['get'] as (id: string) => unknown).call(agents, id)
-    } catch {
-      live = undefined
-    }
-    // 不是这个 id 当前登记的那个存活 agent：调用方已经过期，不按子代理判。
-    if (live !== agent) return false
-  }
   return !roots.includes(agent)
 }
 
@@ -367,10 +381,42 @@ export function hasRunningChildSubagent(agent: unknown, ctx?: unknown): boolean 
     if (ownId !== undefined) parentIds.add(ownId)
     const headerId = sessionIdOf(agent)
     if (headerId !== undefined) parentIds.add(headerId)
-    const running = entriesOf(listed).some(entry =>
-      entry['status'] === 'running'
-      && typeof entry['parent'] === 'string'
-      && parentIds.has(entry['parent']))
+    const rootOfFn = isRecord(subagents) && typeof subagents['rootOf'] === 'function'
+      ? (subagents['rootOf'] as (caller: unknown) => unknown)
+      : undefined
+    const isOwnedByFn = typeof agents['isOwnedBy'] === 'function'
+      ? (agents['isOwnedBy'] as (id: string, owner: unknown) => unknown)
+      : undefined
+    const running = entriesOf(listed).some((entry) => {
+      if (entry === agent || entry['status'] !== 'running') return false
+      if (typeof entry['parent'] === 'string' && parentIds.has(entry['parent'])) return true
+      const session = entry['session']
+      const header = isRecord(session) ? session['header'] : undefined
+      if (isRecord(header)
+        && typeof header['parentSession'] === 'string'
+        && parentIds.has(header['parentSession'])
+        && (header['origin'] === 'subagent' || header['isSeeded'] !== true)) {
+        return true
+      }
+      if (rootOfFn !== undefined) {
+        try {
+          if (rootOfFn.call(subagents, entry) === agent) return true
+        } catch {
+          // 候选者不在同一棵子代理树或无活动根时忽略。
+        }
+      }
+      if (isOwnedByFn !== undefined) {
+        const entryId = idOf(entry)
+        if (entryId !== undefined) {
+          try {
+            if (isOwnedByFn.call(agents, entryId, agent) === true) return true
+          } catch {
+            // 老代归属查询失败时忽略。
+          }
+        }
+      }
+      return false
+    })
     if (running) return true
   }
 

@@ -154,6 +154,20 @@ describe('isDelegatedCaller：两条判定', () => {
     expect(isDelegatedCaller(agent, { get: () => ({ get: () => agent }) })).toBe(false)
   })
 
+  it('0.2.2-rc.2+ 通过 subagents.rootOf(agent) !== agent 识别子代理', () => {
+    const child = bareAgent('child-1')
+    const root = bareAgent('root-1')
+    const ctx = {
+      get: (name: string) => name === 'agents'
+        ? { get: (id: string) => (id === 'child-1' ? child : root) }
+        : name === 'subagents'
+          ? { rootOf: (caller: unknown) => (caller === child ? root : root) }
+          : undefined,
+    }
+    expect(isDelegatedCaller(child, ctx)).toBe(true)
+    expect(isDelegatedCaller(root, ctx)).toBe(false)
+  })
+
   it('非对象的调用方一律不是子代理', () => {
     expect(isDelegatedCaller(undefined)).toBe(false)
     expect(isDelegatedCaller(null)).toBe(false)
@@ -239,6 +253,29 @@ describe('hasRunningChildSubagent：还有没有在跑的子代理', () => {
     }
     const agent = { id: 'root-1', session: { header: { id: 'session-9' } } }
     expect(hasRunningChildSubagent(agent, ctx)).toBe(true)
+  })
+
+  it('真实 DSH 0.2.2-rc.2+ 通过 session.header.parentSession 或 subagents.rootOf 识别在跑子代理', () => {
+    const root = rootAgent('root-1')
+    const childByHeader = {
+      id: 'c1',
+      status: 'running',
+      session: { header: { id: 'c1', origin: 'subagent', parentSession: 'root-1' } },
+    }
+    const ctxByHeader = {
+      get: (name: string) => name === 'agents' ? { list: () => [root, childByHeader] } : undefined,
+    }
+    expect(hasRunningChildSubagent(root, ctxByHeader)).toBe(true)
+
+    const childByRootOf = { id: 'c2', status: 'running' }
+    const ctxByRootOf = {
+      get: (name: string) => name === 'agents'
+        ? { list: () => [root, childByRootOf] }
+        : name === 'subagents'
+          ? { rootOf: (candidate: unknown) => (candidate === childByRootOf ? root : candidate) }
+          : undefined,
+    }
+    expect(hasRunningChildSubagent(root, ctxByRootOf)).toBe(true)
   })
 
   it('注入口优先于宿主探测', () => {
