@@ -20,6 +20,7 @@ import {
   openChatStream,
   openRouterEndpoints,
   type ClinePassGatewayCatalog,
+  type ClinePassHttpResult,
 } from './client.ts'
 import {
   buildAttempts,
@@ -30,6 +31,7 @@ import {
   injectPrefs,
   isAuthenticationError,
   isAdherenceOk,
+  isProviderOptionsRoutingUnsupported,
   mergeUpstreams,
   parseRouting,
   parseTier0,
@@ -135,6 +137,34 @@ export class ClinePassEngine {
     }
   }
 
+  /** Send one pinned completion, recovering only from Cline's providerOptions policy refusal. */
+  private async completionWithPin(
+    model: string,
+    body: Record<string, unknown>,
+    attempt: PinAttempt,
+    account: ClinePassAccount,
+    { signal, timeoutMs }: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<ClinePassHttpResult> {
+    const meta = this.store.metaOf(model) as PinModelMeta
+    const pinned = injectPrefs(body, meta, attempt)
+    const send = async (requestBody: Record<string, unknown>) => await chatCompletion({
+      fetchFn: this.fetchFn,
+      baseURL: account.baseURL || DEFAULT_BASE_URL,
+      apiKey: account.key,
+      body: requestBody,
+      signal,
+      timeoutMs,
+    })
+    const first = await send(pinned)
+    if (pinned.providerOptions === undefined) return first
+    const payload = unwrapEnvelope(first.json)
+    const detail = errorText(payload.error) || first.text
+    if (!isProviderOptionsRoutingUnsupported(detail)) return first
+    const without = { ...pinned }
+    delete without.providerOptions
+    return await send(injectPrefs(without, meta, { ...attempt, spelling: 'openrouter' }))
+  }
+
   /**
    * One pinned request, non-streaming.
    * @returns the decoded payload plus the facts the pin was judged on.
@@ -147,13 +177,8 @@ export class ClinePassEngine {
   ): Promise<ClinePassAttemptOutcome> {
     const account = await this.resolveAccount()
     const meta = this.store.metaOf(model) as PinModelMeta
-    const pinned = injectPrefs(body, meta, attempt)
     const started = Date.now()
-    const result = await chatCompletion({
-      fetchFn: this.fetchFn,
-      baseURL: account.baseURL || DEFAULT_BASE_URL,
-      apiKey: account.key,
-      body: pinned,
+    const result = await this.completionWithPin(model, body, attempt, account, {
       signal,
       timeoutMs: timeoutMs ?? this.options.attemptTimeoutMs ?? 180_000,
     })
@@ -425,18 +450,13 @@ export class ClinePassEngine {
       const batch = list.slice(index, index + VALIDATE_CONCURRENCY)
       const settled = await Promise.all(batch.map(async (upstream) => {
         const started = Date.now()
-        const attempt: PinAttempt = { upstream, strict: true, sort: null, orderRest: [], excludeList: [], has }
+        const attempt: PinAttempt = { upstream, strict: true, sort: null, orderRest: [], excludeList: [], has, spelling: this.options.pinFor(model).spelling }
         const base = { model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }
-        // The same injection the live path uses, so a verdict describes the pin
-        // this plugin would really send.
-        const body = injectPrefs(base, meta, attempt)
+        // The same injection and providerOptions recovery the live path uses,
+        // so a verdict describes the pin this plugin would really send.
         try {
           const account = await this.resolveAccount()
-          const result = await chatCompletion({
-            fetchFn: this.fetchFn,
-            baseURL: account.baseURL || DEFAULT_BASE_URL,
-            apiKey: account.key,
-            body,
+          const result = await this.completionWithPin(model, base, attempt, account, {
             signal,
             timeoutMs: timeoutMs ?? this.options.probeTimeoutMs,
           })
@@ -660,6 +680,31 @@ export class ClinePassEngine {
   /** Refresh the official subscription model list. */
   async officialModels({ signal }: { signal?: AbortSignal } = {}): Promise<ClinePassCatalogScan> {
     return await fetchOfficialModels({ fetchFn: this.fetchFn, signal })
+  }
+
+  /** Open a pinned stream, recovering only from Cline's providerOptions policy refusal. */
+  async openStreamWithPin(
+    model: string,
+    body: Record<string, unknown>,
+    attempt: PinAttempt,
+    account: ClinePassAccount,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const meta = this.store.metaOf(model) as PinModelMeta
+    const pinned = injectPrefs(body, meta, attempt)
+    const response = await this.openStream(account, pinned, signal)
+    if (response.ok || pinned.providerOptions === undefined) return response
+    const detail = await response.clone().text().catch(() => '')
+    if (!isProviderOptionsRoutingUnsupported(detail)) return response
+    const without = { ...pinned }
+    delete without.providerOptions
+    const direct = injectPrefs(without, meta, { ...attempt, spelling: 'openrouter' })
+    try {
+      return await this.openStream(account, direct, signal)
+    } catch {
+      // Keep the original, explicit policy refusal if the recovery transport fails.
+      return response
+    }
   }
 
   /** Open one chat stream for the adapter; transport only. */

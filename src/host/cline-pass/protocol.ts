@@ -113,8 +113,15 @@ export function errorText(value: unknown): string {
   }
 }
 
+/** Cline's policy refusal for the AI SDK planner spelling, not an account refusal. */
+export function isProviderOptionsRoutingUnsupported(message: unknown): boolean {
+  const detail = String(message ?? '')
+  return /client[-\s]+supplied[\s\S]{0,80}providerOptions[\s\S]{0,80}model routing is not supported/i.test(detail)
+}
+
 /** Account authentication refusals, including responses with no useful body. */
 export function isAuthenticationError(message: unknown, status?: number): boolean {
+  if (isProviderOptionsRoutingUnsupported(message)) return false
   const detail = String(message ?? '').replace(/[_-]/g, ' ')
   return status === 401 || status === 403 || /unauthorized|re\s*authenticate|invalid\s*(?:api\s*key|token)|\b401\b|\b403\b/i.test(detail)
 }
@@ -340,7 +347,9 @@ export function injectPrefs(body: WireBody, meta: PinModelMeta | undefined, atte
   const openRouterAllow = excluded.length > 0 ? knownChannels(meta, 'direct').filter((name) => !excludedIds.has(normalizeSlug(name))) : null
   const pipeline = meta?.pipeline ?? null
   const both = attempt.spelling !== 'detected'
-  const useGateway = both || pipeline === 'planner' || pipeline === null
+  // `openrouter` is the automatic recovery spelling for Cline deployments that
+  // reject client-supplied providerOptions before provider planning starts.
+  const useGateway = attempt.spelling === 'openrouter' ? false : both || pipeline === 'planner' || pipeline === null
   const useOpenRouter = both || pipeline === 'direct' || pipeline === null
   const gatewayUsable = useGateway && (upstream !== null || sort !== null || has.length > 0 || (gatewayAllow !== null && gatewayAllow.length > 0))
   // `ignore` is OpenRouter's own exclusion field: written alongside the

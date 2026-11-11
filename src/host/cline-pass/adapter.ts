@@ -36,7 +36,7 @@ import {
   type ClinePassDiscoveredModel,
 } from './types.ts'
 import { resolveModelInfo } from './catalog.ts'
-import { buildAttempts, injectPrefs, isRecord, pinAdherence, pinWarnings, parseRouting, unwrapEnvelope, type ClinePipeline } from './protocol.ts'
+import { buildAttempts, isRecord, pinAdherence, pinWarnings, parseRouting, unwrapEnvelope, type ClinePipeline } from './protocol.ts'
 import {
   buildClinePassBody,
   parseServerSentEvents,
@@ -329,13 +329,12 @@ export class ClinePassAdapter extends LlmAdapter {
       const attemptStarted = Date.now()
       const attemptLabel = attempt.upstream ?? '(auto)'
       try {
-        const pinned = injectPrefs(body as unknown as Record<string, unknown>, meta, attempt)
         let response: Response | undefined
         let transportError: unknown
         for (let transportTry = 0; transportTry <= TRANSPORT_RETRIES; transportTry += 1) {
           const headerDeadline = withAttemptTimeout(upstream, this.options.headerTimeoutMs)
           try {
-            response = await this.engine.openStream(account, pinned, headerDeadline.signal)
+            response = await this.engine.openStreamWithPin(options.model, body as unknown as Record<string, unknown>, attempt, account, headerDeadline.signal)
             // The 180 s budget belongs to the response-header wait only. Once the
             // gateway has answered, the stream's own idle watchdog takes over;
             // leaving this timer armed would kill a healthy long reasoning pass.

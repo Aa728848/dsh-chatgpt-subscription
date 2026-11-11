@@ -117,6 +117,37 @@ describe('ClinePassAdapter', () => {
     expect(history[0]?.attempts).toEqual(['baseten', 'deepseek'])
   })
 
+  it('recovers a stream when Cline rejects client-supplied providerOptions', async () => {
+    await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
+    await settings.setPin(MODEL, { upstreams: ['deepseek'], exclude: [], pinMode: 'strict', sort: '', has: ['vision'] })
+    await settings.update({ enabledModelIds: [MODEL] })
+    const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      calls.push(body)
+      if (body.providerOptions !== undefined) {
+        return Response.json({ error: { message: 'Error 403: client-supplied "providerOptions" model routing is not supported' } }, { status: 403 })
+      }
+      return new Response(SSE_OK, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    const adapter = adapterWith(fetchFn)
+    const chunks = []
+    for await (const chunk of adapter.stream({
+      provider: 'cline-pass',
+      model: MODEL,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      signal: undefined,
+    } as never)) chunks.push(chunk)
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.providerOptions).toBeDefined()
+    expect(calls[1]?.providerOptions).toBeUndefined()
+    expect(calls[1]?.provider).toEqual({ only: ['deepseek'] })
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta')).toHaveLength(1)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    const accounts = await pool.listAccounts()
+    expect(accounts.find((account) => account.alias === 'main')?.authStatus).not.toBe('invalid')
+  })
+
   it('retries a failure that happened before the request was sent', async () => {
     await pool.addAccount({ apiKey: 'sk-a', alias: 'main' })
     await settings.update({ enabledModelIds: [MODEL] })
