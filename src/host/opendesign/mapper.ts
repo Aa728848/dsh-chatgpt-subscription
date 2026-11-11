@@ -482,10 +482,41 @@ export function isErrorPayload(payload: unknown): payload is { error: unknown } 
   return isRecord(payload) && payload.error !== undefined && payload.choices === undefined
 }
 
-/** Whether one refusal is about the credential at all. */
+/**
+ * Wording the gateway uses when the membership tier does not include a MODEL.
+ *
+ * This is the one refusal a healthy key earns. `tier_request_kind_not_entitled`
+ * ("membership tier \"go\" is not entitled to use this model for
+ * chat_completions") and `tier_model_not_entitled` ("Go/Plus 用户不允许访问最贵的
+ * 模型") are verdicts about the PLAN and the MODEL, and the very same key keeps
+ * serving every model that tier does include. Filed as a rejected credential,
+ * one attempt at a model the plan withholds parks an account that was never
+ * broken, and the card then says "replace it from the account card" — which is
+ * the one action that cannot help.
+ */
+const MODEL_ENTITLEMENT_DENIAL =
+  /tier_[a-z_]*not_entitled|not\s+entitled\s+to\s+use\s+this\s+model|membership\s+tier|upgrade_required|plan\s+does\s+not\s+include/i
+
+/** Whether one refusal is the plan withholding a MODEL rather than a bad key. */
+export function isModelEntitlementDenial(message: string, status?: number): boolean {
+  if (status !== undefined && status !== 403 && status !== 402 && status !== 400) return false
+  return MODEL_ENTITLEMENT_DENIAL.test(String(message ?? ''))
+}
+
+/**
+ * Whether one refusal is about the credential at all.
+ *
+ * A 401 is unambiguous: the gateway did not accept the key. A 403 is not. The
+ * gateway also uses it for "this plan does not include this model", and that is
+ * exactly how OpenDesign answers an entitlement denial, so the status alone
+ * cannot decide. Every 403 used to read as a rejected key, which stood healthy
+ * accounts down over a refusal that only ever concerned one model; the payload
+ * now has to name the credential. `command-code` reached the same verdict for
+ * the same reason (see `isCommandCodeModelAccessDenied`).
+ */
 export function isAuthenticationError(message: string, status?: number): boolean {
-  if (status === 401 || status === 403) return true
-  return /missing_api_key|invalid_api_key|unauthenticated|unauthorized|invalid\s*(?:api\s*key|token)|api key not found/i.test(message)
+  if (status === 401) return true
+  return /missing_api_key|invalid_api_key|unauthenticated|unauthorized|invalid\s*(?:api\s*key|token)|api key not found|(?:revoked|expired)_key|key\s+(?:was\s+)?(?:revoked|expired)|token\s+expired/i.test(message)
 }
 
 /**
@@ -501,6 +532,11 @@ export function streamErrorCode(message: string, status?: number): string {
   const detail = String(message ?? '')
   const spent = /(?:insufficient|out of|exhaust\w*|deplet\w*|spent|used up|run out)[\s\S]{0,60}?(?:credit|balance|quota)|(?:credit|balance|quota)[\s\S]{0,60}?(?:insufficient|exhaust\w*|deplet\w*|spent|used up|run(?:ning)? out)/i.test(detail)
   if (status === 402 || spent) return 'QUOTA'
+  // A plan that withholds THIS MODEL is a refusal of the request, not of the
+  // credential, so it must not reach the AUTH branch below: that branch parks
+  // the account behind an `invalid` marker the user can only clear by adding
+  // the account again.
+  if (isModelEntitlementDenial(detail, status)) return 'PROVIDER_ERROR'
   if (isAuthenticationError(detail, status)) return 'AUTH'
   if (status === 429 || /429|rate limit|rate-?limited/i.test(detail)) return 'RATE_LIMIT'
   // The overflow wording is the SHARED one, so this line reads a refusal the

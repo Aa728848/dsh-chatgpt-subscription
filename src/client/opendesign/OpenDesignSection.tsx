@@ -458,6 +458,26 @@ export function OpenDesignSection(props: Props): React.ReactElement {
     }).catch((cause) => setError(detail(cause)))
   }, [loginFlow])
 
+  /**
+   * Re-authorize one account.
+   *
+   * The failure marker is cleared first and nothing is deleted, which is the
+   * same contract every sibling line's card has. A row parked by a refusal that
+   * was never about its key — the plan withholding one model answers 403 too —
+   * comes back as soon as the marker is gone; a row whose key really is dead is
+   * no worse off, because the next request parks it again for the same reason.
+   */
+  const reloginAccount = useCallback((accountId: string) => {
+    void (async () => {
+      try {
+        applyStatus(await API.accountAction('relogin', { accountId }))
+      } catch (cause) {
+        setError(detail(cause))
+        return
+      }
+      startLogin()
+    })()
+  }, [applyStatus, startLogin])
 
   const run = useCallback(async (label: string, action: () => Promise<OpenDesignWebStatus>) => {
     setBusy(label)
@@ -663,7 +683,7 @@ const refreshUsage = useCallback(() => {
           busy={busy}
           onLogin={startLogin}
           loginBusyLabel={t.loggingIn}
-          onRelogin={startLogin}
+          onRelogin={reloginAccount}
           onSetPrimary={(id) => void run('set-primary', () => API.accountAction('set-primary', { accountId: id }))}
           onDelete={(id) => void run('delete', () => API.accountAction('delete', { accountId: id }))}
           onClearCooldown={(id) => void run('clear-cooldown', () => API.accountAction('clear-cooldown', { accountId: id }))}

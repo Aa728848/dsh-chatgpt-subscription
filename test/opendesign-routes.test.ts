@@ -203,6 +203,28 @@ describe('OpenDesign settings API', () => {
     expect(captured.raw).not.toContain('od_stored')
   })
 
+  it('relogin clears the failure marker and keeps the account', async () => {
+    // A 403 that only ever concerned one model used to park a healthy account
+    // behind an `invalid` marker, and this line had no action that cleared it —
+    // the only way back was adding the account again under another identity.
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_parked', alias: 'parked' })
+    const accountId = (await pool.listAccounts())[0]!.id
+    await pool.markAuthFailed(accountId, 'OpenDesign rejected this API key.', 'invalid')
+    const parked = await call({ url: '/opendesign/api/status' })
+    expect((parked.body.value as OpenDesignWebStatus).pool.accounts[0]!.authStatus).toBe('invalid')
+    expect((parked.body.value as OpenDesignWebStatus).usable).toBe(false)
+
+    const cleared = await call({ url: '/opendesign/api/accounts', method: 'POST', body: { action: 'relogin', accountId } })
+    expect(cleared.status).toBe(200)
+    const status = cleared.body.value as OpenDesignWebStatus
+    // Cleared, not deleted: the alias and the rotation slot survive.
+    expect(status.pool.accounts).toHaveLength(1)
+    expect(status.pool.accounts[0]!.authStatus).toBeUndefined()
+    expect(status.pool.accounts[0]!.alias).toBe('parked')
+    expect(status.usable).toBe(true)
+    expect(cleared.raw).not.toContain('od_parked')
+  })
+
   it('rejects a cross-origin mutation', async () => {
     const captured = await call({
       url: '/opendesign/api/accounts',

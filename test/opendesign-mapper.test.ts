@@ -235,6 +235,34 @@ describe('streamErrorCode', () => {
   it('a passing mention of a plan is not a spent balance', () => {
     expect(streamErrorCode('plan lookup failed, retry later', 500)).toBe('SERVER')
   })
+
+  it('a plan withholding a model is not a rejected key', () => {
+    // The gateway's own wording for both halves of the go-tier refusal: the
+    // model KIND ("go 用户默认禁用全部模型") and the price cap ("Go/Plus 用户不允许
+    // 访问最贵的模型"). The key is healthy in both — the same key serves every
+    // model the tier does include — so parking it makes the card tell the user
+    // to replace something that works.
+    const kindRefusal = '[code=tier_request_kind_not_entitled] membership tier "go" is not entitled to use this model for chat_completions: go 用户默认禁用全部模型（兜底规则）'
+    expect(streamErrorCode(kindRefusal, 403)).toBe('PROVIDER_ERROR')
+    const priceRefusal = '[code=tier_model_not_entitled] membership tier "go" is not entitled to use this model for chat_completions: Go/Plus 用户不允许访问最贵的模型'
+    expect(streamErrorCode(priceRefusal, 403)).toBe('PROVIDER_ERROR')
+    // In band: a 200 body that wraps the refusal carries no status at all.
+    expect(streamErrorCode(kindRefusal)).toBe('PROVIDER_ERROR')
+  })
+
+  it('a 403 that names no credential is not an authentication failure', () => {
+    // This is the whole bug: `403` alone used to mean AUTH, and AUTH parks the
+    // account. A gate that forbids a model answers the same status.
+    expect(streamErrorCode('forbidden', 403)).toBe('HTTP_403')
+    expect(streamErrorCode('access denied', 403)).toBe('HTTP_403')
+  })
+
+  it('still reads a 403 that does name the credential as a rejected key', () => {
+    expect(streamErrorCode('invalid_api_key', 403)).toBe('AUTH')
+    expect(streamErrorCode('this key was revoked', 403)).toBe('AUTH')
+    // A 401 stays unambiguous: the gateway did not accept the key.
+    expect(streamErrorCode('forbidden', 401)).toBe('AUTH')
+  })
 })
 
 describe('parseServerSentEvents', () => {
