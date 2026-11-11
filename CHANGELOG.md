@@ -7,7 +7,7 @@
   - **根因**：`isAuthenticationError` 把 **401 与 403 一律**判成 `AUTH`，`streamErrorCode` 因此把网关的 `tier_request_kind_not_entitled`（`membership tier "go" is not entitled to use this model for chat_completions`）与 `tier_model_not_entitled`（`Go/Plus 用户不允许访问最贵的模型`）也归到 `AUTH`，`standDown` 再写成 `authStatus: "invalid"`。这两种拒绝说的是**套餐与模型**，同一把 Key 对其余模型照常可用；而 `invalid` 只由 `clearAuthFailed` 解除，本线路的账号路由又没有该 action（实测 `POST {"action":"relogin"}` 返回 `Unsupported account action.`），于是正常账号被永久挂起。
   - **改法**：`mapper.ts` 新增 `isModelEntitlementDenial`，`streamErrorCode` 在 `AUTH` 之前把它归为 `PROVIDER_ERROR`；`isAuthenticationError` 只在 401，或 403 的正文点名了密钥（`invalid_api_key` / `key was revoked` 等）时才返回真。`adapter.ts` 对权益类拒绝改成「跳过本账号、换下一个账号」，**不落任何标记**——号池里可能有更高档位的 Key，而当前账号对其余模型仍然有效。`routes.ts` 新增 `relogin`（清标记、不删账号），卡片「重新登录」改为先清标记再走登录，与同仓其余线路一致。
   - **刻意不做**：不改 `PROVIDER_ERROR` 的重试语义、不动 `QUOTA` 判定，也不把 5xx 拉进这次分类——`database_unavailable` 已经是 `SERVER`，本来就不会挂起账号。
-  - **回归**：`test/opendesign-mapper.test.ts` 覆盖两种 `tier_*` 403、不带凭证线索的 403（现在是 `HTTP_403`，此前是 `AUTH`）、带凭证线索的 403 与 401；`test/opendesign-routes.test.ts` 覆盖 `relogin` 清标记后账号仍在、别名保留、`usable` 恢复。`npm run typecheck` 通过；三个 opendesign 测试文件 148 例全通过；全量 Vitest 为 380 文件通过 / 3 跳过，余下 3 个文件 45 例失败在 `origin/master` 上以相同方式失败（本机网络把 `cdn.example.com` 解析到非公网地址，与本改动无关）。
+  - **回归**：`test/opendesign-mapper.test.ts` 覆盖两种 `tier_*` 403、不带凭证线索的 403（现在是 `HTTP_403`，此前是 `AUTH`）、带凭证线索的 403 与 401；`test/opendesign-adapter.test.ts` 覆盖承重的一步——权益类 403 换到下一个账号、且该账号既不落 `invalid` 也不进冷却（合并后补齐，并做过反向对照：短路 `adapter.ts` 那条分支即失败）；`test/opendesign-routes.test.ts` 覆盖 `relogin` 清标记后账号仍在、别名保留、`usable` 恢复。`npm run typecheck` 通过；四个 opendesign 测试文件 171 例全通过；全量 Vitest 为 384 文件通过 / 2 跳过，6991 例通过 / 9 跳过，0 失败。
 
 ## 0.68.0 - 2026-11-11
 

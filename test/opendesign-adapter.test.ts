@@ -212,6 +212,44 @@ describe('OpenDesignAdapter', () => {
     expect(bad.authFailedReason).toContain('rejected')
   })
 
+  it('rotates past a model the plan withholds without parking the account', async () => {
+    // The gateway answers 403 for "this tier does not include this model" too,
+    // and that refusal has nothing to do with the key: the same key keeps
+    // serving every model the tier does include, so the account stays routable.
+    // Parked here, it would sit behind an 'invalid' marker the user can only
+    // clear by adding the account again.
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_go' }, 'go')
+    await pool.addAccount({ kind: 'api-key', apiKey: 'od_plus' }, 'plus')
+    let calls = 0
+    const fetchFn = (async (_input: unknown, init?: RequestInit) => {
+      calls += 1
+      const key = new Headers(init?.headers).get('authorization') ?? ''
+      if (key.includes('od_go')) {
+        return Response.json({
+          error: {
+            code: 'tier_request_kind_not_entitled',
+            message: 'membership tier "go" is not entitled to use this model for chat_completions: go 用户默认禁用全部模型（兜底规则）',
+          },
+        }, { status: 403 })
+      }
+      return sse('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+    }) as unknown as typeof fetch
+    const adapter = new OpenDesignAdapter(settings, { fetchFn, accountPool: pool })
+    const chunks = await collect(adapter, options())
+    // The NEXT account served the request: an entitlement denial is worth
+    // another account (it may sit on a higher tier), so rotation still happens.
+    expect(calls).toBe(2)
+    expect(chunks.some((chunk) => (chunk as { type: string }).type === 'text-delta')).toBe(true)
+    // The refusal was never about the key, so nothing is written on the account:
+    // no 'invalid' marker (which would need a manual clear) and no cooldown
+    // (which would hide a healthy account from the rotation for a while).
+    const accounts = await pool.listAccounts()
+    const goTier = accounts.find((account) => account.alias === 'go')!
+    expect(goTier.authStatus).toBeUndefined()
+    expect(goTier.authFailedReason).toBeUndefined()
+    expect(goTier.cooldownUntil).toBeUndefined()
+  })
+
   it('an OAuth account chats with its runtime key, never the control key', async () => {
     await pool.addAccount({
       kind: 'oauth',
