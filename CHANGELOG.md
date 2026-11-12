@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.70.1 - 2026-11-12
+
+- **[client / 样式] 修复移除 Antigravity 时误删共享账号卡骨架样式，导致所有线路账号卡重叠（0.70.0 干净构建回归）**
+  - **现象**：从干净构建的 0.70.0 起，设置页每条线路的账号卡（`AccountPoolSection`）标题、徽标、删除按钮、额度区与分隔线相互重叠，卡片本身也丢失背景与边框；当旧 `lib/`（移除前产物）还在时看不出。
+  - **根因**：移除 Antigravity 的提交删掉了 `src/client/antigravity/styles.ts`，但该表里托管着**全线路共享**的账号卡骨架样式——`.dsha-accounts-list`、`.dsha-account-card(.active)`、`.dsha-account-header`、`-identity`、`-title`、`.dsha-badges`、`.dsha-badge.primary|active|cooldown`、`-details`、`-actions`，由全局 `installAntigravityStyles()` 注入。删除后这些规则再无人定义，任何干净构建都会丢失卡片骨架。
+  - **改法**：把丢失的 13 条骨架规则按原值补回 `src/client/common/styles.ts` 的 `installPoolStyles()`（始终安装的账号池共用样式表）。`.dsha-badge` 的基座仍留在各线路表中，本表只保留共享变体填充，以及原本就在本表里的 `.dsha-badge.danger`。
+  - **回归**：`test/client-styles.test.ts` 新增守卫，精确断言裸 `.dsha-accounts-list / .dsha-account-card / .dsha-account-card.active / -header / -identity / -title / .dsha-badges / .dsha-badge.primary|active|cooldown / -details / -actions` 均存在（旧的 `toContain('.dsha-account-card')` 会被 `.dsha-account-card--kimi` 复合选择器蒙混过关，正是它没拦住这次回归）。
+  - **验证**：`npm run typecheck` 通过；全量 Vitest 为 358 个文件通过 / 2 个跳过（6675 例通过 / 9 跳过 / 0 失败）；从零 `npm run build` 后产物含恢复规则、`npm pack --dry-run` 无 antigravity 文件；Kimi 账号卡 Before/After 同场景渲染截图确认重叠消失、卡片骨架恢复。
+
 ## 0.70.0 - 2026-11-12
 
 - **[antigravity / 移除] 完整移除 Antigravity 线路（GitHub #104 之后的主分支决策）**
