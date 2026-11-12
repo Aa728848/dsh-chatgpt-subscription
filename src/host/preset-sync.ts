@@ -205,12 +205,19 @@ export function packageInstalled(
  * Packages the preset intentionally loads from the plugin's own dependency
  * closure rather than the harness installation. Every other harness row must
  * resolve where the registry mounts it, not merely beside this plugin.
+ *
+ * The native executor is deliberately **absent** from this list. Code Mode must
+ * drive the kernel's own instance, so a resolution that lands in a copy beside
+ * this plugin is the desynchronised duplicate the probe exists to reject: that
+ * is exactly the failure an install-time dependency produced, where a pinned
+ * copy shadowed the running desktop kernel and broke the preset on every
+ * version drift. Requiring the plugin-side probe to land in the harness tree
+ * also keeps the gate and the loader in agreement — the `code-mode` row's
+ * static import resolves from this package, so a package it cannot reach must
+ * never be judged mountable.
  */
 const PLUGIN_RESOLVED_PACKAGES: readonly string[] = [
   '@eddyskywalker/dsh-chatgpt-subscription',
-  // A real dependency of this plugin: profile plugins cannot resolve the
-  // host's kernel packages, so Code Mode carries its native executor itself.
-  '@deepseek-ai/dsh-tool-executor-native',
 ]
 
 /** Whether `candidate` is `root` itself or one of its descendants. */
@@ -252,8 +259,8 @@ type ModuleResolver = (specifier: string) => unknown
  * runtime-declared preset rows from its own context. A successful plugin-side
  * resolution is therefore not sufficient for a harness package: an old copy in
  * the profile tree must not override the running harness's missing export.
- * Plugin-owned rows and the plugin-borne native executor are the deliberate
- * exceptions. With no harness entry, retain the legacy local probe behavior.
+ * The plugin's own rows are the deliberate exception. With no harness entry,
+ * retain the legacy local probe behavior.
  */
 export function resolvesFromInstallation(
   specifier: string,

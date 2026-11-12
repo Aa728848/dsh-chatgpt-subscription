@@ -44,9 +44,11 @@ export const PTC_EXECUTOR_PACKAGE = '@deepseek-ai/dsh-tool-executor-ptc'
  *
  * A program sub-call must run through the harness's own policy, approval, and
  * post-execute pipeline; re-implementing that pipeline is how a plugin silently
- * drops policy. A profile plugin cannot resolve the host's kernel packages, so
- * this package carries the executor as a real dependency and drives the host
- * registry with it.
+ * drops policy. The package is therefore an *optional peer*: the running
+ * harness supplies it, and npm never installs a second copy into the profile,
+ * where a stale pinned version would shadow the kernel's own and desynchronise
+ * the two on every desktop update. Code Mode degrades to the PTC row when it is
+ * absent (see {@link resolveDispatchPreset}).
  */
 export const NATIVE_EXECUTOR_PACKAGE = '@deepseek-ai/dsh-tool-executor-native'
 

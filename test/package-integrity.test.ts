@@ -87,6 +87,33 @@ describe('Package Integrity & BOM Checks', () => {
     }
   })
 
+  it('never installs a kernel package into the profile beside the running harness', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'))
+    const dependents = pkg.dependencies || {}
+    const peerDeps = pkg.peerDependencies || {}
+    const peerMeta = pkg.peerDependenciesMeta || {}
+
+    // Issue #104: shipping a kernel package as a real dependency made npm copy it
+    // into the profile, where the pinned copy shadowed the desktop kernel's own
+    // version and broke the `standard` preset on every drift. No @deepseek-ai
+    // package may appear in `dependencies` — the kernel supplies them all.
+    const kernelDeps = Object.keys(dependents).filter((key) => key.startsWith('@deepseek-ai/'))
+    expect(kernelDeps, 'kernel packages must be peers, never dependencies').toEqual([])
+
+    // The other kernel peers carry the union of every supported generation, so
+    // npm resolves them to the copy the harness already installed. The executor
+    // was the exception that produced issue #104: a caret range in
+    // `dependencies` that npm installed as a second, version-pinned copy. It is
+    // an optional peer so npm never installs it, and Code Mode degrades to the
+    // PTC row when the running harness does not ship it.
+    const executor = '@deepseek-ai/dsh-tool-executor-native'
+    expect(peerDeps[executor], `${executor} must be a peer`).toBeTruthy()
+    expect(
+      peerMeta[executor]?.optional,
+      `${executor} must be an optional peer so npm does not install a second copy`,
+    ).toBe(true)
+  })
+
   it('declares a Node engines floor at least as new as the transport it bundles', () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'))
     const node = pkg.engines?.node
@@ -109,6 +136,17 @@ describe('Package Integrity & BOM Checks', () => {
       comparison >= 0,
       `engines.node ${String(node)} is weaker than the bundled undici floor >=22.19.0`,
     ).toBe(true)
+  })
+
+  it('keeps the native executor a real import in the built Code Mode bundle', () => {
+    const bundlePath = path.join(ROOT_DIR, 'lib', 'codemode.js')
+    if (!fs.existsSync(bundlePath)) return
+    const content = fs.readFileSync(bundlePath, 'utf8')
+
+    // One executor per scope: Code Mode hands every program sub-call to the
+    // kernel's instance. Inlining a copy would apply that copy's own policy and
+    // approval pipeline beside the host's, which is the failure this guards.
+    expect(content).toMatch(/from\s*["']@deepseek-ai\/dsh-tool-executor-native["']/)
   })
 
   it('ensures built lib/index.js does not statically import CallId from @deepseek-ai/dsh-llm', () => {
