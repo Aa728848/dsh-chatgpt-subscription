@@ -58,20 +58,19 @@ export const PROGRESS_UPDATE_LANGUAGES: readonly ProgressUpdateLanguage[] = ['au
 /**
  * 引导词正文。写法对齐 Kimi 的「进展更新」：先说清多步任务早期的思路，再报
  * 有意义的结论、阶段判断、长等待与阻塞；每条给一行标题，细节放正文；不重复
- * 没有变化的状态。开头与结尾两条被提成硬要求——没有它们，面板在任务的两端
- * 都是空的。
+ * 没有变化的状态。多步骤任务保留开头与结尾两条硬要求；L0 单点工作不制造固定播报。
  */
 export const PROGRESS_GUIDANCE = [
   '## Progress updates',
   '',
   'During multi-step work you can call `progress_update` to report progress without ending your turn and without spending a question: report, then keep working.',
   '',
-  '**Two updates are mandatory — missing either one means the job is not finished:**',
+  '**For L1/L2 and other multi-step work, two updates are mandatory — missing either one means the job is not finished. L0 single-point work does not require opening or closing updates:**',
   '',
   '- **Opening**: before the first tool call of the task, send one update stating the plan (which steps, what you touch first). The user must be able to redirect you before you disappear into execution.',
   '- **Closing**: after the work is done and before your final answer, send one update stating the result (what changed, what was verified, what is left). The panel and the conversation both close on this line.',
   '',
-  'Use exactly one opening and one closing update per task. Never announce an intended tool call instead of making it: after an opening or intermediate update, perform actual work, ask a necessary question, or finish before considering another update. If a repeat-tool reminder names `progress_update`, do not answer with another progress update; inspect the previous result and continue with a task tool, a necessary question, or the final response.',
+  'Use exactly one opening and one closing update per multi-step task; do not manufacture either for L0 single-point work. Never announce an intended tool call instead of making it: after an opening or intermediate update, perform actual work, ask a necessary question, or finish before considering another update. If a repeat-tool reminder names `progress_update`, do not answer with another progress update; inspect the previous result and continue with a task tool, a necessary question, or the final response.',
   '',
   'Beyond those two, these moments are worth a report:',
   '- **Early planning**: the opening update covers it; report again only when the plan really changes (different approach, smaller scope, a broken premise).',

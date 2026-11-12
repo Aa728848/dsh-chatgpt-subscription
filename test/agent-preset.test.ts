@@ -99,7 +99,7 @@ describe('the dispatch definition', () => {
     expect(DISPATCH_PRESET.name).toBe('调度模式')
     expect(DISPATCH_PRESET.order).toBe(5)
     expect(DISPATCH_PRESET.description).toBe(
-      '基于 Code Mode 的调度 Agent：先分诊任务复杂度，L2 任务在规划前先做澄清访谈，再由主代理规划、派发子代理（显式选择子代理模型）、审查与验收。',
+      '基于 Code Mode 的调度 Agent：按决策状态分诊，明确工程任务快速执行，治理任务先访谈与审批；由主代理选择拓扑、显式路由子代理并统一验收。',
     )
   })
 
@@ -653,7 +653,7 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).not.toContain('Orchestration ready: subagent')
       expect(persona).not.toContain('is **not orchestratable**')
       expect(persona).not.toContain('Call ask_user_question once (see R-W) offering')
-      expect(persona).toContain('[Execution Pipeline] R0 Triage -> (L2) R-G Interview')
+      expect(persona).toContain('[Execution Pipeline] R0 Triage -> [L2-Governed only: R-G Interview')
       // The board contract survives, because it was never about generations.
       expect(persona).toContain('[Agent Teams Board]')
       expect(persona).toContain('team_task_create and its list/get/update siblings')
@@ -813,7 +813,7 @@ describe('the persona block the declaration transcribes', () => {
     // whatever shape the dispatcher happened to use — and the blind-box probe
     // measured a ~240-point gap between an ambiguous rule set and a written-out
     // one. Both copies must require the sixth element, the four fields per limit,
-    // the explicit "unlimited", and must forbid the restatement ritual that
+    // explicit numeric caps, and must forbid the restatement ritual that
     // reproduces a misreading instead of catching it.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
@@ -939,9 +939,9 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('ONE code_run containing only tools.exit_plan_mode must be the sole and final top-level tool call of the turn that submits the plan')
       // The degraded path when the tool is absent stays a question, never prose.
       expect(persona).toContain('the degraded path is ONE code_run program containing exactly one tools.ask_user_question(...) sub-call asking the user to enter /plan')
-      // Anti-patterns 21 and 22 pin the two ways R9 gets abused.
-      expect(persona).toContain('21. Entering Plan Mode for an L0/L1 task, or before the R-G interview has converged')
-      expect(persona).toContain('22. Using leave_plan_mode to bypass exit_plan_mode approval')
+      // The anti-pattern pins both premature Plan Mode and leave-as-approval abuse.
+      expect(persona).toContain('Orchestrating or opening Plan Mode for L0/L1/L2-Clear')
+      expect(persona).toContain('using leave_plan_mode to bypass exit_plan_mode approval')
       // The subagent clause is generation-graded, because the bridge now
       // degrades to "let it through" where roots cannot be read. An
       // unconditional promise of DELEGATED_CALLER would be a lie on those hosts.
@@ -1011,9 +1011,12 @@ describe('the persona block the declaration transcribes', () => {
     expect(prefix).toContain('status: ready | hand_back | blocked | failed | dropped')
     expect(prefix).toContain('hand_back_reason')
     expect(prefix).toContain('no per-cycle banking')
+    expect(prefix).toContain('at most 3 execution runs per brief including the initial run')
+    expect(prefix).toContain('at most 2 consecutive model steps without new evidence')
+    expect(prefix).toContain('minimum sufficient evidence')
     // A clean hand_back is a scope routing event, not a failed run.
-    expect(prefix).toContain('does not increment the brief\u2019s 3-run failure counter')
-    expect(prefix).toContain('send_message({ agent_id })')
+    expect(prefix).toContain('does not increment a failure count or trigger R8 by itself')
+    expect(prefix).toContain('send_message({ agent })')
     // Minimal native whitelist and the program-only question/plan contract.
     expect(prefix).toContain('[Dispatch Native Tool Whitelist]')
     expect(prefix).toContain('Top-level: only code_run, cache_warmup_result, dispatch_ledger, progress_update, and structured_output')
@@ -1028,6 +1031,10 @@ describe('the persona block the declaration transcribes', () => {
     expect(prefix).not.toContain('Criterion: whether spawn_teammate exists')
     expect(prefix).toContain('The board tools stay declared whether or not the board is on')
     expect(prefix).toContain('Dispatch independent tasks concurrently through code_run Promise.all')
+    expect(prefix).toContain('ordinary code_run programs should batch independent read/search/tool calls')
+    expect(prefix).toContain('L2-Clear')
+    expect(prefix).toContain('L2-Governed')
+    expect(prefix).toContain('One acceptance layer owned by Lead')
     expect(prefix).not.toContain('(PTC: tools.spawn_teammate)')
     expect(prefix).not.toContain('stay visible in the PTC SDK')
     expect(prefix).not.toContain('(in PTC mode: tools.list_subagent_models)')
@@ -1036,9 +1043,9 @@ describe('the persona block the declaration transcribes', () => {
     // carry stayed as [Agent Teams Board]. The ceiling is unchanged - it still
     // catches unbounded growth, and the freed characters become headroom.
     expect(prefix.length).toBeLessThan(19000)
-    expect(prefix).toContain('23. Asking the user about an implementation detail an existing-standard in the repository already settles')
-    expect(prefix).toContain('24. Penalizing a clean status: hand_back scope escalation as a failed run')
-    expect(prefix).toContain('25. Accepting a visible UI change without Before & After comparison evidence')
+    expect(prefix).toContain('Asking the user about an implementation detail an existing-standard in the repository already settles')
+    expect(prefix).toContain('penalizing a clean status: hand_back scope escalation as a failed run')
+    expect(prefix).toContain('accepting a visible UI change without Before & After comparison evidence')
 
     // The plan-mode section is the coordinator's own guardrail: it carries the
     // exemption and the visual-evidence gate the plan itself has to name.

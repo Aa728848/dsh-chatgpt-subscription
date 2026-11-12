@@ -1,7 +1,7 @@
 /**
  * 「计划模式管线」的宿主入口 —— 本包**第三个** loader 行（组件）。
  *
- * 调度模式（dispatch preset）的接线顺序是「R-G 澄清访谈收敛 → 规划 → 派发」。
+ * 调度模式（dispatch preset）的治理路径接线顺序是「L2-Governed → R-G 澄清访谈收敛 → 规划 → 派发」。
  * 澄清访谈收敛之后，主代理需要**显式进入**计划模式，把「只是进入」与「下一步
  * 才开始探索并出计划」分开，否则模型会把进入与出计划压在同一步里，计划就变成
  * 了没有探索的猜测。放弃规划时同样需要一个明确的出口。
@@ -380,17 +380,17 @@ function assertLiveRoot(ctx: Context, agent: unknown): void {
  * **刻意压到 380 字符以内。** 工具描述与 system 段一样，每一步都随请求重发，是计划
  * 模式期间**每一步都在付**的常驻开销（Kimi 线路按内容前缀命中，进入计划模式那一步
  * 工具表一变，前缀必然重建一次；但重建之后，每一步还要为这些字节付输入费）。所以
- * 这里只留「能不能调用」的四条判定：只有调度模式用；只有 L2 且 R-G 访谈收敛后才可
- * 调用；进入这一步**只完成进入**；L0/L1 或访谈未收敛时不得调用。
+ * 这里只留「能不能调用」的四条判定：只有调度模式用；只有 L2-Governed 且 R-G 访谈收敛后才可
+ * 调用；进入这一步**只完成进入**；L0/L1/L2-Clear 或访谈未收敛时不得调用。
  *
  * 探索纪律、决策完备清单、`exit_plan_mode` 唯一最后调用、打回循环都搬到
  * `enterResultText()` 的工具返回里：工具结果是**末尾追加**，不破坏前缀，且比描述便宜。
  */
 export const ENTER_DESCRIPTION = 'Enter plan mode for the rest of this session. '
-  + 'Dispatch mode only: call it only once the task is triaged L2 and the R-G interview has converged '
+  + 'Dispatch mode only: call it only once the task is triaged L2-Governed and the R-G interview has converged '
   + '(frontier empty, user confirmed shared understanding). '
   + 'This step completes only the entry; exploring and writing the plan happen in your next step. '
-  + 'Never call it for L0/L1 or while a frontier question is open.'
+  + 'Never call it for L0/L1/L2-Clear or while a frontier question is open.'
 
 /**
  * `leave_plan_mode` 的模型侧描述。

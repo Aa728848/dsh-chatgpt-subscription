@@ -461,7 +461,7 @@ describe('the plan-mode texts: resident budgets and the rules they still carry',
 
   it('keeps the trigger conditions in the enter description', () => {
     expect(ENTER_DESCRIPTION).toContain('Dispatch mode only')
-    expect(ENTER_DESCRIPTION).toContain('triaged L2')
+    expect(ENTER_DESCRIPTION).toContain('triaged L2-Governed')
     expect(ENTER_DESCRIPTION).toContain('R-G interview has converged')
     expect(ENTER_DESCRIPTION).toContain('frontier empty')
     expect(ENTER_DESCRIPTION).toContain('user confirmed shared understanding')
@@ -469,7 +469,7 @@ describe('the plan-mode texts: resident budgets and the rules they still carry',
     expect(ENTER_DESCRIPTION).toContain('This step completes only the entry')
     expect(ENTER_DESCRIPTION).toContain('exploring and writing the plan happen in your next step')
     // 两个否定触发条件。
-    expect(ENTER_DESCRIPTION).toContain('Never call it for L0/L1')
+    expect(ENTER_DESCRIPTION).toContain('Never call it for L0/L1/L2-Clear')
     expect(ENTER_DESCRIPTION).toContain('while a frontier question is open')
   })
 

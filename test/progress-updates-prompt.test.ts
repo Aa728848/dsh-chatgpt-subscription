@@ -30,7 +30,8 @@ describe('progressSectionText', () => {
 
   it('pins the anti-loop rule without making the section dynamic', () => {
     const text = progressSectionText()
-    expect(text()).toContain('Use exactly one opening and one closing update per task')
+    expect(text()).toContain('Use exactly one opening and one closing update per multi-step task')
+    expect(text()).toContain('L0 single-point work does not require opening or closing updates')
     expect(text()).toContain('Never announce an intended tool call instead of making it')
     expect(text()).toContain('repeat-tool reminder names `progress_update`')
     expect(text()).toContain('do not answer with another progress update')
