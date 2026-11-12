@@ -93,6 +93,33 @@ describe('provider hub overview styles', () => {
     expect(css).toContain('[data-level=danger]')
   })
 
+  it('ships the shared account-pool card skeleton every line depends on', () => {
+    // The roster rendered by AccountPoolSection across all providers (list, card,
+    // header, identity, title, badges, details, actions) gets its layout from
+    // these rules. They lived in the deleted antigravity stylesheet and vanished
+    // with it, collapsing every line's card onto itself; a compound descendant
+    // rule like .dsha-account-card.dsha-account-card--kimi must not be mistaken
+    // for the bare skeleton, so assert the exact bare selectors here.
+    installPoolStyles()
+    const css = sheetText(POOL_SELECTOR)
+    for (const selector of [
+      '.dsha-accounts-list',
+      '.dsha-account-card',
+      '.dsha-account-card.active',
+      '.dsha-account-header',
+      '.dsha-account-identity',
+      '.dsha-account-title',
+      '.dsha-badges',
+      '.dsha-badge.primary',
+      '.dsha-badge.active',
+      '.dsha-badge.cooldown',
+      '.dsha-account-details',
+      '.dsha-account-actions',
+    ]) {
+      expect(ruleBody(css, selector), selector).toBeDefined()
+    }
+  })
+
   it('ships the shared model checklist rows in their own sheet', () => {
     installModelChecklistStyles()
     const css = document.querySelector<HTMLStyleElement>(CHECKLIST_SELECTOR)?.textContent ?? ''
