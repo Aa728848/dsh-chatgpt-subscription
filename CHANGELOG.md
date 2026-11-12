@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.70.0 - 2026-11-12
+
+- **[antigravity / 移除] 完整移除 Antigravity 线路（GitHub #104 之后的主分支决策）**
+  - 删除 `src/host/antigravity/`、`src/client/antigravity/`、`src/shared/antigravity-contracts.ts`、`bin/antigravity-login.mjs` 与全部 `test/antigravity-*` 专属测试，共 47 个文件。
+  - 宿主 `src/index.ts` 不再注册 Antigravity Provider、OAuth/号池、`/v1internal:*` 路由、Hub 汇总、生图工具 `antigravity_image_generate` 与 `antigravityFirstOutputTimeoutMs` 配置；`package.json` 移除 `antigravity-login` bin 与 `bin` 发布目录。
+  - 客户端移除设置卡片、Composer 配额、三语语言包、品牌图标与 `tool.call.toolview` 注册；Widget 线路枚举与配额归一化同步移除，当前文档改为 12 条线路。
+  - 保留 CHANGELOG、`docs/antigravity-*` 历史审计/设计归档，以及用户已有的凭据、号池和设置文件：升级不读取、不迁移、不删除。共享策略中仅移除反重力专属分支，其他线路的代理、缓存、号池与重试语义不变。
+  - **验证**：完整类型检查、强制 `tsc -b` 与正式构建通过；全量 Vitest 为 358 个文件通过 / 2 个跳过（6667 例通过 / 9 例跳过 / 0 失败）；`npm pack --dry-run` 的 936 个文件内无反重力文件与登录 CLI；Hub Before/After 同场景 DOM 由 13 张卡降为 12 张且 After 无 Antigravity。
+
+- **[kimi-code / 流式] 首帧等待延长到 360s，看门狗 TIMEOUT 不再自动重试，避免长前缀重复写缓存与重复计费**
+  - **现象**：上游偶尔在响应头之前长时间不回包（截图中 22 次失败的 attempts 均无状态码），120s 看门狗判 `TIMEOUT` 后，原生重试又把同一长前缀重新发送；Kimi 的 5 小时额度在 14:20–15:48 间上涨 7.17 个百分点，与「客户端一个字节没收到」的请求量对得上。
+  - **改法**：新增 `STREAM_FIRST_OUTPUT_TIMEOUT_MS = 360_000`，首 chunk 前按 360s 计；首 chunk 后仍按 `STREAM_IDLE_TIMEOUT_MS = 120_000` 检测断流。新增 `TRANSPORT_HEADERS_TIMEOUT_MS = 420_000`，仅为 Kimi 的传输 fetch 设置响应头上限，确保应用层先于 undici 默认 300s 判死。
+  - **重试策略**：`KIMI_CODE_RETRY_POLICY_CONFIG.retryableCodes` 移除 `TIMEOUT`，保留 `RATE_LIMIT`、`SERVER`、`TRANSPORT` 与 `maxRetries: 3`、原有退避。一次看门狗超时只发一次上游请求，不自动重发；用户主动重试仍是新的正常请求。
+  - **共享边界**：`ProxyManager.createFetch` 新增可选 `headersTimeoutMs`，直连与代理 Agent 都应用该值，缓存键包含超时值；未设置的调用仍走原有 baseFetch/Agent 与默认上限，其他 Provider 不变。缓存亲和、冷启动、缓存统计与持久化格式均未修改。
+  - **验证**：新增「TIMEOUT 只消耗一次原生请求」、「360s 首帧窗口内可存活」、「首 chunk 后仍按 120s 判死」、代理直连/代理超时隔离与缓存键区分等回归；专项 5 个文件 154 例通过。全量 Vitest 为 358 个文件通过 / 2 个跳过（6674 例通过 / 9 例跳过 / 0 失败）；`npm run typecheck`、`npx tsc -b --force`、`npm run build` 与 `git diff --check` 通过。
+
 - **[依赖 / 预设] 把 `@deepseek-ai/dsh-tool-executor-native` 从 `dependencies` 改成可选 peer，内核版与插件版不再互相顶掉**
   - **现象**：安装 0.69.0 后，profile 的 `node_modules/@deepseek-ai/` 里多出一份被钉死的 `dsh-tool-executor-native@0.2.2-rc.2`。桌面版内核自带的那一份是它自己的版本，两份版本一旦不同步，`standard` 预设就用不了；用户能做的只有反复重装。
   - **根因**：Code Mode 需要内核的 executor 才能把程序内子调用交给真实的策略 / 审批 / post-execute 管线，而 profile 插件按 Node 解析规则够不到宿主自己的 `node_modules`，所以早先把该包写成了**真实依赖**。npm 7 起会连 peer 一起装，但真实依赖的语义是「按我的范围装我这一份」——于是它被复制进 profile，正好盖住了内核的那一份。
