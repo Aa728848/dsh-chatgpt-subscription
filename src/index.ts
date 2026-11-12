@@ -73,7 +73,11 @@ import {
   FileModelSettingsStore as KimiCodeModelSettingsStore,
   registerKimiCodePreferenceStore,
 } from './host/kimi-code/token-store.ts'
-import { PROVIDER_ID as KIMI_CODE_PROVIDER_ID, PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME } from './host/kimi-code/types.ts'
+import {
+  PROVIDER_ID as KIMI_CODE_PROVIDER_ID,
+  PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME,
+  TRANSPORT_HEADERS_TIMEOUT_MS as KIMI_CODE_TRANSPORT_HEADERS_TIMEOUT_MS,
+} from './host/kimi-code/types.ts'
 import {
   installKimiRepeatBreaker,
   type KimiRepeatBreakerContext,
@@ -1011,9 +1015,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       logger: ctx.logger,
     })
     const proxyFetch = proxyManager.createFetch()
+    // Kimi's 360 s first-chunk budget must precede its transport safety net;
+    // undici's default 300 s header deadline would otherwise surface a
+    // retryable TRANSPORT failure before the application can reject the retry.
+    const kimiCodeProxyFetch = proxyManager.createFetch({
+      headersTimeoutMs: KIMI_CODE_TRANSPORT_HEADERS_TIMEOUT_MS,
+    })
     const providerLimits = readModelRequestLimits()
+    const baseFetchFor = (provider: ControlledProvider) => (
+      provider === 'kimi-code' ? kimiCodeProxyFetch : proxyFetch
+    )
     const modelFetch = Object.fromEntries(CONTROLLED_PROVIDERS.map(provider => [
-      provider, createControlledModelFetch(createDiagnosticFetch(proxyFetch, {
+      provider, createControlledModelFetch(createDiagnosticFetch(baseFetchFor(provider), {
         provider,
         onRecord: record => ctx.logger.info('[provider-diagnostics] ' + JSON.stringify(record)),
       }), { provider, limits: providerLimits }),

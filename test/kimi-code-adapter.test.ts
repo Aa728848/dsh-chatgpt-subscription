@@ -135,7 +135,7 @@ describe('KimiCodeAdapter retry policy', () => {
     expect(policy).toMatchObject({
       mode: 'normal',
       maxRetries: 3,
-      retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+      retryableCodes: ['RATE_LIMIT', 'SERVER', 'TRANSPORT'],
     })
     expect(KIMI_CODE_RETRY_POLICY_CONFIG.backoff).toEqual({
       initialDelayMs: 1_500,

@@ -16,7 +16,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
-import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { LlmError, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
   KimiCodeOAuthError,
   KimiCodeRetryableError,
@@ -414,6 +414,17 @@ describe('what a failed refresh keeps', () => {
 })
 
 describe('the model request path', () => {
+  it('spends exactly one upstream request on a watchdog timeout', async () => {
+    let attempts = 0
+    const spent = await nativeRetryLoop(async () => {
+      attempts += 1
+      throw new LlmError('Kimi Code stream idle timeout before the first chunk', 'TIMEOUT')
+    })
+    expect(spent).toBe(1)
+    expect(attempts).toBe(1)
+    expect(KIMI_CODE_RETRY_POLICY_CONFIG.retryableCodes).not.toContain('TIMEOUT')
+  })
+
   it('spends one refresh attempt per preparation on the single-credential path', async () => {
     const oauth = statusStub(429)
     const { adapter } = adapterFor({ fetchFn: oauth.fetchFn })

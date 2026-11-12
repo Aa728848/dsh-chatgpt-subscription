@@ -40,18 +40,24 @@ const PROXY_CONNECT_TIMEOUT_MS = 60_000
 export function proxyAgentOptions(
   uri: string,
   allowH2?: boolean,
-): { uri: string; connectTimeout: number; allowH2?: false } {
-  return { uri, connectTimeout: PROXY_CONNECT_TIMEOUT_MS, ...(allowH2 === false ? { allowH2: false as const } : {}) }
+  headersTimeoutMs?: number,
+): { uri: string; connectTimeout: number; allowH2?: false; headersTimeout?: number } {
+  return {
+    uri,
+    connectTimeout: PROXY_CONNECT_TIMEOUT_MS,
+    ...(allowH2 === false ? { allowH2: false as const } : {}),
+    ...(headersTimeoutMs === undefined ? {} : { headersTimeout: headersTimeoutMs }),
+  }
 }
 
 /** One pool per (proxy, protocol policy, credential): neither policy nor identity may be shared. */
-function agentCacheKey(proxyUrl: string, allowH2?: boolean, poolKey?: string): string {
-  return `${poolKey ?? 'shared'}:${allowH2 === false ? 'h1' : 'auto'}:${proxyUrl}`
+function agentCacheKey(proxyUrl: string, allowH2?: boolean, poolKey?: string, headersTimeoutMs?: number): string {
+  return `${poolKey ?? 'shared'}:${allowH2 === false ? 'h1' : 'auto'}:${headersTimeoutMs ?? 'default'}:${proxyUrl}`
 }
 
 /** The key of the dispatcher that serves one credential's unproxied traffic. */
-function directAgentKey(poolKey: string, allowH2?: boolean, omitAlpn?: boolean): string {
-  return `direct:${poolKey}:${allowH2 === true ? 'auto' : 'h1'}:${omitAlpn === true ? 'noalpn' : 'alpn'}`
+function directAgentKey(poolKey: string, allowH2?: boolean, omitAlpn?: boolean, headersTimeoutMs?: number): string {
+  return `direct:${poolKey}:${allowH2 === true ? 'auto' : 'h1'}:${omitAlpn === true ? 'noalpn' : 'alpn'}:${headersTimeoutMs ?? 'default'}`
 }
 
 /**
@@ -665,8 +671,8 @@ export class ProxyManager {
     return this.getSystemProxy()
   }
 
-  private getOrCreateAgent(proxyUrl: string, allowH2?: boolean, poolKey?: string): ProxyAgent {
-    const key = agentCacheKey(proxyUrl, allowH2, poolKey)
+  private getOrCreateAgent(proxyUrl: string, allowH2?: boolean, poolKey?: string, headersTimeoutMs?: number): ProxyAgent {
+    const key = agentCacheKey(proxyUrl, allowH2, poolKey, headersTimeoutMs)
     const existing = this.agents.get(key)
     if (existing instanceof ProxyAgent) return existing
     // The options-object form, and deliberately not `new ProxyAgent(url, options)`:
@@ -674,7 +680,7 @@ export class ProxyManager {
     // dropped silently and the connect timeout would never be applied - the
     // agent would fall back to the 10s default and fail the same way it
     // always did, with nothing in the code to show why.
-    const agent = new ProxyAgent(proxyAgentOptions(proxyUrl, allowH2))
+    const agent = new ProxyAgent(proxyAgentOptions(proxyUrl, allowH2, headersTimeoutMs))
     this.remember(key, agent)
     return agent
   }
@@ -690,13 +696,14 @@ export class ProxyManager {
    */
   private getOrCreateDirectAgent(
     poolKey: string,
-    overrides?: { allowH2?: boolean; omitAlpn?: boolean },
+    overrides?: { allowH2?: boolean; omitAlpn?: boolean; headersTimeoutMs?: number },
   ): Agent {
-    const key = directAgentKey(poolKey, overrides?.allowH2, overrides?.omitAlpn)
+    const key = directAgentKey(poolKey, overrides?.allowH2, overrides?.omitAlpn, overrides?.headersTimeoutMs)
     const existing = this.agents.get(key)
     if (existing instanceof Agent) return existing
     const agent = new Agent({
       allowH2: overrides?.allowH2 === true,
+      ...(overrides?.headersTimeoutMs === undefined ? {} : { headersTimeout: overrides.headersTimeoutMs }),
       ...(overrides?.omitAlpn === true ? { connect: NATIVE_CONNECTOR } : {}),
     })
     this.remember(key, agent)
@@ -746,6 +753,8 @@ export class ProxyManager {
     stripHeaders?: readonly string[]
     /** Offer no ALPN on unproxied connections. Proxied ones cannot: ProxyAgent owns their connector. */
     omitAlpn?: boolean
+    /** Response-header deadline for this consumer; other callers keep undici's default. */
+    headersTimeoutMs?: number
   }): FetchLike {
     const shape = <T extends object>(dispatcher: T): T => {
       const headers = overrides?.stripHeaders
@@ -761,9 +770,9 @@ export class ProxyManager {
       const activeProxy = this.resolveActiveProxyUrl()
 
       if (!activeProxy) {
-        return poolKey === undefined
+        return poolKey === undefined && overrides?.headersTimeoutMs === undefined
           ? this.baseFetch(input, init)
-          : this.dispatchWith(input, init, shape(this.getOrCreateDirectAgent(poolKey, overrides)))
+          : this.dispatchWith(input, init, shape(this.getOrCreateDirectAgent(poolKey ?? 'shared', overrides)))
       }
 
       // A loopback target or a `NO_PROXY` host is reached better by this process
@@ -771,9 +780,9 @@ export class ProxyManager {
       // bare fetch for that reason, and a proxy whose DNS answers with its own
       // fake-ip range (Clash/Mihomo) cannot be used to reach its own host at all.
       if (shouldBypassProxy(requestTarget(input), this.getNoProxyList())) {
-        return poolKey === undefined
+        return poolKey === undefined && overrides?.headersTimeoutMs === undefined
           ? this.baseFetch(input, init)
-          : this.dispatchWith(input, init, shape(this.getOrCreateDirectAgent(poolKey, overrides)))
+          : this.dispatchWith(input, init, shape(this.getOrCreateDirectAgent(poolKey ?? 'shared', overrides)))
       }
 
       // One retry, and only for a client undici has already destroyed: the
@@ -783,12 +792,12 @@ export class ProxyManager {
       // recovered answer and a line that stays broken until the process restarts.
       for (let attempt = 0; ; attempt += 1) {
         try {
-          const agent = shape(this.getOrCreateAgent(activeProxy, overrides?.allowH2, poolKey))
+          const agent = shape(this.getOrCreateAgent(activeProxy, overrides?.allowH2, poolKey, overrides?.headersTimeoutMs))
           // undiciFetch supports dispatcher option
           return await this.dispatchWith(input, init, agent)
         } catch (error) {
           if (attempt === 0 && isDestroyedClientError(error)) {
-            this.agents.delete(agentCacheKey(activeProxy, overrides?.allowH2, poolKey))
+            this.agents.delete(agentCacheKey(activeProxy, overrides?.allowH2, poolKey, overrides?.headersTimeoutMs))
             continue
           }
           throw error

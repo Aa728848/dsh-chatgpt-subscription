@@ -17,6 +17,7 @@ vi.mock('../src/host/kimi-code/types.ts', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   // 内联而不是引用下面的常量：vi.mock 会被提升到文件顶部。
   STREAM_IDLE_TIMEOUT_MS: 250,
+  STREAM_FIRST_OUTPUT_TIMEOUT_MS: 500,
 }))
 
 const TIMEOUT_MS = 250
@@ -156,12 +157,11 @@ describe('Kimi Code idle watchdog counts transport activity, not displayable chu
 
   it('budgets a slow first byte apart from in-stream silence', async () => {
     const fetchFn = (async (_url: any, init: any) => {
-      // 响应头在阈值内到达——那是连接与预填充，不是流内静默；首字节落在阈值之后。
-      // 只有「收到响应头就 pulse」这一下把计时复位过，这次请求才活得下来：
-      // 没有那次 pulse，计时会在 250ms 处到点，0.29s 才到的首字节救不回来。
+      // 首帧预算是 500ms：响应头 100ms 到达，正文再晚 450ms。
+      // 没有响应头 pulse，500ms 处会先判死；有 pulse，首帧可等到 600ms。
       await new Promise((resolve) => setTimeout(resolve, 100))
       return new Response(
-        scheduledBody(init?.signal, [{ text: COMPLETION, afterMs: 190 }]),
+        scheduledBody(init?.signal, [{ text: COMPLETION, afterMs: 450 }]),
         { status: 200, headers: { 'content-type': 'text/event-stream' } },
       )
     }) as unknown as typeof fetch
@@ -171,10 +171,42 @@ describe('Kimi Code idle watchdog counts transport activity, not displayable chu
     expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')).toBe('ok')
   })
 
+  it('uses the longer first-chunk budget before response bytes arrive', async () => {
+    const fetchFn = (async (_url: any, init: any) => {
+      // 300ms 已超过流内 250ms 预算，但仍在首帧 500ms 预算内。
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      return new Response(scheduledBody(init?.signal, [{ text: COMPLETION, afterMs: 0 }]), {
+        status: 200, headers: { 'content-type': 'text/event-stream' },
+      })
+    }) as unknown as typeof fetch
+
+    const chunks = await drain(buildAdapter(fetchFn).stream(OPTIONS))
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')).toBe('ok')
+  })
+
   it('still throws TIMEOUT when the connection really is silent', async () => {
     const fetchFn = (async (_url: any, init: any) => new Response(
       // 一个字节都不给：阈值之后才关门，所以看门狗必须先动手。
       scheduledBody(init?.signal, [{ text: COMPLETION, afterMs: TIMEOUT_MS * 4 }]),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )) as unknown as typeof fetch
+
+    await expect(drain(buildAdapter(fetchFn).stream(OPTIONS))).rejects.toMatchObject({ code: 'TIMEOUT' })
+  })
+
+  it('returns to the shorter in-stream budget after the first chunk', async () => {
+    const first = [
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+      '',
+    ].join('\n\n')
+    const last = 'data: {"type":"message_stop"}\n\n'
+    const fetchFn = (async (_url: any, init: any) => new Response(
+      scheduledBody(init?.signal, [
+        { text: first, afterMs: 0 },
+        { text: last, afterMs: TIMEOUT_MS * 4 },
+      ]),
       { status: 200, headers: { 'content-type': 'text/event-stream' } },
     )) as unknown as typeof fetch
 
@@ -194,5 +226,8 @@ describe('Kimi Code idle budget sits strictly inside the transport deadline', ()
     expect(actual.STREAM_IDLE_TIMEOUT_MS).toBeLessThan(300_000)
     // 同时必须留出远超实测首字节等待（65 s）的余量，否则慢预填充会被误杀。
     expect(actual.STREAM_IDLE_TIMEOUT_MS).toBeGreaterThanOrEqual(90_000)
+    expect(actual.STREAM_FIRST_OUTPUT_TIMEOUT_MS).toBe(360_000)
+    expect(actual.TRANSPORT_HEADERS_TIMEOUT_MS).toBe(420_000)
+    expect(actual.STREAM_FIRST_OUTPUT_TIMEOUT_MS).toBeLessThan(actual.TRANSPORT_HEADERS_TIMEOUT_MS)
   })
 })

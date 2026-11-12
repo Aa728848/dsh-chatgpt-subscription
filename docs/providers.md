@@ -162,6 +162,7 @@
   - **请求体守卫与自动压缩衔接**：1M 档模型默认上限 **24 MiB**、256K 档默认 **2 MiB**（`DSH_KIMI_CODE_MAX_BODY_BYTES` 可覆盖），超限抛出 `CONTEXT_WINDOW_EXCEEDED` 交由 DSH 自动压缩重试；另支持 `DSH_KIMI_CODE_BYTES_PER_TOKEN` 提前压缩折算；
   - **缓存预热与等待策略**：自动监测约 25 分钟前缀缓存存活窗口，配合 `cache-warmup` 子系统（大结果 `ref://` 预览 + `cache_warmup_result` 精确分页补读）、主代理等待子代理期间的可选轻量续热，以及四段式重复工具调用刹车（`KIMI_CODE_REPEAT_BREAKER`）。
   - **共享化边界**：结果预览与分级重复提醒可覆盖其他受控线路；静态前缀排序和 in-flight 冷启动协调已复用到 Codex、Step、Claude、MiniMax。账号亲和、warm 跳过、等待续热和 hosted media 仍按各线路证据与 `promptCacheOverrides` 启用，Kimi 的 TTL、协议字段和错误词表不向外复制。
+  - **慢预填充与断流**：首 chunk 前允许等待 360 秒，专用响应头传输兜底为 420 秒；首 chunk 后按 120 秒传输活动预算检测断流。看门狗 TIMEOUT 不自动重试，避免上游已接收长前缀后重复写入缓存并消耗额度。
 - **额度窗口**：展示 5 小时、7 天、月度会员共享池、月度 Kimi Code 池四个窗口与加油包余额。
 
 ### 宿主路由（`/kimi-code/api`）

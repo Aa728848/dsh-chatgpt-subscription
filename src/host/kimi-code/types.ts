@@ -153,6 +153,22 @@ export const STREAM_IDLE_TIMEOUT_MS = 120_000
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /**
+ * Long-window allowance before Kimi produces its first consumer-visible chunk.
+ *
+ * Large prompts can spend minutes in upstream prefill before response headers or
+ * body bytes arrive. Six minutes is the product choice for that phase; once the
+ * first chunk arrives, the ordinary 120 s activity budget above takes over.
+ */
+export const STREAM_FIRST_OUTPUT_TIMEOUT_MS = 360_000
+
+/**
+ * Transport safety net for response headers, strictly beyond the app deadline.
+ * The watchdog must settle a slow first chunk as TIMEOUT before undici can turn
+ * the same silence into a retryable TRANSPORT error at its own default 300 s.
+ */
+export const TRANSPORT_HEADERS_TIMEOUT_MS = 420_000
+
+/**
  * Resolve the managed OAuth host.
  *
  * The official client lets an environment variable pin the host for testing or

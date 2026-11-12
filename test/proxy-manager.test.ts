@@ -371,6 +371,49 @@ describe('ProxyManager', () => {
   })
 })
 
+describe('consumer-specific response-header deadlines', () => {
+  it('leaves the proxy default untouched and states a custom value only when asked', () => {
+    expect(proxyAgentOptions('http://127.0.0.1:7890')).not.toHaveProperty('headersTimeout')
+    expect(proxyAgentOptions('http://127.0.0.1:7890', undefined, 420_000))
+      .toMatchObject({ headersTimeout: 420_000 })
+  })
+
+  it('uses a direct Agent with the custom value and separates different deadlines', async () => {
+    const baseFetch = vi.fn(async () => new Response('base'))
+    const transport = vi.fn(async (_input: unknown, _init?: unknown) => new Response('ok'))
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'direct', customProxyUrl: null }),
+      baseFetch: baseFetch as any,
+      proxyFetchFn: transport as any,
+    })
+
+    await manager.createFetch({ headersTimeoutMs: 420_000 })('https://example.test/one')
+    await manager.createFetch({ headersTimeoutMs: 420_000 })('https://example.test/two')
+    await manager.createFetch({ headersTimeoutMs: 430_000 })('https://example.test/three')
+
+    expect(baseFetch).not.toHaveBeenCalled()
+    const agents = transport.mock.calls.map(call => (call[1] as any).dispatcher) as Agent[]
+    expect(agents[0]).toBeInstanceOf(Agent)
+    expect(agents[0]).toBe(agents[1])
+    expect(agents[0]).not.toBe(agents[2])
+    const optionsSymbol = Object.getOwnPropertySymbols(agents[0]!).find(symbol => symbol.description === 'options')!
+    expect((agents[0] as any)[optionsSymbol].headersTimeout).toBe(420_000)
+    manager.dispose()
+  })
+
+  it('applies the custom value to a proxied dispatcher too', async () => {
+    const transport = vi.fn(async (_input: unknown, _init?: unknown) => new Response('ok'))
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: 'http://127.0.0.1:7890' }),
+      proxyFetchFn: transport as any,
+    })
+    await manager.createFetch({ headersTimeoutMs: 420_000 })('https://example.test/')
+    const dispatcher = (transport.mock.calls[0]![1] as any).dispatcher
+    expect(dispatcher).toBeInstanceOf(ProxyAgent)
+    manager.dispose()
+  })
+})
+
 describe('Linux GNOME Proxy Parser', () => {
   function reader(values: Record<string, string>) {
     return (key: string): string | null => values[key] ?? null

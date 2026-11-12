@@ -28,6 +28,7 @@ import {
   FALLBACK_MODELS,
   PROVIDER_ID,
   PROVIDER_NAME,
+  STREAM_FIRST_OUTPUT_TIMEOUT_MS,
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
   clampOutputToContext,
@@ -233,10 +234,14 @@ import type {
  *   account that hit it, so rotation on it still earns its keep;
  * - `TRANSPORT` — a connection that failed to carry the response: none at all,
  *   a body severed mid-stream (`streamFailure`), or a stream that ended without
- *   its terminal event (`assertStreamComplete`);
- * - `TIMEOUT` — a stalled stream, handled by the idle watchdog.
+ *   its terminal event (`assertStreamComplete`).
  *
  * Deliberately outside the set:
+ *
+ * - `TIMEOUT` — the idle watchdog can expire after upstream has accepted the
+ *   long prompt even when no response headers came back. Automatically sending
+ *   that prefix again would repeat cache writes and spend allowance without
+ *   evidence that another attempt can answer, so this verdict ends the attempt.
  *
  * - `INVALID_CREDENTIAL` — a rejected access token fails identically on every
  *   attempt;
@@ -258,7 +263,7 @@ export const KIMI_CODE_RETRY_POLICY_CONFIG: {
 } = {
   mode: 'normal',
   maxRetries: 3,
-  retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+  retryableCodes: ['RATE_LIMIT', 'SERVER', 'TRANSPORT'],
   backoff: { initialDelayMs: 1_500, maxDelayMs: 15_000, jitterRatio: 0.2 },
 }
 
@@ -269,8 +274,8 @@ const RETRY_POLICY = resolveRetryPolicy(KIMI_CODE_RETRY_POLICY_CONFIG, 'dsh-chat
  *
  * One. The harness already retries this route's model requests (see
  * {@link KIMI_CODE_RETRY_POLICY_CONFIG}: `maxRetries: 3`), and it retries them
- * on exactly the verdicts a failed refresh produces — RATE_LIMIT, SERVER,
- * TIMEOUT, TRANSPORT. A refresh that retries INSIDE the request therefore
+ * on the verdicts a failed refresh produces — RATE_LIMIT, SERVER, TRANSPORT.
+ * A refresh that retries INSIDE the request therefore
  * multiplies the two budgets: the outer loop's four attempts each spent three
  * refresh POSTs, so one upstream hiccup cost the service twelve requests where
  * four were intended.
@@ -1536,6 +1541,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
       PROVIDER_NAME,
+      STREAM_FIRST_OUTPUT_TIMEOUT_MS,
     )
   }
 

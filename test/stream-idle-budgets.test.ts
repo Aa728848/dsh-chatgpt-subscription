@@ -3,7 +3,11 @@ import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from '../src/host/common/idle-watchdog
 import { STREAM_IDLE_TIMEOUT_MS as CLAUDE } from '../src/host/claude/types.ts'
 import { STREAM_IDLE_TIMEOUT_MS as COMMAND_CODE } from '../src/host/command-code/types.ts'
 import { STREAM_IDLE_TIMEOUT_MS as GLM } from '../src/host/glm-coding-plan/types.ts'
-import { STREAM_IDLE_TIMEOUT_MS as KIMI } from '../src/host/kimi-code/types.ts'
+import {
+  STREAM_FIRST_OUTPUT_TIMEOUT_MS as KIMI_FIRST_OUTPUT,
+  STREAM_IDLE_TIMEOUT_MS as KIMI,
+  TRANSPORT_HEADERS_TIMEOUT_MS as KIMI_HEADERS,
+} from '../src/host/kimi-code/types.ts'
 import { STREAM_IDLE_TIMEOUT_MS as MINIMAX } from '../src/host/minimax-code/types.ts'
 import { STREAM_IDLE_TIMEOUT_MS as OLLAMA } from '../src/host/ollama/types.ts'
 import { STREAM_IDLE_TIMEOUT_MS as WORKBUDDY } from '../src/host/workbuddy/types.ts'
@@ -56,6 +60,13 @@ describe('every route fails a silent stream before the transport does', () => {
 
   it.each(SHARED_BUDGET_LINES)('keeps the %s budget on the shared value', (_line, value) => {
     expect(value).toBe(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+  })
+
+  it('gives Kimi a six-minute first-chunk window inside its own transport safety net', () => {
+    expect(KIMI_FIRST_OUTPUT).toBe(360_000)
+    expect(KIMI_HEADERS).toBe(420_000)
+    expect(KIMI_FIRST_OUTPUT).toBeGreaterThan(KIMI)
+    expect(KIMI_FIRST_OUTPUT).toBeLessThan(KIMI_HEADERS)
   })
 
   it('keeps ollama longer than the shared budget, on purpose', () => {
