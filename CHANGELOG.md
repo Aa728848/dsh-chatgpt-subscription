@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[依赖 / 预设] 把 `@deepseek-ai/dsh-tool-executor-native` 从 `dependencies` 改成可选 peer，内核版与插件版不再互相顶掉**
+  - **现象**：安装 0.69.0 后，profile 的 `node_modules/@deepseek-ai/` 里多出一份被钉死的 `dsh-tool-executor-native@0.2.2-rc.2`。桌面版内核自带的那一份是它自己的版本，两份版本一旦不同步，`standard` 预设就用不了；用户能做的只有反复重装。
+  - **根因**：Code Mode 需要内核的 executor 才能把程序内子调用交给真实的策略 / 审批 / post-execute 管线，而 profile 插件按 Node 解析规则够不到宿主自己的 `node_modules`，所以早先把该包写成了**真实依赖**。npm 7 起会连 peer 一起装，但真实依赖的语义是「按我的范围装我这一份」——于是它被复制进 profile，正好盖住了内核的那一份。
+  - **改法**：`package.json` 里把该包移出 `dependencies`，改列 `peerDependencies`（范围覆盖已发布的 `^0.2.2-alpha.2` / `^0.2.2-alpha.3` / `^0.2.2-rc.1` / `^0.2.2-rc.2`）并加 `peerDependenciesMeta.optional = true`，npm 因此不再自动安装它；`devDependencies` 保留一份`^0.2.2-rc.1`，本仓库的 typecheck / 测试 / 构建仍照旧跑在实测基线上。
+  - **降级路径不变**：`resolveDispatchPreset` 本来就按「该包能否解析」在 `code-mode`、`tool-executor-ptc`、`agent-tool-presentation` 三行之间切换；缺包时预设回落到 PTC 行，而不是挂上一份来路不明的第二个 executor。
+  - **解析口径收紧**：该包已从 `src/host/preset-sync.ts` 的 `PLUGIN_RESOLVED_PACKAGES` 移除。此前条目把「插件侧解析到」当作「可挂载」，于是插件依赖树里那份副本会被判为可用——这正是 issue 描述的失效路径。现在只有内核安装树里的那一份算数，与 `code-mode` 行自己的静态 import 落点一致。
+  - **回归**：`test/package-integrity.test.ts` 新增一条，断言该包出现在 `peerDependencies`、标了 `optional`、且不在 `dependencies` 里；`test/preset-sync.test.ts` 用「只有插件侧能解析到」的假安装验证解析必须为 `false`、内核树里有实物时才为 `true`（**反向对照**：把该包加回 `PLUGIN_RESOLVED_PACKAGES` 后该用例立即失败，恢复后通过）。
+
 ## 0.69.0 - 2026-11-12
 
 - **[codemode / 兼容] 对齐 DSH 0.2.2-rc.2：升级 `code_run` 图文混排投影、`scoped-repl` 顶层 `return` 自愈、一等 `PtcImage` 绑定与子代理血缘守卫**

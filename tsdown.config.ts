@@ -35,6 +35,11 @@ const host: UserConfig = {
       '@deepseek-ai/dsh-host-webserver',
       '@deepseek-ai/dsh-attachment',
       '@deepseek-ai/dsh-llm',
+      // Code Mode delegates its program sub-calls to the kernel's executor, so
+      // bundling a second copy would silently defeat "one executor per scope" —
+      // the bundled copy would apply its own policy pipeline beside the host's.
+      // It must stay an import resolved from the running installation.
+      '@deepseek-ai/dsh-tool-executor-native',
     ],
   },
 }

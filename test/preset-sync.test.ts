@@ -17,6 +17,9 @@ import {
   syncPresetTrees,
 } from '../src/host/preset-sync.ts'
 
+/** The optional-peer package Code Mode delegates its program sub-calls to. */
+const NATIVE_EXECUTOR = '@deepseek-ai/dsh-tool-executor-native'
+
 const roots: string[] = []
 
 function tempDir(): string {
@@ -219,16 +222,36 @@ describe('resolution from the installation that mounts the preset', () => {
     expect(resolvesFromInstallation(LEGACY_LIST_AGENTS, entry, () => staleResolution)).toBe(true)
   })
 
-  it('keeps resolving the plugin-owned rows and its native executor dependency', () => {
+  it('keeps resolving the plugin-owned rows from the plugin itself', () => {
     const root = tempDir()
     const entry = harnessEntry(root)
-    for (const specifier of [
-      '@eddyskywalker/dsh-chatgpt-subscription/plan-mode',
-      '@deepseek-ai/dsh-tool-executor-native',
-    ]) {
-      const resolved = pathToFileURL(join(root, 'profile', 'plugin-dependency', `${packageNameForTest(specifier)}.js`)).href
-      expect(resolvesFromInstallation(specifier, entry, () => resolved)).toBe(true)
-    }
+    const specifier = '@eddyskywalker/dsh-chatgpt-subscription/plan-mode'
+    const resolved = pathToFileURL(join(root, 'profile', 'plugin-dependency', `${packageNameForTest(specifier)}.js`)).href
+    expect(resolvesFromInstallation(specifier, entry, () => resolved)).toBe(true)
+  })
+
+  it('refuses a native executor that only resolves beside the plugin', () => {
+    // Regression for the reported install shape: the plugin used to carry the
+    // executor as a real dependency, so a pinned copy sat in the profile and
+    // shadowed the running kernel. Judging that copy mountable is what let the
+    // two versions drift apart; only the harness's own copy may count.
+    const root = tempDir()
+    const entry = harnessEntry(root)
+    const beside = pathToFileURL(join(root, 'profile', 'plugin-dependency', 'native-executor.js')).href
+    expect(resolvesFromInstallation(NATIVE_EXECUTOR, entry, () => beside)).toBe(false)
+
+    // The harness's own copy is the one that counts, whether it is found by
+    // walking down from the entry script or by the plugin-side probe landing
+    // inside that same tree.
+    const hosted = join(root, 'harness', 'node_modules', '@deepseek-ai', 'dsh-tool-executor-native')
+    mkdirSync(hosted, { recursive: true })
+    writeFileSync(join(hosted, 'package.json'), JSON.stringify({ exports: { '.': './lib/index.js' } }))
+    expect(resolvesFromInstallation(NATIVE_EXECUTOR, entry, () => beside)).toBe(true)
+
+    const hostedResolution = pathToFileURL(join(hosted, 'lib', 'index.js')).href
+    const bare = tempDir()
+    const bareEntry = harnessEntry(bare)
+    expect(resolvesFromInstallation(NATIVE_EXECUTOR, bareEntry, () => hostedResolution)).toBe(false)
   })
 
   it('retains the plugin-local resolver fallback without a harness entry', () => {
