@@ -11,8 +11,6 @@ import { createStreamState as claudeState, processStreamLine as claudeStream } f
 import { toLlmError } from '../src/host/claude/adapter.ts'
 import { classifyFailure as claudeFailure } from '../src/host/claude/client.ts'
 
-import { createStreamState as antiState, processStreamLine as antiStream } from '../src/host/antigravity/mapper.ts'
-
 const overflow = [
   { code: 'context_length_exceeded', message: 'invalid request' },
   { type: 'context_window_exceeded' },
@@ -67,8 +65,6 @@ describe('provider context overflow classification', () => {
       () => commandAnthropic(frame, commandState('anthropic')),
       () => processResponsesStreamLine(frame, commandState('responses')),
       () => stepStream(frame, stepState()),
-      () => antiStream(frame, antiState()),
-      () => antiStream('data: ' + JSON.stringify({ response: { error } }), antiState()),
       () => claudeStream(frame, claudeState()),
     ]) expect(run).toThrow(expect.objectContaining({ code: 'CONTEXT_WINDOW_EXCEEDED' }))
     expect(() => processMinimaxStreamLine(frame, minimaxState())).toThrow(expect.objectContaining({ code: 'CONTEXT_WINDOW_EXCEEDED' }))

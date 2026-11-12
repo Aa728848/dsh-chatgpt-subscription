@@ -17,7 +17,7 @@ describe('prompt cache policy defaults', () => {
   })
 
   it('allows in-flight coordination without inventing a warm TTL', () => {
-    for (const provider of ['codex-chatgpt', 'antigravity', 'step-code', 'claude', 'minimax-code']) {
+    for (const provider of ['codex-chatgpt', 'step-code', 'claude', 'minimax-code']) {
       expect(promptCachePolicyOf(provider).coldStart).toBe('in-flight')
       expect(promptCachePolicyOf(provider).affinity).toBe(false)
       expect(promptCachePolicyOf(provider).waitWarmup).toBe(false)

@@ -11,12 +11,10 @@ type Props = PropsRuntime<'tool.call.toolview'> & PropsLocale<typeof NS> & {
 }
 
 /**
- * Aspect ratios the Gemini image tool accepts in its `aspectRatio` argument.
+ * Aspect ratios recognized when sizing an image tool's placeholder.
  *
- * Mirrors `ANTIGRAVITY_IMAGE_ASPECT_RATIOS` in the host tool schema. The card
- * only *sizes a placeholder* with it, so a drift here degrades to the default
- * square instead of producing a wrong request — the value is never sent
- * anywhere, and the host enum stays the single authority over what is legal.
+ * The value only affects local presentation and is never sent upstream; an
+ * unrecognized ratio falls back to the default square.
  */
 const IMAGE_ASPECT_RATIOS: ReadonlySet<string> = new Set([
   '1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9',

@@ -221,7 +221,6 @@ export const zh = {
   // table so a language pack supplies them like any other copy: the descriptor
   // keeps a literal fallback for a build whose dictionaries arrived late.
   'cardName.chatgpt': 'ChatGPT',
-  'cardName.antigravity': 'Antigravity',
   'cardName.command-code': 'Command Code',
   'cardName.kimi-code': 'Kimi Code',
   'cardName.minimax-code': 'MiniMax Code',
@@ -460,7 +459,6 @@ export const en: Record<keyof typeof zh, string> = {
   stopImportingBusy: 'Stopping the import…',
   stopImportingHint: 'Stopping the import only makes this plugin forget its copy of the local CLI sign-in; the Codex CLI own sign-in file is never deleted or changed. The account pool does not allow deleting a borrowed credential one at a time, so this stops every import at once.',
   'cardName.chatgpt': 'ChatGPT',
-  'cardName.antigravity': 'Antigravity',
   'cardName.command-code': 'Command Code',
   'cardName.kimi-code': 'Kimi Code',
   'cardName.minimax-code': 'MiniMax Code',

@@ -2,7 +2,7 @@
  * The capacity, date and countdown formatting every provider settings card shares.
  *
  * Each card used to carry its own copy of the capacity pair. The five copies
- * were byte-identical except Antigravity's `formatCapacity`, which had lost the
+ * were byte-identical apart from one historical card, which had lost the
  * 1K floor and so rendered a zero as "0K" while its siblings rendered "0". The
  * parse has to mean the same thing on every line — it takes free-text user input
  * that feeds the overflow judgement — so this is the one place it lives. The

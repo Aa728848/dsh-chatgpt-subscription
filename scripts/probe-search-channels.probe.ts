@@ -9,19 +9,12 @@
  * Run: npx vitest run --config vitest.probe.config.ts
  * Narrow it down with: $env:PROBE_ONLY='kimi'; npx vitest run --config vitest.probe.config.ts
  */
-import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { test } from 'vitest'
 import { ProxyManager } from '../src/host/proxy-manager.ts'
 import { FileCredentialStore as KimiStore, credentialPath as kimiCredentialPath } from '../src/host/kimi-code/token-store.ts'
 import { ensureAccessToken } from '../src/host/kimi-code/oauth.ts'
 import { modelRequestHeaders, requestUrl } from '../src/host/kimi-code/client.ts'
-import { FileCredentialStore as AntigravityStore, modelSettingsPath as antigravityModelSettingsPath } from '../src/host/antigravity/token-store.ts'
-import { ensureApiKey } from '../src/host/antigravity/oauth.ts'
-import { AccountPoolStore as AntigravityPool } from '../src/host/antigravity/account-pool.ts'
-import { antigravityHeaders, endpointCandidates } from '../src/host/antigravity/client.ts'
-import { buildRequest } from '../src/host/antigravity/mapper.ts'
-import { MODELS } from '../src/host/antigravity/types.ts'
 
 const TIMEOUT_MS = 45_000
 const proxy = new ProxyManager({ getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null }) })
@@ -118,153 +111,11 @@ async function probeKimi(): Promise<void> {
   }
 }
 
-async function probeAntigravity(): Promise<void> {
-  let token: string
-  let projectId: string | undefined
-  try {
-    const pool = new AntigravityPool()
-    const data = await pool.read().catch(() => null)
-    if (data && data.accounts.length > 0) {
-      const effective = await pool.getEffectiveAccount(new Set(), fetchFn)
-      token = effective.token
-      projectId = effective.projectId
-    } else {
-      const legacy = await ensureApiKey(new AntigravityStore(), fetchFn)
-      token = legacy.token
-      projectId = legacy.projectId
-    }
-  } catch (error) {
-    note('antigravity:credentials', 'error', error instanceof Error ? error.message : String(error))
-    return
-  }
-
-  const modelDef = MODELS.find((entry) => entry.id === 'gemini-3.1-pro') ?? MODELS[0]
-  const baseOptions = (text: string): Record<string, unknown> => ({
-    provider: 'antigravity',
-    model: modelDef.id,
-    system: 'You are a helpful assistant. You must use the available tool and answer in one short sentence.',
-    messages: [{ role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }],
-  })
-
-  // The baseline is the plugin's own request builder, so the envelope is
-  // known-good (a retired model id already answered 200 through it) and the
-  // only open question is which runtime model this account may actually use.
-  const build = (runtimeModel: string, text: string, mutate?: (request: Record<string, unknown>) => void): Record<string, unknown> => {
-    const body = buildRequest(baseOptions(text) as never, modelDef, projectId || 'antigravity-default', runtimeModel) as Record<string, unknown>
-    mutate?.(body.request as Record<string, unknown>)
-    return body
-  }
-
-  const models = [
-    process.env.AG_MODEL?.trim(),
-    'gemini-3.1-pro-high',
-    'gemini-3.8-flash-low',
-  ].filter((entry): entry is string => typeof entry === 'string' && entry !== '')
-
-  const usable: string[] = []
-  for (const model of models) {
-    const statuses = await antigravityRequest(token, model, { label: 'antigravity:baseline', body: build(model, 'Answer in one short sentence: what is 2+2?') })
-    if (statuses.includes(200)) usable.push(model)
-  }
-
-  const variant = process.env.AG_VARIANT?.trim() || 'all'
-  if (variant === 'url' || variant === 'search') {
-    const model = process.env.AG_MODEL?.trim() || 'gemini-3.8-flash-low'
-    await antigravityRequest(token, model, variant === 'url'
-      ? {
-          label: 'antigravity:urlContext',
-          body: build(model, 'Fetch https://example.com and answer with its page title in one short sentence.', (request) => { request.tools = [{ urlContext: {} }] }),
-          populated: true,
-        }
-      : {
-          label: 'antigravity:googleSearch',
-          body: build(model, SEARCH_TEXT, (request) => { request.tools = [{ googleSearch: {} }] }),
-          populated: true,
-        })
-    return
-  }
-
-  for (const model of usable) {
-    await antigravityRequest(token, model, {
-      label: 'antigravity:googleSearch',
-      body: build(model, SEARCH_TEXT, (request) => { request.tools = [{ googleSearch: {} }] }),
-      populated: true,
-    })
-    await antigravityRequest(token, model, {
-      label: 'antigravity:urlContext',
-      body: build(model, 'Fetch https://example.com and answer with its page title in one short sentence.', (request) => { request.tools = [{ urlContext: {} }] }),
-      populated: true,
-    })
-  }
-}
-
-const SEARCH_TEXT = 'Search the web for today\'s date and the name of the current US president, then answer in one short sentence.'
-
-/** Response keys that would prove the service ran the grounding tool itself. */
-const MARKERS = [
-  'groundingMetadata',
-  'groundingChunks',
-  'webSearchQueries',
-  'urlContextMetadata',
-  'url_context_metadata',
-  'urlMetadata',
-  'functionCall',
-]
-
-async function antigravityRequest(
-  token: string,
-  model: string,
-  probe: { label: string; body: Record<string, unknown>; populated?: boolean },
-): Promise<number[]> {
-  const statuses: number[] = []
-  // Every endpoint is tried: a 400 here is about the model, not the host, and
-  // stopping at the first would hide a host that would have accepted it.
-  for (const endpoint of endpointCandidates()) {
-    try {
-      const response = await fetchFn(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-        method: 'POST',
-        headers: antigravityHeaders(token),
-        body: JSON.stringify(probe.body),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      })
-      statuses.push(response.status)
-      const text = (await response.text().catch(() => '')).slice(0, 60_000)
-      // A tool that is merely accepted leaves `groundingMetadata` empty; only a
-      // populated chunk list proves the service actually ran the lookup.
-      const populated = /groundingChunks\\?"\s*:\s*\[\s*\{/.test(text) || /urlMetadata\\?"\s*:\s*\{/.test(text)
-      const markers = MARKERS.filter((marker) => text.includes(marker))
-      note(`${probe.label} ${endpoint} model=${model}`,
-        response.ok && (probe.populated !== true || populated) ? 'ok' : response.ok ? 'rejected' : 'error',
-        `http=${response.status} populated=${populated} markers=[${markers.join(',')}] body=${snippet(text)}`, response.status)
-    } catch (error) {
-      note(`${probe.label} ${endpoint}`, 'error', error instanceof Error ? error.message : String(error))
-    }
-  }
-  return statuses
-}
-
-async function antigravityProbeModel(): Promise<string> {
-  try {
-    const raw = await readFile(antigravityModelSettingsPath(), 'utf8')
-    const parsed = JSON.parse(raw) as { enabledModelIds?: string[]; catalogModels?: Array<{ id: string }> }
-    const enabled = parsed.enabledModelIds?.[0]
-    if (enabled) return enabled
-    // The stored catalog is what the service currently serves; a retired id
-    // answers 200 with a "switch to a newer model" notice and no grounding.
-    const live = parsed.catalogModels?.find((entry) => /^gemini-3\.\d-pro-high$/.test(entry.id))?.id
-    if (live) return live
-  } catch {
-    // fall through to a conservative default
-  }
-  return 'gemini-3.1-pro-high'
-}
-
 test('probe sibling search channels', async () => {
   const only = (process.env.PROBE_ONLY ?? '').split(',').map((entry) => entry.trim()).filter((entry) => entry !== '')
   const wanted = (name: string): boolean => only.length === 0 || only.includes(name)
 
   if (wanted('kimi')) await probeKimi()
-  if (wanted('antigravity')) await probeAntigravity()
 
   proxy.dispose()
   for (const result of results) console.log(JSON.stringify(result))

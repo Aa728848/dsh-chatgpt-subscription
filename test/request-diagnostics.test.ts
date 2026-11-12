@@ -249,7 +249,7 @@ describe('request-diagnostics', () => {
     })
 
     const diagFetch = createDiagnosticFetch(mockFetch, {
-      provider: 'antigravity',
+      provider: 'kimi-code',
       enabled: true,
       onRecord: (rec) => {
         records.push(rec)
@@ -259,7 +259,7 @@ describe('request-diagnostics', () => {
     const abortController = new AbortController()
     const customReason = new Error('Custom abort message')
 
-    const res = await diagFetch('https://cloudcode-pa.googleapis.com/v1:streamGenerateContent', {
+    const res = await diagFetch('https://example.test/v1/chat/completions', {
       method: 'POST',
       signal: abortController.signal,
     })

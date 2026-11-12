@@ -18,7 +18,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import { resolveRequestImages } from '../src/host/common/request-images.ts'
 import { KIMI_CODE_REQUEST_IMAGE_MAX_EDGE, KimiCodeAdapter } from '../src/host/kimi-code/adapter.ts'
-import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
+import { StepCodeAdapter } from '../src/host/step-code/adapter.ts'
 
 /** Kimi's own CLI default, mirrored by this route. */
 const CLI_EDGE = KIMI_CODE_REQUEST_IMAGE_MAX_EDGE
@@ -94,8 +94,8 @@ describe('kimi-code image request target', () => {
   })
 
   it('leaves every other route on the shared 1024 px ceiling', () => {
-    const antigravity = new AntigravityAdapter()
-    expect(antigravity.imageRequestTarget('antigravity', 'gemini-3.8-flash', ref({ width: 2048, height: 1024 })))
+    const stepCode = new StepCodeAdapter()
+    expect(stepCode.imageRequestTarget('step-code', 'step-3.5-flash', ref({ width: 2048, height: 1024 })))
       .toEqual({ width: 1024, height: 512, maxPixels: 524_288, maxBytes: VERSION_MAX_BYTES })
   })
 })

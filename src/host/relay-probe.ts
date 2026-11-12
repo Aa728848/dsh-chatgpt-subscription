@@ -19,7 +19,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { dshHomeDir } from './antigravity/token-store.ts'
+import { dshHomeDir } from './common/home.ts'
 
 /** Environment switch: any of `1`, `true`, `yes`, `on` enables the probe. */
 export const RELAY_PROBE_ENV = 'DSH_CHATGPT_SUBSCRIPTION_RELAY_PROBE'

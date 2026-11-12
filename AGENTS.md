@@ -2,11 +2,11 @@
 
 ## Project Structure & Module Organization
 
-This repository (`@eddyskywalker/dsh-chatgpt-subscription`) is a multi-provider subscription hub and agent runtime enhancement plugin for **DeepSeek Harness (DSH)**. It registers **13 provider lines** (`codex-chatgpt`, `claude-subscription`, `antigravity`, `kimi-code`, `minimax-code`, `command-code`, `glm-coding-plan`, `step-code`, `cline-pass`, `qoder`, `opendesign`, `workbuddy-subscription`, and `ollama`), bundled agent presets, multimodal tools, prefix-cache guards, and Web UI extensions.
+This repository (`@eddyskywalker/dsh-chatgpt-subscription`) is a multi-provider subscription hub and agent runtime enhancement plugin for **DeepSeek Harness (DSH)**. It registers **12 provider lines** (`codex-chatgpt`, `claude-subscription`, `kimi-code`, `minimax-code`, `command-code`, `glm-coding-plan`, `step-code`, `cline-pass`, `qoder`, `opendesign`, `workbuddy-subscription`, and `ollama`), bundled agent presets, multimodal tools, prefix-cache guards, and Web UI extensions.
 
 Source lives in `src/`; generated package output lives in `lib/` (git-ignored) and must be refreshed via build rather than edited by hand.
 
-- `src/index.ts`: core host plugin entry, `Config` schema (including `volatile()` settings), 13-provider wiring, global guards, and tool registrations.
+- `src/index.ts`: core host plugin entry, `Config` schema (including `volatile()` settings), 12-provider wiring, global guards, and tool registrations.
 - `src/entry-*.ts`: sub-entry exports (`progress-updates`, `plan-mode-pipeline`, `plan-mode`, `tool-result-pruner`).
 - `src/host/common/`: shared kernel — multi-account pool, `poolStorage` (`keyring` / `credentials`), catalog snapshots, proxy manager, 120s two-phase stream idle watchdog, context-overflow / image-budget helpers, and 3-language (`zh` / `en` / `ru`) host i18n runtime.
 - `src/host/<line>/`: per-provider adapter, OAuth/auth flows, token/settings stores, mapper, streaming client, quota reader, and HTTP routes.

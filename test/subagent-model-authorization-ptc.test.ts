@@ -27,7 +27,7 @@ import {
 /** Tool-presentation mode that routes direct calls through `run_code`. */
 const CODE_MODE = 'ptc' as const
 
-const GEMINI: AllowedModelRoute = { provider: 'antigravity', model: 'gemini-3.8-flash' }
+const SONNET: AllowedModelRoute = { provider: 'claude', model: 'claude-sonnet-4-6' }
 const DEEPSEEK_OPTIONS = { provider: 'deepseek-official', model: 'deepseek-flash' }
 const NO_SESSIONS: SessionsResolver = { get: () => undefined }
 
@@ -185,7 +185,7 @@ describe('subagent authorization covers the run_code transport', () => {
     const { ctx, runtime } = await setup()
     const calls: unknown[] = []
     registerSubagent(ctx, calls)
-    const agent = recordingAgent([GEMINI])
+    const agent = recordingAgent([SONNET])
     installSubagentModelAuthorization(ctx as never, NO_SESSIONS, { toolNames: ['subagent'] })
 
     const { result, observed } = await runCode(ctx, agent, runtime, tools =>
@@ -201,15 +201,15 @@ describe('subagent authorization covers the run_code transport', () => {
     const { ctx, runtime } = await setup()
     const calls: unknown[] = []
     registerSubagent(ctx, calls)
-    const agent = recordingAgent([GEMINI])
+    const agent = recordingAgent([SONNET])
     installSubagentModelAuthorization(ctx as never, NO_SESSIONS, { toolNames: ['subagent'] })
 
     const { observed } = await runCode(ctx, agent, runtime, tools =>
       tools['subagent']!({
         description: 'nested',
         prompt: 'do it',
-        provider: 'antigravity',
-        model: 'gemini-3.8-flash',
+        provider: 'claude',
+        model: 'claude-sonnet-4-6',
       }))
 
     expect(observed.isError).toBeUndefined()
@@ -220,7 +220,7 @@ describe('subagent authorization covers the run_code transport', () => {
     const { ctx, runtime } = await setup()
     const calls: unknown[] = []
     registerSubagent(ctx, calls)
-    const agent = recordingAgent([GEMINI])
+    const agent = recordingAgent([SONNET])
     installSubagentModelAuthorization(ctx as never, NO_SESSIONS, { toolNames: ['subagent'] })
 
     const { observed } = await runCode(ctx, agent, runtime, tools =>
@@ -251,7 +251,7 @@ describe('subagent authorization covers the run_code transport', () => {
         render: (_args, value) => [{ type: 'text', text: value }],
       },
       execute() {
-        return Promise.resolve('antigravity — Antigravity')
+        return Promise.resolve('claude — Claude')
       },
     }))
     ctx.tools.register(defineTool({
@@ -279,20 +279,20 @@ describe('subagent authorization covers the run_code transport', () => {
         return Promise.resolve('started')
       },
     }))
-    const agent = recordingAgent([GEMINI])
+    const agent = recordingAgent([SONNET])
     installSubagentModelAuthorization(ctx as never, NO_SESSIONS, { toolNames: ['subagent'] })
 
     const { observed } = await runCode(ctx, agent, runtime, tools =>
       tools['list_subagent_models']!({}))
 
     expect(observed.isError).toBeUndefined()
-    expect(observed.message).toContain('antigravity — Antigravity')
+    expect(observed.message).toContain('claude — Claude')
     expect(observed.message).toContain('Authorized child routes for this Session')
-    expect(observed.message).toContain('- antigravity/gemini-3.8-flash -> provider: "antigravity", model: "gemini-3.8-flash"')
+    expect(observed.message).toContain('- claude/claude-sonnet-4-6 -> provider: "claude", model: "claude-sonnet-4-6"')
 
     const assembled = await ctx.systemPrompt.assemble({ scope: agent })
     const sdkSection = assembled.sections.find(section => section.name === 'tools:sdk')
-    expect(sdkSection?.text).toContain("Output is already filtered to this Session's allowlist (antigravity/gemini-3.8-flash)")
+    expect(sdkSection?.text).toContain("Output is already filtered to this Session's allowlist (claude/claude-sonnet-4-6)")
     expect(sdkSection?.text).toContain('Child LLM selection is required in this Session')
     expect(sdkSection?.text).not.toContain('Catalog membership is advisory')
     expect(sdkSection?.text).not.toContain('Child LLM selection is optional')

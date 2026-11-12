@@ -44,14 +44,13 @@
     noAnswerResume: {}                    # 开启无答案/无工具空结束自动续跑；设为 false 关闭
     reasoningCollapseGuard: false         # 推理复读塌缩熔断（默认关闭；传 {} 或参数对象开启）
     codexStreamIdleTimeoutMs: 120000      # Codex 流式传输空闲超时毫秒数
-    antigravityFirstOutputTimeoutMs: 240000  # antigravity 首个 chunk 之前的等待预算（思考期；chunk 之间仍按 120s）
     progressUpdates: true                 # 启用 progress_update 进展汇报（热生效）
     progressUpdatesNudgeThreshold: 8      # 连续多少步工具调用未汇报时温和提醒（1–50，热生效）
     progressUpdatesLanguage: auto         # auto | zh | en | ru（热生效）
     planModePipeline: true                # 启用调度模式 enter_plan_mode / leave_plan_mode（热生效）
     dispatchExecutionGuard: true          # 启用调度执行守卫与 Mandate v2 账本守卫（热生效）
     toolRunawayGuard: true                # 工具重复调用分级提醒；Kimi 保留强停（热生效）
-    mediaTools: true                      # 注册五个图片/视频工具（重载插件或重启后生效）
+    mediaTools: true                      # 注册四个图片/视频工具（重载插件或重启后生效）
     cacheWarmup: true                     # 受控线路的大结果 ref:// 预览（热生效）
     cacheWarmupRetrieval: true            # 受控线路的导航检索大纲投影（热生效）
     cacheWaitWarmup: true                 # 默认 Kimi 的等待续热；其他线路需显式策略（热生效）
@@ -74,7 +73,6 @@
 | `noAnswerResume` | `object \| false` | `{}`（开启） | 重载插件 | 模型未输出正文也未调工具即结束时自动补发续跑 |
 | `reasoningCollapseGuard` | `GuardOptions \| false` | `false`（关闭） | 重载插件 | 字面 + 语义双信号连续越线时切断退化推理流并续跑 |
 | `codexStreamIdleTimeoutMs` | 正整数（ms） | `120000` | 重载插件 | Codex Responses 流式传输活动空闲超时 |
-| `antigravityFirstOutputTimeoutMs` | 正整数（ms） | `240000` | 重载插件 | antigravity 线路「首个 chunk 之前」的空闲预算（思考期）；chunk 之间仍按共享 120s 判死，设为 `120000` 即回到单窗口 |
 | `progressUpdates` | `boolean` | `true` | **热生效（volatile）** | 是否启用 `progress_update` 工具与提示引导 |
 | `progressUpdatesNudgeThreshold` | `1..50` 整数 | `8` | **热生效（volatile）** | 连续未汇报工具步数的提醒阈值 |
 | `progressUpdatesLanguage` | `'auto' \| 'zh' \| 'en' \| 'ru'` | `'auto'` | **热生效（volatile）** | 进展汇报输出语言 |
@@ -82,7 +80,7 @@
 | `dispatchExecutionGuard` | `boolean` | `true` | **热生效（volatile）** | 执行期拦截子代理越权调用主控专用工具、拦截空 `sleep` 及校验 Mandate v2 账本 |
 | `teamPolicyCacheGuard` | `boolean` | `true` | **热生效（volatile）** | 把内置 Agent Teams 的 `team:policy` 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作刷掉整段前缀缓存 |
 | `toolRunawayGuard` | `boolean` | `true` | **热生效（volatile）** | 各线路重复工具调用分级提醒；只有 Kimi 保留第 12 次强停，MiniMax 保留自己的官方失控规则 |
-| `mediaTools` | `boolean` | `true` | **重载插件 / 重启** | 统一注册 Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解；`false` 时五个工具均不进入 schema，MiniMax 仍叠加自己的线路开关；Kimi 既有会话在工具表变化后重建一次前缀缓存 |
+| `mediaTools` | `boolean` | `true` | **重载插件 / 重启** | 统一注册 Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解；`false` 时四个工具均不进入 schema，MiniMax 仍叠加自己的线路开关；Kimi 既有会话在工具表变化后重建一次前缀缓存 |
 | `cacheWarmup` | `boolean` | `true` | **热生效（volatile）** | 受控线路的命令/日志大结果 `ref://` 预览与 `cache_warmup_result` 补读 |
 | `cacheWarmupProviders` | `string[]` | 全部 controlled providers | **热生效（volatile）** | 允许产生新预览的线路；`[]` 关闭所有新投影，已有 ref 不受影响 |
 | `cacheWarmupRetrieval` | `boolean` | `true` | **热生效（volatile）** | 受控线路明确导航意图下的文件/网页检索结果大纲投影 |
@@ -142,7 +140,7 @@ promptCacheOverrides:
 
 ### 统一代理（全线路共享）
 
-在 **设置 → 订阅服务 → ChatGPT → 网络代理** 配置的代理会作用于**全部 13 条供应线路**的对话生成、OAuth 兑换与续期、模型目录同步、额度查询，以及插件接管的搜索与网页抓取，修改后即时生效：
+在 **设置 → 订阅服务 → ChatGPT → 网络代理** 配置的代理会作用于**全部 12 条供应线路**的对话生成、OAuth 兑换与续期、模型目录同步、额度查询，以及插件接管的搜索与网页抓取，修改后即时生效：
 
 - **系统代理（自动检测）**：Windows 读取注册表 `ProxyEnable` / `ProxyServer`；macOS 读取 `scutil --proxy`；Linux 读取 GNOME `gsettings`（不支持 PAC 脚本）；若均未命中，自动回退读取进程环境变量或 `$DSH_HOME/.env` 中的 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`；
 - **自定义代理**：显式指定代理 URL；
@@ -174,7 +172,7 @@ promptCacheOverrides:
 $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queueTimeoutMs":120000}'
 ```
 
-- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`antigravity`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`。
+- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`。
 - `0` 或缺省表示不限制；非法 JSON 或未知字段会在启动时直接报错拒绝（fail-closed）。
 
 ### 脱敏请求诊断日志（`DSH_PROVIDER_DIAGNOSTICS`）
@@ -207,10 +205,6 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | **Claude** | `CLAUDE_CONFIG_DIR` | 本机 Claude Code 配置目录（默认 `~/.claude`） |
 | | `DSH_CLAUDE_CLI_VERSION` | 覆盖向 Anthropic 网关申报的客户端版本号 |
 | | `DSH_CLAUDE_OAUTH_AUTHORIZE_URL` | 覆盖 Claude OAuth 授权入口 URL |
-| **Antigravity** | `DSH_ANTIGRAVITY_ENDPOINT` | 覆盖 Code Assist 上游端点 |
-| | `DSH_ANTIGRAVITY_CALLBACK_PORT` | 指定本地 OAuth 回调监听端口（规避 Windows 保留端口段冲突） |
-| | `DSH_ANTIGRAVITY_VERSION` / `_CL` / `_OS` / `_ARCH` / `_USER_AGENT` | 覆盖客户端元数据头字段；`_VERSION`/`_CL` 一旦设置就**钉死**，不再从 Hub 更新清单自动跟随（默认每 6 小时读一次清单取官方当前版本） |
-| | `DSH_ANTIGRAVITY_LEGACY_HEADERS` | 恢复旧的身份头（`X-Goog-Api-Client` 与 `Client-Metadata`）；默认为关——官方 `language_server` 不发这两个头，若某账号的资格判定因此异常再打开 |
 | **Kimi Code** | `DSH_KIMI_CODE_OAUTH_HOST` / `KIMI_CODE_OAUTH_HOST` | 覆盖 OAuth 主机（国际区设为 `https://auth.kimi.ai`） |
 | | `DSH_KIMI_CODE_BASE_URL` / `KIMI_CODE_BASE_URL` | 覆盖模型接口基址（国际区设为 `https://api.kimi.ai/coding`） |
 | | `DSH_KIMI_CODE_MAX_BODY_BYTES` | 强制覆盖单次请求序列化字节上限（最高优先级） |

@@ -144,8 +144,7 @@ export const POOL_COOLDOWN_MS = 15 * 60_000
  * vendor models — the command-code registry transcription
  * (src/host/command-code/model-catalog.ts), the cline-pass table
  * (src/host/cline-pass/types.ts), the Claude catalog
- * (src/host/claude/model-catalog.ts) and the antigravity catalog
- * (src/host/antigravity/types.ts) — because this line's fallback must not be a
+ * (src/host/claude/model-catalog.ts) — because this line's fallback must not be a
  * flat 128k for every model while those facts sit in the same repository.
  * Per-model conflict resolution prefers the cline-pass table where the two
  * disagree, since it is the OpenAI-chat gateway closest to this one. A live

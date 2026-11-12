@@ -56,10 +56,6 @@ export const PROMPT_CACHE_POLICIES: Readonly<Record<string, PromptCachePolicy>> 
     mode: 'automatic', scope: 'unknown', staticPrefix: true, coldStart: 'in-flight',
     stickyImages: false, affinity: false, waitWarmup: false, hint: false,
   }),
-  antigravity: policy({
-    mode: 'automatic', scope: 'unknown', staticPrefix: true, coldStart: 'in-flight',
-    stickyImages: false, affinity: false, waitWarmup: false, hint: false,
-  }),
   'step-code': policy({
     mode: 'automatic', scope: 'unknown', ttlMs: 5 * MINUTE_MS,
     staticPrefix: true, coldStart: 'in-flight', stickyImages: false,

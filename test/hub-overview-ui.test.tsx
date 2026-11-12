@@ -29,7 +29,6 @@ function overviewDto(): HubOverviewDto {
   return {
     providers: [
       summary('chatgpt', { accountCount: 2, authenticated: true, enabledModelCount: 2, totalModelCount: 11 }),
-      summary('antigravity'),
       summary('command-code', { enabled: false, accountCount: 1 }),
       summary('kimi-code'),
       summary('minimax-code', { error: true }),
@@ -132,25 +131,25 @@ describe('HubOverview', () => {
   it('renders one card per provider with its annotation and brand tile', async () => {
     mockFetch()
     await render()
-    expect(cards()).toHaveLength(13)
+    expect(cards()).toHaveLength(12)
     expect(cards().map((card) => card.querySelector('.dsh-hub-card-name')?.textContent))
-      .toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy'])
+      .toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy'])
     expect(cards()[0]!.textContent).toContain('2 个账号')
     expect(cards()[0]!.textContent).toContain('2/11 个模型可用')
     // A disabled line's card is marked and leads with the state.
-    expect(cards()[2]!.dataset.enabled).toBe('false')
-    expect(cards()[2]!.textContent).toContain('已停用')
+    expect(cards()[1]!.dataset.enabled).toBe('false')
+    expect(cards()[1]!.textContent).toContain('已停用')
     // Ollama has no switch; every other card does.
-    expect(cards()[7]!.querySelector('[role="switch"]')).toBeNull()
-    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(12)
+    expect(cards()[6]!.querySelector('[role="switch"]')).toBeNull()
+    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(11)
     // Every card renders its brand tile.
-    expect(container.querySelectorAll('.dsh-hub-brand-tile')).toHaveLength(13)
+    expect(container.querySelectorAll('.dsh-hub-brand-tile')).toHaveLength(12)
   })
 
   it('drills into the detail page from a card click', async () => {
     mockFetch()
     const onOpen = await render()
-    await act(async () => cards()[3]!.click())
+    await act(async () => cards()[2]!.click())
     expect(onOpen).toHaveBeenCalledWith('kimi-code')
   })
 
@@ -211,7 +210,7 @@ describe('HubOverview', () => {
     // Recover on retry: swap the mock to a working overview before clicking.
     mockFetch()
     await act(async () => retry.click())
-    expect(cards()).toHaveLength(13)
+    expect(cards()).toHaveLength(12)
     expect(calls.some((call) => call.url.includes('/hub/overview'))).toBe(true)
   })
 })

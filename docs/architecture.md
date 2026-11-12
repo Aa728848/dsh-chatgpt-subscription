@@ -21,7 +21,7 @@
 ```text
 .
 ├── src/
-│   ├── index.ts                     # 核心宿主入口（13 条线路接线、工具注册、全局守卫）
+│   ├── index.ts                     # 核心宿主入口（12 条线路接线、工具注册、全局守卫）
 │   ├── entry-progress-updates.ts    # 子入口：./progress-updates（进展汇报独立组件）
 │   ├── entry-plan-mode-pipeline.ts  # 子入口：./plan-mode-pipeline（enter/leave_plan_mode）
 │   ├── entry-plan-mode.ts           # 子入口：./plan-mode（尾部一次性投递的计划模式服务）
@@ -29,7 +29,6 @@
 │   ├── compat.ts                    # 跨层常量与插件版本标识
 │   ├── host/                        # Node.js 宿主侧实现
 │   │   ├── common/                  # 共享内核（号池、存储、快照、代理、超时、i18n 等）
-│   │   ├── antigravity/             # Antigravity 线路
 │   │   ├── claude/                  # Claude 订阅线路
 │   │   ├── cline-pass/              # Cline Pass 线路
 │   │   ├── command-code/            # Command Code 线路
@@ -59,7 +58,6 @@
 ├── presets/dispatch/                # 随包分发的「调度模式」Agent Preset
 ├── widgets/line-flip/               # 随包分发的「线路额度」双面翻转看板组件
 ├── locale/progress-updates/         # 进展更新组件元数据多语言包（zh / en / ru）
-├── bin/antigravity-login.mjs        # Antigravity 命令行登录辅助脚本
 ├── test/                            # Vitest 单元与集成测试套件（严禁依赖外网或真实凭据）
 └── docs/                            # 参考手册与各模块设计/协议审计档案
 ```
@@ -84,7 +82,7 @@
 
 - DSH Profile 的 `cordis.patch.yml` 按条目 `id` **整行覆盖** `config`；若把既有用户已经写进核心行的字段迁移到子行，旧 patch 会将子行配置抹回默认值，造成「面板显示开启、实际未生效」的配置撕裂。
 - 这些字段在 Schemastery schema 中标记了 `.volatile()`：宿主设置面板保存时直接更新内存中的活引用（`Volatile<T>`），核心入口通过 `attachProgressSettings` / `attachPlanModePipelineSettings` 将读取闭包移交给子入口，**无需重挂任何插件行，下一步模型调用即刻生效**。
-- `mediaTools` 同样留在核心 Config，并标记为 `volatile` 以允许共享设置表单保存；apply 只在注册时读取一次，不订阅活引用：它控制 Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解这五个工具的注册。工具 schema 是 Kimi 前缀缓存的稳定输入，因此只在插件重载或重启时改变工具表，不使用执行期拒绝或动态 `{ when }` 冒充关闭。默认 `true` 保持旧部署的工具表不变；实际切换后，既有 Kimi 会话会有一次可诊断的 `tools` 前缀重建，随后保持稳定。
+- `mediaTools` 同样留在核心 Config，并标记为 `volatile` 以允许共享设置表单保存；apply 只在注册时读取一次，不订阅活引用：它控制 Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解这四个工具的注册。工具 schema 是 Kimi 前缀缓存的稳定输入，因此只在插件重载或重启时改变工具表，不使用执行期拒绝或动态 `{ when }` 冒充关闭。默认 `true` 保持旧部署的工具表不变；实际切换后，既有 Kimi 会话会有一次可诊断的 `tools` 前缀重建，随后保持稳定。
 
 ---
 
@@ -134,12 +132,12 @@
 
 客户端入口 `src/client/index.tsx` 挂载以下界面能力：
 
-- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 13 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
+- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 12 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
 - **输入框额度胶囊（`conversation.input.right`）**：按当前会话选中的模型自动展示对应线路最紧迫窗口的剩余额度或余额。
-- **多媒体工具视图与命令**：`codex_image_generate`、`antigravity_image_generate` 生图预览卡，`minimax_generate_video` 视频卡片、右侧栏文档预览器及 `/video` 斜杠命令参数表单。
+- **多媒体工具视图与命令**：`codex_image_generate` 生图预览卡，`minimax_generate_video` 视频卡片、右侧栏文档预览器及 `/video` 斜杠命令参数表单。
 - **进展更新面板**与 **Mermaid 图表观察器**（自动将代码块安全渲染为交互图表）。
 - **全栈三语国际化（`zh` / `en` / `ru`）**：
-  - 客户端共 15 个强类型 `LocaleNamespaceMap` 命名空间；
+  - 客户端共 14 个强类型 `LocaleNamespaceMap` 命名空间；
   - 客户端通过 `installHostLocaleMirror` 将当前激活语言同步至宿主 `POST /api/dsh-chatgpt-subscription/i18n/locale`，使宿主侧的 `providerInfo()` 显示名、号池报错、登录引导与限流文案同步支持中文、英文与俄文（`en.ts` 与 `ru.ts` 由 TypeScript 编译期强制对齐 `zh.ts` 的全部键集合）。
 
 ---

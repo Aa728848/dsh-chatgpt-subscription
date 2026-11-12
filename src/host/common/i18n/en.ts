@@ -24,8 +24,6 @@ export const en: Record<HostLocaleKey, string> = {
   'codex.refresherNotReady': 'The ChatGPT credential refresh service is not ready yet',
   'codex.notSignedIn': 'No ChatGPT account is signed in; add and sign in to one under Settings → Subscription services → ChatGPT.',
   'codex.accountGone': 'That ChatGPT account is no longer in the pool',
-  'antigravity.quotaExhausted': 'The Antigravity account quota is exhausted or the request is rate limited (429 RESOURCE_EXHAUSTED). Check the remaining quota and the reset countdown on the plugin settings page. Raw response: {body}',
-  'antigravity.rateLimitedNoReset': 'Antigravity returned 429 (RESOURCE_EXHAUSTED) without a reset time, so this is treated as an immediate rate limit: the account quota is not considered exhausted and the account is not cooled down. Raw response: {body}',
   'wb.oauth.loginInitFailed': '{provider} sign-in could not start (HTTP {status}): {detail}',
   'wb.oauth.loginMissingState': '{provider} sign-in response is missing state or authUrl',
   'wb.oauth.loginPollInvalid': '{provider} sign-in poll returned an invalid payload',

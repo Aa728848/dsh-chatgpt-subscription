@@ -16,8 +16,6 @@ import type { GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import { offloadOldestRequestImages as claudeOffload, MAX_REQUEST_IMAGE_BYTES as CLAUDE_MAX } from '../src/host/claude/mapper.ts'
 import { offloadOldestRequestImages as commandCodeOffload, MAX_REQUEST_IMAGE_BYTES as COMMAND_CODE_MAX } from '../src/host/command-code/mapper.ts'
 import { offloadOldestRequestImages as glmOffload, MAX_REQUEST_IMAGE_BYTES as GLM_MAX } from '../src/host/glm-coding-plan/mapper-openai.ts'
-import { MAX_REQUEST_IMAGE_BYTES as ANTIGRAVITY_MAX } from '../src/host/antigravity/mapper.ts'
-import { offloadOldestRequestImages as sharedAntigravityOffload } from '../src/host/common/request-images.ts'
 
 interface Ref {
   attachmentId: string
@@ -59,9 +57,6 @@ function options(messages: Message[]): GenerateOptions {
   return { model: 'm', messages } as GenerateOptions
 }
 
-// The adapter calls the shared entry with Antigravity's own 12 MiB budget.
-const antigravityOffload = (input: GenerateOptions) => sharedAntigravityOffload(input, ANTIGRAVITY_MAX)
-
 /** Attachment ids still carrying an image, at any nesting depth. */
 function surviving(messages: Message[]): string[] {
   return messages
@@ -92,7 +87,6 @@ const LINES = [
   { name: 'claude', offload: claudeOffload, max: CLAUDE_MAX },
   { name: 'command-code', offload: commandCodeOffload, max: COMMAND_CODE_MAX },
   { name: 'glm-coding-plan', offload: glmOffload, max: GLM_MAX },
-  { name: 'antigravity', offload: antigravityOffload, max: ANTIGRAVITY_MAX },
 ] as const
 
 describe.each(LINES)('$name counts and replaces images nested in a tool result', ({ offload, max }) => {

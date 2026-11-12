@@ -9,11 +9,9 @@
  *     hardcoded English `context window` input label four of them carry);
  *   - whether a row shows the model's effective window beside the name when it
  *     exceeds the model's default, and which stylesheet class that figure wears;
- *   - whether the capacity input carries an `aria-label` at all (Antigravity's
- *     does not);
+ *   - whether the capacity input carries an `aria-label` at all;
  *   - how a save or a restore is carried out, which stays in each card because
- *     one line normalizes its status payload and Antigravity confirms the batch
- *     restore first.
+ *     lines normalize their status payloads and confirmations differently.
  *
  * Everything the rows and callbacks need is therefore the whole interface: the
  * editor parses, seeds and stores nothing.

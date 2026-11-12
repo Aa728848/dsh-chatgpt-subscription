@@ -736,7 +736,7 @@ export function submitLoginCode(raw: string, options: { loginId?: string } = {})
 /**
  * 用平台默认浏览器打开一个 URL。
  *
- * 与其余各线路同一份形状（kimi-code / claude / command-code / antigravity 都有一份）。
+ * 与其余各线路同一份形状（kimi-code / claude / command-code 都有一份）。
  * 全部按尽力而为处理：调用方永远会展示同一个 URL，所以启动失败是可恢复的。
  */
 export function openBrowser(url: string): void {

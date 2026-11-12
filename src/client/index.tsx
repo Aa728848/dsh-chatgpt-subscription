@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
-import { ANTIGRAVITY_IMAGE_TOOL_NAME, CODEX_IMAGE_TOOL_NAME } from '../compat.ts'
+import { CODEX_IMAGE_TOOL_NAME } from '../compat.ts'
 import { CodexComposerQuota } from './CodexComposerQuota.tsx'
 import { CodexImageToolView, type ImageLoader } from './CodexImageToolView.tsx'
 import { ProviderHubSection } from './ProviderHubSection.tsx'
@@ -20,10 +20,7 @@ import { installRussianLocale } from './locales-ru/index.ts'
 import { installStyles } from './styles.ts'
 import { installHubStyles } from './hub/hub-styles.ts'
 import { installModelChecklistStyles } from './common/model-checklist-styles.ts'
-import { installAntigravityStyles } from './antigravity/styles.ts'
 import { installPoolStyles } from './common/styles.ts'
-import { dictionaries as antigravityDicts, NS_ANTIGRAVITY, type AntigravityLocaleKey } from './antigravity/locales.ts'
-import { AntigravityComposerQuota } from './antigravity/AntigravityComposerQuota.tsx'
 import { ClaudeComposerQuota } from './claude/ClaudeComposerQuota.tsx'
 import { dictionaries as claudeDicts, NS_CLAUDE, type ClaudeLocaleKey } from './claude/locales.ts'
 import { installClaudeStyles } from './claude/styles.ts'
@@ -85,7 +82,6 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
    */
   interface LocaleNamespaceMap {
     'dsh-chatgpt-subscription': LocaleKey
-    'dsh-antigravity': AntigravityLocaleKey
     'dsh-claude': ClaudeLocaleKey
     'dsh-command-code': CommandCodeLocaleKey
     'dsh-kimi-code': KimiCodeLocaleKey
@@ -130,11 +126,6 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     installModelChecklistStyles()
     return () => {}
   }, 'dsh-chatgpt-subscription: hub styles')
-  ctx.effect(() => ctx.locale.register(NS_ANTIGRAVITY, antigravityDicts), 'dsh-antigravity: dictionaries')
-  ctx.effect(() => {
-    installAntigravityStyles()
-    return () => {}
-  }, 'dsh-antigravity: styles')
   ctx.effect(() => ctx.locale.register(NS_CLAUDE, claudeDicts), 'dsh-claude: dictionaries')
   ctx.effect(() => {
     installClaudeStyles()
@@ -242,10 +233,6 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     inject: (sessionId) => composerBadgeInject(ctx, sessionId, { withApi: true }),
   }, CodexComposerQuota))
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right', id: 'antigravity-quota', order: 36, locale: NS_ANTIGRAVITY,
-    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
-  }, AntigravityComposerQuota))
-  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right', id: 'command-code-quota', order: 37, locale: NS_COMMAND_CODE,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, CommandCodeComposerQuota))
@@ -302,16 +289,7 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
       loadImage: imageLoader(ctx, sessionId),
     }),
   }, CodexImageToolView))
-  // Antigravity 生图工具的结果与 Codex 生图同形（prompt 参数 + 图片块），复用同一张卡片。
-  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
-    name: 'tool.call.toolview',
-    key: ANTIGRAVITY_IMAGE_TOOL_NAME,
-    locale: NS,
-    inject: (sessionId) => ({
-      loadImage: imageLoader(ctx, sessionId),
-    }),
-  }, CodexImageToolView))
-  // MiniMax 生成视频：与上面两张生图卡片同一种解剖结构，只是媒体区换成 16:9 视频台。
+  // MiniMax 生成视频：与上面的生图卡片同一种解剖结构，只是媒体区换成 16:9 视频台。
   // 视频读不出来时卡片照常显示，只有视频台退回虚线占位——所以这里即使取字节日志
   // 通道缺席也不影响注册。
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({

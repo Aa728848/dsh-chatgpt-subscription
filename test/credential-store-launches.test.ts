@@ -132,7 +132,7 @@ describe.skipIf(process.platform !== 'win32')('WindowsDpapiCredentialStore launc
 
 describe('SecretServiceCredentialStore launches', () => {
   function store(): SecretServiceCredentialStore<{ access: string }> {
-    return new SecretServiceCredentialStore('dsh-antigravity', 'test-account', (value) => value as { access: string })
+    return new SecretServiceCredentialStore('dsh-kimi-code', 'test-account', (value) => value as { access: string })
   }
 
   it('looks the secret up once for repeated reads', async () => {

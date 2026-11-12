@@ -146,9 +146,6 @@
     "typescript": "~5.7.2",
     "vitest": "^4.1.8"
   },
-  "bin": {
-    "antigravity-login": "./bin/antigravity-login.mjs"
-  },
   "files": [
     "icon.svg",
     "lib/index.js",
@@ -156,7 +153,6 @@
     "lib/client.js.map",
     "lib/types/**/*.d.ts",
     "lib/types/**/*.d.ts.map",
-    "bin",
     "presets",
     "widgets",
     "cordis.patch.yml",

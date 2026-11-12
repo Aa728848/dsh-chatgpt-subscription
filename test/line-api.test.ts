@@ -63,7 +63,7 @@ describe('line api', () => {
 
   it('treats ok:false as a failure even when the transport succeeded', async () => {
     respond(JSON.stringify({ ok: false, error: 'nope' }), { status: 200 })
-    const api = createLineApi('/antigravity/api', 'Antigravity')
+    const api = createLineApi('/step-code/api', 'Step Code')
     await expect(api.get('/status')).rejects.toThrow('nope')
   })
 

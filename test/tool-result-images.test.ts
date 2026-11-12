@@ -12,20 +12,14 @@ import {
   resolveRequestImages as ccResolve,
 } from '../src/host/command-code/mapper.ts'
 import {
-  type AttachmentImageReader as AntigravityImageReader,
-  buildRequest as agRequest,
-  resolveRequestImages as agResolve,
-} from '../src/host/antigravity/mapper.ts'
-import { MODELS as AG_MODELS } from '../src/host/antigravity/types.ts'
-import {
   type AttachmentImageReader as KimiImageReader,
   buildAnthropicRequest as kimiAnthropic,
   buildOpenAIRequest as kimiOpenAI,
   resolveRequestImages as kimiResolve,
 } from '../src/host/kimi-code/mapper.ts'
 
-/** The three mappers declare structurally identical readers. */
-type AttachmentImageReader = CommandCodeImageReader & AntigravityImageReader & KimiImageReader
+/** The two mappers declare structurally identical readers. */
+type AttachmentImageReader = CommandCodeImageReader & KimiImageReader
 
 /**
  * Tool-result images have to survive the trip to the wire. Every mapper used to
@@ -106,10 +100,6 @@ function kimiOptions(messages: Message[]): GenerateOptions {
   return { provider: 'kimi-code', model: 'k3', messages } as unknown as GenerateOptions
 }
 
-function agOptions(messages: Message[]): GenerateOptions {
-  return { provider: 'antigravity', model: 'gemini-3.8-flash', messages } as unknown as GenerateOptions
-}
-
 /**
  * The same exchange as {@link toolResultMessages}, in the shape harness 0.1.7
  * delivers: the tool result is its own `role: 'tool'` message, normalized at the
@@ -134,8 +124,6 @@ function currentGenerationMessages(content: readonly unknown[]): Message[] {
   }).messages
 }
 
-const agModel = AG_MODELS.find((m) => m.id === 'gemini-3.8-flash')!
-
 /** The single `tool_result` block a body carries, wherever it landed. */
 function toolResultBlock(body: Record<string, unknown>): Record<string, unknown> {
   for (const message of body.messages as Array<Record<string, unknown>>) {
@@ -149,7 +137,6 @@ function toolResultBlock(body: Record<string, unknown>): Record<string, unknown>
 
 describe.each([
   ['command-code', ccResolve, ccOptions],
-  ['antigravity', agResolve, agOptions],
   ['kimi-code', kimiResolve, kimiOptions],
 ] as const)('%s resolves images nested in a tool result', (_name, resolve, makeOptions) => {
   it('collects the nested attachment instead of skipping the tool result', async () => {
@@ -286,48 +273,6 @@ describe('command-code tool-result images', () => {
     expect(wire[2]!.content).toEqual([
       { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG_BASE64}` } },
     ])
-  })
-})
-
-describe('antigravity tool-result images', () => {
-  it('appends inlineData parts to the same user content as the functionResponse', async () => {
-    const options = agOptions(toolResultMessages())
-    const images = await agResolve(options, reader())
-    const body = agRequest(options, agModel, 'project', 'gemini-3.8-flash-tiered', undefined, images)
-    const contents = ((body.request as Record<string, unknown>).contents) as Array<Record<string, unknown>>
-    const turn = contents[contents.length - 1]!
-    const parts = turn.parts as Array<Record<string, unknown>>
-
-    expect(turn.role).toBe('user')
-    expect(parts).toHaveLength(2)
-    expect(parts[0]).toHaveProperty('functionResponse')
-    expect(parts[1]).toEqual({ inlineData: { mimeType: 'image/png', data: PNG_BASE64 } })
-  })
-
-  it('keeps the parts array unchanged for a tool result without an image', () => {
-    const body = agRequest(agOptions(plainToolResultMessages()), agModel, 'project', 'gemini-3.8-flash-tiered')
-    const contents = ((body.request as Record<string, unknown>).contents) as Array<Record<string, unknown>>
-    const parts = contents[contents.length - 1]!.parts as Array<Record<string, unknown>>
-    expect(parts).toHaveLength(1)
-    expect(parts[0]).toHaveProperty('functionResponse')
-    expect(JSON.stringify(parts[0])).not.toContain('inlineData')
-  })
-
-  it('maps a 0.1.7 tool-role result message onto the same functionResponse turn', async () => {
-    const options = agOptions(currentGenerationMessages([
-      { type: 'text', text: 'screenshot taken' },
-      { type: 'image', attachment: ATTACHMENT },
-    ]))
-    const images = await agResolve(options, reader())
-    const body = agRequest(options, agModel, 'project', 'gemini-3.8-flash-tiered', undefined, images)
-    const contents = ((body.request as Record<string, unknown>).contents) as Array<Record<string, unknown>>
-    const turn = contents[contents.length - 1]!
-    const parts = turn.parts as Array<Record<string, unknown>>
-
-    expect(turn.role).toBe('user')
-    expect(parts).toHaveLength(2)
-    expect(parts[0]).toHaveProperty('functionResponse')
-    expect(parts[1]).toEqual({ inlineData: { mimeType: 'image/png', data: PNG_BASE64 } })
   })
 })
 

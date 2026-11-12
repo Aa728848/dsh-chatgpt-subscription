@@ -21,7 +21,6 @@
 | --- | --- | --- |
 | **Linux 服务器登录成功但报凭据无法安全保存**（`credentials could not be saved securely`） | 默认 `poolStorage: keyring` 依赖桌面 Secret Service（`libsecret` / `secret-tool`），无头服务器通常未安装或未解锁钥匙环 | 在 **设置 → 订阅服务 → ChatGPT → 账号存储位置** 切换为 **DSH 凭据库（`credentials`）**，或在 `cordis.patch.yml` 中配置 `poolStorage: credentials` 后重载插件 |
 | **ChatGPT 登录报 `1455` 端口被占用** | 旧登录回调或本机其它进程占用了 `localhost:1455` | 点击「取消登录」或结束占用 `1455` 端口的进程后重试；无本地浏览器或端口受限时直接改用卡片上的 **设备码登录** |
-| **Antigravity 登录端口绑定失败** | Windows Hyper-V / WSL 保留端口段覆盖了默认回调端口 | 设置环境变量 `DSH_ANTIGRAVITY_CALLBACK_PORT` 为空闲端口后重启 DSH，或改用终端 `npx antigravity-login` |
 | **Command Code 浏览器登录失败** | `127.0.0.1:5959–5968` 端口全部被占用，或跨次点击导致 `state` 不匹配 | 释放端口并重新发起一次登录；无浏览器环境可在 Command Code Studio 创建 API Key 后粘贴登录 |
 | **Claude 手动粘贴授权码提示「请把 `#` 后面的部分一起复制」** | 手动模式必须校验完整 `<授权码>#<state>` 以防登录 CSRF，只粘前半段会被拒绝 | 将浏览器授权结果页显示的整段 `<code#state>`（或完整重定向 URL）原样粘贴 |
 | **提示「从 Codex CLI / Claude Code 导入的登录已过期」** | 导入的是**只读快照**，插件刻意永不刷新它（跨进程抢刷单次轮换令牌会把你踢出官方 CLI） | 回到终端运行官方 `codex` 或 `claude` 完成重新登录，再回设置页点一次「导入 / 收编」即可原地更新 |
@@ -52,7 +51,6 @@
 | **Cline Pass 报 `client-supplied "providerOptions" model routing is not supported`** | 旧版客户端钉选字段不被 Cline 接受 | 升级到已移除上游钉选的版本；请求由网关自动路由，卡片只读回实际渠道 |
 | **MiniMax Code 额度面板提示需要官方客户端标识头** | 插件默认不伪造 MiniMax 第一方客户端签名头，因此用量接口拒绝读取（完全不影响模型对话） | 可直接在 MiniMax 官方控制台查看用量条；若接受携带第一方标识头的取舍，可设置 `DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION=1` 重启 DSH |
 | **长请求约 2 分钟无输出后自动报错重试** | 流式空闲看门狗（chunk 之间默认 120s，Ollama 为 300s）检测到超过预算仍零字节到达，主动切断僵死连接触发重试 | 属于防挂死保护机制；Codex 线路用 `codexStreamIdleTimeoutMs` 调整，其它线路按共享值 |
-| **antigravity 跑 carbon 这类慢思考模型，响应头回来后就报 `stream idle timeout`** | 首帧之前的静默是模型在思考（很长上下文可达数分钟），与「流卡住」共用同一个预算时会被判成死流并从头发起重试。错误文案里的 `before the first chunk` 表示超时落在这一段 | antigravity 首帧前有独立窗口（默认 240s，仍早于 undici 的 300s 传输判死）；用 `antigravityFirstOutputTimeoutMs` 调整，chunk 之间仍是 120s |
 
 ---
 
@@ -62,7 +60,7 @@
 | --- | --- | --- |
 | **长对话触发自动压缩重试，或手动压缩失败** | 输入或「输入 + 输出预留」触及模型上下文窗口，或 Kimi 请求序列化体积触及本档字节上限（1M 档 24 MiB / 256K 档 2 MiB） | ① 确认当前 Preset 启用了压缩后端；② 可在「设置 → 订阅服务 → ChatGPT → 压缩模型」指定一个大窗口/高速模型专门负责写摘要；③ Kimi 中英高密度长会话可设 `DSH_KIMI_CODE_BYTES_PER_TOKEN=8`（中文取 `12`）让宿主在撞墙前提前压缩 |
 | **回答在中途停止并显示 `max-tokens`** | 触发了上游模型单次最大输出上限（注：`codex-chatgpt` 因上游拒收 `max_output_tokens` 参数，输出上限完全由服务端决定） | 让模型继续未完成的部分，或拆分单次生成任务粒度 |
-| **历史早期的截图被模型告知已省略** | 单次请求内联图片超过线路预算（Codex 2 MiB、Claude 8 MiB、Antigravity / Command Code 12 MiB、MiniMax 16 MiB、Kimi 粘性 20 MiB 高水位）时，按**最旧优先**替换为可见说明文本以防整轮请求体积超限失败 | 需要模型重新查看某张早期图片时，在当前轮次重新读取或附上该图即可；Codex / Kimi / MiniMax 支持通过对应 `DSH_*_MAX_IMAGE_BYTES` 环境变量调整预算 |
+| **历史早期的截图被模型告知已省略** | 单次请求内联图片超过线路预算（Codex 2 MiB、Claude 8 MiB、Command Code 12 MiB、MiniMax 16 MiB、Kimi 粘性 20 MiB 高水位）时，按**最旧优先**替换为可见说明文本以防整轮请求体积超限失败 | 需要模型重新查看某张早期图片时，在当前轮次重新读取或附上该图即可；Codex / Kimi / MiniMax 支持通过对应 `DSH_*_MAX_IMAGE_BYTES` 环境变量调整预算 |
 | **Kimi / MiniMax 发送视频被降级为文字说明** | 当前所选模型不支持视频（如 `k3-256k`、`MiniMax-M2.7`）、容器格式不在白名单内，或 Kimi 当前走了无视频块规范的 Anthropic 协议分支 | Kimi 切换至 `k3` / `k3.1-pro` / `kimi-for-coding`（OpenAI 协议）；MiniMax 切换至 `MiniMax-M3` / `MiniMax-M3.1-Flash`，并使用标准 `.mp4` / `.mov` / `.webm` 容器 |
 
 ---

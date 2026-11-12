@@ -38,11 +38,11 @@ import {
   validateInheritToolNames,
 } from '../src/host/subagent-model-authorization.ts'
 
-const GEMINI: AllowedModelRoute = { provider: 'antigravity', model: 'gemini-3.8-flash' }
-const OPUS: AllowedModelRoute = { provider: 'antigravity', model: 'claude-opus-4-6' }
+const SONNET: AllowedModelRoute = { provider: 'claude', model: 'claude-sonnet-4-6' }
+const OPUS: AllowedModelRoute = { provider: 'claude', model: 'claude-opus-4-6' }
 const MINIMAX: AllowedModelRoute = { provider: 'minimax-code', model: 'MiniMax-M3.1-Flash' }
 const SLASHED: AllowedModelRoute = { provider: 'command-code', model: 'deepseek/deepseek-v4.1-flash' }
-const PREFERENCE: SubagentModelSelectionPreference = { enabled: true, allowedModels: [GEMINI, OPUS] }
+const PREFERENCE: SubagentModelSelectionPreference = { enabled: true, allowedModels: [SONNET, OPUS] }
 const NO_SESSIONS: SessionsResolver = { get: () => undefined }
 const DEEPSEEK_OPTIONS = { provider: 'deepseek-official', model: 'deepseek-flash' }
 
@@ -99,19 +99,19 @@ function settingsServing(value: unknown) {
   }
 }
 
-const SETTINGS = settingsServing({ enabled: true, allowedModels: [GEMINI, OPUS] })
+const SETTINGS = settingsServing({ enabled: true, allowedModels: [SONNET, OPUS] })
 
 describe('subagent model authorization', () => {
   it('parses only well-formed routes out of a policy payload', () => {
-    expect(parseAllowedRoutes({ allowedModels: [GEMINI, { provider: 'x' }, { provider: '', model: 'm' },
-      { provider: 'a', model: '' }, 7] })).toEqual([GEMINI])
+    expect(parseAllowedRoutes({ allowedModels: [SONNET, { provider: 'x' }, { provider: '', model: 'm' },
+      { provider: 'a', model: '' }, 7] })).toEqual([SONNET])
     expect(parseAllowedRoutes({ allowedModels: [] })).toBeUndefined()
     expect(parseAllowedRoutes({ allowedModels: 'nope' })).toBeUndefined()
     expect(parseAllowedRoutes(undefined)).toBeUndefined()
   })
 
   it('reads the policy a Session recorded and tolerates gaps and failing accessors', () => {
-    expect(policyRoutesOf(session([{ type: 'session' }, policyEvent([GEMINI])]))).toEqual([GEMINI])
+    expect(policyRoutesOf(session([{ type: 'session' }, policyEvent([SONNET])]))).toEqual([SONNET])
     expect(policyRoutesOf(session([{ type: 'session' }]))).toBeUndefined()
     expect(policyRoutesOf(undefined)).toBeUndefined()
     expect(policyRoutesOf({})).toBeUndefined()
@@ -120,8 +120,8 @@ describe('subagent model authorization', () => {
 
   it('inherits an ancestor policy only through a subagent lineage', () => {
     const child = session([{ type: 'session' }], { origin: 'subagent', parentSession: 'parent' })
-    const root = session([policyEvent([GEMINI])])
-    expect(authorizedRoutesFor({ session: child }, registry({ parent: root }))).toEqual([GEMINI])
+    const root = session([policyEvent([SONNET])])
+    expect(authorizedRoutesFor({ session: child }, registry({ parent: root }))).toEqual([SONNET])
     expect(authorizedRoutesFor(
       { session: session([], { parentSession: 'parent' }) },
       registry({ parent: root }),
@@ -134,8 +134,8 @@ describe('subagent model authorization', () => {
   })
 
   it('reads the Host preference and refuses an unusable settings service', () => {
-    expect(subagentModelSelectionPreference(settingsServing({ enabled: true, allowedModels: [GEMINI] }) as never))
-      .toEqual({ enabled: true, allowedModels: [GEMINI] })
+    expect(subagentModelSelectionPreference(settingsServing({ enabled: true, allowedModels: [SONNET] }) as never))
+      .toEqual({ enabled: true, allowedModels: [SONNET] })
     expect(subagentModelSelectionPreference(undefined)).toBeUndefined()
     expect(subagentModelSelectionPreference({} as never)).toBeUndefined()
     expect(subagentModelSelectionPreference({
@@ -145,19 +145,19 @@ describe('subagent model authorization', () => {
 
   it('denies an explicit route outside the allowlist with the authorized routes', () => {
     const reason = delegationDenialReason(
-      recordingAgent([GEMINI, OPUS]),
+      recordingAgent([SONNET, OPUS]),
       'subagent',
       { provider: 'codex-chatgpt', model: 'gpt-6-astra' },
       PREFERENCE,
       NO_SESSIONS,
     )
     expect(reason).toContain('codex-chatgpt/gpt-6-astra')
-    expect(reason).toContain('antigravity/gemini-3.8-flash, antigravity/claude-opus-4-6')
+    expect(reason).toContain('claude/claude-sonnet-4-6, claude/claude-opus-4-6')
   })
 
   it('requires an explicit route even when the parent model is authorized', () => {
     const reason = delegationDenialReason(
-      recordingAgent([GEMINI, OPUS], { provider: 'antigravity', model: 'gemini-3.8-flash' }),
+      recordingAgent([SONNET, OPUS], { provider: 'claude', model: 'claude-sonnet-4-6' }),
       'subagent',
       {},
       PREFERENCE,
@@ -165,22 +165,22 @@ describe('subagent model authorization', () => {
     )
     expect(reason).toContain('requires an explicit child model')
     expect(reason).toContain('list_subagent_models')
-    expect(reason).toContain('antigravity/gemini-3.8-flash, antigravity/claude-opus-4-6')
+    expect(reason).toContain('claude/claude-sonnet-4-6, claude/claude-opus-4-6')
   })
 
   it('denies a half-specified route and names the missing field', () => {
-    const agent = recordingAgent([GEMINI, OPUS])
+    const agent = recordingAgent([SONNET, OPUS])
     const missingProvider = delegationDenialReason(
-      agent, 'subagent', { model: 'gemini-3.8-flash' }, PREFERENCE, NO_SESSIONS,
+      agent, 'subagent', { model: 'claude-sonnet-4-6' }, PREFERENCE, NO_SESSIONS,
     )
     expect(missingProvider).toContain('requires an explicit child model')
-    expect(missingProvider).toContain('model "gemini-3.8-flash"')
+    expect(missingProvider).toContain('model "claude-sonnet-4-6"')
     expect(missingProvider).toContain('provider must be named together')
 
     const missingModel = delegationDenialReason(
-      agent, 'subagent', { provider: 'antigravity' }, PREFERENCE, NO_SESSIONS,
+      agent, 'subagent', { provider: 'claude' }, PREFERENCE, NO_SESSIONS,
     )
-    expect(missingModel).toContain('provider "antigravity"')
+    expect(missingModel).toContain('provider "claude"')
     expect(missingModel).toContain('model must be named together')
 
     // Empty strings are not a named pair either: they cannot be authorized.
@@ -189,25 +189,25 @@ describe('subagent model authorization', () => {
   })
 
   it('stays out of the way for authorized routes, other tools, and disabled authorization', () => {
-    const agent = recordingAgent([GEMINI, OPUS], { provider: 'antigravity', model: 'gemini-3.8-flash' })
+    const agent = recordingAgent([SONNET, OPUS], { provider: 'claude', model: 'claude-sonnet-4-6' })
     expect(delegationDenialReason(agent, 'subagent', {
-      provider: 'antigravity', model: 'gemini-3.8-flash',
+      provider: 'claude', model: 'claude-sonnet-4-6',
     }, PREFERENCE, NO_SESSIONS)).toBeUndefined()
-    expect(delegationDenialReason(agent, 'subagent', { provider: 'antigravity', model: 'claude-opus-4-6' },
+    expect(delegationDenialReason(agent, 'subagent', { provider: 'claude', model: 'claude-opus-4-6' },
       PREFERENCE, NO_SESSIONS)).toBeUndefined()
     // `subagent_fork` is not an explicit-route tool, so a plain name list still
     // leaves it alone; inherit mode is configured separately.
     expect(delegationDenialReason(agent, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS)).toBeUndefined()
-    expect(delegationDenialReason(agent, 'subagent', {}, { enabled: false, allowedModels: [GEMINI] },
+    expect(delegationDenialReason(agent, 'subagent', {}, { enabled: false, allowedModels: [SONNET] },
       NO_SESSIONS)).toBeUndefined()
   })
 
   it('keeps a recorded policy authoritative when the settings service is absent', () => {
-    const agent = recordingAgent([GEMINI, OPUS], { provider: 'antigravity', model: 'gemini-3.8-flash' })
+    const agent = recordingAgent([SONNET, OPUS], { provider: 'claude', model: 'claude-sonnet-4-6' })
     expect(delegationDenialReason(agent, 'subagent', {}, undefined, NO_SESSIONS))
       .toContain('requires an explicit child model')
     expect(delegationDenialReason(agent, 'subagent', {
-      provider: 'antigravity', model: 'gemini-3.8-flash',
+      provider: 'claude', model: 'claude-sonnet-4-6',
     }, undefined, NO_SESSIONS)).toBeUndefined()
   })
 
@@ -223,29 +223,29 @@ describe('subagent model authorization', () => {
     const agent: AuthorizationAgent = { options: DEEPSEEK_OPTIONS }
     expect(delegationDenialReason(agent, 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'preference'))
       .toContain('requires an explicit child model')
-    expect(delegationDenialReason(agent, 'subagent', { provider: 'antigravity', model: 'gemini-3.8-flash' },
+    expect(delegationDenialReason(agent, 'subagent', { provider: 'claude', model: 'claude-sonnet-4-6' },
       PREFERENCE, NO_SESSIONS, ['subagent'], 'preference')).toBeUndefined()
   })
 
   it('denies an explicit route that is not registered rather than resolving it locally', () => {
-    const agent = recordingAgent([GEMINI, OPUS])
+    const agent = recordingAgent([SONNET, OPUS])
     expect(delegationDenialReason(agent, 'subagent', { provider: 'not-registered', model: 'some-model' },
       PREFERENCE, NO_SESSIONS)).toContain('is not on the Session allowlist')
-    expect(delegationDenialReason(agent, 'subagent', { provider: 'not-registered', model: 'gemini-3.8-flash' },
+    expect(delegationDenialReason(agent, 'subagent', { provider: 'not-registered', model: 'claude-sonnet-4-6' },
       PREFERENCE, NO_SESSIONS)).toContain('is not on the Session allowlist')
-    expect(unauthorizedRouteReason(undefined, undefined, [GEMINI], false)).toContain('the inherited route')
+    expect(unauthorizedRouteReason(undefined, undefined, [SONNET], false)).toContain('the inherited route')
   })
 
   it('prefers the recorded Session policy over the current preference', () => {
-    const agent = recordingAgent([GEMINI], { provider: 'antigravity', model: 'claude-opus-4-6' })
+    const agent = recordingAgent([SONNET], { provider: 'claude', model: 'claude-opus-4-6' })
     // OPUS is authorized by the current preference only, and the Session
-    // recorded GEMINI alone, so the recorded list decides both the verdict and
+    // recorded SONNET alone, so the recorded list decides both the verdict and
     // the routes the denial names.
     expect(delegationDenialReason(agent, 'subagent', {
-      provider: 'antigravity', model: 'claude-opus-4-6',
-    }, PREFERENCE, NO_SESSIONS)).toContain('antigravity/gemini-3.8-flash')
+      provider: 'claude', model: 'claude-opus-4-6',
+    }, PREFERENCE, NO_SESSIONS)).toContain('claude/claude-sonnet-4-6')
     expect(delegationDenialReason(agent, 'subagent', {
-      provider: 'antigravity', model: 'claude-opus-4-6',
+      provider: 'claude', model: 'claude-opus-4-6',
     }, PREFERENCE, NO_SESSIONS)).not.toContain('claude-opus-4-6 with')
   })
 
@@ -258,7 +258,7 @@ describe('subagent model authorization', () => {
     const unrecorded: AuthorizationAgent = { options: DEEPSEEK_OPTIONS }
     expect(authorize(unrecorded, 'subagent', {})).toBeUndefined()
     expect(authorize(unrecorded, 'delegate', {})).toBeUndefined()
-    expect(authorize(recordingAgent([GEMINI, OPUS]), 'delegate', {}))
+    expect(authorize(recordingAgent([SONNET, OPUS]), 'delegate', {}))
       .toContain('requires an explicit child model')
     const permissive = createSubagentAuthorization({
       settings: SETTINGS as never,
@@ -267,7 +267,7 @@ describe('subagent model authorization', () => {
       scope: 'preference',
     })
     expect(permissive(unrecorded, 'subagent', {})).toContain('requires an explicit child model')
-    expect(permissive(unrecorded, 'subagent', { provider: 'antigravity', model: 'gemini-3.8-flash' }))
+    expect(permissive(unrecorded, 'subagent', { provider: 'claude', model: 'claude-sonnet-4-6' }))
       .toBeUndefined()
   })
 
@@ -283,19 +283,19 @@ describe('subagent model authorization', () => {
   })
 
   it('reads the inherited route from the request header, falling back only when it says nothing', () => {
-    expect(inheritedRouteOf({ session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }) }))
+    expect(inheritedRouteOf({ session: routedSession([SONNET], { provider: 'kimi-code', model: 'k3' }) }))
       .toEqual({ provider: 'kimi-code', model: 'k3', reasoningEffort: undefined })
     // The header is authoritative: stale creation options must not win after a
     // mid-session model switch.
     expect(inheritedRouteOf({
-      options: { provider: 'antigravity', model: 'gemini-3.8-flash' },
-      session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }),
+      options: { provider: 'claude', model: 'claude-sonnet-4-6' },
+      session: routedSession([SONNET], { provider: 'kimi-code', model: 'k3' }),
     })).toMatchObject({ provider: 'kimi-code', model: 'k3' })
     // A header naming no route leaves the declared options in charge.
     expect(inheritedRouteOf({
-      options: { provider: 'antigravity', model: 'gemini-3.8-flash' },
-      session: routedSession([GEMINI], {}),
-    })).toMatchObject({ provider: 'antigravity', model: 'gemini-3.8-flash' })
+      options: { provider: 'claude', model: 'claude-sonnet-4-6' },
+      session: routedSession([SONNET], {}),
+    })).toMatchObject({ provider: 'claude', model: 'claude-sonnet-4-6' })
     expect(inheritedRouteOf({ options: DEEPSEEK_OPTIONS }))
       .toMatchObject({ provider: 'deepseek-official', model: 'deepseek-flash' })
     expect(inheritedRouteOf(undefined)).toEqual({ provider: undefined, model: undefined })
@@ -307,20 +307,20 @@ describe('subagent model authorization', () => {
   })
 
   it('denies an inherit-mode delegation whose inherited route is not authorized', () => {
-    const agent = { session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }) }
+    const agent = { session: routedSession([SONNET], { provider: 'kimi-code', model: 'k3' }) }
     const reason = delegationDenialReason(
       agent, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS,
       ['subagent'], 'session', ['subagent_fork'],
     )
     expect(reason).toContain('subagent_fork')
     expect(reason).toContain('"kimi-code/k3"')
-    // The Session recorded GEMINI alone, so that — not the wider preference —
+    // The Session recorded SONNET alone, so that — not the wider preference —
     // is the list the denial must name.
-    expect(reason).toContain('antigravity/gemini-3.8-flash')
+    expect(reason).toContain('claude/claude-sonnet-4-6')
   })
 
   it('allows an inherit-mode delegation when the inherited route is authorized', () => {
-    const agent = { session: routedSession([GEMINI], { provider: 'antigravity', model: 'gemini-3.8-flash' }) }
+    const agent = { session: routedSession([SONNET], { provider: 'claude', model: 'claude-sonnet-4-6' }) }
     expect(delegationDenialReason(
       agent, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS,
       ['subagent'], 'session', ['subagent_fork'],
@@ -330,39 +330,39 @@ describe('subagent model authorization', () => {
   it('denies an inherit-mode delegation that tries to name a route it cannot accept', () => {
     // The inherited route IS authorized, so only the override can deny this call:
     // that proves the override check runs before the route check.
-    const agent = { session: routedSession([GEMINI], { provider: 'antigravity', model: 'gemini-3.8-flash' }) }
+    const agent = { session: routedSession([SONNET], { provider: 'claude', model: 'claude-sonnet-4-6' }) }
     const reason = delegationDenialReason(
-      agent, 'subagent_fork', { provider: 'antigravity', model: 'claude-opus-4-6' },
+      agent, 'subagent_fork', { provider: 'claude', model: 'claude-opus-4-6' },
       PREFERENCE, NO_SESSIONS, ['subagent'], 'session', ['subagent_fork'],
     )
     expect(reason).toContain('accepts no')
-    expect(reason).toContain('antigravity/claude-opus-4-6')
+    expect(reason).toContain('claude/claude-opus-4-6')
   })
 
   it('leaves inherit mode inert without a recorded allowlist', () => {
-    const agent = { session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }) }
+    const agent = { session: routedSession([SONNET], { provider: 'kimi-code', model: 'k3' }) }
     expect(delegationDenialReason(
       { options: DEEPSEEK_OPTIONS }, 'subagent_fork', {}, PREFERENCE, NO_SESSIONS,
       ['subagent'], 'session', ['subagent_fork'],
     )).toBeUndefined()
     // A disabled preference suspends it everywhere, exactly like explicit mode.
     expect(delegationDenialReason(
-      agent, 'subagent_fork', {}, { enabled: false, allowedModels: [GEMINI] }, NO_SESSIONS,
+      agent, 'subagent_fork', {}, { enabled: false, allowedModels: [SONNET] }, NO_SESSIONS,
       ['subagent'], 'session', ['subagent_fork'],
     )).toBeUndefined()
   })
 
   it('renders inherit-mode reasons without a route and without a named pair', () => {
-    expect(inheritRouteDenialReason('subagent_fork', undefined, undefined, [GEMINI]))
+    expect(inheritRouteDenialReason('subagent_fork', undefined, undefined, [SONNET]))
       .toContain("the calling agent's route")
-    expect(inheritRouteDenialReason('subagent_fork', 'a', 'b', [GEMINI], 'high')).toContain('(high)')
+    expect(inheritRouteDenialReason('subagent_fork', 'a', 'b', [SONNET], 'high')).toContain('(high)')
     // Option A's remedy must be reachable: fork is denied because the SESSION's
     // route is unauthorized, so the refusal has to say the tool returns once the
     // session moves to an authorized model — otherwise the model has no way out.
-    const denied = inheritRouteDenialReason('subagent_fork', 'kimi-code', 'k3', [GEMINI])
+    const denied = inheritRouteDenialReason('subagent_fork', 'kimi-code', 'k3', [SONNET])
     expect(denied).toContain('unavailable for now')
     expect(denied).toContain('works again')
-    expect(denied).toContain('antigravity/gemini-3.8-flash')
+    expect(denied).toContain('claude/claude-sonnet-4-6')
     expect(inheritOverrideReason('subagent_fork', 'a', 'b')).toContain('"a/b"')
   })
 
@@ -375,7 +375,7 @@ describe('subagent model authorization', () => {
     expect(DEFAULT_SUBAGENT_INHERIT_TOOLS).not.toContain('subagent')
     expect(normalizeInheritToolNames(undefined)).toContain('spawn_teammate')
 
-    const unauthorized = { session: routedSession([GEMINI], { provider: 'kimi-code', model: 'k3' }) }
+    const unauthorized = { session: routedSession([SONNET], { provider: 'kimi-code', model: 'k3' }) }
     const reason = delegationDenialReason(
       unauthorized, 'spawn_teammate', {}, PREFERENCE, NO_SESSIONS,
       ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
@@ -384,11 +384,11 @@ describe('subagent model authorization', () => {
     // model at tools it can actually re-route, not at unfillable fields.
     expect(reason).toContain('spawn_teammate')
     expect(reason).toContain('"kimi-code/k3"')
-    expect(reason).toContain('antigravity/gemini-3.8-flash')
+    expect(reason).toContain('claude/claude-sonnet-4-6')
     expect(reason).not.toContain('requires an explicit child model')
 
     // An authorized Lead route lets the teammate through untouched.
-    const authorized = { session: routedSession([GEMINI], { provider: 'antigravity', model: 'gemini-3.8-flash' }) }
+    const authorized = { session: routedSession([SONNET], { provider: 'claude', model: 'claude-sonnet-4-6' }) }
     expect(delegationDenialReason(
       authorized, 'spawn_teammate', {}, PREFERENCE, NO_SESSIONS,
       ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
@@ -398,7 +398,7 @@ describe('subagent model authorization', () => {
     // the override branch, which is the only thing that can still deny a call
     // whose inherited route is already authorized.
     expect(delegationDenialReason(
-      authorized, 'spawn_teammate', { provider: 'antigravity', model: 'claude-opus-4-6' },
+      authorized, 'spawn_teammate', { provider: 'claude', model: 'claude-opus-4-6' },
       PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
     )).toContain('accepts no')
 
@@ -459,18 +459,18 @@ describe('subagent model authorization', () => {
     )
     expect(registered).toHaveLength(1)
     const guard = registered[0]!
-    const exec = { name: 'subagent', arguments: {}, agent: recordingAgent([GEMINI, OPUS]), signal: new AbortController().signal }
+    const exec = { name: 'subagent', arguments: {}, agent: recordingAgent([SONNET, OPUS]), signal: new AbortController().signal }
     expect(guard(exec as never)).toContain('requires an explicit child model')
     expect(guard({ ...exec, name: 'read' } as never)).toBeUndefined()
     // An agent without a recorded policy stays on the built-in behavior under
     // session scope, even when its own route would be authorized.
     expect(guard({
       ...exec,
-      agent: { options: { provider: 'antigravity', model: 'gemini-3.8-flash' } },
+      agent: { options: { provider: 'claude', model: 'claude-sonnet-4-6' } },
     } as never)).toBeUndefined()
     expect(guard({
       ...exec,
-      arguments: { provider: 'antigravity', model: 'gemini-3.8-flash' },
+      arguments: { provider: 'claude', model: 'claude-sonnet-4-6' },
     } as never)).toBeUndefined()
     dispose()
     expect(disposed).toBe(1)
@@ -686,7 +686,7 @@ describe('per-main-model subagent routing', () => {
   const CODEX: AllowedModelRoute = { provider: 'codex-chatgpt', model: 'gpt-6-astra' }
   const BY_MAIN: SubagentModelSelectionPreference = {
     enabled: true,
-    allowedModels: [GEMINI, OPUS],
+    allowedModels: [SONNET, OPUS],
     defaultAllowedModels: [MINIMAX],
     byMainModel: {
       'codex-chatgpt/gpt-6-astra': [CODEX],
@@ -702,14 +702,14 @@ describe('per-main-model subagent routing', () => {
   }
 
   it('applies the entry for the root Session main model, then the fallback list, then the policy', () => {
-    const codexRoot = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const codexRoot = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     expect(effectiveAllowedRoutes({ session: codexRoot }, BY_MAIN, NO_SESSIONS)).toEqual([CODEX])
     // An unmatched main model falls back to the deployment's fallback list.
-    const deepseekRoot = rootSession([GEMINI, OPUS], DEEPSEEK)
+    const deepseekRoot = rootSession([SONNET, OPUS], DEEPSEEK)
     expect(effectiveAllowedRoutes({ session: deepseekRoot }, BY_MAIN, NO_SESSIONS)).toEqual([MINIMAX])
     // A deployment with no override configured keeps the Session policy.
-    const plain = rootSession([GEMINI, OPUS], DEEPSEEK)
-    expect(effectiveAllowedRoutes({ session: plain }, PREFERENCE, NO_SESSIONS)).toEqual([GEMINI, OPUS])
+    const plain = rootSession([SONNET, OPUS], DEEPSEEK)
+    expect(effectiveAllowedRoutes({ session: plain }, PREFERENCE, NO_SESSIONS)).toEqual([SONNET, OPUS])
     // An override can never invent an allowlist for a Session that governs none.
     expect(effectiveAllowedRoutes({ session: session([]) }, BY_MAIN, NO_SESSIONS)).toEqual([])
     expect(effectiveAllowedRoutes({ session: session([]) }, BY_MAIN, NO_SESSIONS, 'preference')).toEqual([MINIMAX])
@@ -718,8 +718,8 @@ describe('per-main-model subagent routing', () => {
   })
 
   it('resolves the main model from the ROOT Session, never from the child', () => {
-    const root = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
-    const child = session([policyEvent([GEMINI, OPUS])], { origin: 'subagent', parentSession: 'root' })
+    const root = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const child = session([policyEvent([SONNET, OPUS])], { origin: 'subagent', parentSession: 'root' })
     const sessions = registry({ root })
     // The child's own route is irrelevant: the main model belongs to the root.
     const childAgent = { session: child, options: DEEPSEEK }
@@ -730,14 +730,14 @@ describe('per-main-model subagent routing', () => {
   })
 
   it('reads the main route from the live model accessor and the delegation hint', () => {
-    const live = session([policyEvent([GEMINI, OPUS])])
+    const live = session([policyEvent([SONNET, OPUS])])
     expect(resolveRootSessionAndMainRoute({ session: live, model: { current: () => DEEPSEEK } }, NO_SESSIONS).mainRoute)
       .toEqual(DEEPSEEK)
-    const hinted = session([policyEvent([GEMINI, OPUS])])
+    const hinted = session([policyEvent([SONNET, OPUS])])
     expect(resolveRootSessionAndMainRoute({ session: hinted }, NO_SESSIONS, CODEX).mainRoute).toEqual(CODEX)
     // A header that names the route outranks the creation options, which go stale
     // after a mid-session switch.
-    const switched = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const switched = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     expect(resolveRootSessionAndMainRoute({ session: switched, options: DEEPSEEK }, NO_SESSIONS).mainRoute)
       .toEqual({ provider: 'codex-chatgpt', model: 'gpt-6-astra' })
   })
@@ -746,7 +746,7 @@ describe('per-main-model subagent routing', () => {
     // A Session whose main model is switched AFTER its policy was first read
     // keeps the routes it started with: re-pointing them would change the
     // prompt-advertised list mid-conversation and invalidate its prefix cache.
-    const events = [policyEvent([GEMINI, OPUS])]
+    const events = [policyEvent([SONNET, OPUS])]
     let config: { provider?: string; model?: string } = { provider: 'codex-chatgpt', model: 'gpt-6-astra' }
     const lockable: PolicySession = {
       eventAt: (seq: number) => events[seq] as { type?: unknown; data?: unknown } | undefined,
@@ -760,7 +760,7 @@ describe('per-main-model subagent routing', () => {
     expect(resolveRootSessionAndMainRoute(agent, NO_SESSIONS).mainRoute)
       .toEqual({ provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     // A different Session object is a different lock.
-    const other = rootSession([GEMINI, OPUS], DEEPSEEK)
+    const other = rootSession([SONNET, OPUS], DEEPSEEK)
     expect(effectiveAllowedRoutes({ session: other }, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
   })
 
@@ -770,7 +770,7 @@ describe('per-main-model subagent routing', () => {
     // prompt-assembly hook rewrites the subagent description and the tools:sdk
     // section from it, so a mid-conversation change loses the prefix cache and
     // contradicts the card's "applies to new sessions" promise.
-    const live = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const live = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     const agent = { session: live }
     expect(effectiveAllowedRoutes(agent, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([CODEX])
 
@@ -778,7 +778,7 @@ describe('per-main-model subagent routing', () => {
     // fallback list changes too.
     const edited: SubagentModelSelectionPreference = {
       ...BY_MAIN,
-      defaultAllowedModels: [{ provider: 'antigravity', model: 'gemini-3.8-flash' }],
+      defaultAllowedModels: [{ provider: 'claude', model: 'claude-sonnet-4-6' }],
       byMainModel: { 'codex-chatgpt/gpt-6-astra': [MINIMAX] },
     }
     // The running session keeps the list it started with...
@@ -797,10 +797,10 @@ describe('per-main-model subagent routing', () => {
     expect(rewritten.sections[0]!.text).not.toContain('minimax-code/MiniMax-M3.1-Flash')
 
     // A session created AFTER the edit picks the new list up.
-    const fresh = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const fresh = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     expect(effectiveAllowedRoutes({ session: fresh }, edited, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
     // The fallback list is locked the same way for a main model with no entry.
-    const deepseekLive = rootSession([GEMINI, OPUS], DEEPSEEK)
+    const deepseekLive = rootSession([SONNET, OPUS], DEEPSEEK)
     expect(effectiveAllowedRoutes({ session: deepseekLive }, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
     const editedFallback: SubagentModelSelectionPreference = {
       ...BY_MAIN,
@@ -808,19 +808,19 @@ describe('per-main-model subagent routing', () => {
     }
     expect(effectiveAllowedRoutes({ session: deepseekLive }, editedFallback, NO_SESSIONS, 'session', true))
       .toEqual([MINIMAX])
-    expect(effectiveAllowedRoutes({ session: rootSession([GEMINI, OPUS], DEEPSEEK) }, editedFallback, NO_SESSIONS, 'session', true))
+    expect(effectiveAllowedRoutes({ session: rootSession([SONNET, OPUS], DEEPSEEK) }, editedFallback, NO_SESSIONS, 'session', true))
       .toEqual([CODEX])
     // A session with a request header locks on first use even without the flag.
-    const headerLocked = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const headerLocked = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     expect(effectiveAllowedRoutes({ session: headerLocked }, BY_MAIN, NO_SESSIONS)).toEqual([CODEX])
     expect(effectiveAllowedRoutes({ session: headerLocked }, edited, NO_SESSIONS)).toEqual([CODEX])
   })
 
   it('denies a delegation outside the overridden list with that list in the reason', () => {
-    const codexRoot = rootSession([GEMINI, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const codexRoot = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     const agent = { session: codexRoot }
-    // GEMINI is on the Session policy but not on this main model's entry.
-    expect(delegationDenialReason(agent, 'subagent', { provider: GEMINI.provider, model: GEMINI.model }, BY_MAIN, NO_SESSIONS))
+    // SONNET is on the Session policy but not on this main model's entry.
+    expect(delegationDenialReason(agent, 'subagent', { provider: SONNET.provider, model: SONNET.model }, BY_MAIN, NO_SESSIONS))
       .toContain('codex-chatgpt/gpt-6-astra')
     expect(delegationDenialReason(agent, 'subagent', { provider: CODEX.provider, model: CODEX.model }, BY_MAIN, NO_SESSIONS))
       .toBeUndefined()
@@ -836,7 +836,7 @@ describe('per-main-model subagent routing', () => {
       enabled: true, allowedModels: [], byMainModel: { 'a/b': [CODEX] },
     })
     expect(mergePreferenceOverrides(PREFERENCE, { byMainModel: { 'a/b': [CODEX] } })).toEqual({
-      enabled: true, allowedModels: [GEMINI, OPUS], byMainModel: { 'a/b': [CODEX] },
+      enabled: true, allowedModels: [SONNET, OPUS], byMainModel: { 'a/b': [CODEX] },
     })
   })
 
@@ -844,12 +844,12 @@ describe('per-main-model subagent routing', () => {
     const providerList = [
       'minimax-code — MiniMax Code',
       'codex-chatgpt — ChatGPT Subscription',
-      'antigravity — Antigravity',
+      'claude — Claude',
     ].join('\n')
     const filteredProviders = enrichListSubagentModelsOutput(providerList, [CODEX])
     expect(filteredProviders).toContain('codex-chatgpt — ChatGPT Subscription')
     expect(filteredProviders).not.toContain('minimax-code — MiniMax Code')
-    expect(filteredProviders).not.toContain('antigravity — Antigravity')
+    expect(filteredProviders).not.toContain('claude — Claude')
     expect(filteredProviders).toContain('codex-chatgpt/gpt-6-astra -> provider: "codex-chatgpt", model: "gpt-6-astra"')
 
     const modelList = 'codex-chatgpt/gpt-6-astra — GPT-6 Astra\ncodex-chatgpt/gpt-5.6-sol — GPT-5.6 Sol\nminimax-code/MiniMax-M3.1-Flash — MiniMax'
@@ -879,7 +879,7 @@ describe('route-parameter adaptivity', () => {
 
   it('enforces the inherited route instead of demanding a parameter the tool lacks', () => {
     const reason = delegationDenialReason(
-      recordingAgent([GEMINI, OPUS]), 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
+      recordingAgent([SONNET, OPUS]), 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
     )
     expect(reason).toContain('keeps its child on')
     expect(reason).toContain('deepseek-official/deepseek-flash')
@@ -887,7 +887,7 @@ describe('route-parameter adaptivity', () => {
   })
 
   it('lets a parameterless delegation through when the inherited route is authorized', () => {
-    const agent = recordingAgent([GEMINI, OPUS], { provider: 'antigravity', model: 'gemini-3.8-flash' })
+    const agent = recordingAgent([SONNET, OPUS], { provider: 'claude', model: 'claude-sonnet-4-6' })
     expect(delegationDenialReason(
       agent, 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
     )).toBeUndefined()
@@ -897,9 +897,9 @@ describe('route-parameter adaptivity', () => {
     // A false probe answer must never make an explicit dispatch impossible to
     // satisfy: the pair is still judged against the allowlist, and an
     // unauthorized one is refused for THAT reason rather than for its shape.
-    const agent = recordingAgent([GEMINI, OPUS])
+    const agent = recordingAgent([SONNET, OPUS])
     expect(delegationDenialReason(
-      agent, 'subagent', { provider: 'antigravity', model: 'gemini-3.8-flash' },
+      agent, 'subagent', { provider: 'claude', model: 'claude-sonnet-4-6' },
       PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
     )).toBeUndefined()
     expect(delegationDenialReason(
@@ -908,14 +908,14 @@ describe('route-parameter adaptivity', () => {
     )).toContain('is not on the Session allowlist')
     // A half-named route still gets the diagnostic that names the real problem.
     const partial = delegationDenialReason(
-      agent, 'subagent', { provider: 'antigravity' }, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
+      agent, 'subagent', { provider: 'claude' }, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], undeclared,
     )
     expect(partial).toContain('exposes no provider/model parameter')
     expect(partial).not.toContain('requires an explicit child model')
   })
 
   it('keeps the configured mode when the registry cannot answer', () => {
-    const agent = recordingAgent([GEMINI, OPUS])
+    const agent = recordingAgent([SONNET, OPUS])
     for (const probe of [unanswerable, declared]) {
       expect(delegationDenialReason(
         agent, 'subagent', {}, PREFERENCE, NO_SESSIONS, ['subagent'], 'session', [], probe,
@@ -1000,7 +1000,7 @@ describe('route-parameter adaptivity', () => {
     )).toContain('spawn_teammate')
 
     // 5. Another main model without allowParentFork still falls back to defaultAllowParentFork (false).
-    const otherMain = { session: routedSession([FAST_CHILD], { provider: 'antigravity', model: 'claude-opus-4-6' }) }
+    const otherMain = { session: routedSession([FAST_CHILD], { provider: 'claude', model: 'claude-opus-4-6' }) }
     expect(effectiveAllowParentFork(otherMain, merged, NO_SESSIONS)).toBe(false)
     expect(delegationDenialReason(
       otherMain, 'subagent_fork', {},
@@ -1022,7 +1022,7 @@ describe('route-parameter adaptivity', () => {
     expect(delegationDenialReason(
       switchableAgent, 'subagent_fork', {},
       merged, NO_SESSIONS, ['subagent'], 'session', [...DEFAULT_SUBAGENT_INHERIT_TOOLS],
-    )).toContain('antigravity/claude-opus-4-6')
+    )).toContain('claude/claude-opus-4-6')
   })
 })
 

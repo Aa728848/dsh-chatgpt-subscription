@@ -20,7 +20,7 @@
  * Two conventions this file fixes once, because a card must not have to know:
  *
  *  - EVERY instant here is Unix MILLISECONDS. The lines disagree on the wire
- *    (codex states seconds, antigravity and cline-pass state ISO strings,
+ *    (codex states seconds and cline-pass states ISO strings,
  *    kimi/minimax/qoder/glm/step state milliseconds); the normalizers convert,
  *    so a card never guesses a unit from a magnitude.
  *  - \`null\` means "nobody measured this", and is never 0. A window that was

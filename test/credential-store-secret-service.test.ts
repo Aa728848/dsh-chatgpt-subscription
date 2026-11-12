@@ -27,7 +27,7 @@ function commandResult(code: number, stdout = '', stderr = '', error?: Error) {
 }
 
 function store() {
-  return new SecretServiceCredentialStore('dsh-antigravity', 'test-account', (value) => value)
+  return new SecretServiceCredentialStore('dsh-kimi-code', 'test-account', (value) => value)
 }
 
 /** A credential whose JSON form exceeds secret-tool's 8192-byte stdin buffer. */
@@ -55,7 +55,7 @@ describe('Linux Secret Service credential backend', () => {
     await store().save(credentials)
     expect(stdin()).toBe(JSON.stringify(credentials))
     expect(spawn.mock.calls[1][1]).toEqual([
-      'store', '--label=DSH dsh-antigravity', 'service', 'dsh-antigravity', 'account', 'test-account',
+      'store', '--label=DSH dsh-kimi-code', 'service', 'dsh-kimi-code', 'account', 'test-account',
     ])
     expect(JSON.stringify(spawn.mock.calls)).not.toContain('secret-access')
     commandResult(0, JSON.stringify(credentials))
@@ -83,7 +83,7 @@ describe('Linux Secret Service credential backend', () => {
     commandResult(1)
     await store().clear()
     expect(spawn).toHaveBeenCalledTimes(1)
-    expect(spawn.mock.calls[0][1]).toEqual(['lookup', 'service', 'dsh-antigravity', 'account', 'test-account'])
+    expect(spawn.mock.calls[0][1]).toEqual(['lookup', 'service', 'dsh-kimi-code', 'account', 'test-account'])
     commandResult(1, '', 'locked')
     await expect(store().clear()).rejects.toThrow('requires secret-tool')
   })
@@ -92,7 +92,7 @@ describe('Linux Secret Service credential backend', () => {
     commandResult(0, JSON.stringify({ access: 'a' }))
     commandResult(0)
     await store().clear()
-    expect(spawn.mock.calls[1][1]).toEqual(['clear', 'service', 'dsh-antigravity', 'account', 'test-account'])
+    expect(spawn.mock.calls[1][1]).toEqual(['clear', 'service', 'dsh-kimi-code', 'account', 'test-account'])
   })
 
   it('stores an oversized payload as shards plus an envelope and reads it back', async () => {
@@ -116,8 +116,8 @@ describe('Linux Secret Service credential backend', () => {
     // Shards are addressed under the generation the envelope names.
     for (let index = 0; index < envelope.chunks; index += 1) {
       expect(spawn.mock.calls[1 + index][1]).toEqual([
-        'store', '--label=DSH dsh-antigravity',
-        'service', 'dsh-antigravity', 'account', `test-account#${envelope.gen}#${index}`,
+        'store', '--label=DSH dsh-kimi-code',
+        'service', 'dsh-kimi-code', 'account', `test-account#${envelope.gen}#${index}`,
       ])
     }
     // The payload itself never appears in command arguments.
@@ -173,8 +173,8 @@ describe('Linux Secret Service credential backend', () => {
 
     const clears = spawn.mock.calls.filter((call) => call[1][0] === 'clear').map((call) => call[1] as string[])
     expect(clears).toEqual([
-      ['clear', 'service', 'dsh-antigravity', 'account', `test-account#${firstGen}#0`],
-      ['clear', 'service', 'dsh-antigravity', 'account', `test-account#${firstGen}#1`],
+      ['clear', 'service', 'dsh-kimi-code', 'account', `test-account#${firstGen}#0`],
+      ['clear', 'service', 'dsh-kimi-code', 'account', `test-account#${firstGen}#1`],
     ])
   })
 
@@ -192,8 +192,8 @@ describe('Linux Secret Service credential backend', () => {
     const calls = spawn.mock.calls.map((call) => call[1] as string[])
     expect(calls[1][0]).toBe('store')
     expect(calls.slice(2)).toEqual([
-      ['clear', 'service', 'dsh-antigravity', 'account', `test-account#${envelope.gen}#0`],
-      ['clear', 'service', 'dsh-antigravity', 'account', `test-account#${envelope.gen}#1`],
+      ['clear', 'service', 'dsh-kimi-code', 'account', `test-account#${envelope.gen}#0`],
+      ['clear', 'service', 'dsh-kimi-code', 'account', `test-account#${envelope.gen}#1`],
     ])
   })
 
@@ -211,10 +211,10 @@ describe('Linux Secret Service credential backend', () => {
 
     const calls = spawn.mock.calls.map((call) => call[1] as string[])
     expect(calls).toEqual([
-      ['lookup', 'service', 'dsh-antigravity', 'account', 'test-account'],
-      ['clear', 'service', 'dsh-antigravity', 'account', `test-account#${envelope.gen}#0`],
-      ['clear', 'service', 'dsh-antigravity', 'account', `test-account#${envelope.gen}#1`],
-      ['clear', 'service', 'dsh-antigravity', 'account', 'test-account'],
+      ['lookup', 'service', 'dsh-kimi-code', 'account', 'test-account'],
+      ['clear', 'service', 'dsh-kimi-code', 'account', `test-account#${envelope.gen}#0`],
+      ['clear', 'service', 'dsh-kimi-code', 'account', `test-account#${envelope.gen}#1`],
+      ['clear', 'service', 'dsh-kimi-code', 'account', 'test-account'],
     ])
   })
 

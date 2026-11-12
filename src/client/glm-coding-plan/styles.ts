@@ -37,7 +37,7 @@ export function installGlmCodingPlanStyles(): void {
    换行与间距。按钮的主次由各自的 class 决定 —— 主按钮带 .dsha-btn-primary，取信息
    色填充；次要入口（设备码登录、导入本地登录）保持中性外观，这样一行里才读得出
    「主入口 + 另外两种进入方式」。这里原先统一涂成信息色，是为了绕开
-   .dsha-btn:hover 盖掉主按钮填充的问题（见 antigravity / kimi-code 两张表里的
+   .dsha-btn:hover 盖掉主按钮填充的问题（见 kimi-code 表里的
    :not(.dsha-btn-primary)）；通用 hover 修好后它只剩副作用：把 .dsha-btn 的次要
    按钮也画成主按钮，故删除。 */
 .dsha-account-add-actions{display:flex;flex-wrap:wrap;gap:8px}

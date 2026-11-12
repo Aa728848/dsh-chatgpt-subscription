@@ -7,12 +7,9 @@ import { ClaudeAdapter } from '../src/host/claude/adapter.ts'
 import { CLAUDE_MODELS } from '../src/host/claude/model-catalog.ts'
 import { GlmCodingPlanAdapter } from '../src/host/glm-coding-plan/adapter.ts'
 import { GLM_MODEL_CATALOG as GLM } from '../src/host/glm-coding-plan/model-catalog.ts'
-import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
-import { MODELS as ANTIGRAVITY } from '../src/host/antigravity/types.ts'
 import { OllamaAdapter } from '../src/host/ollama/adapter.ts'
 import { resolveCodexModel } from '../src/host/model-catalog.ts'
 import { CODEX_MODEL_CATALOG, codexModelMaxTokens } from '../src/shared/model-catalog.ts'
-import { FileModelSettingsStore as AntigravitySettings } from '../src/host/antigravity/token-store.ts'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -52,7 +49,6 @@ const rows: ProviderRow[] = [
   ...COMMAND.map(m => ({ provider: 'command', model: m.id, window: m.contextWindow, cap: commandCap(m.id) })),
   ...CLAUDE_MODELS.map(m => ({ provider: 'claude', model: m.id, window: m.contextWindow, cap: m.maxTokens })),
   ...GLM.map(m => ({ provider: 'glm', model: m.id, window: m.defaultContextWindow, cap: m.defaultMaxTokens })),
-  ...ANTIGRAVITY.map(m => ({ provider: 'antigravity', model: m.id, window: m.contextWindow, cap: m.maxTokens })),
   ...CODEX_MODEL_CATALOG.map(m => ({ provider: 'codex', model: m.id, window: m.contextWindow, cap: codexModelMaxTokens(m.id) })),
   ...[80_000, 128_000, 262_144].map(window => ({ provider: 'ollama', model: 'live-model', window, cap: 8192 })),
 ]
@@ -61,11 +57,6 @@ async function resolve(row: ProviderRow, window = row.window) {
   const settings = { enabled: true, enabledModelIds: [row.model], catalogModels: [],
     contextWindowOverrides: { [row.model]: window }, defaultReasoningEffort: null }
   if (row.provider === 'codex') return resolveCodexModel(row.model, { status: () => settings } as never)
-  if (row.provider === 'antigravity') {
-    const store = new AntigravitySettings()
-    vi.spyOn(store, 'read').mockResolvedValue(settings)
-    return new AntigravityAdapter(undefined, store).resolveModel('antigravity', row.model)
-  }
   const adapter = row.provider === 'command' ? new CommandCodeAdapter()
     : row.provider === 'claude' ? new ClaudeAdapter()
       : row.provider === 'glm' ? new GlmCodingPlanAdapter() : new OllamaAdapter()
@@ -88,7 +79,7 @@ describe('all provider fixed output reservations', () => {
     if (valid(row.window, 0)) expect(valid(row.window, info.defaultMaxTokens ?? 0)).toBe(true)
   })
 
-  it.each(['command', 'claude', 'glm', 'antigravity', 'codex', 'ollama'])(
+  it.each(['command', 'claude', 'glm', 'codex', 'ollama'])(
     '%s handles a smaller effective window without inventing capacity', async provider => {
       const row = rows.find(r => r.provider === provider)!
       const window = 80_000

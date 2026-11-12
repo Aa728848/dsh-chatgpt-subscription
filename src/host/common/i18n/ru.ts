@@ -25,8 +25,6 @@ export const ru: Record<HostLocaleKey, string> = {
   'codex.refresherNotReady': 'Служба обновления учётных данных ChatGPT ещё не готова',
   'codex.notSignedIn': 'Вход в аккаунт ChatGPT не выполнен; добавьте и войдите в аккаунт в разделе «Настройки → Подписки → ChatGPT».',
   'codex.accountGone': 'Этого аккаунта ChatGPT больше нет в пуле',
-  'antigravity.quotaExhausted': 'Квота аккаунта Antigravity исчерпана или запрос ограничен (429 RESOURCE_EXHAUSTED). Проверьте остаток квоты и таймер сброса на странице настроек плагина. Исходный ответ: {body}',
-  'antigravity.rateLimitedNoReset': 'Antigravity вернул 429 (RESOURCE_EXHAUSTED) без времени сброса, поэтому это считается мгновенным ограничением: квота аккаунта не исчерпана, и аккаунт не переводится в ожидание. Исходный ответ: {body}',
   'wb.oauth.loginInitFailed': '{provider}: не удалось начать вход (HTTP {status}): {detail}',
   'wb.oauth.loginMissingState': '{provider}: в ответе на вход нет state или authUrl',
   'wb.oauth.loginPollInvalid': '{provider}: недопустимый ответ опроса входа',

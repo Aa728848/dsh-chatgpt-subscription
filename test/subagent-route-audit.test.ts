@@ -15,12 +15,12 @@ import {
  * The shapes below are the real durable ones: a parent records one
  * `subagent/catalog` event per continuable child, and the child records one
  * `subagent/descriptor` whose `agentProvider`/`agentModel` are its resolved
- * route. The `kimi-code/k3` parent and `antigravity`-only allowlist reproduce
+ * route. The `kimi-code/k3` parent and `claude`-only allowlist reproduce
  * the live fork escape this audit exists to surface.
  */
 
-const GEMINI: AuditedRoute = { provider: 'antigravity', model: 'gemini-3.8-flash' }
-const ALLOWED: AuditedRoute[] = [GEMINI, { provider: 'command-code', model: 'deepseek/deepseek-v4.1-flash' }]
+const SONNET: AuditedRoute = { provider: 'claude', model: 'claude-sonnet-4-6' }
+const ALLOWED: AuditedRoute[] = [SONNET, { provider: 'command-code', model: 'deepseek/deepseek-v4.1-flash' }]
 
 /** A session whose log and header are plain fixtures. */
 function session(
@@ -148,14 +148,14 @@ describe('subagent route audit', () => {
 
   it('accepts an inheriting child whose parent route is authorized', () => {
     const parent = session('p', [policyEvent, catalogEvent('c1')], {},
-      { config: { provider: 'antigravity', model: 'gemini-3.8-flash' } })
+      { config: { provider: 'claude', model: 'claude-sonnet-4-6' } })
     const child = session('c1', [descriptorEvent({ provider: 'fork' })], { parentSession: 'p', origin: 'subagent' })
     expect(auditChildRoutes(parent, registry([parent, child]), ALLOWED)).toEqual([])
   })
 
   it('reports a child that declared its own unauthorized route', () => {
     const parent = session('p', [policyEvent, catalogEvent('c1')], {},
-      { config: { provider: 'antigravity', model: 'gemini-3.8-flash' } })
+      { config: { provider: 'claude', model: 'claude-sonnet-4-6' } })
     const child = session('c1', [descriptorEvent({ provider: 'spawn', agentProvider: 'codex-chatgpt', agentModel: 'gpt-6-astra' })],
       { parentSession: 'p', origin: 'subagent' })
     const violations = auditChildRoutes(parent, registry([parent, child]), ALLOWED)

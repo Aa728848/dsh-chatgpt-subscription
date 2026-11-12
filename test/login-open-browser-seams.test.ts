@@ -2,12 +2,10 @@
  * 每条线路都要留一个「谁来开浏览器」的口子。
  *
  * GLM 真的踩过一次同款事故——卡片 window.open 一次、host 又 spawn 一次，于是每次
- * 登录都弹出两个一模一样的授权页。收口时全仓复查又找出两处同形状的隐患：今天还没有
- * 用例会触发它们，可将来只要有人给 kimi 的 /login 或 antigravity 的 loginAndSave
- * 补一条用例，就会在跑测试的机器上真的弹出窗口，而写用例的人不会事先知道。
+ * 登录都弹出两个一模一样的授权页。Kimi 的登录路由也需要同样的可注入口子，
+ * 否则测试会真的弹出窗口，而写用例的人不会事先知道。
  *
- * 这两条线路不在那次修复的范围里，所以这里的改动是**纯增量**：生产行为一个字没变，
- * 只是把「开浏览器」这件事变成可注入的。这一份钉的就是这件事——口子存在，且缺省
+ * 这一份钉的就是这件事——口子存在，且缺省
  * 仍然是生产原本的那一份。分工与 login-opens-browser-once.test.ts 相反：那一份钉的
  * 是「host 不许开」（GLM / Claude / Command Code），这一份钉的是「口子不许没有」。
  */
@@ -46,8 +44,6 @@ const spawnSpy = vi.mocked(childProcess.spawn)
 const kimiOauth = await import('../src/host/kimi-code/oauth.ts')
 const { registerKimiCodeRoutes } = await import('../src/host/kimi-code/routes.ts')
 const KimiStores = await import('../src/host/kimi-code/token-store.ts')
-const { loginAndSave } = await import('../src/host/antigravity/oauth.ts')
-import type { FileCredentialStore } from '../src/host/antigravity/token-store.ts'
 
 type Handler = (request: IncomingMessage, response: ServerResponse) => Promise<void>
 
@@ -102,21 +98,6 @@ function kimiHandler(openBrowser?: (url: string) => void): Handler {
   ))
 }
 
-/**
- * 走到「开浏览器」为止就中止的凭据存储。
- *
- * loginAndSave 先开回调服务、再开浏览器、然后才检查 abort，所以这一个中止信号足以
- * 让它在写盘之前抛出；而它一次也没读过这个存储。真的 FileCredentialStore 在 Windows
- * 上读一次要 spawn powershell 走 DPAPI，这条用例要验的不是平台加密。
- */
-function antigravityStore(): FileCredentialStore {
-  return {
-    read: async () => null,
-    write: async () => undefined,
-    clear: async () => undefined,
-  } as unknown as FileCredentialStore
-}
-
 /** Calls that would put a browser window in front of the user. */
 function browserLaunches(): unknown[][] {
   return spawnSpy.mock.calls.filter(([command]) => ['cmd', 'open', 'xdg-open'].includes(String(command)))
@@ -153,29 +134,5 @@ describe('kimi-code: /login 留着一个可注入的 opener', () => {
     // 正向对照：平台默认那份真的会 spawn 浏览器（本文件的 mock 只记不执行）。
     kimiOauth.openBrowser('https://auth.kimi.com/device?user_code=ABCD-EFGH')
     expect(browserLaunches()).toHaveLength(1)
-  })
-})
-
-describe('antigravity: loginAndSave 留着一个可注入的 opener', () => {
-  it('注入的 opener 被真的用上，而不是硬编码那一份', async () => {
-    const opened: string[] = []
-    await expect(loginAndSave(
-      antigravityStore(),
-      AbortSignal.abort(),
-      undefined,
-      undefined,
-      undefined,
-      (url) => { opened.push(url) },
-    )).rejects.toThrow(/aborted/i)
-    expect(opened).toHaveLength(1)
-    expect(opened[0]).toMatch(/^https:\/\//)
-    expect(browserLaunches()).toEqual([])
-  })
-
-  it('不注入时走的仍是平台实现，生产行为未变', async () => {
-    // 反向证据：同一段流程，不注入就落到 oauth.ts 自己那份，会 spawn 浏览器。
-    await expect(loginAndSave(antigravityStore(), AbortSignal.abort())).rejects.toThrow(/aborted/i)
-    expect(browserLaunches()).toHaveLength(1)
-    expect(['cmd', 'open', 'xdg-open']).toContain(String(spawnSpy.mock.calls[0]![0]))
   })
 })

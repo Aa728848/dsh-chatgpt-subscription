@@ -99,15 +99,12 @@ const NATIVE_CONNECTOR = buildNativeConnector()
 /**
  * A connector that offers no ALPN at all.
  *
- * The native Antigravity client is a Go HTTP/1.1 client and sends no ALPN
- * extension; undici's built-in connector always advertises `http/1.1`. Offering
- * nothing does not change the protocol that ends up being spoken (the server
- * falls back to HTTP/1.1 either way) but it removes one extension the client this
- * route imitates does not have.
+ * This is available to callers that deliberately need a TLS hello without ALPN;
+ * undici's built-in connector otherwise advertises `http/1.1`. Offering nothing
+ * does not change the protocol spoken when the server falls back to HTTP/1.1.
  *
- * SNI is set explicitly: undici hands the connector an empty `servername`, and a
- * hello without SNI is refused by Cloud Code (measured: a bare
- * `SSL_ALERT_HANDSHAKE_FAILURE`).
+ * SNI is set explicitly because undici may hand the connector an empty
+ * `servername`; callers can supply the target hostname as a fallback.
  *
  * HTTP targets keep a plain TCP connect -- the ALPN question only exists for TLS.
  * `connectTls` / `connectTcp` are the seams that keep the shape testable.
@@ -733,7 +730,7 @@ export class ProxyManager {
    * A fetch that follows this manager's proxy policy, with optional protocol and
    * credential pins for one consumer.
    *
-   * `allowH2: false` keeps TLS at HTTP/1.1. Antigravity asks for it: the native
+   * `allowH2: false` keeps TLS at HTTP/1.1 for callers that require it; the native
    * `language_server` speaks HTTP/1.1, and the direct path this manager falls
    * back to is Node's global fetch, which offers http/1.1 only - without the pin
    * the same route would speak h2 behind a proxy and HTTP/1.1 without one.

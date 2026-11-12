@@ -7,10 +7,6 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FilePreferencesStore, preferencesPath } from '../src/host/common/file-preferences.ts'
 import { registerPreferenceStore } from '../src/host/preferences.ts'
 import {
-  FileModelSettingsStore as AntigravityModelSettingsStore,
-  registerAntigravityPreferenceStore,
-} from '../src/host/antigravity/token-store.ts'
-import {
   FileModelSettingsStore as CommandCodeModelSettingsStore,
   registerCommandCodePreferenceStore,
 } from '../src/host/command-code/token-store.ts'
@@ -102,21 +98,21 @@ describe('subscription preferences', () => {
       subagentDefaultModels: [
         { provider: ' minimax-code ', model: ' MiniMax-M3.1-Flash ' },
         route,
-        { provider: 'antigravity', model: 'gemini-3.8-flash' },
+        { provider: 'claude', model: 'claude-sonnet-4-6' },
       ],
     })).toMatchObject({
-      subagentDefaultModels: [route, { provider: 'antigravity', model: 'gemini-3.8-flash' }],
+      subagentDefaultModels: [route, { provider: 'claude', model: 'claude-sonnet-4-6' }],
     })
     // One entry per main model, merged rather than replaced.
     expect(await store.update({
       subagentModelsByMainModel: { 'deepseek-official/deepseek-flash': [route] },
     })).toMatchObject({ subagentModelsByMainModel: { 'deepseek-official/deepseek-flash': [route] } })
     const merged = await store.update({
-      subagentModelsByMainModel: { 'codex-chatgpt/gpt-6-astra': [{ provider: 'antigravity', model: 'claude-opus-4-6' }] },
+      subagentModelsByMainModel: { 'codex-chatgpt/gpt-6-astra': [{ provider: 'claude', model: 'claude-opus-4-6' }] },
     })
     expect(merged.subagentModelsByMainModel).toEqual({
       'deepseek-official/deepseek-flash': [route],
-      'codex-chatgpt/gpt-6-astra': [{ provider: 'antigravity', model: 'claude-opus-4-6' }],
+      'codex-chatgpt/gpt-6-astra': [{ provider: 'claude', model: 'claude-opus-4-6' }],
     })
     // A model id that legally contains a slash still round-trips: the split is
     // at the FIRST slash, so the provider half ends there.
@@ -126,7 +122,7 @@ describe('subscription preferences', () => {
     // `null` (or `[]`) clears exactly one entry and leaves the rest alone.
     const cleared = await store.update({ subagentModelsByMainModel: { 'deepseek-official/deepseek-flash': null } })
     expect(cleared.subagentModelsByMainModel).toEqual({
-      'codex-chatgpt/gpt-6-astra': [{ provider: 'antigravity', model: 'claude-opus-4-6' }],
+      'codex-chatgpt/gpt-6-astra': [{ provider: 'claude', model: 'claude-opus-4-6' }],
       'command-code/deepseek/deepseek-v4.1-flash': [route],
     })
     expect((await store.update({ subagentModelsByMainModel: { 'codex-chatgpt/gpt-6-astra': [] } }))
@@ -233,13 +229,6 @@ describe('subscription preferences', () => {
 
   it('hydrates every provider preference fallback from its settings file', async () => {
     const emptySettings = {}
-
-    await new AntigravityModelSettingsStore().updateSettings({ enabled: false, enabledModelIds: ['gemini-3.8-flash'] })
-    const antigravity = registerAntigravityPreferenceStore(emptySettings)
-    await vi.waitFor(() => expect(antigravity.status()).toMatchObject({
-      enabled: false,
-      enabledModelIds: ['gemini-3.8-flash'],
-    }))
 
     await new CommandCodeModelSettingsStore().updateSettings({ enabled: false, enabledModelIds: ['command-code-pick'] })
     const commandCode = registerCommandCodePreferenceStore(emptySettings)

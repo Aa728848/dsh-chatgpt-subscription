@@ -13,7 +13,7 @@
  * THE THREE THINGS EACH ONE EXISTS TO GET RIGHT
  *
  * 1. Units. The lines disagree: codex states Unix SECONDS (resetsAt),
- *    antigravity and cline-pass state ISO 8601 strings, kimi / minimax / qoder /
+ *    cline-pass states ISO 8601 strings, kimi / minimax / qoder /
  *    glm / step / command-code state milliseconds. Each normalizer knows which
  *    family it holds and converts exactly once — nothing here guesses a unit
  *    from a magnitude.
@@ -610,54 +610,6 @@ export function normalizeMinimaxCodeQuota(status: unknown): LineQuotaFacts {
 }
 
 /**
- * The Antigravity line's quota.
- *
- * Units: the harder one of the set. Each allowance is stated as
- * `remainingFraction` in [0, 1] (null when the service measured nothing, and
- * NOT zero), named windows arrive as `window: '5h' | 'weekly'`, and reset
- * instants as ISO 8601. Windows are grouped (Gemini models, third-party
- * models); each bucket's label is prefixed with its group once there is more
- * than one group, because "Weekly" twice on one card says nothing about which
- * allowance it is.
- *
- * @param status - The route's `value`.
- * @returns The facts.
- */
-export function normalizeAntigravityQuota(status: unknown): LineQuotaFacts {
-  const root = asRecord(status)
-  if (root === null) return unavailableFacts(null)
-  const quotaBody = asRecord(root.quota)
-  const groups = asRecords(quotaBody?.groups)
-  const seeds: WindowSeed[] = []
-  for (const group of groups) {
-    const groupName = groups.length > 1 ? asText(group.displayName) : null
-    for (const bucket of asRecords(group.buckets)) {
-      const minutes = namedWindowMinutes(bucket.window)
-      const windowName = standardWindowLabel(minutes) ?? asText(bucket.displayName)
-      seeds.push({
-        label: groupName === null || windowName === null ? windowName : groupName + ' · ' + windowName,
-        usedPercent: remainingFractionToUsed(bucket.remainingFraction),
-        windowMinutes: minutes,
-        resetsAt: asIsoToMs(bucket.resetTime),
-      })
-    }
-  }
-  const paidTier = asRecord(quotaBody?.paidTier)
-  const productTier = asRecord(quotaBody?.productTier)
-  return factsOf({
-    windows: windowsFrom(seeds),
-    credits: null,
-    resetCredits: null,
-    fetchedAt: asMs(quotaBody?.fetchedAt) ?? asMs(root.lastFetchedAt),
-    refreshing: root.quotaRefreshing === true,
-    error: firstText([root.quotaError]),
-    planLabel: firstText([quotaBody?.planLabel, paidTier?.name, productTier?.name]),
-    accountLabel: firstText([root.email]),
-    signedIn: root.authenticated,
-  })
-}
-
-/**
  * The Command Code line's quota.
  *
  * Units: two different meter shapes, and both are needed. `windows[]` is
@@ -1208,6 +1160,5 @@ export const LINE_QUOTA_NORMALIZERS: Readonly<Record<string, (status: unknown) =
   opendesign: normalizeOpenDesignQuota,
   'kimi-code': normalizeKimiCodeQuota,
   'minimax-code': normalizeMinimaxCodeQuota,
-  antigravity: normalizeAntigravityQuota,
   'command-code': normalizeCommandCodeQuota,
 }

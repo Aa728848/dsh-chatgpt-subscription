@@ -14,7 +14,6 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LocaleSnapshot } from '@deepseek-ai/dsh-client-locale/client'
 import type { ClaudeWebStatus } from '../src/shared/claude-contracts.ts'
-import { dictionaries as antigravityDicts, NS_ANTIGRAVITY } from '../src/client/antigravity/locales.ts'
 import { dictionaries as claudeDicts, NS_CLAUDE } from '../src/client/claude/locales.ts'
 import { dictionaries as clinePassDicts, NS_CLINE_PASS } from '../src/client/cline-pass/locales.ts'
 import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from '../src/client/command-code/locales.ts'
@@ -32,7 +31,6 @@ import { dictionaries as hubDicts, NS } from '../src/client/locales.ts'
 import { ClaudeSection } from '../src/client/claude/ClaudeSection.tsx'
 import { installLineLocale } from '../src/client/common/line-locale.ts'
 import { RU_LOCALE, installRussianLocale } from '../src/client/locales-ru/index.ts'
-import { dictionary as antigravityRu } from '../src/client/locales-ru/antigravity.ts'
 import { dictionary as claudeRu } from '../src/client/locales-ru/claude.ts'
 import { dictionary as clinePassRu } from '../src/client/locales-ru/cline-pass.ts'
 import { dictionary as commandCodeRu } from '../src/client/locales-ru/command-code.ts'
@@ -52,7 +50,6 @@ import { dictionary as workbuddyRu } from '../src/client/locales-ru/workbuddy.ts
 const NAMESPACES = [
   { ns: NS, zh: hubDicts.zh as Record<string, string>, en: hubDicts.en as Record<string, string>, ru: hubRu },
   { ns: NS_CLAUDE, zh: claudeDicts.zh as Record<string, string>, en: claudeDicts.en as Record<string, string>, ru: claudeRu },
-  { ns: NS_ANTIGRAVITY, zh: antigravityDicts.zh as Record<string, string>, en: antigravityDicts.en as Record<string, string>, ru: antigravityRu },
   { ns: NS_COMMAND_CODE, zh: commandCodeDicts.zh as Record<string, string>, en: commandCodeDicts.en as Record<string, string>, ru: commandCodeRu },
   { ns: NS_KIMI_CODE, zh: kimiDicts.zh as Record<string, string>, en: kimiDicts.en as Record<string, string>, ru: kimiRu },
   { ns: NS_MINIMAX_CODE, zh: minimaxDicts.zh as Record<string, string>, en: minimaxDicts.en as Record<string, string>, ru: minimaxRu },

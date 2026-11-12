@@ -2,7 +2,7 @@
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
-import { ANTIGRAVITY_IMAGE_TOOL_NAME, CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
+import { CODEX_IMAGE_TOOL_NAME } from '../src/compat.ts'
 import { CODEX_MODEL_CATALOG } from '../src/shared/model-catalog.ts'
 import { CodexSubscriptionSection, parseCapacity } from '../src/client/CodexSubscriptionSection.tsx'
 import { ProviderHubSection } from '../src/client/ProviderHubSection.tsx'
@@ -312,8 +312,7 @@ describe('client registration', () => {
 
     expect(injectedSlots).toEqual([
       'settings.section',
-      // order 35-41 这一段：ChatGPT 自己的胶囊，加上每一条线路各一格。
-      'conversation.input.right',
+      // ChatGPT 和既有线路各自保留一个胶囊槽位。
       'conversation.input.right',
       'conversation.input.right',
       'conversation.input.right',
@@ -332,9 +331,7 @@ describe('client registration', () => {
       // WorkBuddy 的胶囊只取新末尾（order 47）。
       'conversation.input.right',
       'tool.call.toolview',
-      // Antigravity 生图工具复用同一张生图卡片，按工具名再注册一次。
-      'tool.call.toolview',
-      // MiniMax 生成视频：第三张工具卡片，同一个 keyed 槽，按工具名再注册一次。
+      // MiniMax 生成视频：第二个媒体工具卡片，同一个 keyed 槽，按工具名再注册一次。
       'tool.call.toolview',
       // Code Mode 的 code_run 源码卡片，接在 MiniMax 视频卡片之后。
       'tool.call.toolview',
@@ -365,7 +362,6 @@ describe('client registration', () => {
     ])
     expect(registrations.filter((registration) => registration.name === 'conversation.input.right')).toEqual([
       expect.objectContaining({ name: 'conversation.input.right', id: 'codex-subscription-quota', order: 35 }),
-      expect.objectContaining({ name: 'conversation.input.right', id: 'antigravity-quota', order: 36 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'command-code-quota', order: 37 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'kimi-code-quota', order: 38 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'minimax-code-quota', order: 40 }),
@@ -384,7 +380,6 @@ describe('client registration', () => {
     ])
     expect(registrations.filter((registration) => registration.name === 'tool.call.toolview')).toEqual([
       expect.objectContaining({ key: CODEX_IMAGE_TOOL_NAME }),
-      expect.objectContaining({ key: ANTIGRAVITY_IMAGE_TOOL_NAME }),
       expect.objectContaining({ key: 'minimax_generate_video' }),
       expect.objectContaining({ key: CODE_RUN_TOOL_NAME }),
       // 派发卡片：按工具名占用整行，把 mandate 头拆成结构并留住拒绝码。
@@ -405,7 +400,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'antigravity', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy'] as const
+    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -528,7 +523,7 @@ describe('client registration', () => {
           conflict: null,
         } })
       }
-      if (url.startsWith('/antigravity/api') || url.startsWith('/claude/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api')) {
+      if (url.startsWith('/claude/api') || url.startsWith('/command-code/api') || url.startsWith('/kimi-code/api')) {
         return Response.json({ ok: true, value: {
           authenticated: false,
           account: null,
@@ -571,13 +566,13 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Antigravity', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
       // no enable switch on the host, renders none. Step Code joins the toggleable
       // side (it posts enabled to its own /settings like every other line).
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(12)
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(11)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.
@@ -585,7 +580,7 @@ describe('client registration', () => {
 
       // Drilling in replaces the overview with that line's section, mounted
       // under the back bar; leaving the page means the section unmounts.
-      for (const [index, apiPrefix] of [[1, '/antigravity/api/status'], [2, '/command-code/api/status'], [3, '/kimi-code/api/status'], [4, '/minimax-code/api/status'], [5, '/glm-coding-plan/api/status'], [6, '/claude/api/status']] as const) {
+      for (const [index, apiPrefix] of [[1, '/command-code/api/status'], [2, '/kimi-code/api/status'], [3, '/minimax-code/api/status'], [4, '/glm-coding-plan/api/status'], [5, '/claude/api/status']] as const) {
         const id: string = TAB_IDS[index]
         fetchMock.mockClear()
         await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[index]?.click() })
@@ -613,7 +608,7 @@ describe('client registration', () => {
       // and 8 others to ChatGPT wording (the sign-in button literally read
       // "使用 ChatGPT 登录"). Resolve `t` the way the real LocaleFace does — an
       // unknown key falls through to the key itself — and assert no key leaks.
-      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[4]?.click() })
+      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[3]?.click() })
       const minimaxText = container.querySelector('.dsh-hub-detail .dsha-page')?.textContent ?? ''
       expect(minimaxText).not.toContain('使用 ChatGPT 登录')
       expect(minimaxText).not.toContain(zh.signIn)
@@ -625,7 +620,7 @@ describe('client registration', () => {
       await act(async () => { container.querySelector<HTMLButtonElement>('.dsh-hub-back')?.click() })
 
       // The detail the user was last on survives a remount of the settings page.
-      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[6]?.click() })
+      await act(async () => { container.querySelectorAll<HTMLElement>('.dsh-hub-card')[5]?.click() })
       expect(container.querySelector('.dsh-hub-backbar-name')?.textContent).toBe('Claude')
       await act(async () => root.unmount())
       const remountRoot = createRoot(container)

@@ -282,13 +282,6 @@ export const LINE_DEFINITIONS: readonly LineDefinition[] = [
     normalize: LINE_QUOTA_NORMALIZERS['minimax-code'],
   },
   {
-    id: 'antigravity',
-    label: 'Antigravity',
-    statusPath: '/antigravity/api/status',
-    refreshPath: '/antigravity/api/quota',
-    normalize: LINE_QUOTA_NORMALIZERS.antigravity,
-  },
-  {
     id: 'command-code',
     label: 'Command Code',
     statusPath: '/command-code/api/status',

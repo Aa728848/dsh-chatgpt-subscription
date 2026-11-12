@@ -97,11 +97,9 @@ export class SecretServiceCredentialStore<T> implements CredentialStore<T> {
   /**
    * Label the desktop keyring manager shows for this entry.
    *
-   * Derived from the entry's own `service` attribute: it used to be a hardcoded
-   * 'DSH Antigravity OAuth' for every caller, so the ChatGPT, Claude, Qoder and
-   * Minimax pools all appeared in seahorse under Antigravity's name and a user
-   * could not tell which secret they were looking at. The label is display-only,
-   * so entries stored under the old one keep working.
+   * Derived from the entry's own `service` attribute rather than a shared
+   * hardcoded product name, so every pool remains distinguishable in the desktop
+   * keyring manager. The label is display-only, so existing entries keep working.
    */
   private get label(): string {
     return `DSH ${this.service}`

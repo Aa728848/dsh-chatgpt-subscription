@@ -538,7 +538,7 @@ async function performListing(options: {
 }): Promise<KimiCodeCatalogModel[]> {
   const region = options.region ?? await resolveRegion()
   // Sampled before the first await: a clear during this fetch must silence the
-  // publish below, exactly like the antigravity quota epoch does.
+  // publish below through the same epoch check used by the cached read path.
   const epoch = catalogCacheEpoch
   let accessToken = options.accessToken
 

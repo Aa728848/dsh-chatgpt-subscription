@@ -11,7 +11,6 @@ import {
 import {
   LINE_QUOTA_NORMALIZERS,
   minimaxAccountQuotaReading,
-  normalizeAntigravityQuota,
   normalizeClaudeQuota,
   normalizeClinePassQuota,
   normalizeCodexQuota,
@@ -116,25 +115,6 @@ describe('line quota normalizers', () => {
     expect(facts.quota?.fetchedAt).toBe(1792658462726)
     expect(facts.quota?.refreshing).toBe(true)
     expect(facts.planLabel).toBe('Token Plan')
-  })
-
-  it('inverts Antigravity remaining fractions and parses its ISO resets', () => {
-    const facts = normalizeAntigravityQuota(statusOf('antigravity'))
-    const windows = facts.quota?.windows ?? []
-    // Shortest window first, and both groups named once there is more than one.
-    expect(windows.map((window) => window.label)).toEqual([
-      'Gemini Models · 5 小时',
-      'Claude and GPT models · 5 小时',
-      'Gemini Models · 每周',
-      'Claude and GPT models · 每周',
-    ])
-    // remainingFraction 0.9784805 remaining => 2.15195% used.
-    expect(windows[0]?.usedPercent).toBeCloseTo(2.15195, 5)
-    expect(windows[0]?.windowMinutes).toBe(300)
-    expect(windows[2]?.usedPercent).toBeCloseTo(24.41002, 5)
-    expect(windows[2]?.resetsAt).toBe(Date.parse('2026-10-24T06:23:12Z'))
-    expect(facts.planLabel).toBe('Google AI Ultra')
-    expect(facts.accountLabel).toBe('cchen2422@gmail.com')
   })
 
   it('reports Command Code credit meters that measured nothing as no bars', () => {
@@ -374,26 +354,6 @@ describe('line quota normalizers', () => {
         expect(facts.error).toBe(null)
       }
     }
-  })
-
-  it('drops a window nobody measured instead of drawing it as empty', () => {
-    const facts = normalizeAntigravityQuota({
-      authenticated: true,
-      quota: {
-        groups: [{
-          displayName: 'Gemini Models',
-          buckets: [
-            { window: '5h', remainingFraction: null, resetTime: '2026-10-22T12:25:00Z' },
-            { window: 'weekly', remainingFraction: 0, resetTime: '2026-10-24T06:23:12Z' },
-          ],
-        }],
-      },
-    })
-    // Only one group, so no group prefix; the immeasurable bucket is gone and
-    // the real 0%-remaining one is a full bar.
-    expect(facts.quota?.windows).toEqual([
-      { label: '每周', usedPercent: 100, windowMinutes: 10080, resetsAt: Date.parse('2026-10-24T06:23:12Z') },
-    ])
   })
 
   it('derives a Qoder account share only from a bounded bucket', () => {
@@ -753,7 +713,7 @@ describe('line registry', () => {
     const ids = LINE_DEFINITIONS.map((definition) => definition.id)
     expect(ids).toEqual([
       'codex', 'claude', 'glm-coding-plan', 'step-code', 'qoder',
-      'cline-pass', 'opendesign', 'kimi-code', 'minimax-code', 'antigravity', 'command-code',
+      'cline-pass', 'opendesign', 'kimi-code', 'minimax-code', 'command-code',
     ])
     for (const definition of LINE_DEFINITIONS) {
       expect(definition.statusPath.startsWith('/')).toBe(true)

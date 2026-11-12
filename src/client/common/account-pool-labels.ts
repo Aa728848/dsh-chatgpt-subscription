@@ -67,7 +67,7 @@ export interface AccountPoolLabels {
   composerLabel: string
 }
 
-/** Chinese labels; the wording the Antigravity card shipped with. */
+/** Chinese labels shared by every provider account-pool card. */
 export const accountPoolZh: AccountPoolLabels = {
   accountPool: '账号管理',
   addAccount: '添加账号',

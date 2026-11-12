@@ -13,7 +13,7 @@
  *
  * ## 为什么是字符串而不是 CSS Modules
  *
- * 本插件其余线路（hub / antigravity / claude / kimi-code / step-code ……）全部走
+ * 本插件其余线路（hub / claude / kimi-code / step-code ……）全部走
  * `common/plugin-style.ts` 的 `installPluginStyle`：它把 CSS 作为一张带
  * `data-plugin` 归属的 <style> 注入，模块系统因此不会把这张表认领成别人的、
  * 也不会顺手删掉。CSS Modules 的 lightningcss 编译这条链路不在本插件的 tsdown

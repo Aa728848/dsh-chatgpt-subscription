@@ -64,7 +64,6 @@ describe('Step Code 线路身份', () => {
       'command-code',
       'claude-subscription',
       'kimi-code',
-      'antigravity',
       'ollama',
       'minimax-code',
       'glm-coding-plan',

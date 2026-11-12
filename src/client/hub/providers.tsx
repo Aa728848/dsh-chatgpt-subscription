@@ -20,7 +20,6 @@ import {
   STEP_CODE_ROUTE_PREFIX,
 } from '../../shared/step-code-contracts.ts'
 import { CodexSubscriptionSection } from '../CodexSubscriptionSection.tsx'
-import { AntigravitySection } from '../antigravity/AntigravitySection.tsx'
 import { CommandCodeSection } from '../command-code/CommandCodeSection.tsx'
 import { KimiCodeSection } from '../kimi-code/KimiCodeSection.tsx'
 import { MinimaxCodeSection } from '../minimax-code/MinimaxCodeSection.tsx'
@@ -116,12 +115,6 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: 'ChatGPT',
     setEnabled: setChatGptEnabled,
     renderDetail: ({ t, runtime }) => <CodexSubscriptionSection t={t} {...runtime} />,
-  },
-  {
-    id: 'antigravity',
-    name: 'Antigravity',
-    setEnabled: (enabled) => postLineSettings('/antigravity/api', { enabled }),
-    renderDetail: ({ onModelChange }) => <AntigravitySection onModelChange={onModelChange} />,
   },
   {
     id: 'command-code',

@@ -27,12 +27,10 @@ export const zh = {
   'pool.credentialRejected': '{provider} 账号的凭据已被拒绝，需要重新登录。',
   'pool.allUnavailable': '全部 {count} 个 {provider} 账号当前都不可用，且没有处于冷却中的账号。',
   'pool.allCoolingDown': '全部 {count} 个 {provider} 账号均处于配额限制或冷却中 (429)。最短预计在 {minutes} 分钟后解除冷却。',
-  // Codex-line and Antigravity failures the user reads in the conversation.
+  // Codex-line failures the user reads in the conversation.
   'codex.refresherNotReady': 'ChatGPT 凭据刷新服务尚未就绪',
   'codex.notSignedIn': '未登录 ChatGPT 账号，请在「设置 → 订阅服务 → ChatGPT」中添加并登录账号。',
   'codex.accountGone': 'ChatGPT 账号已不在号池中',
-  'antigravity.quotaExhausted': 'Antigravity 账号配额已耗尽或请求受限 (429 RESOURCE_EXHAUSTED)。请在插件设置页查看配额剩余百分比及重置倒计时。原始响应: {body}',
-  'antigravity.rateLimitedNoReset': 'Antigravity 上游返回 429 (RESOURCE_EXHAUSTED) 但未给出重置时间，因此按瞬时限流处理，不视为账号配额耗尽，也不会冷却该账号。原始响应: {body}',
   // WorkBuddy line: login flow, account pool refusals and the desktop-account rule.
   'wb.oauth.loginInitFailed': '{provider} 登录初始化失败（HTTP {status}）：{detail}',
   'wb.oauth.loginMissingState': '{provider} 登录响应缺少 state 或 authUrl',

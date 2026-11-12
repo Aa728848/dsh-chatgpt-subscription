@@ -12,7 +12,6 @@ import {
 } from '../src/host/command-code/token-store.ts'
 import { clearCachedCatalog, clearCachedQuota } from '../src/host/command-code/client.ts'
 import { PREFERENCES_NAMESPACE } from '../src/shared/preferences.ts'
-import { ANTIGRAVITY_PREFERENCES_NAMESPACE } from '../src/host/antigravity/token-store.ts'
 import { COMMAND_CODE_PREFERENCES_NAMESPACE } from '../src/host/command-code/token-store.ts'
 
 type SettingsValue = Record<string, unknown>
@@ -221,15 +220,14 @@ describe('Command Code plugin wiring', () => {
     expect(healed.body.value).toMatchObject({ serving: true, conflict: null })
   })
 
-  it('registers the three settings namespaces the plugin owns', () => {
+  it('registers the two remaining settings namespaces this fixture owns', () => {
     vi.spyOn(CommandCodeCredentialStore.prototype, 'read').mockResolvedValue(null)
     mountPlugin()
     const namespaces = [
       PREFERENCES_NAMESPACE,
-      ANTIGRAVITY_PREFERENCES_NAMESPACE,
       COMMAND_CODE_PREFERENCES_NAMESPACE,
     ]
-    expect(new Set(namespaces).size).toBe(3)
+    expect(new Set(namespaces).size).toBe(2)
     expect(namespaces).toContain('dsh-command-code')
   })
 })

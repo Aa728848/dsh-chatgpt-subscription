@@ -19,7 +19,6 @@ import { createHmac, randomBytes } from 'node:crypto'
 export const DIAGNOSTIC_PROVIDERS = [
   'codex-chatgpt',
   'claude-subscription',
-  'antigravity',
   'kimi-code',
   'minimax-code',
   'command-code',

@@ -48,7 +48,7 @@ export const MINIMAX_CODE_REASONING_EFFORTS: readonly MinimaxCodeReasoningEffort
  * 路由前缀（host 暴露、client 消费）。
  *
  * 与其余各订阅线路一致：每条线路把自己的设置面挂在 `/<line>/api` 下
- * （antigravity / claude / command-code / kimi-code 都是如此），
+ * （claude / command-code / kimi-code 都是如此），
  * 而不是挂到 Codex 那条线路的 `/api/dsh-chatgpt-subscription` 前缀下面。
  * 唯一的 `/api/dsh-chatgpt-subscription` 前缀属于 Codex 自己的路由表。
  */

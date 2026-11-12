@@ -2,7 +2,7 @@
 
 面向 **DeepSeek Harness（DSH）** 的多平台订阅接入与智能体运行时增强插件包。
 
-插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **13 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
+插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **12 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
 
 - **跨平台支持**：Windows、macOS、Linux（含无桌面密钥环的远程服务器部署模式）
 - **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.2** 全系列版本
@@ -34,7 +34,6 @@
 | --- | --- | --- | --- | --- |
 | `codex-chatgpt` | ChatGPT（Plus / Pro / Business 等） | OpenAI Responses / Lite | 浏览器 OAuth（`:1455`）/ 设备码 / 只读导入 Codex CLI | 实时 `/backend-api/codex/models` + 随包兜底 |
 | `claude-subscription` | Claude Pro / Max | Anthropic Messages | PKCE 手动粘贴 `<code#state>` / loopback 回调 / 只读收编 Claude Code | 实时 `/v1/models` + 随包 17 模型能力表 |
-| `antigravity` | Google Antigravity | Google Code Assist（Gemini） | Google OAuth（Web 界面或 CLI `antigravity-login`） | 内置路由表 + 项目可用模型探测 |
 | `kimi-code` | Kimi Code 编程订阅 | OpenAI Chat Completions（可选 Anthropic） | RFC 8628 设备码授权（国区 / 国际区） | 实时 `/v1/models` + 随包兜底 |
 | `minimax-code` | MiniMax Code 编程订阅 | Anthropic Messages | 复用/导入本机桌面端 `auth.json` 或 RFC 8628 设备码 | 随包硬编码目录（上游未开放订阅侧 `/v1/models`） |
 | `command-code` | Command Code | Anthropic（`claude-*`）/ OpenAI（其余） | 浏览器 loopback OAuth（`:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 109 条能力表 |
@@ -48,7 +47,7 @@
 
 > **合规与风险提示**：
 > - `claude-subscription` 通过订阅 OAuth 凭据模拟官方 CLI 身份转发请求，与 Anthropic 现行服务条款存在冲突，未获官方授权，存在账号被限制或封禁的风险。
-> - `antigravity`、`workbuddy-subscription`、`qoder` 等线路部分依赖非公开或逆向协议契约；`step-code` 额度面板使用非公开开发者中心接口（与对话请求完全隔离）。
+> - `workbuddy-subscription`、`qoder` 等线路部分依赖非公开或逆向协议契约；`step-code` 额度面板使用非公开开发者中心接口（与对话请求完全隔离）。
 > - 各线路详细的鉴权细节、验证置信度分档与宿主 API 路由请参阅 **[供应线路完整指南（docs/providers.md）](docs/providers.md)**。
 
 ---
@@ -56,7 +55,7 @@
 ## 核心特性
 
 ### 1. 统一订阅中心与多账号池调度
-- **聚合总览页**：在 **设置 → 订阅服务** 提供单页总览卡片，集中查看 13 条线路的启停状态、可用账号数与已勾选模型数，支持在线检测 npm 更新并一键升级插件（自动保护本地 `link:` 开发目录）。
+- **聚合总览页**：在 **设置 → 订阅服务** 提供单页总览卡片，集中查看 12 条线路的启停状态、可用账号数与已勾选模型数，支持在线检测 npm 更新并一键升级插件（自动保护本地 `link:` 开发目录）。
 - **统一号池内核**：所有线路共享多账号池架构，支持 **顺序耗尽（`sequential`）/ 轮流使用（`round-robin`）/ 固定当前（`sticky`）** 三种策略；遇到账号级 429 配额耗尽自动按重置窗口冷却换号，遇到全局瞬时过载则原地指数退避，防止抽干号池。
 - **本机登录态零侵入收编**：支持只读导入本机已登录的 Codex CLI、Claude Code、ZCode、StepCode、Qoder CLI、CodeBuddy 桌面端凭据，以及复用 MiniMax Code 桌面端登录态。导入前仅做 `stat` 存在性检查，绝不修改或删除第三方客户端文件，也不跨进程抢刷单次轮换令牌。
 - **桌面与无头服务器双存储模式**：默认使用系统加密密钥环（`keyring`：Windows DPAPI / macOS Keychain / Linux Secret Service）；无桌面环境的 Linux 服务器可一键切换至 DSH 标准凭据库（`credentials`：`$DSH_HOME/.credentials.yaml`，强制 `0600` 权限），告别安装 `gnome-keyring` 的繁琐配置。
@@ -141,7 +140,6 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 | `progress_update` | 全线路通用 | 在不中断当前回合的前提下向用户汇报结构化阶段进展，渲染于对话行与右侧进展面板 |
 | `dispatch_ledger` | 全线路通用（配合 `dispatch` 预设） | 只读查询委派账本并获取 Mandate v2 协议及预填好的可复制头部骨架 |
 | `codex_image_generate` | 需已登录 `codex-chatgpt` | 通过 ChatGPT 订阅生图接口生成 PNG 图片并写入会话附件 |
-| `antigravity_image_generate` | 需已登录 `antigravity` | 通过 Antigravity Gemini 生图模型生成支持多画幅比例的图片 |
 | `kimi_attach_video` | `kimi-code` 支持视频的模型 | 将本地视频路径或 URL 挂载进下一轮多模态请求 |
 | `cache_warmup_result` | `kimi-code` 会话 | 对被替换为 `ref://<session>/<sha256>` 预览的大工具结果按字节/行精确分页补读或释放 |
 | `minimax_generate_video` | `minimax-code` 会话 | 调用 MiniMax-H3 / H3-Max / Hailuo-2.3 生成视频（支持首尾帧与参考图/视频/音频）并下载至工作区 |

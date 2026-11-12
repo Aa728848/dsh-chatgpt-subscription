@@ -13,7 +13,6 @@
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import { NS_ANTIGRAVITY } from '../antigravity/locales.ts'
 import { NS_CLAUDE } from '../claude/locales.ts'
 import { NS_CLINE_PASS } from '../cline-pass/locales.ts'
 import { NS_COMMAND_CODE } from '../command-code/locales.ts'
@@ -28,7 +27,6 @@ import { NS_QODER } from '../qoder/locales.ts'
 import { NS_STEP_CODE } from '../step-code/locales.ts'
 import { NS_WORKBUDDY } from '../workbuddy/locales.ts'
 import { NS } from '../locales.ts'
-import { dictionary as antigravity } from './antigravity.ts'
 import { dictionary as claude } from './claude.ts'
 import { dictionary as clinePass } from './cline-pass.ts'
 import { dictionary as commandCode } from './command-code.ts'
@@ -80,7 +78,6 @@ export function installRussianLocale(ctx: ClientContext): void {
   const dictionaries: Array<readonly [string, Record<string, string>]> = [
     [NS, hub],
     [NS_CLAUDE, claude],
-    [NS_ANTIGRAVITY, antigravity],
     [NS_COMMAND_CODE, commandCode],
     [NS_KIMI_CODE, kimiCode],
     [NS_MINIMAX_CODE, minimaxCode],

@@ -12,7 +12,7 @@
 import { BRAND_MARKS, type BrandMarkKey, type BrandMarkSvg } from './brand-svg.ts'
 
 export type HubProviderId =
-  | 'chatgpt' | 'antigravity' | 'command-code' | 'kimi-code'
+  | 'chatgpt' | 'command-code' | 'kimi-code'
   | 'minimax-code' | 'glm-coding-plan' | 'claude' | 'ollama'
   | 'step-code' | 'cline-pass' | 'qoder' | 'opendesign' | 'workbuddy'
 
@@ -151,7 +151,6 @@ interface ProviderBrand {
 
 export const PROVIDER_BRANDS: Record<HubProviderId, ProviderBrand> = {
   chatgpt: { mark: 'openai', color: '#10A37F', tile: '#10A37F' },
-  antigravity: { mark: 'gemini', tile: '#3186FF' },
   'command-code': { monogram: '>_', color: '#7C6AEF', tile: '#7C6AEF' },
   'kimi-code': { mark: 'kimi', color: '#1F1F1F', tile: '#1783FF' },
   'minimax-code': { mark: 'minimax', tile: '#E2167E' },

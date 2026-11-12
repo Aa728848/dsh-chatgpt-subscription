@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { accountPoolEn, accountPoolZh, type AccountPoolLabels } from '../src/client/common/account-pool-labels.ts'
 import { en as chatgptEn, zh as chatgptZh } from '../src/client/locales.ts'
-import { en as antigravityEn, zh as antigravityZh } from '../src/client/antigravity/locales.ts'
 import { en as claudeEn, zh as claudeZh } from '../src/client/claude/locales.ts'
 import { en as commandCodeEn, zh as commandCodeZh } from '../src/client/command-code/locales.ts'
 import { en as kimiEn, zh as kimiZh } from '../src/client/kimi-code/locales.ts'
@@ -60,7 +59,6 @@ const SHARED_KEYS = [...SHARED_QUOTA_KEYS, ...SHARED_COOLDOWN_KEYS]
  */
 const TABS: Record<string, { zh: Record<string, string>; en: Record<string, string> }> = {
   chatgpt: { zh: chatgptZh, en: chatgptEn },
-  antigravity: { zh: antigravityZh, en: antigravityEn },
   claude: { zh: claudeZh, en: claudeEn },
   'command-code': { zh: commandCodeZh, en: commandCodeEn },
   'kimi-code': { zh: kimiZh, en: kimiEn },

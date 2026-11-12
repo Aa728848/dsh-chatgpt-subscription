@@ -2,7 +2,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { PLUGIN_ID } from '../src/client/common/plugin-style.ts'
 import { installStyles } from '../src/client/styles.ts'
-import { installAntigravityStyles } from '../src/client/antigravity/styles.ts'
 import { installClaudeStyles } from '../src/client/claude/styles.ts'
 import { installKimiCodeStyles } from '../src/client/kimi-code/styles.ts'
 import { installMinimaxCodeStyles } from '../src/client/minimax-code/styles.ts'
@@ -17,7 +16,6 @@ import { installSubagentStyles } from '../src/client/subagent/styles.ts'
 /** Every sheet this plugin injects, by its `data-plugin-css` sub-name. */
 const SHEETS = [
   { name: 'main', install: installStyles },
-  { name: 'antigravity', install: installAntigravityStyles },
   { name: 'claude', install: installClaudeStyles },
   { name: 'kimi-code', install: installKimiCodeStyles },
   { name: 'minimax-code', install: installMinimaxCodeStyles },
@@ -71,7 +69,6 @@ describe('plugin stylesheet ownership', () => {
     // The hub's default ChatGPT tab renders its controls with the shared
     // `.dsha-*` classes, whose base sheet the sibling provider modules install.
     installKimiCodeStyles()
-    installAntigravityStyles()
     const base = owned().filter((tag) => (tag.textContent ?? '').includes('.dsha-page'))
     expect(base.length).toBeGreaterThan(0)
     for (const tag of base) expect(tag.getAttribute('data-plugin')).toBe(PLUGIN_ID)
@@ -92,15 +89,16 @@ describe('plugin stylesheet ownership', () => {
     // module system then claimed it for an unrelated package. Installing must
     // adopt and re-stamp that element instead of leaving it to be deleted.
     const legacy = document.createElement('style')
-    legacy.id = 'dsh-antigravity-settings-style'
+    legacy.id = 'dsh-kimi-code-settings-style'
     legacy.dataset.plugin = 'some-other-package'
     legacy.textContent = '.dsha-page{display:flex}'
     document.head.append(legacy)
 
-    installAntigravityStyles()
+
+    installKimiCodeStyles()
 
     const adopted = [...document.querySelectorAll<HTMLStyleElement>('style')].filter(
-      (tag) => tag.getAttribute('data-plugin-css') === `${PLUGIN_ID}/antigravity`,
+      (tag) => tag.getAttribute('data-plugin-css') === `${PLUGIN_ID}/kimi-code`,
     )
     expect(adopted).toHaveLength(1)
     expect(adopted[0]).toBe(legacy)

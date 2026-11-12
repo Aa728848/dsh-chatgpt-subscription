@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest'
 import { installStyles } from '../src/client/styles.ts'
-import { installAntigravityStyles } from '../src/client/antigravity/styles.ts'
 import { installGlmCodingPlanStyles } from '../src/client/glm-coding-plan/styles.ts'
 import { installHubStyles } from '../src/client/hub/hub-styles.ts'
 import { installKimiCodeStyles } from '../src/client/kimi-code/styles.ts'
@@ -13,7 +12,6 @@ const SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription
 const HUB_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/hub"]'
 const CHECKLIST_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/model-checklist"]'
 const POOL_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/pool"]'
-const ANTIGRAVITY_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/antigravity"]'
 const KIMI_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/kimi-code"]'
 const GLM_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/glm-coding-plan"]'
 const WORKBUDDY_SELECTOR = 'style[data-plugin-css="@eddyskywalker/dsh-chatgpt-subscription/workbuddy"]'
@@ -50,7 +48,6 @@ afterEach(() => {
     HUB_SELECTOR,
     CHECKLIST_SELECTOR,
     POOL_SELECTOR,
-    ANTIGRAVITY_SELECTOR,
     KIMI_SELECTOR,
     GLM_SELECTOR,
     WORKBUDDY_SELECTOR,
@@ -109,9 +106,8 @@ describe('provider hub overview styles', () => {
     // The shared checklist owns the model rows now, so a line sheet that still
     // defined the old chip list would be carrying a rule nothing can match — the
     // same dead CSS the main sheet already shed.
-    installAntigravityStyles()
     installKimiCodeStyles()
-    for (const selector of [ANTIGRAVITY_SELECTOR, KIMI_SELECTOR]) {
+    for (const selector of [KIMI_SELECTOR]) {
       const css = document.querySelector<HTMLStyleElement>(selector)?.textContent ?? ''
       expect(css).not.toContain('.dsha-models{')
       expect(css).toContain('.dsha-models-hint{')
@@ -124,10 +120,9 @@ describe('provider hub overview styles', () => {
     // button it replaced the blue outright while the label stayed white, so a
     // hovered "保存设置" read as an empty pill. The exclusion is part of the
     // selector — the same shape the shared chip uses for its pressed state — so
-    // the two sheets that carry this vocabulary cannot drift apart on it.
-    installAntigravityStyles()
+    // the line sheets that carry this vocabulary cannot drift apart on it.
     installKimiCodeStyles()
-    for (const selector of [ANTIGRAVITY_SELECTOR, KIMI_SELECTOR]) {
+    for (const selector of [KIMI_SELECTOR]) {
       const css = sheetText(selector)
       // The unguarded rule is what made the fill disappear: it must be gone.
       expect(ruleBody(css, '.dsha-btn:hover:not(:disabled)')).toBeUndefined()

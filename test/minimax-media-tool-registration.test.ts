@@ -21,7 +21,6 @@ type SettingsValue = Record<string, unknown>
 
 const MEDIA_TOOLS = [
   'codex_image_generate',
-  'antigravity_image_generate',
   'kimi_attach_video',
   'minimax_understand_video',
   'minimax_generate_video',
@@ -122,7 +121,6 @@ describe('MiniMax media tools follow the line switch', () => {
     // The server-side image routes serve every deployment.
     expect(tools).not.toContain('progress_update')
     expect(tools).toContain('codex_image_generate')
-    expect(tools).toContain('antigravity_image_generate')
     expect(tools).toContain('kimi_attach_video')
   })
 

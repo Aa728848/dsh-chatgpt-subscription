@@ -24,7 +24,6 @@ const ROUTES = Object.keys(capabilityTable())
 describe('provider capability matrix (legacy inventory compatibility)', () => {
   it('covers every route this plugin ships', () => {
     expect(ROUTES.sort()).toEqual([
-      'antigravity',
       'claude',
       'codex-chatgpt',
       'command-code',

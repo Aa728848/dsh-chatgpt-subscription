@@ -12,7 +12,7 @@ $env:DSH_COMMAND_CODE_ZDR = '1'
 
 ### Concurrency
 
-`DSH_PROVIDER_CONCURRENCY` accepts a JSON object with `default`, `queueTimeoutMs`, and any of: `codex-chatgpt`, `claude`, `antigravity`, `kimi-code`, `minimax-code`, `command-code`, `ollama`. Values are nonnegative integers. A zero/missing limit disables limiting; a zero queue timeout disables that timeout. Unknown keys and invalid values fail configuration validation.
+`DSH_PROVIDER_CONCURRENCY` accepts a JSON object with `default`, `queueTimeoutMs`, and any of: `codex-chatgpt`, `claude`, `kimi-code`, `minimax-code`, `command-code`, `ollama`. Values are nonnegative integers. A zero/missing limit disables limiting; a zero queue timeout disables that timeout. Unknown keys and invalid values fail configuration validation.
 
 Limits apply per provider and credential fingerprint to generation POST requests, across models using the same credential. Slots remain held until response EOF, cancellation, abort, or error. Auth/token refresh/catalog/quota requests bypass the gate. Credentials are not logged; token rotation creates a new scope, so this is deliberately credential-scoped, not a guaranteed account-wide ceiling across refreshed tokens or separate host processes.
 
@@ -33,7 +33,7 @@ These are closed decisions. Each entry states why the feature is not implemented
 - Codex turn-state reuse: consumed host GenerateOptions has no reliable human-turn lifecycle identity. Continue request-local conservative fallback, not content heuristics.
 - Codex WebSocket / previous_response_id: subscription handshake and resumability require authorized gateway fixtures, with tool side-effect deduplication before any replay.
 - New provider server-side tool search, compaction, cache configuration, server multi-agent: public API support does not establish subscription gateway acceptance or host permission ownership. Keep unknown gates closed.
-- Kimi Files / MiniMax and Antigravity native video: require entitlement and endpoint/TTL/delete/account-scope evidence. Existing video tools are not counted as new Files API delivery.
+- Kimi Files and MiniMax native video: require entitlement and endpoint/TTL/delete/account-scope evidence. Existing video tools are not counted as new Files API delivery.
 - Ollama Local: separate trusted endpoint/SSRF/auth/VRAM scheduling scope; no arbitrary user-controlled outbound base URL is introduced.
 - Main-agent reserved capacity / whole-tree budget: requires host-provided root/agent identity and cancellation/budget hooks, not prompt or header guessing.
 - Live A/B latency, quota or cost claims: no authorization for paid/limited calls has been assumed.

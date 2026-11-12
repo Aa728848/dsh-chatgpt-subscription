@@ -216,7 +216,6 @@ export const dictionary: Record<LocaleKey, string> = {
   stopImportingHint: 'Остановка лишь заставляет плагин забыть копию входа локального CLI; собственный файл входа Codex CLI не удаляется и не меняется. Пул аккаунтов не позволяет удалять заимствованные учётные данные по одному, поэтому здесь импорт останавливается сразу для всех.',
   // Названия карточек в обзоре: по одному на каждого провайдера.
   'cardName.chatgpt': 'ChatGPT',
-  'cardName.antigravity': 'Antigravity',
   'cardName.command-code': 'Command Code',
   'cardName.kimi-code': 'Kimi Code',
   'cardName.minimax-code': 'MiniMax Code',

@@ -1,6 +1,6 @@
 # 供应线路完整指南与接口参考
 
-本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **13 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
+本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **12 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
 
 > 跨线路共用的号池调度、存储后端（`poolStorage`）、统一网络代理与环境变量详见 [部署配置与安全参考](configuration.md)。
 
@@ -12,17 +12,16 @@
 2. [本机登录态收编（Adopt）](#2-本机登录态收编adopt)
 3. [Codex（ChatGPT 订阅）：`codex-chatgpt`](#3-codexchatgpt-订阅codex-chatgpt)
 4. [Claude（订阅）：`claude-subscription`](#4-claude订阅claude-subscription)
-5. [Antigravity：`antigravity`](#5-antigravityantigravity)
-6. [Kimi Code：`kimi-code`](#6-kimi-codekimi-code)
-7. [MiniMax Code（编程订阅）：`minimax-code`](#7-minimax-code编程订阅minimax-code)
-8. [Command Code：`command-code`](#8-command-codecommand-code)
-9. [GLM（ZCode 账号）：`glm-coding-plan`](#9-glmzcode-账号glm-coding-plan)
-10. [Step Code（Step Plan 订阅）：`step-code`](#10-step-codestep-plan-订阅step-code)
-11. [Cline Pass：`cline-pass`](#11-cline-passcline-pass)
-12. [Qoder（订阅）：`qoder`](#12-qoder订阅qoder)
-13. [OpenDesign：`opendesign`](#13-opendesignopendesign)
-14. [WorkBuddy（CodeBuddy 订阅）：`workbuddy-subscription`](#14-workbuddycodebuddy-订阅workbuddy-subscription)
-15. [Ollama：`ollama`](#15-ollamaollama)
+5. [Kimi Code：`kimi-code`](#5-kimi-codekimi-code)
+6. [MiniMax Code（编程订阅）：`minimax-code`](#6-minimax-code编程订阅minimax-code)
+7. [Command Code：`command-code`](#7-command-codecommand-code)
+8. [GLM（ZCode 账号）：`glm-coding-plan`](#8-glmzcode-账号glm-coding-plan)
+9. [Step Code（Step Plan 订阅）：`step-code`](#9-step-codestep-plan-订阅step-code)
+10. [Cline Pass：`cline-pass`](#10-cline-passcline-pass)
+11. [Qoder（订阅）：`qoder`](#11-qoder订阅qoder)
+12. [OpenDesign：`opendesign`](#12-opendesignopendesign)
+13. [WorkBuddy（CodeBuddy 订阅）：`workbuddy-subscription`](#13-workbuddycodebuddy-订阅workbuddy-subscription)
+14. [Ollama：`ollama`](#14-ollamaollama)
 
 ---
 
@@ -34,7 +33,6 @@
 | --- | --- | --- | --- | --- | --- |
 | `codex-chatgpt` | Codex（ChatGPT 订阅） | OpenAI Responses / Responses Lite | 浏览器 OAuth（`localhost:1455`）/ 设备码 / 只读导入 Codex CLI | 实时 `/backend-api/codex/models` + 随包兜底 | `/api/dsh-chatgpt-subscription` |
 | `claude-subscription` | Claude（订阅） | Anthropic Messages | PKCE 手动粘贴 `<code#state>` / loopback 回调 / 只读收编 Claude Code | 实时 `/v1/models` + 随包能力表 | `/claude/api` |
-| `antigravity` | Antigravity | Google Code Assist（Gemini） | Google OAuth（Web 或 CLI `antigravity-login`） | 内置路由与能力表 + 项目目录探测 | `/antigravity/api` |
 | `kimi-code` | Kimi Code | OpenAI Chat Completions（可选 Anthropic Messages） | RFC 8628 设备码（`auth.kimi.com` / `.ai`） | 实时 `/v1/models` + 随包兜底 | `/kimi-code/api` |
 | `minimax-code` | MiniMax Code（编程订阅） | Anthropic Messages | 复用/导入桌面端 `auth.json` 或 RFC 8628 设备码 | 随包硬编码目录（4 款模型） | `/minimax-code/api` |
 | `command-code` | Command Code | Anthropic Messages（`claude-*`）/ OpenAI Chat Completions（其余） | 浏览器 loopback OAuth（`127.0.0.1:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 109 条能力表 | `/command-code/api` |
@@ -48,7 +46,7 @@
 
 > **合规与风险声明**：
 > - `claude-subscription` 使用订阅 OAuth 凭据模拟客户端身份转发请求，与 Anthropic 现行服务条款冲突，未获官方授权，存在账号受限或封禁风险。
-> - `antigravity`、`workbuddy-subscription`、`qoder` 等线路依赖非公开或逆向协议契约，上游可能随时收紧渠道校验或风控策略。
+> - `workbuddy-subscription`、`qoder` 等线路依赖非公开或逆向协议契约，上游可能随时收紧渠道校验或风控策略。
 > - `step-code` 的额度查询使用非公开开发者中心接口（与模型请求完全隔离，失败不影响对话）。
 > 请在使用前自行评估账号与合规风险。
 
@@ -106,7 +104,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/status` | 账号（脱敏）、连接状态、额度、抓取后端状态及本机 Codex CLI 文件存在性 |
-| `GET` | `/hub/overview` | 订阅中心首页 13 条线路的聚合只读摘要 |
+| `GET` | `/hub/overview` | 订阅中心首页 12 条线路的聚合只读摘要 |
 | `GET` / `POST` | `/update`（检测 / 应用） | 检查 npm 新版本并在支持的部署上一键升级插件 |
 | `POST` | `/i18n/locale` | 客户端向宿主同步当前界面语言（`zh` / `en` / `ru`） |
 | `POST` | `/login/start` | 启动浏览器回调 OAuth 登录 |
@@ -149,24 +147,7 @@
 
 ---
 
-## 5. Antigravity：`antigravity`
-
-- **鉴权与端点**：
-  - 通过 Google OAuth 登录（可在 Web 设置页发起，或在终端运行随包 CLI `npx antigravity-login` / `npx antigravity-login --logout`）；
-  - 默认按官方客户端顺序优先请求 `https://daily-cloudcode-pa.googleapis.com`，回退 `https://cloudcode-pa.googleapis.com`（支持 `DSH_ANTIGRAVITY_ENDPOINT` 覆盖），自动完成项目发现与 onboard。
-- **模型与多模态能力**：
-  - 内置 Gemini 4 Carbon、Gemini 4 Argon、Gemini 3.8 Flash、Gemini 3.5 / 3.1 Flash Lite、Gemini 3 Flash、Gemini 2.5 Pro / Flash、Claude Opus 5.5 / Sonnet 5.5（Code Assist 托管）、`gpt-oss-120b` 等模型路由，严格一对一映射运行时 ID（不做静默跨模型降级）；
-  - 支持图片输入（单次请求 base64 负载上限 **12 MiB**，超限按最旧优先替换为文本占位）；
-  - 工具往返完整保留 Gemini 原始思考签名（thought signature）；
-  - 注册 `antigravity_image_generate` 工具，支持通过已登录的 Antigravity 账号直接生成图片并存入 DSH 附件系统；可选 14 种比例与 0.5K/1K/2K/4K 分辨率，新参数仅在显式提供时发送，上游拒绝时明确报错。
-
-### 宿主路由（`/antigravity/api`）
-
-`GET /status` · `POST /login` · `GET /login/status` · `POST /logout` · `GET|POST /quota` · `GET|POST /models` · `POST /accounts`
-
----
-
-## 6. Kimi Code：`kimi-code`
+## 5. Kimi Code：`kimi-code`
 
 - **鉴权与区域**：
   - 专用于 **Kimi Code 订阅**（`https://api.kimi.com/coding/v1`，与 Moonshot 按量开放平台互不通用）；
@@ -180,7 +161,7 @@
   - **粘性双水位内联图片预算**：默认 20 MiB 高水位 / 10 MiB 低水位（`DSH_KIMI_CODE_MAX_IMAGE_BYTES` 可覆盖），只计量实际发送的 base64 字节；OpenAI 协议下成功上传的 `ms://` 图片引用不占该预算，上传失败回退为内联时重新计量。已淘汰旧图持久化记录，避免后续轮次反复重算打断前缀缓存；
   - **请求体守卫与自动压缩衔接**：1M 档模型默认上限 **24 MiB**、256K 档默认 **2 MiB**（`DSH_KIMI_CODE_MAX_BODY_BYTES` 可覆盖），超限抛出 `CONTEXT_WINDOW_EXCEEDED` 交由 DSH 自动压缩重试；另支持 `DSH_KIMI_CODE_BYTES_PER_TOKEN` 提前压缩折算；
   - **缓存预热与等待策略**：自动监测约 25 分钟前缀缓存存活窗口，配合 `cache-warmup` 子系统（大结果 `ref://` 预览 + `cache_warmup_result` 精确分页补读）、主代理等待子代理期间的可选轻量续热，以及四段式重复工具调用刹车（`KIMI_CODE_REPEAT_BREAKER`）。
-  - **共享化边界**：结果预览与分级重复提醒可覆盖其他受控线路；静态前缀排序和 in-flight 冷启动协调已复用到 Codex、Antigravity、Step、Claude、MiniMax。账号亲和、warm 跳过、等待续热和 hosted media 仍按各线路证据与 `promptCacheOverrides` 启用，Kimi 的 TTL、协议字段和错误词表不向外复制。
+  - **共享化边界**：结果预览与分级重复提醒可覆盖其他受控线路；静态前缀排序和 in-flight 冷启动协调已复用到 Codex、Step、Claude、MiniMax。账号亲和、warm 跳过、等待续热和 hosted media 仍按各线路证据与 `promptCacheOverrides` 启用，Kimi 的 TTL、协议字段和错误词表不向外复制。
 - **额度窗口**：展示 5 小时、7 天、月度会员共享池、月度 Kimi Code 池四个窗口与加油包余额。
 
 ### 宿主路由（`/kimi-code/api`）
@@ -189,7 +170,7 @@
 
 ---
 
-## 7. MiniMax Code（编程订阅）：`minimax-code`
+## 6. MiniMax Code（编程订阅）：`minimax-code`
 
 - **鉴权与桌面端共生**：
   - 接入 MiniMax Code 编程订阅 Anthropic Messages 接口（国区 `agent.minimax.cn` / 国际区 `agent.minimax.io`，仅使用 `Bearer` 认证）；
@@ -209,7 +190,7 @@
 
 ---
 
-## 8. Command Code：`command-code`
+## 7. Command Code：`command-code`
 
 - **鉴权与双协议分发**：
   - 支持浏览器 loopback OAuth（`127.0.0.1:5959` 起顺延）或手动粘贴 Studio API Key，保存前均经 `/alpha/whoami` 校验；
@@ -225,7 +206,7 @@
 
 ---
 
-## 9. GLM（ZCode 账号）：`glm-coding-plan`
+## 8. GLM（ZCode 账号）：`glm-coding-plan`
 
 - **鉴权与两区隔离**：
   - 面向 **GLM Coding Plan**（支持付费套餐与新用户 5 天免费体验额度），支持国区 BigModel（`bigmodel.cn` / `open.bigmodel.cn`）与国际区 Z.ai（`api.z.ai`），两区账号在号池内严格按区域隔离；
@@ -242,7 +223,7 @@
 
 ---
 
-## 10. Step Code（Step Plan 订阅）：`step-code`
+## 9. Step Code（Step Plan 订阅）：`step-code`
 
 - **鉴权方式**：
   - 支持国区 `api.stepfun.com` 与国际区 `api.stepfun.ai`（按凭据 `profile` 严格隔离）；
@@ -259,7 +240,7 @@
 
 ---
 
-## 11. Cline Pass：`cline-pass`
+## 10. Cline Pass：`cline-pass`
 
 - **鉴权方式**：
   - 默认通过 **WorkOS 设备码 OAuth** 登录，聊天请求携带 `Authorization: Bearer workos:<accessToken>` 并支持 `refresh_token` 自动轮换续期；
@@ -276,7 +257,7 @@
 
 ---
 
-## 12. Qoder（订阅）：`qoder`
+## 11. Qoder（订阅）：`qoder`
 
 - **鉴权与双区隔离**：
   - 支持全球区 `qoder.com` 与中国站 `qoder.com.cn`（凭据严格绑定区域）；
@@ -292,7 +273,7 @@
 
 ---
 
-## 13. OpenDesign：`opendesign`
+## 12. OpenDesign：`opendesign`
 
 - **鉴权与双钥机制**：
   - 官方明确支持包括 DSH 在内的第三方编码 Agent 接入；
@@ -308,7 +289,7 @@
 
 ---
 
-## 14. WorkBuddy（CodeBuddy 订阅）：`workbuddy-subscription`
+## 13. WorkBuddy（CodeBuddy 订阅）：`workbuddy-subscription`
 
 - **鉴权与区域**：
   - 支持国区 `copilot.tencent.com` 与国际区 `www.workbuddy.ai`（按凭据 `domain` 绑定区域）；
@@ -323,7 +304,7 @@
 
 ---
 
-## 15. Ollama：`ollama`
+## 14. Ollama：`ollama`
 
 - **定位与鉴权**：
   - 对接 **Ollama Cloud**（`https://ollama.com`），使用在 `https://ollama.com/settings/keys` 创建的静态 API Key（`Bearer` 认证，支持多 Key 号池轮换）；不开放任意本地/内网自定义出站地址，确保 SSRF 边界清晰。

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { AntigravityAdapter } from '../src/host/antigravity/adapter.ts'
 import { KimiCodeAdapter } from '../src/host/kimi-code/adapter.ts'
 import { MinimaxCodeAdapter } from '../src/host/minimax-code/adapter.ts'
 import { StepCodeAdapter } from '../src/host/step-code/adapter.ts'
@@ -24,7 +23,6 @@ const KIMI_LARGE_TARGET = { width: 2000, height: 1000, maxPixels: 2_000_000, max
 
 describe('adapter image request targets', () => {
   for (const [provider, model, adapter, largeTarget] of [
-    ['antigravity', 'gemini-3.8-flash', new AntigravityAdapter(), SHARED_LARGE_TARGET],
     ['kimi-code', 'k3', new KimiCodeAdapter(), KIMI_LARGE_TARGET],
     ['minimax-code', 'MiniMax-M3.1-Flash', new MinimaxCodeAdapter(), SHARED_LARGE_TARGET],
     ['step-code', 'step-3.5-flash', new StepCodeAdapter(), SHARED_LARGE_TARGET],

@@ -23,7 +23,6 @@ import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './host/common/idle-watchdog.ts'
 import { HostLocaleRuntime, installHostLocale } from './host/common/i18n/index.ts'
 import { webServerOrigin } from './host/common/webserver-compat.ts'
 import { createCodexImageTool } from './host/codex-images.ts'
-import { createAntigravityImageTool } from './host/antigravity/image-tool.ts'
 import { createCodexSearchProvider } from './host/codex-search.ts'
 import { OAuthService } from './host/oauth-service.ts'
 import { ProxyManager } from './host/proxy-manager.ts'
@@ -45,26 +44,9 @@ import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
 import { startWebProviderReconciler } from './host/web-provider-reconciler.ts'
 import { UsageService } from './host/usage-service.ts'
 import { registerWidgetBoard, type WidgetBoardContext } from './host/widget-board/provider.ts'
-import { AntigravityAdapter } from './host/antigravity/adapter.ts'
-import { registerAntigravityRoutes } from './host/antigravity/routes.ts'
-import {
-  FileCredentialStore,
-  FileModelSettingsStore,
-  registerAntigravityPreferenceStore,
-  credentialPath,
-  modelSettingsPath,
-} from './host/antigravity/token-store.ts'
-import { AccountPoolStore } from './host/antigravity/account-pool.ts'
-import { refreshHubVersion } from './host/antigravity/client-version.ts'
 import { configurePoolStorage } from './host/common/pool-storage.ts'
 import { PoolStorageSettings } from './host/common/pool-storage-settings.ts'
 import { asCredentialsSeam } from './host/common/credentials-compat.ts'
-import {
-  ANTIGRAVITY_ABSENT_HEADERS,
-  PROVIDER_ID as ANTIGRAVITY_PROVIDER_ID,
-  PROVIDER_NAME as ANTIGRAVITY_PROVIDER_NAME,
-  STREAM_FIRST_OUTPUT_TIMEOUT_MS as ANTIGRAVITY_FIRST_OUTPUT_TIMEOUT_MS,
-} from './host/antigravity/types.ts'
 import { CommandCodeAdapter } from './host/command-code/adapter.ts'
 import { CommandCodeAccountPool } from './host/command-code/account-pool.ts'
 import { registerCommandCodeRoutes } from './host/command-code/routes.ts'
@@ -323,8 +305,8 @@ export interface Config {
   /** 工具失控治理总开关：各线路提醒重复调用；只有 Kimi 保留第 12 次强停。 */
   toolRunawayGuard?: Volatile<boolean>
   /**
-   * 图片/视频工具总开关：控制 Codex/Antigravity 生图、Kimi 视频挂载，以及
-   * MiniMax 视频生成与理解这五个工具的注册。默认开启。
+   * 图片/视频工具总开关：控制 Codex 生图、Kimi 视频挂载，以及
+   * MiniMax 视频生成与理解这四个工具的注册。默认开启。
    *
    * volatile 只负责允许设置表单保存；apply 只读取一次，不在会话中途热切换。
    * 修改后重载插件或重启 DSH；既有会话在工具表实际变化后重建一次前缀。
@@ -433,18 +415,6 @@ export interface Config {
    */
   codexStreamIdleTimeoutMs?: number
   /**
-   * Budget for the wait before the antigravity route's first chunk, in milliseconds.
-   *
-   * That gap is thinking rather than silence: a model that reasons before it
-   * speaks can produce no bytes for minutes after the response headers, and the
-   * shared two-minute idle budget reported those turns as stalled streams and
-   * retried them from the beginning. Only the wait before the first chunk is
-   * relaxed — the gaps between chunks keep the shared budget, so a stream that
-   * really stalled is still called promptly. Setting it equal to the idle budget
-   * collapses the seam back to a single window.
-   */
-  antigravityFirstOutputTimeoutMs?: number
-  /**
    * Where every provider line's account pool is stored.
    *
    * `keyring` (default) is the platform store — DPAPI on Windows, the Keychain on
@@ -521,17 +491,6 @@ export interface ConfigInput {
   /** Idle budget for one Codex Responses stream, in milliseconds. */
   codexStreamIdleTimeoutMs?: number
   /**
-   * Budget for the wait before the antigravity route's first chunk, in milliseconds.
-   *
-   * The gap that matters is thinking, not a stall: lines that reason before they
-   * speak can stay silent well past the shared two-minute idle budget, and that
-   * silence was reported as a dead stream and retried from the beginning. The
-   * budget between chunks stays the shared one, so this relaxation cannot delay
-   * the verdict on a stream that really did stall. Setting it equal to the shared
-   * budget collapses the seam back to a single window.
-   */
-  antigravityFirstOutputTimeoutMs?: number
-  /**
    * 号池存储后端：`keyring`（默认，平台密钥环）或 `credentials`（DSH 凭据库，服务器推荐）。
    *
    * 没有 `auto`：按探测结果换存储会让一个号池在两份存储之间来回搬，而「号池搬家了」
@@ -582,7 +541,7 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 注册期开关：volatile 只让设置写入器接受保存，apply 仍只读取一次，
   // 不在会话中途改变工具表。默认 true 保持既有工具表与缓存前缀不变。
   mediaTools: z.boolean().default(true).volatile()
-    .description('注册图片/视频工具：Codex/Antigravity 生图、Kimi 视频挂载、MiniMax 视频生成与理解；默认开启。修改后重载插件或重启 DSH，Kimi 既有会话在工具表变化后会重建一次前缀缓存。'),
+    .description('注册图片/视频工具：Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解；默认开启。修改后重载插件或重启 DSH，Kimi 既有会话在工具表变化后会重建一次前缀缓存。'),
 
   // Agent Teams 策略段守卫：把内置 `team:policy` 段从 system 里摘掉，改成切开关时
   // 尾部投递一次，避免中途开团队协作时整段前缀重建。默认开启——它不增加任何工具
@@ -610,12 +569,6 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('按线路覆盖缓存语义（ttlMs、scope、coldStart、affinity、waitWarmup 等）；仅用于已有证据的部署，修改后重载插件。'),
   // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
   codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
-  // The antigravity route serves thinking models (gemini-4-carbon), which can stay
-  // silent well past the shared budget before their first chunk while they reason.
-  // Still strictly inside the transport's 300 s stream deadline, so a dead
-  // connection ends with this line's verdict rather than undici's.
-  antigravityFirstOutputTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1)
-    .default(ANTIGRAVITY_FIRST_OUTPUT_TIMEOUT_MS),
   // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
   // Service），现有安装零变化；没有桌面密钥环的服务器要显式选 `credentials`，
   // 把号池放进 DSH 自己的凭据库——原先这里在 Linux 上硬编码 Secret Service，
@@ -831,11 +784,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // 值只进工具结果与守卫校验——不进 system prompt，前缀缓存零漂移。
     promptRef: promptRefDescriptor(canonicalPromptSourceText(DISPATCH_PRESET)).ref,
   }), 'dsh-chatgpt-subscription: dispatch ledger')
-
-  const antigravityStore = new FileCredentialStore()
-  const antigravityAccountPool = new AccountPoolStore(undefined, undefined, antigravityStore)
-  const antigravityModelSettings = new FileModelSettingsStore()
-  const antigravityPreferences = registerAntigravityPreferenceStore(ctx.settings, antigravityModelSettings)
 
   const commandCodeStore = new CommandCodeCredentialStore()
   // One credential per Command Code key, with the pre-pool file projected as the
@@ -1063,61 +1011,13 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       logger: ctx.logger,
     })
     const proxyFetch = proxyManager.createFetch()
-    // Antigravity is pinned to HTTP/1.1 on the proxied path too. The native
-    // `language_server` speaks HTTP/1.1 (one credential per process, keep-alive
-    // sized against GFE's 240 s HTTP/1.1 cutoff), and this manager's direct path
-    // is Node's global fetch, which offers http/1.1 only -- without the pin one
-    // route would speak h2 behind a proxy and HTTP/1.1 without one.
-    // `stripHeaders` drops the two browser headers `fetch` adds and the direct
-    // path's `omitAlpn` keeps the hello free of an ALPN extension, both measured
-    // against the native client's Go shape.
-    const antigravityProxyFetch = proxyManager.createFetch({
-      allowH2: false,
-      credentialPools: true,
-      stripHeaders: ANTIGRAVITY_ABSENT_HEADERS,
-      omitAlpn: true,
-    })
-    // The Hub release Cloud Code gates its catalogue on is read once from the
-    // updater manifest: not awaited, because the first requests only need a
-    // usable version and the built-in one already is.
-    void refreshHubVersion(antigravityProxyFetch)
     const providerLimits = readModelRequestLimits()
-    const baseFetchFor = (provider: ControlledProvider) => (
-      provider === 'antigravity' ? antigravityProxyFetch : proxyFetch
-    )
     const modelFetch = Object.fromEntries(CONTROLLED_PROVIDERS.map(provider => [
-      provider, createControlledModelFetch(createDiagnosticFetch(baseFetchFor(provider), {
+      provider, createControlledModelFetch(createDiagnosticFetch(proxyFetch, {
         provider,
         onRecord: record => ctx.logger.info('[provider-diagnostics] ' + JSON.stringify(record)),
       }), { provider, limits: providerLimits }),
     ])) as Record<ControlledProvider, typeof fetch>
-    const antigravityAdapter = new AntigravityAdapter(
-      antigravityStore,
-      antigravityModelSettings,
-      antigravityPreferences,
-      // The route declares image input, so DSH hands it durable image blocks
-      // that only the attachment service can turn into wire bytes.
-      {
-        fetchFn: modelFetch.antigravity,
-        attachments: ctx.attachments,
-        promptCache: promptCacheOverrides.antigravity,
-        firstOutputTimeoutMs: pluginConfig.antigravityFirstOutputTimeoutMs,
-      },
-      antigravityAccountPool,
-    )
-    const antigravityClaim = claimProviderRoute(ctx, {
-      providerId: ANTIGRAVITY_PROVIDER_ID,
-      label: ANTIGRAVITY_PROVIDER_NAME,
-      adapter: antigravityAdapter,
-    })
-    const disposeAntigravityRoutes = registerAntigravityRoutes(
-      ctx,
-      antigravityStore,
-      antigravityModelSettings,
-      antigravityPreferences,
-      antigravityProxyFetch,
-      antigravityAccountPool,
-    )
     const disposeCommandCodeRoutes = registerCommandCodeRoutes(
       ctx,
       commandCodeStore,
@@ -1508,7 +1408,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           opendesign: openDesignLine.accountPool,
           'kimi-code': kimiCodeAccountPool,
           'minimax-code': minimaxCodeAccountPool,
-          antigravity: antigravityAccountPool,
           'command-code': commandCodeAccountPool,
           workbuddy: workBuddyAccountPool,
         },
@@ -1686,7 +1585,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const routable = (accounts: readonly { authStatus?: string }[]): boolean =>
       accounts.some((account) => account.authStatus === undefined || account.authStatus === 'ok')
     // What the overview card's "N/M models" counts. Every line already holds its
-    // catalog: Antigravity, Command Code, Kimi Code and Ollama persist the last
+    // catalog: Command Code, Kimi Code and Ollama persist the last
     // successful sync in their model settings, while Claude and MiniMax Code
     // keep it in memory. All of these are reads of what the line
     // already has — opening the settings page must not trigger a catalog fetch —
@@ -1706,23 +1605,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
             authenticated: routable(accounts),
             enabledModelCount: current.visibleModelIds.length,
             totalModelCount: CODEX_MODEL_CATALOG.length,
-          }
-        },
-      },
-      {
-        id: 'antigravity',
-        providerId: ANTIGRAVITY_PROVIDER_ID,
-        canToggle: true,
-        read: async () => {
-          const current = antigravityPreferences.status()
-          const accounts = await antigravityAccountPool.listAccounts().catch(() => [])
-          const total = catalogTotal((await antigravityModelSettings.read()).catalogModels.length)
-          return {
-            enabled: current.enabled !== false,
-            accountCount: accounts.length,
-            authenticated: routable(accounts),
-            enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
-            totalModelCount: total,
           }
         },
       },
@@ -1932,16 +1814,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const disposeImageTool = mediaToolsEnabled
       ? ctx.tools.register(createCodexImageTool(oauth, ctx.attachments, { fetchFn: proxyFetch }))
       : () => undefined
-    // gemini-3.1-flash-image is served as a tool, not a chat model: the harness
-    // accepts text-only assistant output, so only a tool result can carry the image.
-    const disposeAntigravityImageTool = mediaToolsEnabled
-      ? ctx.tools.register(createAntigravityImageTool(
-        antigravityAccountPool,
-        antigravityStore,
-        ctx.attachments,
-        { fetchFn: antigravityProxyFetch, isEnabled: () => antigravityPreferences.status().enabled !== false },
-      ))
-      : () => undefined
     // The video ingress for the Kimi route. Registered here because the tool
     // needs the plugin context to resolve the calling session's route before it
     // agrees to attach anything.
@@ -2030,7 +1902,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposePreferenceWatch()
       disposeWebProviderReconciler()
       disposeImageTool()
-      disposeAntigravityImageTool()
       disposeVideoTool()
       disposeMinimaxUnderstandVideoTool()
       disposeMinimaxGenerateVideoTool()
@@ -2038,8 +1909,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeRoutes()
       disposeHubOverview()
       disposeUpdateRoutes()
-      disposeAntigravityRoutes()
-      antigravityClaim.dispose()
       disposeOllamaRoutes()
       ollamaClaim.dispose()
       disposeCommandCodeRoutes()
@@ -2160,7 +2029,6 @@ export { AccountPoolCore, normalizeRotationStrategy } from './host/common/accoun
 export { dshHomeDir } from './host/common/home.ts'
 export { CodexChatGptAdapter } from './host/adapter.ts'
 export { createCodexImageTool } from './host/codex-images.ts'
-export { createAntigravityImageTool } from './host/antigravity/image-tool.ts'
 export { createCodexSearchProvider } from './host/codex-search.ts'
 export { createCodexFetchProvider } from './host/codex-fetch.ts'
 export { SearchProviderSwitcher, type SearchProviderSwitcherStatus } from './host/search-provider-switcher.ts'
@@ -2172,7 +2040,6 @@ export { LinuxFileTokenStore } from './host/token-store-linux.ts'
 export { WindowsDpapiTokenStore } from './host/token-store-windows.ts'
 export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts'
 
-export { AntigravityAdapter } from './host/antigravity/adapter.ts'
 export {
   CommandCodeAccountPool,
   commandCodePoolPath,
@@ -2332,13 +2199,6 @@ export {
   KIMI_CODE_MODELS,
   kimiCodeModelDef,
 } from './host/kimi-code/model-catalog.ts'
-export {
-  FileCredentialStore,
-  FileModelSettingsStore,
-  credentialPath,
-  modelSettingsPath,
-} from './host/antigravity/token-store.ts'
-export { AccountPoolStore } from './host/antigravity/account-pool.ts'
 // --- GLM（ZCode 账号）-------------------------------------------------------------
 export {
   GlmCodingPlanAdapter,
@@ -2417,8 +2277,6 @@ export {
   loadCatalog as loadGlmCodingPlanCatalog,
   verifyCodingPlanKey as verifyGlmCodingPlanKey,
 } from './host/glm-coding-plan/client.ts'
-export { loginAndSave, beginWebLogin, refreshAntigravityToken } from './host/antigravity/oauth.ts'
-export { clearCachedQuota, fetchAccountQuota, getCachedQuota } from './host/antigravity/client.ts'
 
 // --- MiniMax Code -----------------------------------------------------------------
 export { MinimaxCodeAdapter, classifyMinimaxFailure, MINIMAX_CODE_RETRY_POLICY_CONFIG } from './host/minimax-code/adapter.ts'
