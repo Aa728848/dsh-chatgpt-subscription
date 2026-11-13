@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.73.0 - 2026-11-13
 - **[antigravity-acp / 读图修复] `read_image` 的像素现在真的会回到 agent 手里**
   - **问题**：用户反馈这条线路「读不了图」。工具调用链本身是通的——`read_image` 确实经回环 MCP 桥交回 DSH 执行——但结果回传把图片丢了：`collectToolResults` 只取 `type === 'text'` 的块，图片块被过滤成空串，桥又只能发 `{type:'text'}`，agent 收到的是一条**空内容**，看起来就和「工具什么都没返回」一样。
   - **修复**：结果收集递归取出 `image` 块，用与提示词相同的 `imageBlockToInline` 解析（受 12 MiB 内联预算约束）；`McpBridge` 按 MCP 规范回 `text` + 每个 `{type:'image', data, mimeType}`，纯图片结果也带一条非空文本占位，避免出现空 `content` 数组。
