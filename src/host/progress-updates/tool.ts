@@ -23,8 +23,8 @@ export const DISABLED_OUTPUT_TEXT = 'Progress updates are disabled; the update w
 /** 工具描述的最终全文。 */
 export const PROGRESS_UPDATE_DESCRIPTION = [
   'Report progress to the user without ending your turn.',
-  'For L1/L2 and other multi-step work, two updates are part of the job, not optional narration: send one BEFORE your first tool call (the plan),'
-    + ' and one BEFORE your final answer (what was done and what was verified). L0 single-point work does not require either update.',
+  'For L2, delegated, or long-running multi-step work, two updates are part of the job, not optional narration: send one BEFORE your first tool call (the plan),'
+    + ' and one BEFORE your final answer (what was done and what was verified). L0 single-point work and quick local L1 tasks do not require either update.',
   'Use it during the rest of the work so the user can follow along and correct course early:',
   'state your plan near the beginning of the task (what you will do, and in what order);',
   'report a meaningful conclusion the moment you have it (a key fact, the root cause, a verified assumption) rather than narrating every step;',
@@ -32,7 +32,7 @@ export const PROGRESS_UPDATE_DESCRIPTION = [
   'explain what you are waiting for before a long wait such as a test run, an install, or a build;',
   'and say what blocks you — and what you will try next, or what you need from the user — when you are stuck.',
   'Each update has one short title line (plain text, no Markdown, no trailing period) with the details in the message body.',
-  'Do not repeat a status that has not changed. Use exactly one opening and one closing update per multi-step task; do not manufacture either for L0 single-point work.',
+  'Do not repeat a status that has not changed. Use at most one opening and one closing update per complex multi-step task; do not manufacture either for L0 single-point or quick L1 work.',
   'Never announce an intended tool call instead of making it. After an opening or intermediate update, perform actual work, ask a necessary question, or finish before considering another update.',
   'If a repeat-tool reminder names progress_update, do not answer with another progress update: inspect the previous result and continue with a task tool, a necessary question, or the final response.',
   'When you run as a subagent, describe only your own subtask: finishing your subtask is not the same as finishing the overall task.',

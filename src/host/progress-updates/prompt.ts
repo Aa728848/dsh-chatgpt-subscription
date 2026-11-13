@@ -58,34 +58,22 @@ export const PROGRESS_UPDATE_LANGUAGES: readonly ProgressUpdateLanguage[] = ['au
 /**
  * 引导词正文。写法对齐 Kimi 的「进展更新」：先说清多步任务早期的思路，再报
  * 有意义的结论、阶段判断、长等待与阻塞；每条给一行标题，细节放正文；不重复
- * 没有变化的状态。多步骤任务保留开头与结尾两条硬要求；L0 单点工作不制造固定播报。
+ * 没有变化的状态。复杂多步骤任务（L2、含派发或长耗时）保留开头与结尾两条硬要求；
+ * L0 单点工作与短平快 L1 任务不制造固定开场/收尾播报（L1 按需播报）。
  */
 export const PROGRESS_GUIDANCE = [
   '## Progress updates',
   '',
-  'During multi-step work you can call `progress_update` to report progress without ending your turn and without spending a question: report, then keep working.',
+  'During multi-step work you can call `progress_update` to report progress without ending your turn: report, then keep working.',
   '',
-  '**For L1/L2 and other multi-step work, two updates are mandatory — missing either one means the job is not finished. L0 single-point work does not require opening or closing updates:**',
+  '**For L2, delegated, or long-running multi-step work, two updates are mandatory — missing either one means the job is not finished. L0 single-point work and quick, local L1 tasks do not require opening or closing updates (for L1, report on demand only when a phase shift, long wait, or blocker occurs):**',
   '',
-  '- **Opening**: before the first tool call of the task, send one update stating the plan (which steps, what you touch first). The user must be able to redirect you before you disappear into execution.',
-  '- **Closing**: after the work is done and before your final answer, send one update stating the result (what changed, what was verified, what is left). The panel and the conversation both close on this line.',
+  '- **Opening**: before the first tool call of the task, state the plan (which steps, what you touch first).',
+  '- **Closing**: after the work is done and before your final answer, state the result (what changed, what was verified, what is left).',
   '',
-  'Use exactly one opening and one closing update per multi-step task; do not manufacture either for L0 single-point work. Never announce an intended tool call instead of making it: after an opening or intermediate update, perform actual work, ask a necessary question, or finish before considering another update. If a repeat-tool reminder names `progress_update`, do not answer with another progress update; inspect the previous result and continue with a task tool, a necessary question, or the final response.',
+  'Use at most one opening and one closing update per complex multi-step task; do not manufacture either for L0 single-point or quick L1 work. Never announce an intended tool call instead of making it: after an update, perform actual work, ask a necessary question, or finish before considering another update. If a repeat-tool reminder names `progress_update`, do not answer with another progress update; inspect the previous result and continue with a task tool, a necessary question, or the final response.',
   '',
-  'Beyond those two, these moments are worth a report:',
-  '- **Early planning**: the opening update covers it; report again only when the plan really changes (different approach, smaller scope, a broken premise).',
-  '- **A meaningful conclusion**: a key fact, a root cause, a verified assumption — report the conclusion itself, not "I just read a file".',
-  '- **A stage judgement**: one phase ends and the next begins — one line on where things stand and what happens next.',
-  '- **Before a long wait**: a test run, an install, a build — say what you are waiting for and roughly how long.',
-  '- **When blocked**: missing information, missing permission, an external failure — say where you are stuck, what you will try next, or what you need from the user.',
-  '',
-  'How to write one:',
-  '- One short title line (plain text, no Markdown, no trailing period); the details go in the message body.',
-  '- The body uses light Markdown: one paragraph of prose plus a few bullets. **When several rows share fields, use a GFM pipe table** (header row plus a `| --- |` separator row) instead of one item per line.',
-  '- Do not repeat a status that has not changed: if the last update already said it is running, it needs no second report.',
-  '- A progress update is for the user, not for the log: write it in human words, do not restate tool arguments.',
-  '',
-  'When you run as a subagent: describe only your own subtask progress. Finishing your subtask is not the same as finishing the overall task — do not report the overall progress as done.',
+  'Report intermediate updates only on a plan change, meaningful conclusion, stage transition, long wait, or blocker. Format: one short plain-text title line (no Markdown, no trailing period) and a brief Markdown body (use a GFM pipe table when rows share fields). Write in human words without restating tool arguments or unchanged status. As a subagent, describe only your own subtask progress.',
 ].join('\n')
 
 /**

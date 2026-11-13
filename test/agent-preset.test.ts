@@ -625,8 +625,8 @@ describe('the persona block the declaration transcribes', () => {
       // it is only unrestricted, so it cannot be a fallback excuse (R2 state).
       expect(persona).toContain('An unmounted tool is the only routing condition that permits fallback')
       // The anti-patterns that made the stale fallback self-reinforcing.
-      expect(persona).toContain('Carrying a one-off fallback forward as the default for the rest of the session')
-      expect(persona).toContain('Using a tool hard-rejection as a fallback excuse instead of fixing its trigger condition')
+      expect(persona).toContain('carrying a one-off R8 fallback into subsequent tasks')
+      expect(persona).toContain('using a fixable tool rejection as a fallback excuse')
       // The condition-fix guidance for the two hard rejections seen in the field.
       expect(persona).toContain('active child limit')
       expect(persona).toContain('subagent model selection')
@@ -666,8 +666,7 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('never start work because a task is ready')
       expect(persona).toContain('never reassign a task to skip R6')
       // The anti-patterns that let a degraded branch back in.
-      expect(persona).toContain('Switching to teammate vocabulary to keep orchestrating')
-      expect(persona).toContain('Treating the team task board as a substitute for R1 topology')
+      expect(persona).toContain('using teammate vocabulary / the team task board to replace R1–R6/R-W')
       // No trace of the stale premise survives in either copy.
       expect(persona).not.toContain('Dispatch Mode is **incompatible** with Agent Teams')
       expect(persona).not.toContain('whether spawn_teammate and wait_agent exist')
@@ -706,8 +705,8 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('Only two exceptions: plan-mode approval still goes through tools.exit_plan_mode inside code_run')
       // The anti-patterns that let each of the three back in.
       expect(persona).toContain('placeholder long commands to wait')
-      expect(persona).toContain('Proactively creating a goal at the start of a task')
-      expect(persona).toContain('Ending with a paragraph of prose to wait for user sign-off')
+      expect(persona).toContain('proactively calling create_goal')
+      expect(persona).toContain('ending with prose instead of ask_user_question when blocked on a decision')
       // R-W is dispatch-side only, like every other coordinator rule.
       expect(persona).toContain('the coordinator-facing rules in R0, R-G, R1, R2, R4, R5, and R-W')
     }
@@ -724,14 +723,13 @@ describe('the persona block the declaration transcribes', () => {
     // the internal symbol name that baited the grep.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
-      expect(persona).toContain('The sole source of truth for the allowlist is list_subagent_models')
-      expect(persona).toContain('call list_subagent_models({}) to list authorized providers')
-      expect(persona).toContain('call list_subagent_models({ provider }) to list authorized models under that provider')
+      expect(persona).toContain('the sole source of truth for the allowlist is list_subagent_models')
+      expect(persona).toContain('Call list_subagent_models({}) to list authorized providers and routes')
+      expect(persona).toContain('call list_subagent_models({ provider }) when you need model details under that provider')
       expect(persona).toContain('model without the <provider>/ prefix')
       expect(persona).toContain('trust its output directly without cross-checking local config files or workspace code')
-      expect(persona).toContain('Catalog membership is advisory')
       expect(persona).toContain('the runtime output is already filtered to this session\'s allowlist')
-      expect(persona).toContain('Second-guessing list_subagent_models output by hunting through local config or source files just to check which subagent models are allowed')
+      expect(persona).toContain('hunting local config/source files to verify allowed subagent models')
       expect(persona).not.toContain('subagentModelAuthorization')
     }
   })
@@ -742,7 +740,7 @@ describe('the persona block the declaration transcribes', () => {
     // That is false. The tool row and the route parameters are mounted
     // statically (modelSelection: true, modelDiscovery: true), so they exist even in a session
     // that recorded no allowlist. Both copies must name all three states, say
-    // which permits inheritance, and retain the 0.2.2 parent-route caveat instead
+    // which permits inheritance, and retain the parent-route caveat instead
     // of equating "no Session allowlist" with unrestricted explicit selection.
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
@@ -752,24 +750,19 @@ describe('the persona block the declaration transcribes', () => {
       // A deployment whose guard was never installed appends nothing at all, so
       // the rule needs a reading for "the annotation is absent": fall back to the
       // unlisted behaviour without claiming either posture.
-      expect(persona).toContain('If the output says neither')
-      expect(persona).toContain('the annotation is absent and you cannot read the posture')
-      expect(persona).toContain('say "unconfirmed" rather than claiming either posture')
+      expect(persona).toContain('or says neither—treat as unconfirmed and never report a route as authorized')
       // The mechanism, stated as a fact rather than as a preference.
-      expect(persona).toContain('mounted statically, so they are present even in a session that authorized no route at all')
-      expect(persona).toContain('Read that fact instead of inferring it')
+      expect(persona).toContain('mounted statically even when no route is authorized; read the posture from its output')
       // Fork's admission is the parent route, not the discovery tool: that is why
       // it survives the state where list_subagent_models is absent.
-      expect(persona).toContain('its admission is decided by the route the calling session is actually running')
-      expect(persona).toContain('so it still works when list_subagent_models is absent')
-      expect(persona).toContain('try subagent_fork once and read the denial')
-      expect(persona).toContain('Never claim per-task routing is in force here')
+      expect(persona).toContain('still works when list_subagent_models is absent: try subagent_fork once and read the denial')
+      expect(persona).toContain('never claim per-task routing is in force here')
       // The single-signal claim and the vocabulary that depended on it are gone.
       expect(persona).not.toContain('so this single signal is sufficient')
       expect(persona).not.toContain('[When Available]')
       expect(persona).not.toContain('[When Unavailable]')
       expect(persona).not.toContain('allowlist is empty and the user has not enabled it')
-      expect(persona).toContain('Reporting a route as "authorized", or claiming per-task routing is in force')
+      expect(persona).toContain('claiming a route is authorized under [State: Unlisted]')
     }
   })
 
@@ -802,7 +795,7 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).not.toContain('L1 Moderate: 2–5 files')
       expect(persona).not.toContain('Ask at most 1–2 key questions')
       expect(persona).not.toContain('Re-dispatch the same task brief at most twice')
-      expect(persona).toContain('Writing a task brief with a range where a cap belongs')
+      expect(persona).toContain('Writing range limits ("2–5 files") instead of caps')
     }
   })
 
@@ -823,7 +816,7 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('silence is read as a limit of zero')
       expect(persona).toContain('a quota that resets per cycle is lost, not banked')
       expect(persona).toContain('Do not ask the child to restate your rules back as a correctness check')
-      expect(persona).toContain('Asking a subagent to restate its rules as a correctness check')
+      expect(persona).toContain('asking a subagent to restate rules')
       // The five-element form is gone from both copies.
       expect(persona).not.toContain('must contain five elements')
     }
@@ -841,7 +834,7 @@ describe('the persona block the declaration transcribes', () => {
       expect(persona).toContain('[Noticed but not handled]')
       expect(persona).toContain('Writing it into the delivery summary and shipping anyway is not an available outcome')
       expect(persona).toContain('the defect goes back out on a re-dispatch with evidence')
-      expect(persona).toContain('Shipping a defect you already named in the review')
+      expect(persona).toContain('shipping a review defect by merely noting it in the summary')
       // The notification is a post-hoc signal, in both rules that touch it.
       expect(persona).toContain('The completion notification is a post-hoc signal')
       expect(persona).toContain('post-hoc signal')
@@ -849,20 +842,14 @@ describe('the persona block the declaration transcribes', () => {
     }
   })
 
-  it('scans for escalating items before each turn', () => {
-    // The one prompt that measurably worked in the behaviour probe: "find the
-    // items that will escalate, expire or time out this turn and handle those
-    // first" took escalations from 3.67 per run to 0. Without it a
-    // low-priority backlog is what eventually turns into the incident.
+  it('scans for escalating items before each turn without turn-age clutter', () => {
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
       expect(persona).toContain('[Before every turn]')
-      expect(persona).toContain('will escalate, expire, or time out if you do nothing this turn')
-      expect(persona).toContain('handle those before the items that are merely large')
-      expect(persona).toContain('an item that is fine')
-      expect(persona).toContain('listed with its age in turns')
-      // The run count lives in the task list, not in the coordinator's memory.
-      expect(persona).toContain('Each task item carries its own run count')
+      expect(persona).toContain('Prioritize items that will escalate, expire, or time out before items that are merely large')
+      expect(persona).toContain('do not list per-turn item ages in user replies')
+      // The run count lives in the task list for delegated briefs, not in the coordinator's memory.
+      expect(persona).toContain('each delegated task item carries its own run count')
       expect(persona).toContain('the number belongs in the task list item for that brief')
     }
   })
@@ -919,7 +906,7 @@ describe('the persona block the declaration transcribes', () => {
     for (const persona of [personaBlockOf(yml), declaredPrefix()]) {
       expect(persona).toContain('Ask at most 2 key questions')
       expect(persona).toContain('2 is the cap')
-      expect(persona).toContain('Read-only exploration and the decision-complete plan belong to the next turn')
+      expect(persona).toContain('Read-only exploration and the decision-complete plan belong to the next step')
       expect(persona).toContain('subagent model routes are provided directly by list_subagent_models')
     }
   })
@@ -940,16 +927,10 @@ describe('the persona block the declaration transcribes', () => {
       // The degraded path when the tool is absent stays a question, never prose.
       expect(persona).toContain('the degraded path is ONE code_run program containing exactly one tools.ask_user_question(...) sub-call asking the user to enter /plan')
       // The anti-pattern pins both premature Plan Mode and leave-as-approval abuse.
-      expect(persona).toContain('Orchestrating or opening Plan Mode for L0/L1/L2-Clear')
+      expect(persona).toContain('Opening Plan Mode for L0/L1/L2-Clear or before R-G convergence')
       expect(persona).toContain('using leave_plan_mode to bypass exit_plan_mode approval')
-      // The subagent clause is generation-graded, because the bridge now
-      // degrades to "let it through" where roots cannot be read. An
-      // unconditional promise of DELEGATED_CALLER would be a lie on those hosts.
-      expect(persona).toContain('where the host exposes the live root set (agents.roots()), a call made by a live child is rejected with DELEGATED_CALLER')
-      expect(persona).toContain('an older generation cannot determine roots at all and the bridge lets the call through')
-      expect(persona).toContain('Never rely on that rejection')
-      expect(persona).toContain('it carries the open decision, including any request to enter Plan Mode, back to its dispatcher')
-      // The unconditional claim the three-level fallback made false is gone.
+      expect(persona).toContain('never call plan-mode tools (rejected with DELEGATED_CALLER on supported hosts)')
+      expect(persona).toContain('carry any open decision or Plan Mode request back to the dispatcher via status: hand_back')
       expect(persona).not.toContain('The bridge rejects a live child at execution time')
     }
   })
@@ -1029,7 +1010,7 @@ describe('the persona block the declaration transcribes', () => {
     expect(prefix).toContain('use a Compact Delta Brief by default')
     // Dual-track Code Mode wording: no stale PTC-only parentheticals remain.
     expect(prefix).not.toContain('Criterion: whether spawn_teammate exists')
-    expect(prefix).toContain('The board tools stay declared whether or not the board is on')
+    expect(prefix).toContain('frozen declaration, not availability')
     expect(prefix).toContain('Dispatch independent tasks concurrently through code_run Promise.all')
     expect(prefix).toContain('ordinary code_run programs should batch independent read/search/tool calls')
     expect(prefix).toContain('L2-Clear')
@@ -1039,13 +1020,14 @@ describe('the persona block the declaration transcribes', () => {
     expect(prefix).not.toContain('stay visible in the PTC SDK')
     expect(prefix).not.toContain('(in PTC mode: tools.list_subagent_models)')
     expect(prefix).not.toContain('(via Promise.all in PTC mode)')
-    // The legacy-runtime gate left the prefix; the board contract it used to
-    // carry stayed as [Agent Teams Board]. The ceiling is unchanged - it still
-    // catches unbounded growth, and the freed characters become headroom.
-    expect(prefix.length).toBeLessThan(19000)
-    expect(prefix).toContain('Asking the user about an implementation detail an existing-standard in the repository already settles')
-    expect(prefix).toContain('penalizing a clean status: hand_back scope escalation as a failed run')
-    expect(prefix).toContain('accepting a regression-risk visual change without a Before & After or an After-only note')
+    // Slimmed resident prefix budget (<15500 chars, down from ~19000).
+    expect(prefix.length).toBeLessThan(15500)
+    expect(prefix).toContain('Asking the user about settled repo/external standards (existing-standard)')
+    expect(prefix).toContain('search the web (GitHub docs/repos, official docs, research papers, specs) to avoid reinventing the wheel')
+    expect(section).toContain('external prior art (GitHub docs/repos, official docs, research papers, specs)')
+    expect(section).toContain('never reinvent the wheel')
+    expect(prefix).toContain('penalizing a clean status: hand_back as a failed run')
+    expect(prefix).toContain('accepting regression-risk UI changes without Before & After (or After-only note)')
 
     // The plan-mode section is the coordinator's own guardrail: it carries the
     // exemption and the visual-evidence gate the plan itself has to name.

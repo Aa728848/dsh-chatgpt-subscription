@@ -943,7 +943,7 @@ describe('the resident character budgets', () => {
     // 缓存就归零。所以它的长度是被测出来的，不是估出来的。R0.5 闸门删除后，任务板契约
     // 改由 [Agent Teams Board] 段承载（board is bookkeeping, ledger stays
     // authoritative），预算保持 19000 作为余量；天花板仍负责挡住无界增长。
-    const budget = 19000
+    const budget = 15500
     for (const [name, persona] of [['YAML', yamlPersona()], ['声明', declaredPersona()]] as const) {
       expect(persona.length, `${name} 侧 persona 超出 ${budget} 字符预算（还差 ${persona.length - budget}）`)
         .toBeLessThan(budget)

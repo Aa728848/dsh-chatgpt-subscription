@@ -388,7 +388,7 @@ function assertLiveRoot(ctx: Context, agent: unknown): void {
  */
 export const ENTER_DESCRIPTION = 'Enter plan mode for the rest of this session. '
   + 'Dispatch mode only: call it only once the task is triaged L2-Governed and the R-G interview has converged '
-  + '(frontier empty, user confirmed shared understanding). '
+  + '(frontier empty, all open decisions answered). '
   + 'This step completes only the entry; exploring and writing the plan happen in your next step. '
   + 'Never call it for L0/L1/L2-Clear or while a frontier question is open.'
 
