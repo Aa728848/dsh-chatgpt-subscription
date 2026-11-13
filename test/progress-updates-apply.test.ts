@@ -266,12 +266,11 @@ describe('apply: 提示词引导', () => {
     const text = (fake.sections.get(PROGRESS_SECTION_NAME)!.text as () => string)()
     expect(text).toContain('Opening')
     expect(text).toContain('Closing')
-    expect(text).toContain('A meaningful conclusion')
-    expect(text).toContain('Before a long wait')
-    expect(text).toContain('When blocked')
-    expect(text).toContain('Do not repeat a status that has not changed')
-    expect(text).toContain('When you run as a subagent')
-    expect(text).toContain('not the same as finishing the overall task')
+    expect(text).toContain('meaningful conclusion')
+    expect(text).toContain('long wait')
+    expect(text).toContain('blocker')
+    expect(text).toContain('unchanged status')
+    expect(text).toContain('As a subagent, describe only your own subtask progress')
   })
 
   it('输出语言不进分节：三个档位渲染出的分节逐字节相同', () => {

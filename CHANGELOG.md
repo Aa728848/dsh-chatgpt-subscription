@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.72.0 - 2026-11-13
+- **[dispatch / 提示词与流程减负] 精简调度模式常驻提示词、消除过度要求并增加外部先例检索**
+  - **流程减负（7 项优化）**：① **R-G 访谈收敛去重**：决策前沿清空（所有未决问题答完）即收敛进入 R9 计划模式，不再额外多问一轮“确认共识”；② **R9 同回合推进**：`enter_plan_mode` 之后在同回合下一步（`next step`）完成只读探索并调 `exit_plan_mode`，防止空手断回合；③ **R7 待办与文档减负**：L0 免维护 `todo_write`，仅委派任务项记运行次数，移除每回合末罗列待办账龄（`age in turns`）的冗余指令；④ **R2 按需查路由**：仅在需要委派子代理时调 `list_subagent_models({})`，移除 `[State: Unlisted]` 下的交付总结免责声明；⑤ **R0 / G3 去呆板化**：L0 免输出 `"Tier + Rationale"` 标签直接执行，`ask_user_question` 直接使用工具结构化字段而不重复手写拼接正文；⑥ **Dispatch Ledger 子代理减负**：协调者首次委派前调一次 `dispatch_ledger {action:"self"}`，子代理可直接复用收到的 `dsh-mandate-v2` 头部字段或回合末直接回报；⑦ **进度播报分级**：仅 L2、含子代理委派或长耗时任务强制开场+收尾各一次 `progress_update`，豁免 L0 与短平快本地 L1（L1 按需播报）。
+  - **外部先例检索（避免闭门造车与重复造轮子）**：`G4` 与 `plan-mode` 只读探索指引新增外部先例检索路径——除排查本地代码库与 `AGENTS.md` 外，要求主动联网检索 GitHub 文档/开源仓库、官方文档、研究论文与技术规范，优先复用成熟方案（`target_basis: existing-standard`）。
+  - **提示词全面瘦身**：合并跨段落重复条款、剥离宿主内部实现解说并收紧 `Anti-Patterns`，将常驻 `persona.config.prefix` 从 ~18,900 字符压缩至 14,949 字符（预算上限下调锁死在 `< 15500`），`plan-mode.config.section` 压缩 42%，`PROGRESS_GUIDANCE` 压缩 45%，总计减少约 6,500 字符（~1,500+ Tokens）。
 - **[antigravity-acp / 新线路] 用官方 ACP 重建 Antigravity 线路：主模型 + 子代理双形态**
   - **为什么重建**：旧 `antigravity` 线路把 Antigravity 当模型供应商接，自己实现 Cloud Code Assist 的 `streamGenerateContent`、思考签名重放与缓存对齐，甚至要模仿官方 Go 客户端的 TLS 指纹（`docs/antigravity-tls-fingerprint-probe.md` 的结论是做不到），已在 v0.70.0 整条删除。新线路走 Google **官方**的 Agent Client Protocol：插件只把一次 DSH 调用翻译成一次 ACP `session/prompt`，模型联网、登录、思考签名与提示缓存全部由官方 `agy` 进程负责。
   - **单账号、不碰凭据**：ACP 服务端只持有一套凭据，插件不读取、不复制、不保存任何 Google token；登录由官方进程完成，浏览器只由它打开一次（有测试锁定）。
@@ -9,8 +14,9 @@
   - **模型与思考档位**：目录来自实时 `session/new`，把 `models.availableModels` 的档位 id 与 `configOptions[model].options` 的基名归一；思考档位走 DSH 的 reasoning effort → ACP `thought_level`。服务端未公布的档位不声明、不猜测。
   - **可执行文件**：优先本机 `agy`，缺失时按官方 ACP Registry 的固定版本与 sha256 下载到 `<DSH_HOME>/cache/antigravity-acp/`；拒绝重定向、校验哈希、失败按名删除半成品，**不随包分发 Google 二进制**。
   - **明确不做**：不显示任何额度百分比或余额（官方不公布）；不复用旧线路的代码或凭据；不把 `agy_acp_server` 打进 npm 包。
+  - **设置卡体验修复**：登录区块展示已登录/未登录徽标、已登录时按钮切换为“重新登录”并立即回显登录结果与刷新状态；长说明折叠进 `details` 面板；`readStatus` 拆分返回完整目录与已勾选模型列表，避免清空模型勾选后误显示为“从未同步目录”而隐藏勾选列表，`POST /refresh` 在上游未返回目录时报 502 可读错误。
   - **⚠️ 条款风险与默认关闭**：Google Antigravity 官方 FAQ 明确写着「使用第三方软件、工具或服务访问 Antigravity 违反其服务条款」，且「把 `agy` 包装进第三方编码 Agent/应用、或自动化账号轮换，在消费者套餐下不受支持」，可能导致账号被暂停或终止。虽然 Google 同时公开提供 ACP 接入编辑器的文档（两者存在解释空间），且本线路运行的是官方 `agy` 与官方 ACP 服务器、不逆向协议、不读取凭据、单账号不轮换，但这些措施**不能消除条款风险**。因此本线路**默认关闭**（`enabled: false`），设置卡与 README/providers 文档均明示该风险；需要零争议时请改用 Gemini Enterprise 或 Google AI Studio API Key。
-  - **验证**：`npx tsc -b`、测试工程与脚本工程类型检查通过；全量 Vitest 为 369 文件通过 / 2 跳过（6742 例通过 / 9 跳过 / 0 失败）；`npm run build` 与 `npm pack --dry-run`（974 文件，无 Google 二进制）通过；反向对照证明 `antigravity-acp-catalog-read.test.ts` 能在错误实现下变红。真实上游探针见 `docs/antigravity-acp-line-plan.md` §3。
+  - **验证**：`npx tsc -b`、测试工程与脚本工程类型检查通过；全量 Vitest 通过；`npm run build` 与 `npm pack --dry-run`（无 Google 二进制）通过；反向对照证明 `antigravity-acp-catalog-read.test.ts` 能在错误实现下变红。真实上游探针见 `docs/antigravity-acp-line-plan.md` §3。
   - **未完成**：UI Before/After 截图对（视觉验收门禁因此未满足），以及真实 `dsh web` 会话内的完整 agent 轮次与真实子代理委派——三项都写进了线路计划的「左未验证清单」。
 
 ## 0.71.0 - 2026-11-12
