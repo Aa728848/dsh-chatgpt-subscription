@@ -169,11 +169,10 @@ export async function readCatalogFrom(
   const configOptions = Array.isArray(session.configOptions) ? session.configOptions : []
   const modelOption = configOptions.find((entry): entry is Record<string, unknown> =>
     typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>).id === 'model')
-  const thoughtOption = configOptions.find((entry): entry is Record<string, unknown> =>
-    typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>).id === 'thought_level')
+  // The thought_level option describes the session's current model only; each
+  // model's own ladder comes from its tier-suffixed ids, so it is not read here.
   const optionValues = readOptionValues(modelOption)
-  const acceptedLevels = readOptionValues(thoughtOption).map((option) => option.value)
-  const models = collapseModels(optionValues, availableModels, acceptedLevels)
+  const models = collapseModels(optionValues, availableModels)
   const tier = readTier(session._meta)
   return { models, ...(tier === undefined ? {} : { tier }) }
 }

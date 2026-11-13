@@ -74,21 +74,25 @@ export interface AcpModelOption {
  * - `availableModels` - the tier ids the model picker itself shows
  *   (`gemini-4-carbon-low`).
  *
- * A model's own ladder is the set of tier suffixes published for it, intersected
- * with the levels the server separately accepts. A model with no suffixes
- * (its id already carries the tier, such as `gpt-oss-120b-medium`) publishes no
- * ladder, and this function says so with an empty list rather than borrowing a
- * global one: `reasoning` is then simply not offered for it.
+ * A model's own ladder is the set of tier suffixes published for it. A model
+ * with no suffixes (its id already carries the tier, such as
+ * `gpt-oss-120b-medium`) publishes no ladder, and this function says so with an
+ * empty list rather than borrowing a global one: `reasoning` is then simply not
+ * offered for it.
+ *
+ * The `thought_level` option is deliberately NOT consulted here. That option
+ * describes the levels of whichever model the session currently has selected -
+ * Argon publishes low/medium/high - so intersecting every model's ladder with
+ * it silently dropped the fourth level a newer model publishes for itself
+ * (`gemini-4-hydrogen-xhigh` never reached the picker).
  *
  * @param options - The `model` option values, in server order.
  * @param availableModels - The tier ids, in server order.
- * @param acceptedLevels - Levels the server's `thought_level` option accepts; empty when it published none.
  * @returns One entry per selectable model, with its ladder least to greatest.
  */
 export function collapseModels(
   options: readonly AcpModelOption[],
   availableModels: readonly AcpAvailableModel[],
-  acceptedLevels: readonly string[],
 ): AntigravityAcpModelDto[] {
   const byBase = new Map<string, Set<string>>()
   for (const option of options) {
@@ -97,7 +101,6 @@ export function collapseModels(
       if (!id.startsWith(option.value + '-')) continue
       const suffix = id.slice(option.value.length + 1)
       if (!isEffort(suffix)) continue
-      if (acceptedLevels.length > 0 && !acceptedLevels.includes(suffix)) continue
       const levels = byBase.get(option.value) ?? new Set<string>()
       levels.add(suffix)
       byBase.set(option.value, levels)

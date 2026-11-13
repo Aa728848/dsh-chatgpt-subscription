@@ -14,7 +14,6 @@ describe('collapseModels', () => {
         { modelId: 'gemini-4-carbon-medium' },
         { modelId: 'gemini-4-carbon-high' },
       ],
-      ['low', 'medium', 'high'],
     )
     expect(models).toEqual([
       { id: 'gemini-4-carbon', name: 'Gemini 4 Carbon', efforts: ['low', 'medium', 'high'] },
@@ -25,25 +24,29 @@ describe('collapseModels', () => {
     const models = collapseModels(
       [{ value: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' }],
       [{ modelId: 'gpt-oss-120b-medium' }],
-      ['low', 'medium', 'high'],
     )
     expect(models[0]?.efforts).toEqual([])
   })
 
-  it('drops a level the server publishes as a tier but not as an accepted level', () => {
+  it('keeps a level the model publishes as a tier even when another model omits it', () => {
+    // The thought_level option describes the selected model only; Hydrogen's
+    // fourth level must survive next to Argon's three-level option list.
     const models = collapseModels(
-      [{ value: 'gemini-4-carbon' }],
-      [{ modelId: 'gemini-4-carbon-low' }, { modelId: 'gemini-4-carbon-xhigh' }],
-      ['low', 'medium', 'high'],
+      [{ value: 'gemini-4-hydrogen' }],
+      [
+        { modelId: 'gemini-4-hydrogen-low' },
+        { modelId: 'gemini-4-hydrogen-medium' },
+        { modelId: 'gemini-4-hydrogen-high' },
+        { modelId: 'gemini-4-hydrogen-xhigh' },
+      ],
     )
-    expect(models[0]?.efforts).toEqual(['low'])
+    expect(models[0]?.efforts).toEqual(['low', 'medium', 'high', 'xhigh'])
   })
 
   it('orders the ladder least to greatest regardless of the server order', () => {
     const models = collapseModels(
       [{ value: 'm' }],
       [{ modelId: 'm-high' }, { modelId: 'm-low' }, { modelId: 'm-medium' }],
-      ['low', 'medium', 'high'],
     )
     expect(models[0]?.efforts).toEqual(['low', 'medium', 'high'])
   })
