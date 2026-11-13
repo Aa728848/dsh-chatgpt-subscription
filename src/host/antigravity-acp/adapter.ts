@@ -384,8 +384,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       }
       const descriptor = await bridge.start()
       const sessionId = await this.openSession(client, options, [descriptor], settings)
-      if (effort !== undefined) await this.applyConfigQuietly(client, sessionId, 'thought_level', effort)
-      await this.applyConfig(client, sessionId, 'model', options.model)
+      await this.applyModelAndEffort(client, sessionId, options.model, effort)
       const prompt = buildPrompt(options, images, 0)
       // When a bridge is attached the agent must not touch the workspace itself;
       // see BRIDGE_ONLY_INSTRUCTION for why this is said in the prompt rather than
@@ -655,15 +654,51 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     }
   }
 
-  private async applyConfig(client: AcpClient, sessionId: string, configId: string, value: string): Promise<void> {
+  private async applyConfig(client: AcpClient, sessionId: string, configId: string, value: string): Promise<Record<string, unknown> | undefined> {
     try {
-      await client.request('session/set_config_option', { sessionId, configId, value })
+      return asRecord(await client.request('session/set_config_option', { sessionId, configId, value }))
     } catch (error) {
       throw new LlmError(
         `Antigravity ACP rejected ${configId} "${value}": ${error instanceof Error ? error.message : String(error)}`,
         'UNSUPPORTED_OPTION',
       )
     }
+  }
+
+  /**
+   * Select the model, then the thinking level, falling back to the model variant
+   * the server publishes for a level the current model does not list.
+   *
+   * `thought_level` is scoped to the model the session already has selected, so
+   * it is applied after the model. The previous order set the level first and
+   * replaced the model after it, which kept the level of the model the session
+   * started on. Some models publish a level as a model variant instead of a
+   * thinking level (`gemini-4-hydrogen-xhigh`): selecting that variant is what
+   * makes the server accept the fourth level.
+   *
+   * @param client - The connection running this turn.
+   * @param sessionId - The ACP session the turn belongs to.
+   * @param model - The model the caller asked for.
+   * @param effort - The requested thinking level, when the caller or settings named one.
+   */
+  private async applyModelAndEffort(
+    client: AcpClient,
+    sessionId: string,
+    model: string,
+    effort: string | undefined,
+  ): Promise<void> {
+    const afterModel = await this.applyConfig(client, sessionId, 'model', model)
+    if (effort === undefined) return
+    const levels = configOptionValues(afterModel, 'thought_level')
+    // No options in the answer means the server said nothing about the ladder;
+    // the level is still sent, because the old server accepted it that way.
+    if (levels === undefined || levels.includes(effort)) {
+      await this.applyConfigQuietly(client, sessionId, 'thought_level', effort)
+      return
+    }
+    // A level the model does not list as an option but does publish as a variant
+    // is selected as that variant; one it publishes nowhere stays unapplied.
+    await this.applyConfigQuietly(client, sessionId, 'model', `${model}-${effort}`)
   }
 
   private async applyConfigQuietly(client: AcpClient, sessionId: string, configId: string, value: string): Promise<void> {
@@ -997,6 +1032,29 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined
+}
+
+/**
+ * The values one `session/set_config_option` result lists for a config option.
+ *
+ * @param result - The response payload, when the server sent one.
+ * @param configId - Option id to read, such as `thought_level`.
+ * @returns The accepted values, or undefined when the answer carried no options.
+ */
+function configOptionValues(result: Record<string, unknown> | undefined, configId: string): string[] | undefined {
+  const options = result?.configOptions
+  if (!Array.isArray(options)) return undefined
+  for (const entry of options) {
+    const record = asRecord(entry)
+    if (record?.id !== configId) continue
+    const values = record.options
+    if (!Array.isArray(values)) return undefined
+    return values.flatMap((option) => {
+      const value = asRecord(option)?.value
+      return typeof value === 'string' ? [value] : []
+    })
+  }
+  return undefined
 }
 
 export { PROVIDER_ID }
