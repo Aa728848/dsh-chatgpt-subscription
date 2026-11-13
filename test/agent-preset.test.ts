@@ -1045,12 +1045,13 @@ describe('the persona block the declaration transcribes', () => {
     expect(prefix.length).toBeLessThan(19000)
     expect(prefix).toContain('Asking the user about an implementation detail an existing-standard in the repository already settles')
     expect(prefix).toContain('penalizing a clean status: hand_back scope escalation as a failed run')
-    expect(prefix).toContain('accepting a visible UI change without Before & After comparison evidence')
+    expect(prefix).toContain('accepting a regression-risk visual change without a Before & After or an After-only note')
 
     // The plan-mode section is the coordinator's own guardrail: it carries the
     // exemption and the visual-evidence gate the plan itself has to name.
     expect(section).toContain('existing-standard')
     expect(section).toContain('Before and After visual evidence')
+    expect(section).toContain('with no reliable Before, an After plus a note suffices')
 
     // L2 decouples full governance from execution topology (Lead-Core / Hybrid /
     // Fan-out) and remains strictly model- and provider-agnostic.
