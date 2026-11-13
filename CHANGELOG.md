@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **[antigravity-acp / 新线路] 用官方 ACP 重建 Antigravity 线路：主模型 + 子代理双形态**
+  - **为什么重建**：旧 `antigravity` 线路把 Antigravity 当模型供应商接，自己实现 Cloud Code Assist 的 `streamGenerateContent`、思考签名重放与缓存对齐，甚至要模仿官方 Go 客户端的 TLS 指纹（`docs/antigravity-tls-fingerprint-probe.md` 的结论是做不到），已在 v0.70.0 整条删除。新线路走 Google **官方**的 Agent Client Protocol：插件只把一次 DSH 调用翻译成一次 ACP `session/prompt`，模型联网、登录、思考签名与提示缓存全部由官方 `agy` 进程负责。
+  - **单账号、不碰凭据**：ACP 服务端只持有一套凭据，插件不读取、不复制、不保存任何 Google token；登录由官方进程完成，浏览器只由它打开一次（有测试锁定）。
+  - **工具由 DSH 执行并把关**：会话创建时带一个回环 MCP 桥（127.0.0.1、每会话新签发 256-bit bearer token、校验 Host、拒绝浏览器 Origin、仅 `POST /mcp`、body ≤ 1 MiB）。agent 的 `tools/call` 被挂起并转成 DSH 工具调用，由 DSH 的权限预设执行；拒绝以 `isError` 回传，永不绕过。**已用真实 `agy` 跑通两段式工具往返**（第一段 `finish(tool-calls)`，第二段在同一 ACP prompt 内继续并返回工具结果）。
+  - **模型与思考档位**：目录来自实时 `session/new`，把 `models.availableModels` 的档位 id 与 `configOptions[model].options` 的基名归一；思考档位走 DSH 的 reasoning effort → ACP `thought_level`。服务端未公布的档位不声明、不猜测。
+  - **可执行文件**：优先本机 `agy`，缺失时按官方 ACP Registry 的固定版本与 sha256 下载到 `<DSH_HOME>/cache/antigravity-acp/`；拒绝重定向、校验哈希、失败按名删除半成品，**不随包分发 Google 二进制**。
+  - **明确不做**：不显示任何额度百分比或余额（官方不公布）；不复用旧线路的代码或凭据；不把 `agy_acp_server` 打进 npm 包。
+  - **⚠️ 条款风险与默认关闭**：Google Antigravity 官方 FAQ 明确写着「使用第三方软件、工具或服务访问 Antigravity 违反其服务条款」，且「把 `agy` 包装进第三方编码 Agent/应用、或自动化账号轮换，在消费者套餐下不受支持」，可能导致账号被暂停或终止。虽然 Google 同时公开提供 ACP 接入编辑器的文档（两者存在解释空间），且本线路运行的是官方 `agy` 与官方 ACP 服务器、不逆向协议、不读取凭据、单账号不轮换，但这些措施**不能消除条款风险**。因此本线路**默认关闭**（`enabled: false`），设置卡与 README/providers 文档均明示该风险；需要零争议时请改用 Gemini Enterprise 或 Google AI Studio API Key。
+  - **验证**：`npx tsc -b`、测试工程与脚本工程类型检查通过；全量 Vitest 为 369 文件通过 / 2 跳过（6742 例通过 / 9 跳过 / 0 失败）；`npm run build` 与 `npm pack --dry-run`（974 文件，无 Google 二进制）通过；反向对照证明 `antigravity-acp-catalog-read.test.ts` 能在错误实现下变红。真实上游探针见 `docs/antigravity-acp-line-plan.md` §3。
+  - **未完成**：UI Before/After 截图对（视觉验收门禁因此未满足），以及真实 `dsh web` 会话内的完整 agent 轮次与真实子代理委派——三项都写进了线路计划的「左未验证清单」。
+
 ## 0.71.0 - 2026-11-12
 
 - **[dispatch / 效率] 按决策状态分诊，减少过度治理、重复验收与执行空转**

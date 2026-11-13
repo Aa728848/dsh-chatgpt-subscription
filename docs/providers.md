@@ -1,6 +1,6 @@
 # 供应线路完整指南与接口参考
 
-本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **12 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
+本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **13 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
 
 > 跨线路共用的号池调度、存储后端（`poolStorage`）、统一网络代理与环境变量详见 [部署配置与安全参考](configuration.md)。
 
@@ -48,6 +48,7 @@
 > - `claude-subscription` 使用订阅 OAuth 凭据模拟客户端身份转发请求，与 Anthropic 现行服务条款冲突，未获官方授权，存在账号受限或封禁风险。
 > - `workbuddy-subscription`、`qoder` 等线路依赖非公开或逆向协议契约，上游可能随时收紧渠道校验或风控策略。
 > - `step-code` 的额度查询使用非公开开发者中心接口（与模型请求完全隔离，失败不影响对话）。
+> - **`antigravity-acp`：条款风险高于技术风险。** 该线路运行 Google 官方 `agy` CLI 与其官方 ACP 服务器（协议、凭据、网络全部由官方程序负责，不逆向任何协议），但 Google Antigravity FAQ 有两段直接相关的表述：①「使用第三方软件、工具或服务访问 Antigravity 违反本服务条款，可能导致账号被暂停或终止」；②「把 `agy` 包装进第三方编码 Agent/应用、或自动化账号轮换，在消费者套餐下不受支持」。Google 同时公开发布了 ACP 接入 Zed/JetBrains 的官方文档，因此「编辑器插件」与「第三方应用」的边界存在解释空间。本插件采取的降低风险措施：**默认关闭**、单账号（不做账号轮换）、不读取或搬运任何 Google 凭据、不伪装客户端身份；但**这些措施不能消除条款风险**。需要零争议时请改用 Gemini Enterprise 或 Google AI Studio API Key。
 > 请在使用前自行评估账号与合规风险。
 
 ---
@@ -104,7 +105,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/status` | 账号（脱敏）、连接状态、额度、抓取后端状态及本机 Codex CLI 文件存在性 |
-| `GET` | `/hub/overview` | 订阅中心首页 12 条线路的聚合只读摘要 |
+| `GET` | `/hub/overview` | 订阅中心首页 13 条线路的聚合只读摘要 |
 | `GET` / `POST` | `/update`（检测 / 应用） | 检查 npm 新版本并在支持的部署上一键升级插件 |
 | `POST` | `/i18n/locale` | 客户端向宿主同步当前界面语言（`zh` / `en` / `ru`） |
 | `POST` | `/login/start` | 启动浏览器回调 OAuth 登录 |
@@ -317,3 +318,22 @@
 ### 宿主路由（`/ollama/api`）
 
 `GET /status` · `POST /settings` · `POST /accounts` · `POST /catalog/refresh` · `POST /logout`
+
+---
+
+## 15. Antigravity（ACP）：`antigravity-acp`
+
+- **定位与鉴权**：
+  - 走 **Google 官方 Antigravity CLI 的 Agent Client Protocol（ACP v1）**：本插件把一次模型调用翻译成一次 ACP `session/prompt`，模型联网、登录、思考签名与提示缓存全部由官方 `agy` 进程负责；
+  - **单账号**：ACP 服务端只持有一套凭据，插件**不读取、不复制、不保存**任何 Google token；登录由 `agy acp --login` 或设置卡的「登录 Google 账号」发起，浏览器**只由官方进程打开一次**；
+  - 与已移除的旧 `antigravity` 线路（Cloud Code Assist `streamGenerateContent` 逆向实现，v0.70.0 删除）**没有任何代码或凭据迁移关系**。
+- **可执行文件**：`配置的路径` → `DSH_ANTIGRAVITY_ACP_BIN` → `~/.gemini/bin/agy` → 官方 ACP Registry 归档（版本与 sha256 随包固定，仅缺失时下载到 `<DSH_HOME>/cache/antigravity-acp/`）。下载拒绝重定向、校验哈希、失败按名删除半成品；**不随包分发 Google 二进制**。
+- **工具由 DSH 执行并把关**：会话创建时带一个回环 MCP 桥描述符（127.0.0.1 + 每次会话新签发的 256-bit bearer token、校验 Host、拒绝浏览器 Origin、仅 `POST /mcp`、body ≤ 1 MiB）。agent 的 `tools/call` 被挂起并转成 DSH 工具调用，由 DSH 的权限预设执行；拒绝以 `isError` 回传，**永不绕过**。
+- **模型与思考档位**：目录来自实时 ACP `session/new`（`models.availableModels` 的档位 id 与 `configOptions[model].options` 的基名归一），思考档位走 DSH 的 reasoning effort → ACP `thought_level`；模型不接受的档位被丢弃而不是让整轮失败。
+- **会话复用**：以 DSH 会话为键保存 ACP 会话与前缀指纹；历史被压缩或改写时新建会话冷重放，避免复用与 DSH 不一致的会话。
+- **子代理形态**：同时注册 `antigravity-acp` 子代理后端（`ctx.get('subagents')` 存在时才注册）；子代理子进程使用官方 Agent 自己的工具集，这是与主模型形态的已知不对称。
+- **明确的能力边界**：ACP 没有独立 system 提示槽位；官方服务端**不公布剩余额度**，因此设置卡与额度胶囊只显示套餐档位与真实返回的 token 用量，不显示任何百分比或余额。
+
+### 宿主路由（`/antigravity-acp/api`）
+
+`GET /status` · `GET|POST /settings`（等同 `/models`）· `POST /login/start` · `GET /login/status` · `POST /logout` · `GET|POST /usage` · `POST /refresh`

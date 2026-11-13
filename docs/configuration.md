@@ -140,7 +140,7 @@ promptCacheOverrides:
 
 ### 统一代理（全线路共享）
 
-在 **设置 → 订阅服务 → ChatGPT → 网络代理** 配置的代理会作用于**全部 12 条供应线路**的对话生成、OAuth 兑换与续期、模型目录同步、额度查询，以及插件接管的搜索与网页抓取，修改后即时生效：
+在 **设置 → 订阅服务 → ChatGPT → 网络代理** 配置的代理会作用于**全部 13 条供应线路**的对话生成、OAuth 兑换与续期、模型目录同步、额度查询，以及插件接管的搜索与网页抓取，修改后即时生效：
 
 - **系统代理（自动检测）**：Windows 读取注册表 `ProxyEnable` / `ProxyServer`；macOS 读取 `scutil --proxy`；Linux 读取 GNOME `gsettings`（不支持 PAC 脚本）；若均未命中，自动回退读取进程环境变量或 `$DSH_HOME/.env` 中的 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`；
 - **自定义代理**：显式指定代理 URL；

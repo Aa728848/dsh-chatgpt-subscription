@@ -2,7 +2,7 @@
 
 面向 **DeepSeek Harness（DSH）** 的多平台订阅接入与智能体运行时增强插件包。
 
-插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **12 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
+插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **13 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
 
 - **跨平台支持**：Windows、macOS、Linux（含无桌面密钥环的远程服务器部署模式）
 - **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.2** 全系列版本
@@ -44,10 +44,12 @@
 | `opendesign` | OpenDesign（Go / Plus / Pro / Max） | OpenAI Chat Completions | AMR 浏览器设备授权（双 Key 签发）/ 粘贴 API Key | 随包 41 模型表 + AMR 控制面与实时 `/v1/models` |
 | `workbuddy-subscription` | WorkBuddy（CodeBuddy 国区 / 国际区） | OpenAI `/v2/chat/completions`；国区 Claude 走 `/v1/messages` | 浏览器轮询授权 / 只读采纳 CodeBuddy 桌面登录态 | 实时 `/v3/config` + 本地快照与随包兜底 |
 | `ollama` | Ollama Cloud | Ollama Native `/api/chat` + OpenAI `/v1/chat/completions` | 粘贴 Ollama Cloud API Key | 实时 `/api/tags` + `/api/show` 元数据探测 |
+| `antigravity-acp` | Google Antigravity（官方 CLI） | **ACP v1 / stdio JSON-RPC**（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；本插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 |
 
 > **合规与风险提示**：
 > - `claude-subscription` 通过订阅 OAuth 凭据模拟官方 CLI 身份转发请求，与 Anthropic 现行服务条款存在冲突，未获官方授权，存在账号被限制或封禁的风险。
 > - `workbuddy-subscription`、`qoder` 等线路部分依赖非公开或逆向协议契约；`step-code` 额度面板使用非公开开发者中心接口（与对话请求完全隔离）。
+> - **`antigravity-acp` 的合规风险不是技术风险，而是条款风险**：它运行的是 Google 官方 `agy` 与其官方 ACP 服务器（协议、凭据、网络全部由官方程序负责，与旧的逆向 `antigravity` 线路有本质区别），但 Google 的 Antigravity FAQ 明确写着：*使用第三方软件、工具或服务访问 Antigravity 违反其服务条款*，且 *把 `agy` 包在第三方编码 Agent/应用中、或自动化账号轮换，在消费者套餐下不受支持*，可能导致账号被暂停或终止。Google 同时公开推荐了 ACP 接入编辑器的方式，两者之间存在解释空间。**默认关闭该线路**；是否启用由使用者自行判断并承担账号风险。Gemini Enterprise / AI Studio API Key 是 Google 官方指引中风险最低的替代路径。
 > - 各线路详细的鉴权细节、验证置信度分档与宿主 API 路由请参阅 **[供应线路完整指南（docs/providers.md）](docs/providers.md)**。
 
 ---
@@ -55,7 +57,7 @@
 ## 核心特性
 
 ### 1. 统一订阅中心与多账号池调度
-- **聚合总览页**：在 **设置 → 订阅服务** 提供单页总览卡片，集中查看 12 条线路的启停状态、可用账号数与已勾选模型数，支持在线检测 npm 更新并一键升级插件（自动保护本地 `link:` 开发目录）。
+- **聚合总览页**：在 **设置 → 订阅服务** 提供单页总览卡片，集中查看 13 条线路的启停状态、可用账号数与已勾选模型数，支持在线检测 npm 更新并一键升级插件（自动保护本地 `link:` 开发目录）。
 - **统一号池内核**：所有线路共享多账号池架构，支持 **顺序耗尽（`sequential`）/ 轮流使用（`round-robin`）/ 固定当前（`sticky`）** 三种策略；遇到账号级 429 配额耗尽自动按重置窗口冷却换号，遇到全局瞬时过载则原地指数退避，防止抽干号池。
 - **本机登录态零侵入收编**：支持只读导入本机已登录的 Codex CLI、Claude Code、ZCode、StepCode、Qoder CLI、CodeBuddy 桌面端凭据，以及复用 MiniMax Code 桌面端登录态。导入前仅做 `stat` 存在性检查，绝不修改或删除第三方客户端文件，也不跨进程抢刷单次轮换令牌。
 - **桌面与无头服务器双存储模式**：默认使用系统加密密钥环（`keyring`：Windows DPAPI / macOS Keychain / Linux Secret Service）；无桌面环境的 Linux 服务器可一键切换至 DSH 标准凭据库（`credentials`：`$DSH_HOME/.credentials.yaml`，强制 `0600` 权限），告别安装 `gnome-keyring` 的繁琐配置。

@@ -8,8 +8,8 @@
 
 | 文档 | 适用读者 | 核心内容 |
 | --- | --- | --- |
-| [根 README.md](../README.md) | 所有用户 | 项目简介、12 条供应线路矩阵、核心特性、快速安装与上手指南 |
-| [供应线路完整指南（providers.md）](providers.md) | 所有用户 / 运维 | 全部 12 条线路的登录鉴权、本机 CLI 收编规则、模型能力、缓存与额度机制、验证边界及完整 HTTP 路由表 |
+| [根 README.md](../README.md) | 所有用户 | 项目简介、13 条供应线路矩阵、核心特性、快速安装与上手指南 |
+| [供应线路完整指南（providers.md）](providers.md) | 所有用户 / 运维 | 全部 13 条线路的登录鉴权、本机 CLI 收编规则、模型能力、缓存与额度机制、验证边界及完整 HTTP 路由表 |
 | [部署配置与安全参考（configuration.md）](configuration.md) | 运维 / 高级用户 | `cordis.patch.yml` 全量配置项、`poolStorage`（桌面密钥环 vs 无头服务器凭据库）、共享网络代理与 `web_fetch`、全量环境变量及安全不变量 |
 | [架构设计与开发指南（architecture.md）](architecture.md) | 贡献者 / 维护者 | 目录与多组件导出结构、`volatile` 设置接线、共享号池内核、Agent 编排与前缀缓存守卫、跨代际 DSH 兼容策略与测试发版规范 |
 | [故障排查手册（troubleshooting.md）](troubleshooting.md) | 所有用户 / 运维 | 登录回调/钥匙环报错、路由冲突、401/403/429/5xx 分类、上下文压缩与图片预算、`fake-ip` 代理抓网页、子代理白名单与调度模式排障 |
@@ -37,6 +37,7 @@
 - [单账号精细额度设计（per-account-quota.md）](per-account-quota.md)
 - [订阅服务设置中心重构（settings-hub-redesign.md）](settings-hub-redesign.md)
 - [线路 Agent 性能优化方案（plan-provider-agent-optimizations.md）](plan-provider-agent-optimizations.md)
+- [Antigravity（ACP）线路计划与证据（antigravity-acp-line-plan.md）](antigravity-acp-line-plan.md)
 - [Antigravity / Claude 缓存审计（antigravity-claude-cache-audit.md）](antigravity-claude-cache-audit.md)
 - [Code Mode `code_run` 报错审计（codemode-code-run-error-audit.md）](codemode-code-run-error-audit.md)
 

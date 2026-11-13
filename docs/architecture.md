@@ -21,7 +21,7 @@
 ```text
 .
 ├── src/
-│   ├── index.ts                     # 核心宿主入口（12 条线路接线、工具注册、全局守卫）
+│   ├── index.ts                     # 核心宿主入口（13 条线路接线、工具注册、全局守卫）
 │   ├── entry-progress-updates.ts    # 子入口：./progress-updates（进展汇报独立组件）
 │   ├── entry-plan-mode-pipeline.ts  # 子入口：./plan-mode-pipeline（enter/leave_plan_mode）
 │   ├── entry-plan-mode.ts           # 子入口：./plan-mode（尾部一次性投递的计划模式服务）
@@ -29,6 +29,7 @@
 │   ├── compat.ts                    # 跨层常量与插件版本标识
 │   ├── host/                        # Node.js 宿主侧实现
 │   │   ├── common/                  # 共享内核（号池、存储、快照、代理、超时、i18n 等）
+│   │   ├── antigravity-acp/         # Antigravity（ACP）线路：官方 agy acp 传输、MCP 工具桥、子代理后端
 │   │   ├── claude/                  # Claude 订阅线路
 │   │   ├── cline-pass/              # Cline Pass 线路
 │   │   ├── command-code/            # Command Code 线路
@@ -51,7 +52,8 @@
 │   │   ├── index.tsx                # 浏览器端总入口（打包为 lib/client.js）
 │   │   ├── hub/                     # 订阅服务总览页与一键更新检查
 │   │   ├── common/                  # 共享号池卡片、模型勾选表、语言镜像与样式
-│   │   ├── locales-ru/              # 俄语语言包（15 个命名空间）
+│   │   ├── antigravity-acp/         # Antigravity（ACP）设置卡、API 封装与输入框胶囊
+│   │   ├── locales-ru/              # 俄语语言包（16 个命名空间）
 │   │   ├── mermaid/                 # 对话流 Mermaid 图表监听与安全渲染
 │   │   └── <line>/                  # 各线路独立设置页、API 封装与输入框额度胶囊
 │   └── shared/                      # Host 与 Client 共享的无副作用纯类型与 DTO 契约
@@ -132,7 +134,7 @@
 
 客户端入口 `src/client/index.tsx` 挂载以下界面能力：
 
-- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 12 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
+- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 13 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
 - **输入框额度胶囊（`conversation.input.right`）**：按当前会话选中的模型自动展示对应线路最紧迫窗口的剩余额度或余额。
 - **多媒体工具视图与命令**：`codex_image_generate` 生图预览卡，`minimax_generate_video` 视频卡片、右侧栏文档预览器及 `/video` 斜杠命令参数表单。
 - **进展更新面板**与 **Mermaid 图表观察器**（自动将代码块安全渲染为交互图表）。
