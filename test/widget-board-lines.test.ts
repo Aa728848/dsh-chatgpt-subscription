@@ -714,6 +714,8 @@ describe('line registry', () => {
     expect(ids).toEqual([
       'codex', 'claude', 'glm-coding-plan', 'step-code', 'qoder',
       'cline-pass', 'opendesign', 'kimi-code', 'minimax-code', 'command-code',
+      // Appended last: a new line joins the end so no shipped card moves.
+      'antigravity-acp',
     ])
     for (const definition of LINE_DEFINITIONS) {
       expect(definition.statusPath.startsWith('/')).toBe(true)

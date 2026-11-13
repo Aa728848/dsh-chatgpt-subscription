@@ -14,6 +14,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LocaleSnapshot } from '@deepseek-ai/dsh-client-locale/client'
 import type { ClaudeWebStatus } from '../src/shared/claude-contracts.ts'
+import { dictionaries as antigravityAcpDicts, NS_ANTIGRAVITY_ACP } from '../src/client/antigravity-acp/locales.ts'
 import { dictionaries as claudeDicts, NS_CLAUDE } from '../src/client/claude/locales.ts'
 import { dictionaries as clinePassDicts, NS_CLINE_PASS } from '../src/client/cline-pass/locales.ts'
 import { dictionaries as commandCodeDicts, NS_COMMAND_CODE } from '../src/client/command-code/locales.ts'
@@ -31,6 +32,7 @@ import { dictionaries as hubDicts, NS } from '../src/client/locales.ts'
 import { ClaudeSection } from '../src/client/claude/ClaudeSection.tsx'
 import { installLineLocale } from '../src/client/common/line-locale.ts'
 import { RU_LOCALE, installRussianLocale } from '../src/client/locales-ru/index.ts'
+import { dictionary as antigravityAcpRu } from '../src/client/locales-ru/antigravity-acp.ts'
 import { dictionary as claudeRu } from '../src/client/locales-ru/claude.ts'
 import { dictionary as clinePassRu } from '../src/client/locales-ru/cline-pass.ts'
 import { dictionary as commandCodeRu } from '../src/client/locales-ru/command-code.ts'
@@ -64,6 +66,8 @@ const NAMESPACES = [
   // 'locales-ru/index.ts': an insert would shift every line after it.
   { ns: NS_WORKBUDDY, zh: workbuddyDicts.zh as Record<string, string>, en: workbuddyDicts.en as Record<string, string>, ru: workbuddyRu },
   { ns: NS_DISPATCH_LEDGER, zh: dispatchLedgerDicts.zh as Record<string, string>, en: dispatchLedgerDicts.en as Record<string, string>, ru: dispatchLedgerRu },
+  // Antigravity（ACP）：同样追加在末尾，既有命名空间的顺序一律不动。
+  { ns: NS_ANTIGRAVITY_ACP, zh: antigravityAcpDicts.zh as Record<string, string>, en: antigravityAcpDicts.en as Record<string, string>, ru: antigravityAcpRu },
 ]
 
 /** `{name}` placeholders in a template, in the order they appear. */

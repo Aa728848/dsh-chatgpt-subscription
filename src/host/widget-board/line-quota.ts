@@ -1150,6 +1150,29 @@ function minimaxWindowList(
  * falls back to nothing measured, so adding a pool without a normalizer
  * degrades to "no quota window" instead of to a thrown error.
  */
+/**
+ * Antigravity（ACP）: the official server publishes a plan tier and per-turn token
+ * counts, and no quota at all. So this line's card states the tier and reports
+ * `quota: null` — the honest answer — instead of drawing a bar whose percentage
+ * would have been invented here.
+ *
+ * @param status - The line's own `GET /antigravity-acp/api/status` payload.
+ * @returns Facts with the tier as the plan label and no quota window.
+ */
+export function normalizeAntigravityAcpQuota(status: unknown): LineQuotaFacts {
+  const root = asRecord(status)
+  if (root === null) return unavailableFacts(null)
+  const auth = asRecord(root.auth)
+  const tier = asRecord(auth?.tier)
+  return {
+    quota: null,
+    planLabel: asText(tier?.name),
+    accountLabel: null,
+    signedIn: asBoolean(auth?.authenticated),
+    error: firstText([root.notice, asRecord(root.binary)?.error]),
+  }
+}
+
 export const LINE_QUOTA_NORMALIZERS: Readonly<Record<string, (status: unknown) => LineQuotaFacts>> = {
   codex: normalizeCodexQuota,
   claude: normalizeClaudeQuota,
@@ -1161,4 +1184,5 @@ export const LINE_QUOTA_NORMALIZERS: Readonly<Record<string, (status: unknown) =
   'kimi-code': normalizeKimiCodeQuota,
   'minimax-code': normalizeMinimaxCodeQuota,
   'command-code': normalizeCommandCodeQuota,
+  'antigravity-acp': normalizeAntigravityAcpQuota,
 }

@@ -170,6 +170,11 @@ export const zh = {
   'glm.pasteCallback': '请粘贴回调链接或授权码。',
   'glm.noLoginInProgress': '当前没有进行中的登录流程，请先点击登录。',
   'glm.notSignedIn': '还没有登录 {provider} 账号。',
+
+  // Antigravity（ACP）线路：显示名与它自己会说给用户的两句话。
+  'provider.antigravity-acp': 'Antigravity（ACP）',
+  'antigravityAcp.notSignedIn': '还没有登录 Antigravity：请在设置页发起登录，或在终端执行 agy acp --login。',
+  'antigravityAcp.noBinary': '未找到可用的 Antigravity CLI（agy），且官方 ACP 服务端尚未下载。',
 } as const
 
 /** Every Host copy key this plugin has. */

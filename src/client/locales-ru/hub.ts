@@ -227,6 +227,7 @@ export const dictionary: Record<LocaleKey, string> = {
   'cardName.qoder': 'Qoder (подписка)',
   'cardName.opendesign': 'OpenDesign',
   'cardName.workbuddy': 'WorkBuddy',
+  'cardName.antigravity-acp': 'Antigravity (ACP)',
   modelChecklistCount: 'Включено {count}/{total}',
   codeRunTitle: 'Код',
   codeRunOutput: 'Вывод',

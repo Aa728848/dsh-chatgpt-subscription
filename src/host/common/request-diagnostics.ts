@@ -39,6 +39,9 @@ export const DIAGNOSTIC_PROVIDERS = [
   'opendesign',
   // WorkBuddy：与 PROVIDER_ID / CONTROLLED_PROVIDERS 使用同一个路由 id。
   'workbuddy-subscription',
+  // Antigravity（ACP）：同样是注册点——不写在这里，本线路就静默失去
+  // [provider-diagnostics] 日志。
+  'antigravity-acp',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]
@@ -49,6 +52,9 @@ export const KNOWN_WIRE_ENDPOINTS = [
   'chat_completions',
   'generate_content',
   'stream_generate_content',
+  // ACP over stdio: no HTTP endpoint, so the wire name says what it is rather
+  // than pretending to be one of the HTTP shapes above.
+  'acp',
   'ollama_chat',
   'ollama_generate',
   'unknown',

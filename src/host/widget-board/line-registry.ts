@@ -288,6 +288,16 @@ export const LINE_DEFINITIONS: readonly LineDefinition[] = [
     refreshPath: '/command-code/api/quota',
     normalize: LINE_QUOTA_NORMALIZERS['command-code'],
   },
+  // Antigravity（ACP）：追加在末尾，既有线路的位置一律不动。
+  // 官方服务端不公布剩余额度，所以这张卡的 quota 半边永远是 null，只显示档位；
+  // refreshPath 仍指向本线路的刷新路由，用来重读状态而不是重读一个不存在的额度。
+  {
+    id: 'antigravity-acp',
+    label: 'Antigravity (ACP)',
+    statusPath: '/antigravity-acp/api/status',
+    refreshPath: '/antigravity-acp/api/refresh',
+    normalize: LINE_QUOTA_NORMALIZERS['antigravity-acp'],
+  },
 ]
 
 /**

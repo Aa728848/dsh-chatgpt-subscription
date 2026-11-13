@@ -61,6 +61,18 @@ import { registerOllamaRoutes } from './host/ollama/routes.ts'
 import { OllamaAccountPool } from './host/ollama/account-pool.ts'
 import { PROVIDER_ID as OLLAMA_PROVIDER_ID, PROVIDER_NAME as OLLAMA_PROVIDER_NAME } from './host/ollama/types.ts'
 import { FileCredentialStore as OllamaCredentialStore, FileModelSettingsStore as OllamaModelSettingsStore } from './host/ollama/token-store.ts'
+import { AntigravityAcpAdapter } from './host/antigravity-acp/adapter.ts'
+import { AntigravityAcpSettingsStore } from './host/antigravity-acp/settings.ts'
+import { AcpCatalog } from './host/antigravity-acp/catalog.ts'
+import { AcpClient } from './host/antigravity-acp/acp-client.ts'
+import { resolveAcpBinary } from './host/antigravity-acp/binary.ts'
+import { probeAuth, startLogin } from './host/antigravity-acp/login.ts'
+import { registerAntigravityAcpRoutes } from './host/antigravity-acp/routes.ts'
+import { AcpAuthCache } from './host/antigravity-acp/auth-cache.ts'
+import { runDoctor } from './host/antigravity-acp/doctor.ts'
+import { readCatalogFrom } from './host/antigravity-acp/catalog.ts'
+import { registerAntigravityAcpSubagent } from './host/antigravity-acp/subagent.ts'
+import { PROVIDER_ID as ANTIGRAVITY_ACP_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_ACP_PROVIDER_NAME, AUTH_REQUIRED_MESSAGE } from './host/antigravity-acp/types.ts'
 import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
 import { KimiCodeAccountPool } from './host/kimi-code/account-pool.ts'
 import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
@@ -1061,6 +1073,43 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       { fetchFn: modelFetch.ollama, attachments: ctx.attachments },
       ollamaAccountPool,
     )
+    // Antigravity（ACP）: the official `agy` CLI owns the protocol, the sign-in and
+    // the network; this plugin only translates one harness call into one ACP turn
+    // and routes the agent's tool calls back through its own MCP bridge.
+    //
+    // Single account on purpose: the ACP server holds exactly one credential set,
+    // and this line neither reads nor copies it. A pool here would be a promise
+    // the protocol cannot keep.
+    const antigravityAcpSettings = new AntigravityAcpSettingsStore()
+    const resolveAntigravityLaunch = async () => {
+      const settings = await antigravityAcpSettings.read()
+      const resolved = await resolveAcpBinary(settings.binaryPath)
+      if (resolved.binary === undefined) {
+        throw new Error(resolved.diagnostics.error ?? 'No usable Antigravity CLI (agy) was found.')
+      }
+      return { command: resolved.binary.path, args: ['acp', '--disable-telemetry'], version: resolved.binary.version }
+    }
+    const antigravityAcpCatalog = new AcpCatalog(
+      resolveAntigravityLaunch,
+      (launch) => new AcpClient({ command: launch.command, args: launch.args, cwd: process.cwd() }),
+      'default',
+    )
+    const antigravityAcpAdapter = new AntigravityAcpAdapter({
+      settings: antigravityAcpSettings,
+      resolveLaunch: resolveAntigravityLaunch,
+      loadCatalog: async (options) => {
+        const read = await antigravityAcpCatalog.read(options)
+        return read === undefined ? undefined : { models: read.models, synced: !read.fromSnapshot }
+      },
+      attachments: ctx.attachments,
+    })
+    // Cold start reads the persisted snapshot (milliseconds); the live refresh runs
+    // behind it, exactly like every other line's catalog.
+    void antigravityAcpCatalog.rehydrate().catch(() => undefined)
+    // The auth probe costs one process spawn. The card polls, the hub polls, and
+    // three readers on one screen must not mean three `agy` launches, so the
+    // answer is cached briefly and invalidated by an explicit sign-in or refresh.
+    const antigravityAcpAuth = new AcpAuthCache(() => probeAuthWithLaunch(resolveAntigravityLaunch))
     // The video reader this route needs: DSH's attachment service is image-only,
     // so videos are ingested by this plugin's own tool and stored locally. The
     // reader verifies each reference against the stored bytes before handing
@@ -1106,6 +1155,59 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       accountPool: ollamaAccountPool,
       modelSettings: ollamaModelSettings,
       fetchFn: proxyFetch,
+    })
+
+    const antigravityAcpClaim = claimProviderRoute(ctx, {
+      providerId: ANTIGRAVITY_ACP_PROVIDER_ID,
+      label: ANTIGRAVITY_ACP_PROVIDER_NAME,
+      adapter: antigravityAcpAdapter,
+    })
+    // Routes are unconditional for the same reason every other line registers them
+    // unconditionally: the card is how a user signs in the first time, so gating it
+    // on the route claim would leave a contested id with no way to configure it.
+    const disposeAntigravityAcpRoutes = registerAntigravityAcpRoutes(ctx, {
+      settings: antigravityAcpSettings,
+      catalog: antigravityAcpCatalog,
+      resolveBinary: async () => {
+        const settings = await antigravityAcpSettings.read()
+        const resolved = await resolveAcpBinary(settings.binaryPath)
+        return { binary: resolved.binary, error: resolved.diagnostics.error }
+      },
+      login: async () => {
+        try {
+          const launch = await resolveAntigravityLaunch()
+          const started = startLogin(launch)
+          // A sign-in changes the answer, so the cached one must not outlive it.
+          antigravityAcpAuth.invalidate()
+          return started
+        } catch (error) {
+          return { started: false, error: error instanceof Error ? error.message : String(error) }
+        }
+      },
+      auth: (options?: { force?: boolean }) => antigravityAcpAuth.read(options),
+      usage: () => antigravityAcpAdapter.usage(),
+      occupancy: () => antigravityAcpAdapter.occupancy(),
+      runDoctor: () => runDoctor({
+        resolveBinary: async () => {
+          const settings = await antigravityAcpSettings.read()
+          const resolved = await resolveAcpBinary(settings.binaryPath)
+          return resolved.binary === undefined
+            ? { error: resolved.diagnostics.error }
+            : { path: resolved.binary.path, version: resolved.binary.version, kind: resolved.binary.kind }
+        },
+        resolveLaunch: resolveAntigravityLaunch,
+        spawnClient: (launch) => new AcpClient({ command: launch.command, args: launch.args, cwd: process.cwd() }),
+        readCatalog: (client) => readCatalogFrom(client),
+        probeAuth: (client) => probeAuth(client),
+      }),
+      conflict: () => antigravityAcpClaim.conflict(),
+    })
+    // The subagent half is registered only where the host has a `subagents`
+    // service; older generations simply do not get it, and the main-model line is
+    // unaffected either way.
+    const disposeAntigravityAcpSubagent = registerAntigravityAcpSubagent(ctx, {
+      resolveLaunch: resolveAntigravityLaunch,
+      settings: antigravityAcpSettings,
     })
 
     const commandCodeClaim = claimProviderRoute(ctx, {
@@ -1730,6 +1832,28 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         },
       },
       {
+        // Antigravity（ACP）: no account pool, so `accountCount` is the one account
+        // the official CLI holds (0 until it answers), and the model counts come
+        // from the same rehydrated catalogue the picker reads.
+        id: 'antigravity-acp',
+        providerId: ANTIGRAVITY_ACP_PROVIDER_ID,
+        canToggle: true,
+        read: async () => {
+          const current = await antigravityAcpSettings.read()
+          const catalog = await antigravityAcpCatalog.rehydrate()
+          const total = catalog === undefined ? null : catalogTotal(catalog.models.length)
+          const selected = current.enabledModelIds === null ? total : current.enabledModelIds.length
+          const auth = await antigravityAcpAuth.read()
+          return {
+            enabled: current.enabled !== false,
+            accountCount: auth.authenticated ? 1 : 0,
+            authenticated: auth.authenticated,
+            enabledModelCount: total === null || selected === null ? null : Math.min(selected, total),
+            totalModelCount: total,
+          }
+        },
+      },
+      {
         id: 'step-code',
         providerId: STEP_CODE_PROVIDER_ID,
         canToggle: true,
@@ -1924,6 +2048,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeUpdateRoutes()
       disposeOllamaRoutes()
       ollamaClaim.dispose()
+      disposeAntigravityAcpRoutes()
+      antigravityAcpClaim.dispose()
+      disposeAntigravityAcpSubagent?.()
+      void antigravityAcpAdapter.dispose().catch(() => undefined)
       disposeCommandCodeRoutes()
       commandCodeClaim.dispose()
       disposeKimiCodeRoutes()
@@ -1948,6 +2076,25 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       clearInterval(workBuddyCheckinTimer)
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
+}
+
+/**
+ * Probe the official CLI's sign-in state without holding a client open.
+ *
+ * The hub overview asks every card in one request; a probe per render would spawn
+ * a process each time, so this one is bounded and always cleans up after itself.
+ */
+async function probeAuthWithLaunch(
+  resolveLaunch: () => Promise<{ command: string; args: string[]; version?: string }>,
+): Promise<{ authenticated: boolean; method?: string; tier?: { id: string; name: string } }> {
+  let client: AcpClient | undefined
+  try {
+    const launch = await resolveLaunch()
+    client = new AcpClient({ command: launch.command, args: launch.args, cwd: process.cwd() })
+    return await probeAuth(client)
+  } finally {
+    await client?.dispose().catch(() => undefined)
+  }
 }
 
 export {

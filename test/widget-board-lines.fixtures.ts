@@ -640,5 +640,41 @@ export const LIVE_STATUS_PAYLOADS: Readonly<Record<string, unknown>> = {
       "conflict": null,
       "quotaRefreshing": true
     }
+  }  ,
+  "antigravity-acp": {
+    "ok": true,
+    "value": {
+      "binary": {
+        "kind": "local-cli",
+        "path": "C:\\Users\\A\\.gemini\\bin\\agy.exe",
+        "version": "1.5.3"
+      },
+      "auth": {
+        "authenticated": true,
+        "method": "oauth-personal",
+        "tier": {
+          "id": "g1-ultra-tier",
+          "name": "Google AI Ultra"
+        }
+      },
+      "models": [
+        {
+          "id": "gemini-4-carbon",
+          "name": "Gemini 4 Carbon",
+          "efforts": ["low", "medium", "high"],
+          "contextWindow": 1048576
+        }
+      ],
+      "enabledModelIds": null,
+      "defaultReasoningEffort": null,
+      "permissionPolicy": "reject",
+      "catalogSynced": true,
+      "usage": {
+        "inputTokens": 9084,
+        "outputTokens": 34,
+        "cachedReadTokens": 0,
+        "at": 1792658466348
+      }
+    }
   }
 }

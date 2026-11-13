@@ -159,4 +159,8 @@ export const en: Record<HostLocaleKey, string> = {
   'glm.pasteCallback': 'Paste the callback link or the authorization code.',
   'glm.noLoginInProgress': 'No sign-in is in progress; start one first.',
   'glm.notSignedIn': 'No {provider} account is signed in yet.',
+
+  'provider.antigravity-acp': 'Antigravity (ACP)',
+  'antigravityAcp.notSignedIn': 'Antigravity is not signed in. Start the sign-in from this card, or run agy acp --login in a terminal.',
+  'antigravityAcp.noBinary': 'No usable Antigravity CLI (agy) was found and the official ACP server has not been downloaded.',
 }

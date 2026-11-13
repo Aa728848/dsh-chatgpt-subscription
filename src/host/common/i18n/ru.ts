@@ -160,4 +160,8 @@ export const ru: Record<HostLocaleKey, string> = {
   'glm.pasteCallback': 'Вставьте ссылку обратного вызова или код авторизации.',
   'glm.noLoginInProgress': 'Сейчас нет входа в процессе; сначала начните его.',
   'glm.notSignedIn': 'Вход в аккаунт {provider} ещё не выполнен.',
+
+  'provider.antigravity-acp': 'Antigravity (ACP)',
+  'antigravityAcp.notSignedIn': 'Вход в Antigravity не выполнен. Начните его на этой карточке или выполните agy acp --login в терминале.',
+  'antigravityAcp.noBinary': 'Рабочий Antigravity CLI (agy) не найден, и официальный ACP-сервер ещё не загружен.',
 }

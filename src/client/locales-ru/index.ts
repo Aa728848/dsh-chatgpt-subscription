@@ -20,6 +20,7 @@ import { NS_GLM_CODING_PLAN } from '../glm-coding-plan/locales.ts'
 import { NS_KIMI_CODE } from '../kimi-code/locales.ts'
 import { NS_MINIMAX_CODE } from '../minimax-code/locales.ts'
 import { NS_OLLAMA } from '../ollama/locales.ts'
+import { NS_ANTIGRAVITY_ACP } from '../antigravity-acp/locales.ts'
 import { NS_OPENDESIGN } from '../opendesign/locales.ts'
 import { NS_DISPATCH_LEDGER } from '../dispatch-ledger/locales.ts'
 import { NS_PROGRESS_UPDATES } from '../progress-updates/locales.ts'
@@ -35,6 +36,7 @@ import { dictionary as hub } from './hub.ts'
 import { dictionary as kimiCode } from './kimi-code.ts'
 import { dictionary as minimaxCode } from './minimax-code.ts'
 import { dictionary as ollama } from './ollama.ts'
+import { dictionary as antigravityAcp } from './antigravity-acp.ts'
 import { dictionary as openDesign } from './opendesign.ts'
 import { dictionary as dispatchLedger } from './dispatch-ledger.ts'
 import { dictionary as progressUpdates } from './progress-updates.ts'
@@ -92,6 +94,8 @@ export function installRussianLocale(ctx: ClientContext): void {
     // registration order of the lines that were already shipped never moves.
     [NS_WORKBUDDY, workbuddy],
     [NS_DISPATCH_LEDGER, dispatchLedger],
+    // Antigravity（ACP）：追加在末尾，既有命名空间的注册顺序一律不动。
+    [NS_ANTIGRAVITY_ACP, antigravityAcp],
   ]
 
   for (const [ns, dictionary] of dictionaries) {

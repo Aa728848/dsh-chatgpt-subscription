@@ -26,6 +26,7 @@ import { MinimaxCodeSection } from '../minimax-code/MinimaxCodeSection.tsx'
 import { GlmCodingPlanSection } from '../glm-coding-plan/GlmCodingPlanSection.tsx'
 import { ClaudeSection } from '../claude/ClaudeSection.tsx'
 import { OllamaSection } from '../ollama/OllamaSection.tsx'
+import { AntigravityAcpSection } from '../antigravity-acp/AntigravityAcpSection.tsx'
 import { StepCodeSection } from '../step-code/StepCodeSection.tsx'
 import { ClinePassSection } from '../cline-pass/ClinePassSection.tsx'
 import { CLINE_PASS_PROVIDER_NAME, CLINE_PASS_ROUTE_PREFIX } from '../../shared/cline-pass-contracts.ts'
@@ -189,6 +190,15 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: 'WorkBuddy',
     setEnabled: (enabled) => postLineSettings('/workbuddy/api', { enabled }),
     renderDetail: ({ onModelChange }) => <WorkBuddySection onModelChange={onModelChange} />,
+  },
+  {
+    // Antigravity（ACP）：追加在既有卡片之后，不回填历史中间位置。
+    // host 侧注册顺序与之一致（workbuddy 之后）。
+    id: 'antigravity-acp',
+    // 显示名走 hub 字典里的 provider 名，和其余线路同一套解析；没有翻译时退回英文常量。
+    name: 'Antigravity (ACP)',
+    setEnabled: (enabled) => postLineSettings('/antigravity-acp/api', { enabled }),
+    renderDetail: ({ onModelChange }) => <AntigravityAcpSection onModelChange={onModelChange} />,
   },
 ]
 

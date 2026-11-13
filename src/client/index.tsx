@@ -41,6 +41,9 @@ import { GlmCodingPlanComposerQuota } from './glm-coding-plan/GlmCodingPlanCompo
 import { dictionaries as glmCodingPlanDicts, NS_GLM_CODING_PLAN, type GlmCodingPlanLocaleKey } from './glm-coding-plan/locales.ts'
 import { installGlmCodingPlanStyles } from './glm-coding-plan/styles.ts'
 import { dictionaries as ollamaDicts, NS_OLLAMA, type OllamaLocaleKey } from './ollama/locales.ts'
+import { AntigravityAcpComposerBadge } from './antigravity-acp/AntigravityAcpComposerBadge.tsx'
+import { dictionaries as antigravityAcpDicts, NS_ANTIGRAVITY_ACP, type AntigravityAcpLocaleKey } from './antigravity-acp/locales.ts'
+import { installAntigravityAcpStyles } from './antigravity-acp/styles.ts'
 import { StepCodeComposerQuota } from './step-code/StepCodeComposerQuota.tsx'
 import { dictionaries as stepCodeDicts, NS_STEP_CODE, type StepCodeLocaleKey } from './step-code/locales.ts'
 import { installStepCodeStyles } from './step-code/styles.ts'
@@ -88,6 +91,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-minimax-code': MinimaxCodeLocaleKey
     'dsh-glm-coding-plan': GlmCodingPlanLocaleKey
     'dsh-ollama': OllamaLocaleKey
+    'dsh-antigravity-acp': AntigravityAcpLocaleKey
     'dsh-step-code': StepCodeLocaleKey
     'dsh-cline-pass': ClinePassLocaleKey
     'dsh-qoder': QoderLocaleKey
@@ -148,6 +152,12 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     return () => {}
   }, 'dsh-glm-coding-plan: styles')
   ctx.effect(() => ctx.locale.register(NS_OLLAMA, ollamaDicts), 'dsh-ollama: dictionaries')
+  // Antigravity（ACP）：追加在既有线路之后。样式表无条件安装；数据是否出现由宿主决定。
+  ctx.effect(() => ctx.locale.register(NS_ANTIGRAVITY_ACP, antigravityAcpDicts), 'dsh-antigravity-acp: dictionaries')
+  ctx.effect(() => {
+    installAntigravityAcpStyles()
+    return () => {}
+  }, 'dsh-antigravity-acp: styles')
   ctx.effect(() => ctx.locale.register(NS_PROGRESS_UPDATES, progressUpdatesDicts), 'dsh-progress-updates: dictionaries')
   ctx.effect(() => {
     installProgressUpdatesStyles()
@@ -281,6 +291,14 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     name: 'conversation.input.right', id: 'workbuddy-quota', order: 47, locale: NS_WORKBUDDY,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, WorkBuddyComposerQuota))
+  // 顺序 48：Antigravity（ACP）。Append-only：47 及以前的 order 全部不动，
+  // 注册顺序也接在 WorkBuddy 之后（注入序列与 order 同序）。
+  // 本线路的胶囊只显示套餐档位与最近一轮 token 用量；官方 ACP 不公布剩余额度，
+  // 因此 selectFacts 永远返回不带 percent 的事实，不会画出伪造的百分比条。
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'antigravity-acp-quota', order: 48, locale: NS_ANTIGRAVITY_ACP,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, AntigravityAcpComposerBadge))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,
