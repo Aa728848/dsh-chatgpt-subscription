@@ -48,8 +48,14 @@ export const CACHE_WARMUP_DEFAULTS = {
   pageLimitMax: 512,
   /** 分页 maxBytes 默认值（字节）。 */
   pageMaxBytesDefault: 16 * 1024,
-  /** 分页 maxBytes 上限（字节）。 */
-  pageMaxBytesMax: 64 * 1024,
+  /**
+   * 分页 maxBytes 上限（字节）。
+   *
+   * 25 KB，不是越大越好：补读的每一页都会原样进入下一轮的提示，一次 45 KB 的
+   * 整页重读等于把「省下来的」又付一遍。分页的用途是**精确补读**，不是把整份
+   * 原文再抄一遍；真需要看完全文就多翻几页，每页都要过模型的门。
+   */
+  pageMaxBytesMax: 25 * 1024,
   /** usage registry 的 session 数上限。 */
   maxUsageSessions: 256,
   /** 每 session 保留的用量报告条数上限。 */
@@ -119,6 +125,7 @@ export type ProjectionStrategy =
   | 'glob-results'
   | 'structured-rows'
   | 'tool-catalog'
+  | 'batch-results'
   | 'file-outline'
   | 'web-outline'
 

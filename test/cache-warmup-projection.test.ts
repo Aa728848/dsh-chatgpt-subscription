@@ -823,10 +823,8 @@ describe('projectToolResult 的 spill 恢复', () => {
     expect(result.metrics.strategy).toBe('test-failure')
     // 度量按全文算：省略的是没进预览的那部分**全文**。
     expect(result.metrics.inputChars).toBe(full.length)
-    // 入库的是全文，翻页能读回未被截断的输出。
-    const page = await store.page({ sessionId: 'spill-1', refId: result.refId!, limit: 512, maxBytes: 65_536 })
-    expect(page.complete).toBe(true)
-    expect(page.content).toBe(full)
+    // 入库的是全文，翻页能读回未被截断的输出（单页上限 25 KB，翻完拼回原文）。
+    expect(await readAllPages(store, 'spill-1', result.refId!)).toBe(full)
   })
 
   it('spill 读回的多读 JSON 信封：即使全文不足 20_000 字符也投影成 file-outline', async () => {
@@ -1306,9 +1304,7 @@ describe('projectToolResult 的超长多读/多节输出', () => {
     expect(result.preview).toContain('tools: 18 (complete name index; descriptions clipped)')
     for (let index = 0; index < 18; index += 1) expect(result.preview).toContain(`plugin/tool_${index}:`)
     expect(result.preview).not.toContain('parameters')
-    const page = await store.page({ sessionId: 'catalog-1', refId: result.refId!, limit: 512, maxBytes: 65_536 })
-    expect(page.complete).toBe(true)
-    expect(page.content).toBe(raw)
+    expect(await readAllPages(store, 'catalog-1', result.refId!)).toBe(raw)
   })
 
   it('工具目录只认严格 PTC 根形状；额外成员、非 PTC 与预算不足都保持原文', async () => {
@@ -1393,5 +1389,176 @@ describe('projectToolResult 的超长多读/多节输出', () => {
     expect(result.changed).toBe(false)
     expect(result.metrics.strategy).toBe('verbatim-small')
     expect(result.content).toBe(content)
+  })
+})
+
+describe('projectToolResult 的批量程序返回（code_run 数组与路径映射）', () => {
+  /** 一份 `tools.grep` 的批量命中数组：60 条命中、12 个文件。 */
+  function batchMatches(): Array<{ path: string, lineNumber: number, line: string }> {
+    return Array.from({ length: 60 }, (_, index) => ({
+      path: 'packages/client/src/feature/file' + (index % 12) + '.ts',
+      lineNumber: 100 + index,
+      line: '  const slot' + index + ' = "[data-slot=\\"conversation.input.right\\"]"',
+    }))
+  }
+
+  /** 一份 `tools.read` 的批量返回：每个文件带完整递增行号。 */
+  function batchReads(files: number, linesPerFile: number): Array<Record<string, unknown>> {
+    return Array.from({ length: files }, (_, file) => ({
+      path: 'packages/engine/src/module' + file + '.ts',
+      offset: 1,
+      lines: Array.from({ length: linesPerFile }, (_, line) => ({
+        number: line + 1,
+        text: 'export const symbol' + line + ' = ' + 'x'.repeat(40),
+      })),
+      totalLines: linesPerFile,
+    }))
+  }
+
+  it('批量 grep 命中数组换成按文件计数，原文可整份补读', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify(batchMatches(), null, 2)
+    expect(raw.length).toBeGreaterThan(STEADY.maxChars)
+    const result = await projectToolResult({
+      toolName: 'code_run',
+      sessionId: 'batch-grep',
+      content: raw,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('grep-results')
+    expect(result.preview).toContain('matches: 60 across 12 files')
+    expect(result.preview!.length).toBeLessThanOrEqual(STEADY.maxChars)
+    expect(await readAllPages(store, 'batch-grep', result.refId!)).toBe(raw)
+  })
+
+  it('批量改写数组只保留路径与前后篇幅，正文不再回显第二遍', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const edits = Array.from({ length: 6 }, (_, index) => ({
+      path: 'packages/client/src/edit' + index + '.ts',
+      before: 'import a\n'.repeat(600),
+      after: 'import b\n'.repeat(600),
+    }))
+    const raw = JSON.stringify(edits, null, 2)
+    const result = await projectToolResult({
+      toolName: 'code_run',
+      sessionId: 'batch-edit',
+      content: raw,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('batch-results')
+    expect(result.preview).toContain('edits: 6 (complete set')
+    expect(result.preview).toContain('packages/client/src/edit0.ts before 5400ch')
+    expect(result.preview).not.toContain('import b')
+    expect(await readAllPages(store, 'batch-edit', result.refId!)).toBe(raw)
+  })
+
+  it('批量读取只在明确导航任务里换成大纲；编辑任务保持原文', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify(batchReads(10, 90), null, 2)
+    const editing = await projectToolResult({
+      toolName: 'code_run',
+      sessionId: 'batch-read-edit',
+      content: raw,
+      budget: STEADY,
+      store,
+    })
+    expect(editing.changed).toBe(false)
+    expect(editing.content).toBe(raw)
+    expect(editing.metrics.strategy).toBe('verbatim-unparsed')
+
+    const navigating = await projectToolResult({
+      toolName: 'code_run',
+      sessionId: 'batch-read-nav',
+      content: raw,
+      budget: STEADY,
+      navigation: true,
+      store,
+    })
+    expect(navigating.changed, JSON.stringify(navigating.metrics)).toBe(true)
+    expect(navigating.metrics.strategy).toBe('batch-results')
+    expect(navigating.preview).toContain('reads: 10 (complete set')
+    expect(navigating.preview).toContain('packages/engine/src/module0.ts lines 1-90 (90)')
+    expect(await readAllPages(store, 'batch-read-nav', navigating.refId!)).toBe(raw)
+  })
+
+  it('被宿主截断的批量读取同样换成大纲：半截正文不如完整索引加全文引用', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const full = JSON.stringify(batchReads(10, 90), null, 2)
+    const visible = full.slice(0, 30_000)
+    const spillPath = path.join(await makeRoot(), 'batch-read-spill.txt')
+    await fs.writeFile(spillPath, full, 'utf8')
+    const notice = '\n\n(Omitted ' + (full.length - visible.length) + ' bytes. Full formatted result stored at: ' + spillPath
+      + '. Use read with offset/limit, or grep this path to search within it.)'
+    const result = await projectToolResult({
+      toolName: 'code_run',
+      sessionId: 'batch-read-spill',
+      content: visible + notice,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('batch-results')
+    expect(result.metrics.inputChars).toBe(full.length)
+    expect(await readAllPages(store, 'batch-read-spill', result.refId!)).toBe(full)
+  })
+
+  it('「路径 → 带行号正文」映射在导航任务里换成大纲', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const map: Record<string, string> = {}
+    for (let file = 0; file < 6; file += 1) {
+      map['packages/client/src/feature' + file + '.ts'] = Array.from(
+        { length: 120 },
+        (_, line) => line + 1 + ': const value' + line + ' = ' + 'y'.repeat(50),
+      ).join('\n')
+    }
+    const raw = JSON.stringify(map, null, 2)
+    const result = await projectToolResult({
+      toolName: 'code_run',
+      sessionId: 'batch-map',
+      content: raw,
+      budget: STEADY,
+      navigation: true,
+      store,
+    })
+    expect(result.changed, JSON.stringify(result.metrics)).toBe(true)
+    expect(result.metrics.strategy).toBe('batch-results')
+    expect(result.preview).toContain('reads: 6 (complete set')
+    expect(await readAllPages(store, 'batch-map', result.refId!)).toBe(raw)
+  })
+
+  it('形状不完整的数组仍然逐字保留：不是所有 JSON 都值得换预览', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify(
+      Array.from({ length: 40 }, (_, index) => ({ path: 'src/a' + index + '.ts', before: 'x'.repeat(1500) })),
+      null,
+      2,
+    )
+    const result = await projectToolResult({
+      toolName: 'code_run',
+      sessionId: 'batch-shape',
+      content: raw,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed).toBe(false)
+    expect(result.content).toBe(raw)
+  })
+
+  it('非 PTC 工具的同形数组不受影响', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const raw = JSON.stringify(batchMatches(), null, 2)
+    const result = await projectToolResult({
+      toolName: 'win_bash',
+      sessionId: 'batch-other',
+      content: raw,
+      budget: STEADY,
+      store,
+    })
+    expect(result.changed).toBe(false)
+    expect(result.content).toBe(raw)
   })
 })

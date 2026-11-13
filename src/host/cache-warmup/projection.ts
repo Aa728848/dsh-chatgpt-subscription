@@ -1466,6 +1466,226 @@ function buildCompositeSections(entries: readonly CompositeEntry[]): PreviewSect
   return sections
 }
 
+/** 批量结果里的一条读取记录（`{ path, offset?, lines: [{ number, text }] }`）。 */
+interface BatchReadRecord {
+  /** 读到的文件。 */
+  path: string
+  /** 第一条与最后一条行号。 */
+  first: number
+  last: number
+  /** 行数。 */
+  lineCount: number
+}
+
+/**
+ * 识别 `code_run` 里 `tools.read` 的批量返回：`[{ path, offset?, lines: [{ number, text }] }]`。
+ *
+ * 只认**完整、连续、递增**的行号数组；任何一条记录形状不符就整批放弃。
+ * @param value - 候选数组。
+ * @returns 识别出的记录，或 undefined。
+ */
+function canonicalBatchReadRecords(value: readonly unknown[]): BatchReadRecord[] | undefined {
+  const records: BatchReadRecord[] = []
+  for (const entry of value) {
+    if (!isPlainRecord(entry)) return undefined
+    if (typeof entry.path !== 'string' || entry.path.trim() === '') return undefined
+    if (!Array.isArray(entry.lines) || entry.lines.length === 0) return undefined
+    let first = Number.POSITIVE_INFINITY
+    let last = Number.NEGATIVE_INFINITY
+    let previous = -1
+    for (const line of entry.lines) {
+      if (!isPlainRecord(line)) return undefined
+      if (!Number.isSafeInteger(line.number)) return undefined
+      if (typeof line.text !== 'string') return undefined
+      const number = line.number as number
+      if (number <= previous) return undefined
+      previous = number
+      if (number < first) first = number
+      if (number > last) last = number
+    }
+    records.push({ path: entry.path, first, last, lineCount: entry.lines.length })
+  }
+  return records.length > 0 ? records : undefined
+}
+
+/** 批量结果里的一条编辑记录（`{ path, before, after }`）。 */
+interface BatchEditRecord {
+  /** 被改的文件。 */
+  path: string
+  /** 修改前正文的字符数（正文本身不回显）。 */
+  beforeChars: number
+  /** 修改后正文的字符数。 */
+  afterChars: number
+}
+
+/**
+ * 识别 `code_run` 里批量改写的返回：`[{ path, before, after }]`。
+ *
+ * `before`/`after` 是模型自己刚写进程序的入参，回显它们不携带任何新信息：
+ * 这正是「同一条内容在上下文里出现两次」的那一类浪费。只保留路径与篇幅，
+ * 需要正文时用 `read` 或 ref 补读。
+ * @param value - 候选数组。
+ * @returns 识别出的记录，或 undefined。
+ */
+function canonicalBatchEditRecords(value: readonly unknown[]): BatchEditRecord[] | undefined {
+  const records: BatchEditRecord[] = []
+  for (const entry of value) {
+    if (!isPlainRecord(entry)) return undefined
+    if (typeof entry.path !== 'string' || entry.path.trim() === '') return undefined
+    if (typeof entry.before !== 'string' || typeof entry.after !== 'string') return undefined
+    if (entry.before === '' && entry.after === '') return undefined
+    records.push({ path: entry.path, beforeChars: entry.before.length, afterChars: entry.after.length })
+  }
+  return records.length > 0 ? records : undefined
+}
+
+/** 批量读取的预览：每个文件的路径、行范围与行数（完整集合）。 */
+function buildBatchReadSections(records: readonly BatchReadRecord[], maxChars: number): PreviewSection[] {
+  const lines: string[] = []
+  let used = 0
+  let shown = 0
+  for (const record of records) {
+    const line = `  ${clip(record.path, 140)} lines ${record.first}-${record.last} (${record.lineCount})`
+    if (shown > 0 && used + line.length + 1 > maxChars) break
+    lines.push(line)
+    used += line.length + 1
+    shown += 1
+  }
+  const sections: PreviewSection[] = [
+    { lines: [`reads: ${records.length} (complete set; source kept verbatim in the ref)`] },
+    { lines },
+  ]
+  if (shown < records.length) {
+    sections.push({ lines: [`  … ${records.length - shown} more files (full list via ref)`] })
+  }
+  return sections
+}
+
+/** 批量改写的预览：每个文件的路径与前后篇幅（完整集合，正文不回显）。 */
+function buildBatchEditSections(records: readonly BatchEditRecord[], maxChars: number): PreviewSection[] {
+  const lines: string[] = []
+  let used = 0
+  let shown = 0
+  for (const record of records) {
+    const line = `  ${clip(record.path, 140)} before ${record.beforeChars}ch → after ${record.afterChars}ch`
+    if (shown > 0 && used + line.length + 1 > maxChars) break
+    lines.push(line)
+    used += line.length + 1
+    shown += 1
+  }
+  const sections: PreviewSection[] = [
+    { lines: [`edits: ${records.length} (complete set; before/after bodies kept verbatim in the ref)`] },
+    { lines },
+  ]
+  if (shown < records.length) {
+    sections.push({ lines: [`  … ${records.length - shown} more files (full list via ref)`] })
+  }
+  return sections
+}
+
+/** 一行带行号的源码（`1: ...`、`1\t...`）。用于识别「路径 → 带行号正文」映射。 */
+function numberedTextRange(text: string): { first: number; last: number; lines: number } | undefined {
+  let first = Number.POSITIVE_INFINITY
+  let last = Number.NEGATIVE_INFINITY
+  let count = 0
+  let previous = 0
+  for (const raw of text.split('\n')) {
+    if (raw.trim() === '') continue
+    const matched = READ_NUMBERED_LINE.exec(raw)
+    if (matched === null) return undefined
+    const number = Number(matched[1])
+    if (!Number.isSafeInteger(number) || number <= previous) return undefined
+    previous = number
+    if (number < first) first = number
+    if (number > last) last = number
+    count += 1
+  }
+  if (count === 0) return undefined
+  return { first, last, lines: count }
+}
+
+/**
+ * `code_run` 批量工具的投影：数组与「路径 → 正文」映射。
+ *
+ * 真实会话里最贵的工具结果几乎全是这一种：模型在程序里批量 `tools.grep` /
+ * `tools.read` / 批量改写，然后把整个数组 `return` 出来，恰好撞上宿主 50K 字符
+ * 渲染上限。它们不是「无法解析的大文本」，而是**结构完全已知的批量结果**。
+ *
+ * 四条闸门（任何一条不满足就交回原文）：
+ * - 只认 PTC 家族的程序传输工具，别的工具的同形 JSON 与我们无关；
+ * - 批量读取只认行号完整、连续递增的记录；源码正文只在两种情况下换成大纲：
+ *   明确导航任务，或这条结果**已经被宿主截断**（尾部早已不在上下文里，
+ *   此时「完整索引 + ref 全文」严格优于「半截正文」）；
+ * - 批量改写必须是 `{ path, before, after }` 三字段都在的字符串；
+ * - 结果必须真的超过当前预算 —— 小结果不动，避免无谓地扰动前缀。
+ * @param text - 工具结果原文。
+ * @param toolName - 工具名。
+ * @param budgetMaxChars - 当前预览预算的字符上限。
+ * @param navigation - 是否明确导航任务。
+ * @param spilled - 原文是否已被宿主截断并留有 spill 提示。
+ * @returns 投影计划，或 undefined（交回原文）。
+ */
+function planBatchToolResult(
+  text: string,
+  toolName: string,
+  budgetMaxChars: number,
+  navigation: boolean | undefined,
+  spilled: boolean,
+): Extract<ProjectionPlan, { kind: 'preview' }> | undefined {
+  if (!isPtcTransportName(toolName)) return undefined
+  if (text.length <= budgetMaxChars) return undefined
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (Array.isArray(value)) {
+    const grep = canonicalGrepMatches(value)
+    if (grep !== undefined) {
+      return { kind: 'preview', strategy: 'grep-results', sections: buildGrepEnvelopeSections(grep) }
+    }
+    const edits = canonicalBatchEditRecords(value)
+    if (edits !== undefined) {
+      return {
+        kind: 'preview',
+        strategy: 'batch-results',
+        sections: buildBatchEditSections(edits, Math.max(400, budgetMaxChars - 200)),
+      }
+    }
+    // 读取批次的正文是源码：明确导航，或结果已被截断时才换成大纲。
+    if (navigation === true || spilled) {
+      const reads = canonicalBatchReadRecords(value)
+      if (reads !== undefined) {
+        return {
+          kind: 'preview',
+          strategy: 'batch-results',
+          sections: buildBatchReadSections(reads, Math.max(400, budgetMaxChars - 200)),
+        }
+      }
+    }
+    return undefined
+  }
+  if (!isPlainRecord(value)) return undefined
+  // 「路径 → 带行号正文」映射：同样是源码，只在明确导航或已截断时换成大纲。
+  if (navigation !== true && !spilled) return undefined
+  const keys = Object.keys(value)
+  if (keys.length < 2) return undefined
+  const records: BatchReadRecord[] = []
+  for (const key of keys) {
+    const body = value[key]
+    if (typeof body !== 'string') return undefined
+    const range = numberedTextRange(body)
+    if (range === undefined) return undefined
+    records.push({ path: key, first: range.first, last: range.last, lineCount: range.lines })
+  }
+  return {
+    kind: 'preview',
+    strategy: 'batch-results',
+    sections: buildBatchReadSections(records, Math.max(400, budgetMaxChars - 200)),
+  }
+}
+
 /**
  * 复合 JSON 信封的投影计划。
  *
@@ -1713,6 +1933,14 @@ function planProjection(
   if (isJsonDocument(text)) {
     const toolCatalog = planToolCatalogProjection(text, toolName)
     if (toolCatalog !== undefined) return toolCatalog
+  }
+  // 程序传输的**批量**返回：数组（grep 命中、read 记录、改写记录）与「路径 → 正文」映射。
+  // 它们不是「无法解析的大文本」，而是形状已知的批量结果；必须跑在契约判定之前，
+  // 否则一份带几行 `export interface` 的批量读取会被 `looksLikeContract` 整份留住。
+  // 源码类（读取批次）仍只在明确导航任务里换成大纲，与单文件 read 的既有规则一致。
+  if (isPtcTransportName(toolName)) {
+    const batch = planBatchToolResult(text, toolName, budgetMaxChars, navigation, spilled)
+    if (batch !== undefined) return batch
   }
   if (looksLikeContract(text)) return { kind: 'verbatim', strategy: 'verbatim-contract' }
   // 程序传输（`run_code` / `code_run`）把 read 包在程序里：只接受严格单一行号文件，

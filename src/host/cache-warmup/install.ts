@@ -114,8 +114,10 @@ export const CACHE_WARMUP_GUIDANCE = [
   '',
   '- A preview is **not** the full result. It states `complete`, `omitted` and `nextOffset` explicitly; treat an incomplete preview as incomplete data, not as the whole output.',
   '- To read the original, call `cache_warmup_result` with `action: "page"` and that `refId`, then follow `nextOffset` until `complete` is true.',
+  '- Page in small slices (`limit` around 64-120 lines, `maxBytes` at most 8-16 KB) and read only the slice you actually need. Reading a whole stored result back in one call re-sends what the preview just saved.',
   '- `action: "release"` drops the stored copy. The preview already in the conversation stays identical; it simply can no longer be read back.',
   '- Source code, type and contract definitions, mixed evidence and anything that could not be parsed reliably are never replaced: they arrive in full.',
+  '- When a program returns many reads, matches or edits, return a filtered or summarized subset rather than the whole batch: everything you return is processed again on the next turn.',
 ].join('\n')
 
 /**

@@ -295,7 +295,7 @@ describe('FileResultReferenceStore 字节安全分页', () => {
     expect(page.omitted.reason).toBe('bytes')
   })
 
-  it('limit 默认 64、上限 512，maxBytes 默认 16384、上限 65536', async () => {
+  it('limit 默认 64、上限 512，maxBytes 默认 16384、上限 25600', async () => {
     const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
     const reference = await store.put({ sessionId: 'session-a', content: 'line\n'.repeat(10) })
     const defaults = await store.page({ sessionId: 'session-a', refId: reference.refId })
@@ -308,7 +308,7 @@ describe('FileResultReferenceStore 字节安全分页', () => {
       maxBytes: 10_000_000,
     })
     expect(capped.limit).toBe(512)
-    expect(capped.maxBytes).toBe(65_536)
+    expect(capped.maxBytes).toBe(25_600)
   })
 
   it('单行 minified JSON（仅含转义 \\n，无真实换行）：按逻辑转义换行受 limit 行数约束，且拼合后与原文逐字相等', async () => {

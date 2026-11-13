@@ -54,7 +54,7 @@ vi.mock('../src/host/cache-warmup/index.ts', () => ({
     pageLimitDefault: 64,
     pageLimitMax: 512,
     pageMaxBytesDefault: 16 * 1024,
-    pageMaxBytesMax: 64 * 1024,
+    pageMaxBytesMax: 25 * 1024,
     maxUsageSessions: 256,
     maxUsageReportsPerSession: 32,
   },

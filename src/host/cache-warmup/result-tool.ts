@@ -235,6 +235,7 @@ export function createCacheWarmupResultTool(deps: CacheWarmupResultToolDeps): To
     description: [
       'Read back a result that was replaced by a preview, using the `ref://<session>/<sha256>` handle written in that preview.',
       'Use `action: "page"` to read a slice: pass `offset`, and optionally `limit`, `maxBytes`, `fields` and `equals`.',
+      'Keep slices small (a page defaults to 64 lines / 16 KB and is capped at 25 KB): every character a page returns is processed again on the next turn, so read only the slice you need.',
       'Every page reports `complete`, `nextOffset`, `omitted` and `totalChars`, so you can see whether more remains instead of assuming a slice is the whole thing.',
       'Use `action: "release"` when the stored copy is no longer needed.',
     ].join(' '),
