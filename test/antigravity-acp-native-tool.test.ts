@@ -217,17 +217,31 @@ describe('permission requests', () => {
     }
   })
 
-  it('refuses a built-in tool call under the default policy', async () => {
-    const h = harness(permissionServer('run_command'))
+  it('leaves a built-in tool call to the policy: allowed by default, refused when set to reject', async () => {
+    // The default is "allow" so a multi-step task finishes; the strict answer is
+    // one setting away and must still be reachable.
+    const allowed = harness(permissionServer('run_command'))
     try {
-      const text = await collect(h.adapter.stream(REQUEST as never)).then((chunks) => chunks
+      const text = await collect(allowed.adapter.stream(REQUEST as never)).then((chunks) => chunks
+        .filter((chunk): chunk is Extract<StreamChunk, { type: 'text-delta' }> => chunk.type === 'text-delta')
+        .map((chunk) => chunk.text)
+        .join(''))
+      expect(text).toContain('PERMISSION=selected:allow-1')
+    } finally {
+      await allowed.adapter.dispose()
+      allowed.dispose()
+    }
+    const refused = harness(permissionServer('run_command'))
+    try {
+      await refused.settings.update({ permissionPolicy: 'reject' })
+      const text = await collect(refused.adapter.stream(REQUEST as never)).then((chunks) => chunks
         .filter((chunk): chunk is Extract<StreamChunk, { type: 'text-delta' }> => chunk.type === 'text-delta')
         .map((chunk) => chunk.text)
         .join(''))
       expect(text).toContain('PERMISSION=cancelled')
     } finally {
-      await h.adapter.dispose()
-      h.dispose()
+      await refused.adapter.dispose()
+      refused.dispose()
     }
   })
 })

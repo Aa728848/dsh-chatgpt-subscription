@@ -127,7 +127,7 @@ TLS 指纹（见 `docs/antigravity-tls-fingerprint-probe.md`：结论是**做不
 
 | # | 闸门 | 原实现 | 现在 |
 | --- | --- | --- | --- |
-| 1 | `session/request_permission` 的应答 | 只有 `permissionPolicy === "allow"` 才回 `allow_once`，否则回 `cancelled`——**桥工具与原生工具一视同仁** | 桥工具（名字带 `mcp_dsh-bridge_` 前缀）恒定放行，因为它交回 DSH 后由 DSH 的权限预设把关；只有原生工具受 `permissionPolicy` 约束 |
+| 1 | `session/request_permission` 的应答 | 只有 `permissionPolicy === "allow"` 才回 `allow_once`，否则回 `cancelled`——**桥工具与原生工具一视同仁**，而默认值是 `reject` | 桥工具（名字带 `mcp_dsh-bridge_` 前缀）恒定放行，因为它交回 DSH 后由 DSH 的权限预设把关；只有原生工具受 `permissionPolicy` 约束，且该设置默认改为 `allow` |
 | 2 | `session/update` 里出现非桥 `tool_call` | 无条件抛 `ACP_NATIVE_TOOLS_UNSUPPORTED` **取消整轮** | 由 `nativeToolPolicy` 决定：默认 `allow` 在对话里写一条可见记录（工具名 + 参数）并继续，`cancel` 保留整轮取消 |
 
 agy 的事件顺序是 `tool_call` → `session/request_permission` → `tools/call`，所以第二道闸门在原实现里**先于权限请求**触发：即使把设置改成 `allow`，只要模型伸手去用自带工具，这一轮仍然会废。这就是「改了设置只是换一种失败方式」的原因。

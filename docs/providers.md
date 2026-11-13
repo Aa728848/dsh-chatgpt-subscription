@@ -328,7 +328,7 @@
   - **单账号**：ACP 服务端只持有一套凭据，插件**不读取、不复制、不保存**任何 Google token；登录由 `agy acp --login` 或设置卡的「登录 Google 账号」发起，浏览器**只由官方进程打开一次**；
   - 与已移除的旧 `antigravity` 线路（Cloud Code Assist `streamGenerateContent` 逆向实现，v0.70.0 删除）**没有任何代码或凭据迁移关系**。
 - **可执行文件**：`配置的路径` → `DSH_ANTIGRAVITY_ACP_BIN` → `~/.gemini/bin/agy` → 官方 ACP Registry 归档（版本与 sha256 随包固定，仅缺失时下载到 `<DSH_HOME>/cache/antigravity-acp/`）。下载拒绝重定向、校验哈希、失败按名删除半成品；**不随包分发 Google 二进制**。
-- **工具由 DSH 执行并把关**：会话创建时带一个回环 MCP 桥描述符（127.0.0.1 + 每次会话新签发的 256-bit bearer token、校验 Host、拒绝浏览器 Origin、仅 `POST /mcp`、body ≤ 1 MiB）。agent 的 `tools/call` 被挂起并转成 DSH 工具调用，由 DSH 的权限预设执行；拒绝以 `isError` 回传，**永不绕过**。桥工具的权限请求**恒定放行**（它交回 DSH 后由 DSH 把关），「工具权限」设置只作用于 agent 自己的工具。
+- **工具由 DSH 执行并把关**：会话创建时带一个回环 MCP 桥描述符（127.0.0.1 + 每次会话新签发的 256-bit bearer token、校验 Host、拒绝浏览器 Origin、仅 `POST /mcp`、body ≤ 1 MiB）。agent 的 `tools/call` 被挂起并转成 DSH 工具调用，由 DSH 的权限预设执行；拒绝以 `isError` 回传，**永不绕过**。桥工具的权限请求**恒定放行**（它交回 DSH 后由 DSH 把关）；「工具权限」设置只作用于 agent 自己的工具，默认「自动批准」，可选「拒绝」。
 - **自带工具策略（`nativeToolPolicy`）**：ACP 无法在协议层卸载 agent 的内置 shell/文件工具。默认 `allow`：模型一旦使用自带工具，对话里出现一条可见记录（工具名 + 参数），本轮继续；`cancel` 保留旧的严格行为，遇到即报 `ACP_NATIVE_TOOLS_UNSUPPORTED` 并取消整轮。
 - **模型与思考档位**：目录来自实时 ACP `session/new`（`models.availableModels` 的档位 id 与 `configOptions[model].options` 的基名归一），思考档位走 DSH 的 reasoning effort → ACP `thought_level`；模型不接受的档位被丢弃而不是让整轮失败。
 - **会话复用**：以 DSH 会话为键保存 ACP 会话与前缀指纹；历史被压缩或改写时新建会话冷重放，避免复用与 DSH 不一致的会话。

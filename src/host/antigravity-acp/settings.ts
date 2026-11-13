@@ -73,7 +73,12 @@ export function defaultAntigravityAcpSettings(): AntigravityAcpSettings {
     enabled: true,
     enabledModelIds: null,
     defaultReasoningEffort: null,
-    permissionPolicy: 'reject',
+    // Allow by default. ACP cannot unload the agent's built-in tools, and a line
+    // whose default answers "cancelled" to every request is a line where a
+    // multi-step task never finishes - the user sees the model describe what it
+    // would do and stop. The setting still exists for anyone who wants the strict
+    // answer; the default now matches what the line is actually useful for.
+    permissionPolicy: 'allow',
     // Permissive by default: the strict mode cancels a whole turn the moment the
     // model reaches for a built-in tool, which is exactly the "one empty round"
     // failure this default exists to avoid. Users who want the old behaviour
@@ -88,7 +93,9 @@ export function defaultAntigravityAcpSettings(): AntigravityAcpSettings {
  *
  * A field that is present but of the wrong type is treated as absent rather than
  * as its zero value: a corrupt `enabledModelIds` must not become "every model
- * off", and a corrupt `permissionPolicy` must not become "allow".
+ * off", and a corrupt policy field falls back to that policy's own default
+ * instead of to whichever value a `=== 'x' ? … : …` happens to have in the
+ * negative branch.
  *
  * @param value - Parsed JSON.
  * @returns The settings the document describes, with defaults for anything unreadable.
@@ -110,7 +117,10 @@ export function parseAntigravityAcpSettings(value: unknown): AntigravityAcpSetti
     defaultReasoningEffort: typeof record.defaultReasoningEffort === 'string'
       ? record.defaultReasoningEffort
       : null,
-    permissionPolicy: record.permissionPolicy === 'allow' ? 'allow' : 'reject',
+    // An explicit "reject" is kept; anything unreadable falls back to the default,
+    // which is "allow". Written this way round on purpose: the negative branch of
+    // a truthiness test is what a future rename silently inherits.
+    permissionPolicy: record.permissionPolicy === 'reject' ? 'reject' : 'allow',
     // A corrupt value falls back to the permissive default rather than silently
     // putting the line into a mode where every tool-using turn fails.
     nativeToolPolicy: record.nativeToolPolicy === 'cancel' ? 'cancel' : 'allow',

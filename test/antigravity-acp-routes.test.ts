@@ -43,7 +43,7 @@ describe('readStatus', () => {
       expect(status.auth.authenticated).toBe(true)
       expect(status.models).toHaveLength(1)
       expect(status.catalogSynced).toBe(true)
-      expect(status.permissionPolicy).toBe('reject')
+      expect(status.permissionPolicy).toBe('allow')
     } finally {
       harness.dispose()
     }

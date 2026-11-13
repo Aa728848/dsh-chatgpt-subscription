@@ -4,9 +4,11 @@
 - **[antigravity-acp / 修复 #108] 主模型线路不再「一轮就结束」：原生工具改为记录并继续，桥工具恒定放行**
   - **问题**：这条线路只有一轮。默认 `permissionPolicy: "reject"` 下模型想干活就直接 `end_turn`，改成 `allow` 后又变成 `ACP_NATIVE_TOOLS_UNSUPPORTED`。根因是**两道互相独立的闸门**：① `session/request_permission` 对桥工具和原生工具一视同仁，默认回 `cancelled`；② `session/update` 里一出现非桥 `tool_call` 就无条件抛错取消整轮。agy 的事件顺序是 `tool_call` → `permission` → `tools/call`，所以第②道**先于权限请求**触发，设置改成 `allow` 只是换一种失败方式。
   - **桥工具恒定放行**：名字带 `mcp_dsh-bridge_` 前缀的权限请求一律回 `allow_once`——它交回 DSH 后由 DSH 的权限预设把关，在这里拒绝等于把唯一受控的通路关掉；只有 agent 自带工具受 `permissionPolicy` 约束。
+  - **`permissionPolicy` 默认值改为 `allow`**：ACP 卸载不掉 agent 的内置工具，默认每问必拒只会让多步任务永远跑不完。严格答案仍然保留为可选项；解析函数以 `allow` 兜底，损坏值不会落回 `reject`。卡片上「推荐」标记同步移到「自动批准」，选项顺序与默认值一致。
   - **新增 `nativeToolPolicy` 设置（默认 `allow`）**：命中自带工具时在对话里写一条可见记录（工具名 + `rawInput`/标题），同一个调用只记一次，本轮照常继续；`cancel` 保留旧的严格行为。共享 DTO、设置文档、路由读写与设置卡三处（中/英/俄）同步；损坏的设置值回落默认，不会静默把线路切进严格模式。
   - **标题生成不再报错**：ACP 没有 `maxTokens`，而 harness 的标题服务固定传 64 token 上限，原实现把这类请求整个拒绝为 `ACP_UNSUPPORTED_OPTION`。现在 `maxTokens` 被丢弃而非拒绝（约束的是调用方仍会完整读到的回答，丢的只是上限）；`temperature` / `stop` 会改变产出内容，仍然显式拒绝。
-  - **验证**：`npx tsc -b --force` 通过；全量 Vitest 378 文件通过 / 3 跳过（6785 例通过 / 10 跳过 / 0 失败）；`antigravity-acp-native-tool.test.ts` 从 2 例扩到 6 例（宽松默认可见记录 + 正常结束、同一调用只记一次、严格模式仍报错、桥调用恒放行、自带工具默认被拒），设置/路由/卡片各补针对性用例。
+  - **卡片文案**：下拉项去掉 `allow_once` 这类协议常量（`自动批准（推荐）`），说明文字不再点名 `ACP_NATIVE_TOOLS_UNSUPPORTED` 等内部错误码，改为直接描述行为。
+  - **验证**：`npx tsc -b --force` 通过；全量 Vitest 378 文件通过 / 3 跳过（6787 例通过 / 10 跳过 / 0 失败）；`antigravity-acp-native-tool.test.ts` 从 2 例扩到 6 例（宽松默认可见记录 + 正常结束、同一调用只记一次、严格模式仍报错、桥调用恒放行、自带工具默认被拒），设置/路由/卡片各补针对性用例。
 - **[cache-warmup / 批量结果投影] 让 `code_run` 的批量返回值也能被投影，并收紧补读页大小**
   - **问题**：真实会话里最贵的工具输出几乎全是「程序里批量 `tools.grep` / `tools.read` / 批量改写后整包 `return`」的数组，它们恰好撞上宿主 50K 字符渲染上限；而投影器只认**对象信封 + 单个日志字段**，这些形状一律落到 `verbatim-unparsed`。实测 22 步 30k+ 输出贡献了 34.9% 的新增 token，其中 9 次被截断就在截断点重复消费。
   - **新增 `batch-results` 策略**：`[{path, lineNumber, line}]` → 按文件计数；`[{path, before, after}]` → 只列路径与前后篇幅（正文是模型刚写进程序的入参，回显不携带新信息）；`[{path, lines}]` 与「路径 → 带行号正文」映射 → 文件数、行范围与行数。实测 115 KB 批量读取降至 671 字符、50 KB 批量改写降至 602 字符。

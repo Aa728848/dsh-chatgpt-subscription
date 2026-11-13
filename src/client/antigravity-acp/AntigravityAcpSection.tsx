@@ -331,15 +331,15 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
           <select
             className="dsha-select"
             aria-label={t.permissionPolicy}
-            value={status?.permissionPolicy ?? 'reject'}
+            value={status?.permissionPolicy ?? 'allow'}
             disabled={busy !== null}
             onChange={(event) => {
               const value = event.currentTarget.value === 'allow' ? 'allow' : 'reject'
               void run('permission', () => API.update({ permissionPolicy: value }))
             }}
           >
-            <option value="reject">{t.permissionPolicyReject}</option>
             <option value="allow">{t.permissionPolicyAllow}</option>
+            <option value="reject">{t.permissionPolicyReject}</option>
           </select>
         </div>
         <div className="dsha-pref-row">

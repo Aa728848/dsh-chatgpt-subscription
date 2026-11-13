@@ -26,10 +26,14 @@ describe('parseAntigravityAcpSettings', () => {
     expect(parseAntigravityAcpSettings({ enabledModelIds: ['a'] }).enabledModelIds).toEqual(['a'])
   })
 
-  it('never turns a corrupt permission policy into allow', () => {
-    expect(parseAntigravityAcpSettings({ permissionPolicy: 'yes please' }).permissionPolicy).toBe('reject')
-    expect(parseAntigravityAcpSettings({ permissionPolicy: 42 }).permissionPolicy).toBe('reject')
+  it('keeps an explicit choice and falls back to the default for a corrupt one', () => {
+    // The default is "allow", so the interesting case is the opposite: a stored
+    // "reject" is a decision and must survive a reread.
+    expect(parseAntigravityAcpSettings({ permissionPolicy: 'reject' }).permissionPolicy).toBe('reject')
+    expect(parseAntigravityAcpSettings({ permissionPolicy: 'yes please' }).permissionPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({ permissionPolicy: 42 }).permissionPolicy).toBe('allow')
     expect(parseAntigravityAcpSettings({ permissionPolicy: 'allow' }).permissionPolicy).toBe('allow')
+    expect(defaultAntigravityAcpSettings().permissionPolicy).toBe('allow')
   })
 
   it('defaults the native-tool policy to allow and treats a corrupt value as the default', () => {
