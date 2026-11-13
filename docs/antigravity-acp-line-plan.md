@@ -111,8 +111,8 @@ TLS 指纹（见 `docs/antigravity-tls-fingerprint-probe.md`：结论是**做不
 
 | # | 缺漏 | 处理 | 守卫 |
 | --- | --- | --- | --- |
-| 1 | 原生工具绕过 DSH | 提示层声明 + 检测到非桥工具立即抛 `ACP_NATIVE_TOOLS_UNSUPPORTED` 取消该轮 | `antigravity-acp-native-tool.test.ts`（关掉守卫即变红） |
-| 2 | 采样参数被静默忽略 | `temperature` / `maxTokens` / `stop` 显式拒绝为 `ACP_UNSUPPORTED_OPTION`，并点名是哪一项 | `antigravity-acp-sampling.test.ts`（三参数各一例 + 无参数可跑的对照） |
+| 1 | 原生工具绕过 DSH | 提示层声明 + `nativeToolPolicy` 决定遇到非桥工具时的行为：默认 `allow` 在对话里留一条可见记录并继续本轮，`cancel` 保留旧的 `ACP_NATIVE_TOOLS_UNSUPPORTED` 整轮取消 | `antigravity-acp-native-tool.test.ts`（两种策略各一例，另验证同一调用只记一次） |
+| 2 | 采样参数被静默忽略 | `temperature` / `stop` 显式拒绝为 `ACP_UNSUPPORTED_OPTION` 并点名是哪一项；`maxTokens` 改为丢弃上限继续（见 §6.5） | `antigravity-acp-sampling.test.ts`（拒绝两例 + maxTokens 放行 + 无参数对照） |
 | 3 | 单进程会话数无上限 | 新增 `maxSessionsPerProcess`（默认 **100**，与参照同值）；达到上限的进程直接销毁而不是回池 | `antigravity-acp-pool.test.ts` |
 | 4 | 空闲进程池只进不出（本轮发现的真 bug） | `checkoutIdle()` 取热进程 + `rebind()` 换新一手的 handlers；此前每轮都冷启动 | `antigravity-acp-pool.test.ts`（三次生成只 spawn 一次；关闭复用则 3 次） |
 | 5 | 忽略 `usage_update` | 按 schema 只读 `used`/`size` 存为**上下文占用**，与计费 token 分开；经 `/status.occupancy` 暴露并在卡片展示 | `antigravity-acp-routes.test.ts` / 卡片测试 |
@@ -120,6 +120,22 @@ TLS 指纹（见 `docs/antigravity-tls-fingerprint-probe.md`：结论是**做不
 | 7 | 无 doctor / 自检 | 新增 `doctor.ts`（binary → protocol → auth → catalog → prompt 逐段）、`POST /antigravity-acp/api/doctor` 与卡片「运行自检」按钮 | `antigravity-acp-doctor.test.ts`（6 例，含断链与早退） |
 
 **一处实测订正**：ACP schema 的 `UsageUpdate` 只有 `used`/`size`/`cost`，且本机真实 `agy` 1.5.3 **根本不发** `usage_update`（连了两次真实会话确认，只收到 `agent_message_chunk` 与最终结果里的 usage）。因此第 5 项实现为「有则显示占用、无则不显示」，不伪造，也不把占用当计费。
+
+### 6.5 主模型线路「一轮就结束」的两个根因（issue #108）
+
+真实使用里这条线路只有一轮：默认设置下模型想干活就结束，改成 `permissionPolicy: "allow"` 后又换成另一种失败方式。根因是**两道互相独立的闸门**，而只有第一道受设置控制：
+
+| # | 闸门 | 原实现 | 现在 |
+| --- | --- | --- | --- |
+| 1 | `session/request_permission` 的应答 | 只有 `permissionPolicy === "allow"` 才回 `allow_once`，否则回 `cancelled`——**桥工具与原生工具一视同仁** | 桥工具（名字带 `mcp_dsh-bridge_` 前缀）恒定放行，因为它交回 DSH 后由 DSH 的权限预设把关；只有原生工具受 `permissionPolicy` 约束 |
+| 2 | `session/update` 里出现非桥 `tool_call` | 无条件抛 `ACP_NATIVE_TOOLS_UNSUPPORTED` **取消整轮** | 由 `nativeToolPolicy` 决定：默认 `allow` 在对话里写一条可见记录（工具名 + 参数）并继续，`cancel` 保留整轮取消 |
+
+agy 的事件顺序是 `tool_call` → `session/request_permission` → `tools/call`，所以第二道闸门在原实现里**先于权限请求**触发：即使把设置改成 `allow`，只要模型伸手去用自带工具，这一轮仍然会废。这就是「改了设置只是换一种失败方式」的原因。
+
+顺带解决的两件事：
+
+- **会话标题生成失败**：ACP 没有 `maxTokens`，而 harness 的标题服务固定传 64 token 上限，原实现把带 `maxTokens` 的请求整个拒绝为 `ACP_UNSUPPORTED_OPTION`，于是每个会话的标题生成都稳定报错。现在 `maxTokens` 被丢弃而不是拒绝——它约束的是调用方仍会完整读到的一段回答，丢的只是上限；`temperature` / `stop` 会改变模型**产出什么**，仍然显式拒绝。
+- **提示词里的 `BRIDGE_ONLY_INSTRUCTION` 无效**：实测 `_meta.antigravity.systemPrompt.append` 不生效，追加文本进不了上下文（inputTokens 只 +5）。这是 agy 侧的限制，本插件不做补偿，只把它写进「做不到」清单（§6.4）。
 
 ### 6.4 参照项目也承认做不到、我们同样做不到的
 
@@ -140,7 +156,7 @@ TLS 指纹（见 `docs/antigravity-tls-fingerprint-probe.md`：结论是**做不
 | `ACP_RPC_ERROR` | JSON-RPC 返回了没有专属处理的错误 | 看错误文案里的原始 message；重试通常可恢复 |
 | `ACP_INVALID_PARAMS` | 服务端拒绝请求参数或模型 id（`-32602`） | 换一个服务端公布的模型 id；不要用未公布的档位名 |
 | `ACP_METHOD_UNSUPPORTED` | 服务端不实现本客户端调用的方法（`-32601`） | 升级 Antigravity CLI |
-| `ACP_NATIVE_TOOLS_UNSUPPORTED` | agent 用了它自己的工具（`write_file` / shell 等），绕过了 DSH 桥 | 重试；若反复出现，说明该任务需要 DSH 未提供的工具 —— 在卡片里补充工具或换线路 |
+| `ACP_NATIVE_TOOLS_UNSUPPORTED` | agent 用了它自己的工具（`write_file` / shell 等），绕过了 DSH 桥，且 `nativeToolPolicy` 为 `cancel` | 默认策略下不会出现；若已切到严格模式又反复遇到，说明该任务需要 DSH 未提供的工具 —— 在卡片里补充工具、换线路，或把策略切回「记录并继续」 |
 | `ACP_REFUSAL` | agent 拒绝了该 prompt | 调整请求内容 |
 | `ACP_UNKNOWN_STOP` | `stopReason` 不在已知集合内 | 记录该 stopReason 并反馈；本轮按错误处理 |
 | `ACP_TOOL_RESULTS_MISSING` | 工具结果与调用对不上（缺失或重复） | 从已保存的历史重试 |

@@ -163,4 +163,5 @@ export const en: Record<HostLocaleKey, string> = {
   'provider.antigravity-acp': 'Antigravity (ACP)',
   'antigravityAcp.notSignedIn': 'Antigravity is not signed in. Start the sign-in from this card, or run agy acp --login in a terminal.',
   'antigravityAcp.noBinary': 'No usable Antigravity CLI (agy) was found and the official ACP server has not been downloaded.',
+  'antigravityAcp.nativeTool': '[Antigravity ran its own tool outside DSH permissions: {call}]\n',
 }

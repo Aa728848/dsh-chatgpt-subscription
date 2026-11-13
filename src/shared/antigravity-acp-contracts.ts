@@ -93,6 +93,8 @@ export interface AntigravityAcpStatusDto {
    * request (the safe default); `allow` accepts the first `allow_once` option.
    */
   permissionPolicy: AntigravityAcpPermissionPolicy
+  /** What happens when the agent bypasses the bridge and uses its own tool. */
+  nativeToolPolicy: AntigravityAcpNativeToolPolicy
   /** False until at least one live catalog read has succeeded. */
   catalogSynced: boolean
   usage?: AntigravityAcpUsageDto
@@ -113,12 +115,23 @@ export interface AntigravityAcpStatusDto {
 /** How one permission request from the agent is answered. */
 export type AntigravityAcpPermissionPolicy = 'reject' | 'allow'
 
+/**
+ * What happens when the agent uses one of its *own* tools instead of the bridge.
+ *
+ * ACP has no way to unload the agent's built-in tools, so a model that decides to
+ * run `run_command` will do so whatever this client says. `allow` (the default)
+ * records the call in the transcript and lets the turn continue; `cancel` keeps
+ * the older, stricter behaviour of failing the whole turn at the first such call.
+ */
+export type AntigravityAcpNativeToolPolicy = 'allow' | 'cancel'
+
 /** The settings body the card submits. Every field is optional; omitted fields keep their value. */
 export interface AntigravityAcpSettingsUpdateDto {
   enabled?: boolean
   enabledModelIds?: string[] | null
   defaultReasoningEffort?: string | null
   permissionPolicy?: AntigravityAcpPermissionPolicy
+  nativeToolPolicy?: AntigravityAcpNativeToolPolicy
   /** Absolute path to an `agy` executable; `null` returns to auto-resolution. */
   binaryPath?: string | null
 }

@@ -342,6 +342,25 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
             <option value="allow">{t.permissionPolicyAllow}</option>
           </select>
         </div>
+        <div className="dsha-pref-row">
+          <div>
+            <strong>{t.nativeTools}</strong>
+            <p className="dsha-muted">{t.nativeToolsHint}</p>
+          </div>
+          <select
+            className="dsha-select"
+            aria-label={t.nativeTools}
+            value={status?.nativeToolPolicy ?? 'allow'}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const value = event.currentTarget.value === 'cancel' ? 'cancel' : 'allow'
+              void run('nativeTools', () => API.update({ nativeToolPolicy: value }))
+            }}
+          >
+            <option value="allow">{t.nativeToolsAllow}</option>
+            <option value="cancel">{t.nativeToolsCancel}</option>
+          </select>
+        </div>
       </div>
 
       <div className="dsha-group">

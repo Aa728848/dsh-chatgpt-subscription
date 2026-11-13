@@ -175,6 +175,7 @@ export const zh = {
   'provider.antigravity-acp': 'Antigravity（ACP）',
   'antigravityAcp.notSignedIn': '还没有登录 Antigravity：请在设置页发起登录，或在终端执行 agy acp --login。',
   'antigravityAcp.noBinary': '未找到可用的 Antigravity CLI（agy），且官方 ACP 服务端尚未下载。',
+  'antigravityAcp.nativeTool': '[Antigravity 使用了它自带的工具，这次调用没有经过 DSH 权限：{call}]\n',
 } as const
 
 /** Every Host copy key this plugin has. */

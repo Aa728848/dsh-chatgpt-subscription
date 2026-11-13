@@ -32,6 +32,16 @@ describe('parseAntigravityAcpSettings', () => {
     expect(parseAntigravityAcpSettings({ permissionPolicy: 'allow' }).permissionPolicy).toBe('allow')
   })
 
+  it('defaults the native-tool policy to allow and treats a corrupt value as the default', () => {
+    // The strict mode cancels a whole turn at the first built-in tool call, so a
+    // document that cannot be read must not be able to switch a line into it.
+    expect(defaultAntigravityAcpSettings().nativeToolPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({ nativeToolPolicy: 'allow' }).nativeToolPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({ nativeToolPolicy: 'cancel' }).nativeToolPolicy).toBe('cancel')
+    expect(parseAntigravityAcpSettings({ nativeToolPolicy: 'sometimes' }).nativeToolPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({}).nativeToolPolicy).toBe('allow')
+  })
+
   it('falls back to the defaults for a payload that is not an object', () => {
     expect(parseAntigravityAcpSettings(null)).toEqual(defaultAntigravityAcpSettings())
     expect(parseAntigravityAcpSettings([])).toEqual(defaultAntigravityAcpSettings())

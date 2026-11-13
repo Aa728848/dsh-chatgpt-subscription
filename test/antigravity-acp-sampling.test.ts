@@ -1,11 +1,14 @@
 /**
- * Sampling controls: refused, never silently dropped.
+ * Sampling controls: what is refused, and what is only dropped.
  *
- * ACP's `session/prompt` carries content only. The harness's own auxiliary calls
- * do pass `maxTokens` (session titles ask for a small cap, compaction asks for a
- * headroom cap), so silently ignoring it means those callers believe a limit
- * exists while the agent runs unbounded. The reference implementation refuses
- * with a stable code; so does this one.
+ * ACP's `session/prompt` carries content only. A control that changes *what the
+ * model produces* - `temperature`, `stop` - is refused rather than dropped,
+ * because the caller would otherwise get an answer to a different question.
+ *
+ * `maxTokens` is not in that group. It bounds an answer the caller still reads in
+ * full, and the harness's own auxiliary calls always send one: session titles ask
+ * for a small cap and compaction asks for a headroom cap. Refusing it made every
+ * session title on this line fail, so the cap is dropped and the turn runs.
  */
 import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -60,7 +63,6 @@ async function drain(stream: AsyncIterable<unknown>): Promise<void> {
 describe('sampling controls are refused', () => {
   it.each([
     ['temperature', { temperature: 0.2 }],
-    ['maxTokens', { maxTokens: 64 }],
     ['stop', { stop: ['\n\nHuman:'] }],
   ])('rejects a request carrying %s', async (_label, control) => {
     const h = harness()
@@ -72,7 +74,25 @@ describe('sampling controls are refused', () => {
         ...control,
       } as never))
       await expect(run).rejects.toMatchObject({ failure: { code: 'ACP_UNSUPPORTED_OPTION' } })
-      await expect(run).rejects.toThrow(/temperature|maxTokens|stop/)
+      await expect(run).rejects.toThrow(/temperature|stop/)
+    } finally {
+      await h.adapter.dispose()
+      h.dispose()
+    }
+  })
+
+  it('runs a request whose only control is maxTokens, dropping the cap', async () => {
+    // The session-title service asks for 64 output tokens. ACP cannot express a
+    // cap, so the request runs uncapped rather than failing: a title that costs
+    // more tokens than asked is better than a title that never appears.
+    const h = harness()
+    try {
+      await expect(drain(h.adapter.stream({
+        provider: 'antigravity-acp',
+        model: 'gemini-4-carbon',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        maxTokens: 64,
+      } as never))).resolves.toBeUndefined()
     } finally {
       await h.adapter.dispose()
       h.dispose()

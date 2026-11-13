@@ -67,6 +67,23 @@ describe('AntigravityAcpSection', () => {
     expect(text).toContain('已登录')
   })
 
+  it('offers the built-in-tool policy with the permissive option selected', async () => {
+    await act(async () => root.render(createElement(AntigravityAcpSection, {})))
+    const labels = [...container.querySelectorAll('select')]
+      .map((select) => select.getAttribute('aria-label'))
+    // Both switches exist and are distinct: "tool permissions" answers the agent's
+    // own permission requests, this one decides what happens when the agent runs a
+    // tool of its own. Merging them was the bug the issue reported.
+    expect(labels).toContain('自带工具')
+    expect(labels).toContain('工具权限')
+    const native = [...container.querySelectorAll('select')]
+      .find((select) => select.getAttribute('aria-label') === '自带工具')
+    expect(native?.value).toBe('allow')
+    const text = container.textContent ?? ''
+    expect(text).toContain('记录并继续')
+    expect(text).toContain('立即取消整轮')
+  })
+
   it('states the ACP boundaries rather than leaving the user to discover them', async () => {
     await act(async () => root.render(createElement(AntigravityAcpSection, {})))
     const text = container.textContent ?? ''

@@ -164,4 +164,5 @@ export const ru: Record<HostLocaleKey, string> = {
   'provider.antigravity-acp': 'Antigravity (ACP)',
   'antigravityAcp.notSignedIn': 'Вход в Antigravity не выполнен. Начните его на этой карточке или выполните agy acp --login в терминале.',
   'antigravityAcp.noBinary': 'Рабочий Antigravity CLI (agy) не найден, и официальный ACP-сервер ещё не загружен.',
+  'antigravityAcp.nativeTool': '[Antigravity использовал собственный инструмент в обход разрешений DSH: {call}]\n',
 }

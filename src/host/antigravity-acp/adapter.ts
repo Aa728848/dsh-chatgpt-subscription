@@ -42,7 +42,7 @@ import {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
-import { localizedProviderName } from '../common/i18n/index.ts'
+import { localizedProviderName, t } from '../common/i18n/index.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
 import {
   normalizeGenerateOptions,
@@ -57,7 +57,11 @@ import {
   type AttachmentImageReader,
   type ResolvedRequestImages,
 } from '../common/request-images.ts'
-import type { AntigravityAcpModelDto, AntigravityAcpUsageDto } from '../../shared/antigravity-acp-contracts.ts'
+import type {
+  AntigravityAcpModelDto,
+  AntigravityAcpNativeToolPolicy,
+  AntigravityAcpUsageDto,
+} from '../../shared/antigravity-acp-contracts.ts'
 import { AcpClient, AcpError, type AcpClientHandlers } from './acp-client.ts'
 import { BRIDGE_SERVER_NAME, McpBridge, type BridgeDescriptor } from './mcp-bridge.ts'
 import { acpError } from './errors.ts'
@@ -177,6 +181,10 @@ interface LiveTurn {
   settled: { stopReason?: string; usage?: TokenUsage; error?: Error } | undefined
   /** Bridge calls already surfaced to the harness, by call id. */
   surfaced: Set<string>
+  /** Native tool calls already reported to the user, by call id. */
+  notedNative: Set<string>
+  /** Decided at turn start: report native tool use, or fail the turn at the first one. */
+  nativeToolPolicy: AntigravityAcpNativeToolPolicy
   startedAt: number
   /** Set once the turn has emitted a tool call and is waiting for the harness. */
   awaitingHarness: boolean
@@ -323,12 +331,15 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     activity: { pulse(): void },
   ): Promise<AsyncGenerator<StreamChunk>> {
     const options = normalizeGenerateOptions(rawOptions)
-    // ACP's session/prompt carries content only: there is no temperature, no
-    // output cap and no stop sequence. Silently dropping them is worse than
-    // refusing, because the harness's own auxiliary calls (session titles ask for
-    // a 64-token cap, compaction asks for a headroom cap) would believe a limit
-    // exists while the agent ran unbounded. They are refused, the same way the
-    // reference implementation does it.
+    // ACP's session/prompt carries content only: there is no temperature and no
+    // stop sequence, and those are refused rather than dropped - a caller that
+    // asked for one would otherwise believe it took effect.
+    //
+    // `maxTokens` is the exception: the harness's own auxiliary calls pass one
+    // (session titles ask for a small cap, compaction for a headroom cap), and
+    // refusing them turned every session title on this line into a failure. The
+    // cap is dropped instead, and the drop is recorded on the request so nothing
+    // downstream mistakes the answer for a capped one.
     assertNoSamplingControls(options)
     const dshSessionId = String(options.sessionId ?? 'unscoped-session')
     const settings = await this.options.settings.read()
@@ -404,6 +415,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         queue,
         settled: undefined,
         surfaced: new Set(),
+        notedNative: new Set(),
+        nativeToolPolicy: settings.nativeToolPolicy,
         startedAt: this.now(),
         awaitingHarness: false,
         sessionsUsed: reusedSessions + 1,
@@ -518,13 +531,38 @@ export class AntigravityAcpAdapter extends LlmAdapter {
             continue
           }
           // A tool_call that does NOT name our bridge is the agent acting on its
-          // own: it would modify the workspace without DSH's permission presets,
-          // sandbox policy or durable tool records. The reference implementation
-          // cancels the turn at exactly this point, and so does this one - silently
-          // ignoring it would let an unapproved write through while the transcript
-          // claimed the harness was in control.
-          if (type === 'tool_call') assertNoNativeTool(update)
-          if (type === 'tool_call_update') assertNoNativeTool(update)
+          // own: it modifies the workspace through the official process, outside
+          // DSH's permission presets, sandbox policy and durable tool records.
+          //
+          // ACP cannot unload those tools, so the client has two honest options and
+          // this line offers both (see `nativeToolPolicy`). The strict one fails
+          // the turn the moment one is reported. The default one records the call
+          // in the transcript and lets the turn continue, because a cancelled turn
+          // is what made a working multi-step task look like an empty answer: the
+          // model reaches for `run_command`, the client refuses, and the agent has
+          // nothing left to say.
+          if (type === 'tool_call' || type === 'tool_call_update') {
+            const native = readNativeToolCall(update)
+            if (native !== undefined) {
+              if (turn.nativeToolPolicy === 'cancel') {
+                throw acpError('ACP_NATIVE_TOOLS_UNSUPPORTED', `Tool: ${native.name}.`)
+              }
+              // One note per call: an update reports the same call's progress, and
+              // repeating the sentence for every status change would drown the
+              // answer it is attached to.
+              if (type === 'tool_call' && !turn.notedNative.has(native.callId)) {
+                turn.notedNative.add(native.callId)
+                const note = nativeToolNote(native, readNativeToolArguments(update))
+                if (textIndex === undefined) {
+                  textIndex = nextIndex
+                  nextIndex += 1
+                  yield { type: 'block-start', index: textIndex, blockType: 'text' }
+                }
+                text += note
+                yield { type: 'text-delta', index: textIndex, text: note }
+              }
+            }
+          }
           continue
         }
 
@@ -589,19 +627,46 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     }
   }
 
-  private spawn(launch: AcpLaunch, queue: UpdateQueue, activity: { pulse(): void }): AcpClient {
+  /**
+   * Answer one `session/request_permission`.
+   *
+   * Two different requests arrive here and they do not deserve the same answer.
+   * A request for a call the agent makes on the bridge is the agent asking to run
+   * a DSH tool; the bridge already hands that call to the harness, which applies
+   * its own permission presets, so refusing it here would deny the very route
+   * this line exists to provide. A request for the agent's own tool is answered
+   * by `permissionPolicy`, because nothing downstream of it is governed by DSH.
+   *
+   * @param params - The request payload, including the tool call it is about.
+   * @returns The option id to select, or undefined to answer `cancelled`.
+   */
+  private async answerPermission(params: Record<string, unknown>): Promise<string | undefined> {
+    const options = readPermissionOptions(params)
+    const answer = (): string | undefined =>
+      options.find((option) => option.kind === 'allow_once')?.optionId
+        ?? options.find((option) => option.kind === 'allow_always')?.optionId
+    const toolCall = asRecord(params.toolCall)
+    const name = typeof toolCall?.name === 'string' ? toolCall.name : ''
+    // A bridge call is a DSH tool call wearing an MCP name: the harness applies its
+    // own permission preset to it after the bridge hands it over, so answering
+    // "cancelled" here would refuse the route instead of governing it. The name is
+    // what decides; a request that does not name its tool keeps the strict answer.
+    if (name.startsWith(`mcp_${BRIDGE_SERVER_NAME}_`)) return answer()
+    const settings = await this.options.settings.read()
+    return settings.permissionPolicy === 'allow' ? answer() : undefined
+  }
+
+  private spawn(
+    launch: AcpLaunch,
+    queue: UpdateQueue,
+    activity: { pulse(): void },
+  ): AcpClient {
     const handlers: AcpClientHandlers = {
       onSessionUpdate: (_sessionId, update) => {
         queue.push(update)
         activity.pulse()
       },
-      onPermissionRequest: async (_sessionId, params) => {
-        const settings = await this.options.settings.read()
-        if (settings.permissionPolicy !== 'allow') return undefined
-        const options = readPermissionOptions(params)
-        return options.find((option) => option.kind === 'allow_once')?.optionId
-          ?? options.find((option) => option.kind === 'allow_always')?.optionId
-      },
+      onPermissionRequest: async (_sessionId, params) => this.answerPermission(params),
       onExit: (detail) => {
         queue.push({
           sessionUpdate: 'process_exit',
@@ -766,19 +831,17 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   }
 
   /** Re-install per-turn handlers on a reused client. */
-  private attachHandlers(client: AcpClient, queue: UpdateQueue, activity: { pulse(): void }): void {
+  private attachHandlers(
+    client: AcpClient,
+    queue: UpdateQueue,
+    activity: { pulse(): void },
+  ): void {
     client.rebind({
       onSessionUpdate: (_sessionId, update) => {
         queue.push(update)
         activity.pulse()
       },
-      onPermissionRequest: async (_sessionId, params) => {
-        const settings = await this.options.settings.read()
-        if (settings.permissionPolicy !== 'allow') return undefined
-        const options = readPermissionOptions(params)
-        return options.find((option) => option.kind === 'allow_once')?.optionId
-          ?? options.find((option) => option.kind === 'allow_always')?.optionId
-      },
+      onPermissionRequest: async (_sessionId, params) => this.answerPermission(params),
       onExit: (detail) => {
         queue.push({ sessionUpdate: 'process_exit', detail: { code: detail.code ?? null, signal: detail.signal ?? null } })
       },
@@ -869,36 +932,85 @@ function collectToolResults(
 /**
  * Refuse the sampling controls ACP cannot express.
  *
+ * `temperature` and `stop` change what the model produces, so accepting a request
+ * that carries one and then ignoring it would answer a different question than
+ * the caller asked. `maxTokens` is deliberately not in that set: it bounds an
+ * answer the caller still reads in full, and the harness's own auxiliary calls
+ * (session titles, compaction) always send one. Refusing it made every title on
+ * this line fail; dropping it costs only the bound, and the bound is the one
+ * thing ACP genuinely cannot express.
+ *
  * @param options - The normalized request.
  */
 function assertNoSamplingControls(options: GenerateOptions): void {
   const unsupported: string[] = []
   if (options.temperature !== undefined) unsupported.push('temperature')
-  if (options.maxTokens !== undefined) unsupported.push('maxTokens')
   if (options.stop !== undefined && options.stop.length > 0) unsupported.push('stop')
   if (unsupported.length === 0) return
   throw acpError(
     'ACP_UNSUPPORTED_OPTION',
-    `Unsupported: ${unsupported.join(', ')}. Antigravity through ACP has no sampling controls; choose a model variant instead of a token cap or stop sequence.`,
+    `Unsupported: ${unsupported.join(', ')}. Antigravity through ACP has no sampling controls; choose a model variant instead of a stop sequence.`,
   )
 }
 
 /**
- * Throw when one `tool_call` update names something other than the bridge.
+ * Read one `tool_call`/`tool_call_update` as the agent's own tool, or as the bridge.
  *
  * The official server prefixes its MCP tool names with the server name it was
- * given (`mcp_dsh-bridge_<tool>`); everything else is the agent's own tool.
- * A completed native call has already happened by the time it is reported - the
- * turn is cancelled and reported, and the user is told the action was outside
- * this harness's control. That is the honest limit: ACP has no way to refuse a
- * native tool in advance.
+ * given (`mcp_dsh-bridge_<tool>`); everything else is the agent's own tool. What
+ * the caller does with that answer depends on `nativeToolPolicy`: this function
+ * only classifies, so the two policies share one definition of "native".
  *
  * @param update - One `session/update` payload.
+ * @returns The call's id and name when it is a native call; undefined for the bridge.
  */
-function assertNoNativeTool(update: Record<string, unknown>): void {
+function readNativeToolCall(update: Record<string, unknown>): { callId: string; name: string } | undefined {
   const name = typeof update.name === 'string' ? update.name : ''
-  if (name === '' || name.startsWith(`mcp_${BRIDGE_SERVER_NAME}_`)) return
-  throw acpError('ACP_NATIVE_TOOLS_UNSUPPORTED', `Tool: ${name}.`)
+  if (name === '' || name.startsWith(`mcp_${BRIDGE_SERVER_NAME}_`)) return undefined
+  const callId = typeof update.toolCallId === 'string' ? update.toolCallId : ''
+  return { callId, name }
+}
+
+/**
+ * The transcript line that records one native tool call.
+ *
+ * Written into the answer rather than logged, because the user is the one who
+ * has to know the action did not pass through DSH. It names the tool and its
+ * arguments and nothing else: a note that paraphrased the arguments would be a
+ * second, unverified account of what the agent did.
+ *
+ * @param native - The call being reported.
+ * @param args - Its raw argument text, when the update carried one.
+ * @returns One sentence, ending in a newline so the model's own text starts fresh.
+ */
+function nativeToolNote(native: { name: string }, args: string): string {
+  const call = args === '' ? native.name : `${native.name} ${args}`
+  return t('antigravityAcp.nativeTool', { call })
+}
+
+/**
+ * The raw argument text one native call was reported with.
+ *
+ * ACP spells the arguments `rawInput` on `tool_call`, and the live server also
+ * sends `title` (a one-line description of the action) rather than a JSON body.
+ * Both are read, in that order, and neither is invented: a call reported without
+ * either is shown by name alone.
+ *
+ * @param update - One `session/update` payload.
+ * @returns The argument or title text, or an empty string when it carried none.
+ */
+function readNativeToolArguments(update: Record<string, unknown>): string {
+  const raw = update.rawInput
+  if (typeof raw === 'string' && raw !== '') return raw
+  if (typeof raw === 'object' && raw !== null) {
+    try {
+      return JSON.stringify(raw)
+    } catch {
+      return ''
+    }
+  }
+  const title = update.title
+  return typeof title === 'string' ? title : ''
 }
 
 /**

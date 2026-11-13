@@ -90,6 +90,7 @@ export async function readStatus(options: AntigravityAcpRouteOptions): Promise<A
     enabledModelIds: settings.enabledModelIds,
     defaultReasoningEffort: settings.defaultReasoningEffort,
     permissionPolicy: settings.permissionPolicy,
+    nativeToolPolicy: settings.nativeToolPolicy,
     // A snapshot written moments ago is current data, not a stale placeholder:
     // "synced" describes whether the numbers may be trusted, and a fresh file is
     // exactly as trustworthy as the live read that wrote it.
@@ -279,6 +280,11 @@ export function readSettingsUpdate(body: Record<string, unknown>): AntigravityAc
     if (policy !== 'reject' && policy !== 'allow') return undefined
     update.permissionPolicy = policy as AntigravityAcpPermissionPolicy
   }
+  if (body.nativeToolPolicy !== undefined) {
+    const policy = body.nativeToolPolicy
+    if (policy !== 'allow' && policy !== 'cancel') return undefined
+    update.nativeToolPolicy = policy
+  }
   if (body.binaryPath !== undefined) {
     if (body.binaryPath === null) {
       update.binaryPath = null
@@ -295,6 +301,7 @@ function sameSettings(left: AntigravityAcpSettings, right: AntigravityAcpSetting
   return left.enabled === right.enabled
     && left.defaultReasoningEffort === right.defaultReasoningEffort
     && left.permissionPolicy === right.permissionPolicy
+    && left.nativeToolPolicy === right.nativeToolPolicy
     && left.binaryPath === right.binaryPath
     && JSON.stringify(left.enabledModelIds) === JSON.stringify(right.enabledModelIds)
 }

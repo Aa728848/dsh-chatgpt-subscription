@@ -20,7 +20,10 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { dshHomeDir } from '../common/home.ts'
-import type { AntigravityAcpPermissionPolicy } from '../../shared/antigravity-acp-contracts.ts'
+import type {
+  AntigravityAcpNativeToolPolicy,
+  AntigravityAcpPermissionPolicy,
+} from '../../shared/antigravity-acp-contracts.ts'
 
 /** Schema version of the settings document this module writes. */
 export const SETTINGS_VERSION = 1
@@ -35,6 +38,15 @@ export interface AntigravityAcpSettings {
   defaultReasoningEffort: string | null
   /** How the agent's permission requests are answered. */
   permissionPolicy: AntigravityAcpPermissionPolicy
+  /**
+   * What happens when the agent uses one of its own tools instead of the bridge.
+   *
+   * `allow` records the call and keeps the turn alive; `cancel` fails the turn at
+   * the first such call. The strict mode is opt-in because ACP cannot unload the
+   * agent's built-in tools: a model that wants to run a shell command will try,
+   * and cancelling the whole turn is how a working task looked like an empty one.
+   */
+  nativeToolPolicy: AntigravityAcpNativeToolPolicy
   /** Absolute executable path, or `null` for automatic resolution. */
   binaryPath: string | null
   /** Unix milliseconds of the last completed turn, if any. */
@@ -62,6 +74,11 @@ export function defaultAntigravityAcpSettings(): AntigravityAcpSettings {
     enabledModelIds: null,
     defaultReasoningEffort: null,
     permissionPolicy: 'reject',
+    // Permissive by default: the strict mode cancels a whole turn the moment the
+    // model reaches for a built-in tool, which is exactly the "one empty round"
+    // failure this default exists to avoid. Users who want the old behaviour
+    // switch it on in the card.
+    nativeToolPolicy: 'allow',
     binaryPath: null,
   }
 }
@@ -94,6 +111,9 @@ export function parseAntigravityAcpSettings(value: unknown): AntigravityAcpSetti
       ? record.defaultReasoningEffort
       : null,
     permissionPolicy: record.permissionPolicy === 'allow' ? 'allow' : 'reject',
+    // A corrupt value falls back to the permissive default rather than silently
+    // putting the line into a mode where every tool-using turn fails.
+    nativeToolPolicy: record.nativeToolPolicy === 'cancel' ? 'cancel' : 'allow',
     binaryPath: typeof record.binaryPath === 'string' && record.binaryPath !== '' ? record.binaryPath : null,
     ...(typeof record.lastTurnAt === 'number' && Number.isFinite(record.lastTurnAt)
       ? { lastTurnAt: record.lastTurnAt }
@@ -159,6 +179,7 @@ export class AntigravityAcpSettingsStore {
       ...(patch.enabledModelIds === undefined ? {} : { enabledModelIds: patch.enabledModelIds }),
       ...(patch.defaultReasoningEffort === undefined ? {} : { defaultReasoningEffort: patch.defaultReasoningEffort }),
       ...(patch.permissionPolicy === undefined ? {} : { permissionPolicy: patch.permissionPolicy }),
+      ...(patch.nativeToolPolicy === undefined ? {} : { nativeToolPolicy: patch.nativeToolPolicy }),
       ...(patch.binaryPath === undefined ? {} : { binaryPath: patch.binaryPath }),
       ...(patch.lastTurnAt === undefined ? {} : { lastTurnAt: patch.lastTurnAt }),
     }

@@ -94,6 +94,8 @@ describe('readSettingsUpdate', () => {
     expect(readSettingsUpdate({ permissionPolicy: 'reject' })).toEqual({ permissionPolicy: 'reject' })
     expect(readSettingsUpdate({ permissionPolicy: 'allow' })).toEqual({ permissionPolicy: 'allow' })
     expect(readSettingsUpdate({ permissionPolicy: 'always' })).toBeUndefined()
+    expect(readSettingsUpdate({ nativeToolPolicy: 'cancel' })).toEqual({ nativeToolPolicy: 'cancel' })
+    expect(readSettingsUpdate({ nativeToolPolicy: 'sometimes' })).toBeUndefined()
   })
 })
 
