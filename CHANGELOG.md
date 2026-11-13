@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- **[antigravity-acp / 读图修复] `read_image` 的像素现在真的会回到 agent 手里**
+  - **问题**：用户反馈这条线路「读不了图」。工具调用链本身是通的——`read_image` 确实经回环 MCP 桥交回 DSH 执行——但结果回传把图片丢了：`collectToolResults` 只取 `type === 'text'` 的块，图片块被过滤成空串，桥又只能发 `{type:'text'}`，agent 收到的是一条**空内容**，看起来就和「工具什么都没返回」一样。
+  - **修复**：结果收集递归取出 `image` 块，用与提示词相同的 `imageBlockToInline` 解析（受 12 MiB 内联预算约束）；`McpBridge` 按 MCP 规范回 `text` + 每个 `{type:'image', data, mimeType}`，纯图片结果也带一条非空文本占位，避免出现空 `content` 数组。
+  - **验证**：新增 `test/antigravity-acp-image-result.test.ts`——脚本化 ACP 服务端在 `session/new` 里读出桥描述符并**真的发一次 HTTP `tools/call`**，断言回传内容含 `image:image/png:` 与 base64 前缀；反向对照（把图片分支短路）该用例变红。桥的单元测试补一条「纯图片结果不能是空 text 块」。全量 Vitest 379 文件 / 6789 例通过 / 0 失败。
 - **[antigravity-acp / 修复 #108] 主模型线路不再「一轮就结束」：原生工具改为记录并继续，桥工具恒定放行**
   - **问题**：这条线路只有一轮。默认 `permissionPolicy: "reject"` 下模型想干活就直接 `end_turn`，改成 `allow` 后又变成 `ACP_NATIVE_TOOLS_UNSUPPORTED`。根因是**两道互相独立的闸门**：① `session/request_permission` 对桥工具和原生工具一视同仁，默认回 `cancelled`；② `session/update` 里一出现非桥 `tool_call` 就无条件抛错取消整轮。agy 的事件顺序是 `tool_call` → `permission` → `tools/call`，所以第②道**先于权限请求**触发，设置改成 `allow` 只是换一种失败方式。
   - **桥工具恒定放行**：名字带 `mcp_dsh-bridge_` 前缀的权限请求一律回 `allow_once`——它交回 DSH 后由 DSH 的权限预设把关，在这里拒绝等于把唯一受控的通路关掉；只有 agent 自带工具受 `permissionPolicy` 约束。

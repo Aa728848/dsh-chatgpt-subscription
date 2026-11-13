@@ -105,7 +105,7 @@ TLS 指纹（见 `docs/antigravity-tls-fingerprint-probe.md`：结论是**做不
 5. **忽略 `usage_update`**：参照项目明确它是**上下文占用**（`used`/`size`），不是计费 token。
 6. **错误码不成体系**：参照项目有 `ACP_*` 码表与 Troubleshooting。
 7. **无 doctor / 自检**：参照项目有 probe 命令。
-8. **图片输入**：参照项目明确未实现；**我们实现了**（`resolveRequestImages` + 12 MiB 内联预算），这一项我们领先。
+8. **图片输入**：参照项目明确未实现；**我们实现了**（`resolveRequestImages` + 12 MiB 内联预算），这一项我们领先。**图片输出**（工具结果里的像素，如 `read_image`）最初只回传了文本部分，等于把图片丢成空串；现已按 MCP 规范回 `image` 内容块，见 §6.6。
 
 ### 6.3 上述缺漏的处理结果（全部已修）
 
@@ -136,6 +136,19 @@ agy 的事件顺序是 `tool_call` → `session/request_permission` → `tools/c
 
 - **会话标题生成失败**：ACP 没有 `maxTokens`，而 harness 的标题服务固定传 64 token 上限，原实现把带 `maxTokens` 的请求整个拒绝为 `ACP_UNSUPPORTED_OPTION`，于是每个会话的标题生成都稳定报错。现在 `maxTokens` 被丢弃而不是拒绝——它约束的是调用方仍会完整读到的一段回答，丢的只是上限；`temperature` / `stop` 会改变模型**产出什么**，仍然显式拒绝。
 - **提示词里的 `BRIDGE_ONLY_INSTRUCTION` 无效**：实测 `_meta.antigravity.systemPrompt.append` 不生效，追加文本进不了上下文（inputTokens 只 +5）。这是 agy 侧的限制，本插件不做补偿，只把它写进「做不到」清单（§6.4）。
+
+### 6.6 工具结果里的图片（读图失败的真因）
+
+现象：用户报告这条线路「读不了图」。但 `read_image` 的调用链是通的——工具经回环 MCP 桥交回 DSH，DSH 正常执行、返回带像素的 `tool-result`。断点在**结果回传**：
+
+| 环节 | 原实现 | 结果 |
+| --- | --- | --- |
+| `collectToolResults` | 只取 `entry.type === 'text'` 的块 | `read_image` 的图片块被过滤，text 为空串 |
+| `McpBridge.handleToolCall` | 只发 `{ type: 'text', text }` | agent 收到**空内容**，与「工具什么都没返回」无法区分 |
+
+修复后：结果收集递归取出图片块，用与提示词相同的 `imageBlockToInline` 解析（同一套 12 MiB 内联预算，因为两条路径最终都进 agent 的上下文）；桥按 MCP 规范回 `text` + 每个 `{ type: 'image', data, mimeType }`，纯图片结果带一条非空文本占位，避免空 `content` 数组。
+
+守卫：`test/antigravity-acp-image-result.test.ts` 让脚本化服务端真的对桥发一次 HTTP `tools/call`，断言回传内容含 `image:image/png:`；把图片分支短路后该用例变红。
 
 ### 6.4 参照项目也承认做不到、我们同样做不到的
 

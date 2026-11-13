@@ -104,6 +104,39 @@ describe('McpBridge', () => {
     }
   })
 
+  it('returns an image result as MCP image content, not as an empty text block', async () => {
+    // read_image answers with pixels and no prose. Keeping only the text half of
+    // that result told the agent the call returned nothing, which users reported
+    // as the model being unable to read images at all.
+    const bridge = new McpBridge(TOOLS)
+    const descriptor = await bridge.start()
+    try {
+      const token = descriptor.headers[0]!.value
+      const call = rpc(descriptor.url, token, {
+        jsonrpc: '2.0',
+        id: 11,
+        method: 'tools/call',
+        params: { name: 'read_file', arguments: {} },
+      })
+      await bridge.waitForWork()
+      const parked = bridge.takeParked()
+      bridge.settle(parked[0]!.callId, {
+        text: '',
+        images: [{ mediaType: 'image/png', data: 'AAAA' }],
+        isError: false,
+      })
+      const answered = await call
+      const content = (answered.json as { result: { content: Record<string, unknown>[] } }).result.content
+      expect(content).toHaveLength(2)
+      // Never an empty content list: that is what an agent reports as "nothing".
+      expect(content[0]).toMatchObject({ type: 'text' })
+      expect(content[0]!.text).not.toBe('')
+      expect(content[1]).toMatchObject({ type: 'image', data: 'AAAA', mimeType: 'image/png' })
+    } finally {
+      await bridge.close()
+    }
+  })
+
   it('answers a denial as isError rather than as an empty success', async () => {
     const bridge = new McpBridge(TOOLS)
     const descriptor = await bridge.start()

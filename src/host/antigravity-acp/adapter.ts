@@ -53,6 +53,7 @@ import {
 import { STREAM_IDLE_TIMEOUT_CODE, STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog } from '../common/idle-watchdog.ts'
 import {
   NO_RESOLVED_IMAGES,
+  imageBlockToInline,
   resolveRequestImages,
   type AttachmentImageReader,
   type ResolvedRequestImages,
@@ -63,9 +64,21 @@ import type {
   AntigravityAcpUsageDto,
 } from '../../shared/antigravity-acp-contracts.ts'
 import { AcpClient, AcpError, type AcpClientHandlers } from './acp-client.ts'
-import { BRIDGE_SERVER_NAME, McpBridge, type BridgeDescriptor } from './mcp-bridge.ts'
+import {
+  BRIDGE_SERVER_NAME,
+  McpBridge,
+  type BridgeDescriptor,
+  type ToolCallImage,
+  type ToolCallOutcome,
+} from './mcp-bridge.ts'
 import { acpError } from './errors.ts'
-import { buildPrompt, canContinue, fingerprintMessages, type AcpPromptBlock } from './history.ts'
+import {
+  ACP_MAX_INLINE_IMAGE_BYTES,
+  buildPrompt,
+  canContinue,
+  fingerprintMessages,
+  type AcpPromptBlock,
+} from './history.ts'
 import type { AntigravityAcpSettings, AntigravityAcpSettingsStore } from './settings.ts'
 import {
   AUTH_REQUIRED_MESSAGE,
@@ -352,7 +365,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     const live = this.live.get(dshSessionId)
     if (live !== undefined && live.model === options.model && live.effort === effort
       && canContinue(options.messages, live.covered, live.fingerprint)) {
-      return this.continueTurn(live, options, signal, activity)
+      return this.continueTurn(live, options, images, signal, activity)
     }
     if (live !== undefined) await this.closeTurn(live)
     return this.startTurn(dshSessionId, options, settings, images, effort, signal, activity)
@@ -436,10 +449,11 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   private continueTurn(
     turn: LiveTurn,
     options: GenerateOptions,
+    images: ResolvedRequestImages,
     signal: AbortSignal,
     activity: { pulse(): void },
   ): AsyncGenerator<StreamChunk> {
-    const results = collectToolResults(options.messages.slice(turn.covered))
+    const results = collectToolResults(options.messages.slice(turn.covered), images)
     for (const callId of [...turn.surfaced]) {
       const outcome = results.get(callId)
       turn.bridge.settle(callId, outcome === undefined
@@ -910,11 +924,25 @@ export const BRIDGE_ONLY_INSTRUCTION = [
   'If no provided tool covers what you need, stop and say so rather than acting directly.',
 ].join(' ')
 
-/** Tool results keyed by the call id they answer, from the newly appended messages. */
+/**
+ * Tool results keyed by the call id they answer, from the newly appended messages.
+ *
+ * A result is not always text. `read_image` and a screenshot tool answer with an
+ * image block, and keeping only the text half of that handed the agent an empty
+ * string - a successful call it could not tell from a tool that returned
+ * nothing. Image blocks are therefore resolved and carried back as MCP `image`
+ * content; the byte budget is the same one the prompt uses, because both paths
+ * end up inline in the agent's context.
+ *
+ * @param messages - The messages appended since the turn last handed work over.
+ * @param images - Images resolved for this request, keyed by attachment id.
+ * @returns One outcome per answered call id.
+ */
 function collectToolResults(
   messages: readonly { content: readonly ContentBlock[] }[],
-): Map<string, { text: string; isError: boolean }> {
-  const results = new Map<string, { text: string; isError: boolean }>()
+  images: ResolvedRequestImages,
+): Map<string, ToolCallOutcome> {
+  const results = new Map<string, ToolCallOutcome>()
   for (const message of messages) {
     for (const block of message.content) {
       if (block.type !== 'tool-result') continue
@@ -923,7 +951,24 @@ function collectToolResults(
         .map((entry) => (entry.type === 'text' ? entry.text : ''))
         .filter((part) => part !== '')
         .join('\n')
-      results.set(result.toolCallId, { text, isError: result.isError === true })
+      const carried: ToolCallImage[] = []
+      let budget = ACP_MAX_INLINE_IMAGE_BYTES
+      for (const entry of result.content) {
+        if (entry.type !== 'image') continue
+        const inline = imageBlockToInline(entry as unknown as Record<string, unknown>, images)
+        if (inline === undefined) continue
+        const bytes = Math.ceil(inline.data.length * 0.75)
+        // Over budget means the picture is described, not silently dropped: the
+        // agent has to know something was there and did not fit.
+        if (bytes > budget) continue
+        budget -= bytes
+        carried.push({ mediaType: inline.mediaType, data: inline.data })
+      }
+      results.set(result.toolCallId, {
+        text,
+        ...(carried.length === 0 ? {} : { images: carried }),
+        isError: result.isError === true,
+      })
     }
   }
   return results

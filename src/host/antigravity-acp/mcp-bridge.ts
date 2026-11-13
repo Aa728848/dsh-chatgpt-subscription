@@ -41,10 +41,27 @@ export interface ParkedToolCall {
   argumentsText: string
 }
 
+/** One inline image an MCP tool result hands back to the agent. */
+export interface ToolCallImage {
+  /** Media type of the bytes, as the store verified it. */
+  mediaType: string
+  /** Base64 payload, without a `data:` prefix. */
+  data: string
+}
+
 /** What DSH produced for one parked call. */
 export interface ToolCallOutcome {
   /** Text handed back to the agent. */
   text: string
+  /**
+   * Images the tool produced, handed back as MCP `image` content.
+   *
+   * A `read_image` result is pixels, not prose. Collapsing it to its text part
+   * left the agent with an empty result and no way to tell "the tool ran and the
+   * picture is attached" from "the tool returned nothing" - which read to users
+   * as the model being unable to see images at all.
+   */
+  images?: readonly ToolCallImage[]
   /** True when the harness refused or the tool failed; the agent must see an error, not a blank success. */
   isError: boolean
 }
@@ -313,8 +330,19 @@ export class McpBridge {
     await new Promise<ToolCallOutcome>((resolve) => {
       this.pendingResponses.set(callId, resolve)
     }).then((outcome) => {
+      const images = outcome.images ?? []
+      // MCP carries a result as a list of content blocks, so an image result is a
+      // text block plus the image blocks - never an empty list. A result with no
+      // text at all still gets one, because an empty `content` array is what an
+      // agent reports as "the tool returned nothing".
+      const content: Record<string, unknown>[] = images.length > 0 && outcome.text === ''
+        ? [{ type: 'text', text: '[tool result carried an image]' }]
+        : [{ type: 'text', text: outcome.text }]
+      for (const image of images) {
+        content.push({ type: 'image', data: image.data, mimeType: image.mediaType })
+      }
       respond(response, 200, jsonRpcResult(id, {
-        content: [{ type: 'text', text: outcome.text }],
+        content,
         ...(outcome.isError ? { isError: true } : {}),
       }))
     })
