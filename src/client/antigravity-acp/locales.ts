@@ -7,6 +7,8 @@ export const zh = {
   routeConflict: '模型路由已被其他 Provider 占用：{detail}。请在 DSH 设置中移除重复的 Provider 配置后重试。',
 
   binarySection: '运行环境',
+  binarySourceLabel: '当前使用',
+  binaryHintSummary: '从哪里找可执行文件？',
   binaryKindLocal: '本机 Antigravity CLI',
   binaryKindConfigured: '手动指定路径',
   binaryKindDownloaded: '官方 ACP server（已下载）',
@@ -19,10 +21,15 @@ export const zh = {
   binaryPathReset: '恢复自动查找',
 
   authSection: '登录',
+  statusLabel: '状态',
   signedIn: '已登录',
   signedOut: '未登录',
   signIn: '登录 Google 账号',
-  signInStarting: '正在启动登录…',
+  signInAgain: '重新登录',
+  signInStarting: '正在启动…',
+  signInSuccess: '已发起登录：浏览器由 Antigravity CLI 打开，完成授权后状态会自动变为「已登录」。',
+  signInAlready: '当前已是登录状态，无需重复登录。',
+  signInHintSummary: '登录是怎么完成的？',
   signInHint: '登录由 Antigravity CLI 自己完成：点击后它会打开浏览器，完成后回到这里刷新状态。本插件不读取、不保存你的 Google 凭据。',
   signInHeadless: '无界面环境请在终端执行 agy acp --login，然后回到此页刷新。',
   tierLabel: '订阅档位',
@@ -56,16 +63,23 @@ export const zh = {
   permissionPolicyHint: '主模型线路里，Antigravity 的工具调用会经本地 MCP 桥交回 DSH 执行，权限由 DSH 的权限预设决定；这里控制的是官方进程自身的权限请求与子代理形态下的自动批准策略。',
 
   usageSection: '最近一轮用量',
+  usageInputLabel: '输入',
+  usageOutputLabel: '输出',
+  usageCacheLabel: '缓存命中',
+  usageDurationLabel: '耗时',
   usageInput: '输入 {tokens}',
   usageOutput: '输出 {tokens}',
   usageCache: '缓存命中 {tokens}',
   usageDuration: '耗时 {seconds}s',
   usageNone: '尚无已完成的一轮。',
+  usageHintSummary: '这里为什么没有额度百分比？',
   usageHint: '官方 ACP 服务端不公布剩余额度或套餐百分比，因此这里只显示真实返回的 token 用量。',
   occupancyLabel: '上下文占用',
   occupancyDetail: '已用 {used} / 窗口 {size}',
 
   scopeSection: '能力边界',
+  scopeSummary: '四条客观限制：无 system 槽位、每轮重建会话、子代理用官方工具、不公布额度。',
+  scopeHintSummary: '展开看这四条限制',
   scopeHint: '这些是 ACP 与官方 Agent 的客观限制，本线路不做绕过：',
   scopePrompt: 'ACP 没有独立的 system 提示槽位：DSH 的系统提示会作为提示首段随会话发送，官方 Agent 自身的系统提示无法移除。',
   scopeHistory: '每轮对话按 DSH 的完整历史重建 ACP 会话；历史被压缩或改写时会重新建立会话，而不是复用可能已与 DSH 不一致的旧会话。',
@@ -74,7 +88,9 @@ export const zh = {
 
   error: '操作失败：{detail}',
 
-  // 条款风险：这张卡必须在自己身上说清楚，而不是只写在文档里。
+  // 条款风险：这张卡必须在自己身上说清楚，而不是只写在文档里——但一句摘要放在
+  // 折叠标题上，完整段落展开可见，避免整屏被免责声明占满。
+  complianceSummary: '条款风险（点开查看）',
   complianceNotice:
     '⚠️ 条款风险：Google Antigravity 官方 FAQ 明确写着「使用第三方软件、工具或服务访问 Antigravity 违反其服务条款」，且「把 agy 包装进第三方编码 Agent 或应用、或自动化账号轮换，在消费者套餐下不受支持」，可能导致账号被暂停或终止。本插件运行的是 Google 官方 agy 与官方 ACP 服务器（不逆向协议、不读取凭据、单账号不轮换），但这些措施不能消除条款风险。是否继续使用请自行判断；需要零争议时请改用 Gemini Enterprise 或 Google AI Studio API Key。',
   disabledHint: '该线路当前已停用；在上方订阅总览打开开关后才会出现在模型选择器中。',
@@ -89,6 +105,8 @@ export const en = {
   routeConflict: 'The model route is already owned by another provider: {detail}',
 
   binarySection: 'Runtime',
+  binarySourceLabel: 'In use',
+  binaryHintSummary: 'Where does the executable come from?',
   binaryKindLocal: 'Local Antigravity CLI',
   binaryKindConfigured: 'Configured path',
   binaryKindDownloaded: 'Official ACP server (downloaded)',
@@ -101,10 +119,15 @@ export const en = {
   binaryPathReset: 'Restore automatic resolution',
 
   authSection: 'Sign-in',
+  statusLabel: 'Status',
   signedIn: 'Signed in',
   signedOut: 'Not signed in',
   signIn: 'Sign in with Google',
-  signInStarting: 'Starting sign-in...',
+  signInAgain: 'Sign in again',
+  signInStarting: 'Starting...',
+  signInSuccess: 'Sign-in started: the Antigravity CLI opens the browser, and the status here turns to signed in once you approve it.',
+  signInAlready: 'This line is already signed in; there is nothing to do.',
+  signInHintSummary: 'How does sign-in work?',
   signInHint: 'The Antigravity CLI performs the sign-in itself: it opens the browser, and you come back here to refresh the state. This plugin never reads or stores your Google credentials.',
   signInHeadless: 'On a headless host run agy acp --login in a terminal, then refresh here.',
   tierLabel: 'Plan',
@@ -138,6 +161,11 @@ export const en = {
   permissionPolicyHint: "On the main-model line, Antigravity's tool calls come back to DSH through the local MCP bridge and are governed by DSH permission presets. This setting covers the official process's own permission requests and the auto-approval used by the subagent form.",
 
   usageSection: 'Last turn usage',
+  usageInputLabel: 'Input',
+  usageOutputLabel: 'Output',
+  usageCacheLabel: 'Cache read',
+  usageDurationLabel: 'Duration',
+  usageHintSummary: 'Why is there no quota percentage here?',
   usageInput: 'in {tokens}',
   usageOutput: 'out {tokens}',
   usageCache: 'cache read {tokens}',
@@ -148,6 +176,8 @@ export const en = {
   occupancyDetail: '{used} used of {size}',
 
   scopeSection: 'Boundaries',
+  scopeSummary: 'Four objective limits: no system slot, a fresh session every turn, the official tools in subagent form, and no published quota.',
+  scopeHintSummary: 'Show the four limits',
   scopeHint: 'These are objective ACP and official-agent limits; this line does not work around them:',
   scopePrompt: "ACP has no separate system-prompt slot: the DSH system prompt travels as the head of the prompt, and the official agent's own system prompt cannot be removed.",
   scopeHistory: 'Every turn rebuilds the ACP session from the complete DSH history; when that history is compacted or rewritten a new session is created instead of resuming one that may no longer match.',
@@ -156,6 +186,7 @@ export const en = {
 
   error: 'Action failed: {detail}',
 
+  complianceSummary: 'Terms risk (click to read)',
   complianceNotice:
     'Terms risk: Google Antigravity\'s official FAQ states that accessing Antigravity through third-party software, tools, or services violates its Terms of Service, and that wrapping agy inside third-party coding agents or applications, or automating account rotation, is not supported under consumer plans - either can result in suspension or termination of your account. This plugin runs Google\'s own agy CLI and official ACP server (no protocol reverse-engineering, no credential access, single account, no rotation), but those measures do not remove the risk. Whether to keep using it is your decision; where a zero-controversy setup is required, use a Gemini Enterprise or Google AI Studio API key instead.',
   disabledHint: 'This line is switched off. Turn it on from its card in the subscription overview to make it appear in the model picker.',

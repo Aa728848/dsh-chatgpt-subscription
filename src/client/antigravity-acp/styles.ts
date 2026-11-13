@@ -19,6 +19,13 @@ export function installAntigravityAcpStyles(): void {
 .dshagy-runtime{align-items:baseline;display:flex;flex-wrap:wrap;gap:6px 10px;margin-top:4px}
 .dshagy-runtime-kind{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600}
 .dshagy-runtime-path{color:var(--dsw-alias-label-tertiary);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere;user-select:all}
-.dshagy-boundary{margin:0;padding-left:18px}
+/* 折叠区：与 qoder / cline-pass 卡同一套写法——summary 是 12px 次要色、展开后正文同尺寸，
+   details 默认不占版面。卡上只留一行结论，长句全部收进这里，不是删掉。 */
+.dshagy-details{border-top:0.5px solid var(--dsw-alias-border-l2);padding:10px 0 2px}
+.dshagy-details>summary{color:var(--dsw-alias-label-secondary);cursor:pointer;font-size:12px;line-height:1.5;list-style:none;user-select:none}
+.dshagy-details>summary::-webkit-details-marker{display:none}
+.dshagy-details[open]>summary{color:var(--dsw-alias-label-primary)}
+.dshagy-details>p{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.55;margin:9px 0 0}
+.dshagy-boundary{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.55;margin:9px 0 0;padding-left:18px}
 `, STYLE_ID)
 }

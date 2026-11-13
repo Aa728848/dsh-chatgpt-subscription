@@ -14,6 +14,8 @@ export const dictionary: Record<AntigravityAcpLocaleKey, string> = {
   routeConflict: 'Маршрут моделей уже занят другим провайдером: {detail}',
 
   binarySection: 'Среда выполнения',
+  binarySourceLabel: 'Используется',
+  binaryHintSummary: 'Откуда берётся исполняемый файл?',
   binaryKindLocal: 'Локальный Antigravity CLI',
   binaryKindConfigured: 'Указанный путь',
   binaryKindDownloaded: 'Официальный ACP-сервер (загружен)',
@@ -26,10 +28,15 @@ export const dictionary: Record<AntigravityAcpLocaleKey, string> = {
   binaryPathReset: 'Вернуть автопоиск',
 
   authSection: 'Вход',
+  statusLabel: 'Состояние',
   signedIn: 'Выполнен вход',
   signedOut: 'Вход не выполнен',
   signIn: 'Войти через Google',
-  signInStarting: 'Запуск входа…',
+  signInAgain: 'Войти снова',
+  signInStarting: 'Запуск…',
+  signInSuccess: 'Вход запущен: браузер откроет Antigravity CLI, а состояние здесь сменится на «выполнен вход» после подтверждения.',
+  signInAlready: 'Вход уже выполнен, повторять его не нужно.',
+  signInHintSummary: 'Как проходит вход?',
   signInHint: 'Вход выполняет сам Antigravity CLI: он откроет браузер, после чего вернитесь сюда и обновите состояние. Плагин не читает и не сохраняет ваши учётные данные Google.',
   signInHeadless: 'На хосте без графической среды выполните в терминале agy acp --login, затем обновите страницу.',
   tierLabel: 'Тариф',
@@ -63,6 +70,11 @@ export const dictionary: Record<AntigravityAcpLocaleKey, string> = {
   permissionPolicyHint: 'В основной линии вызовы инструментов Antigravity возвращаются в DSH через локальный MCP-мост, и ими управляют пресеты разрешений DSH. Эта настройка касается собственных запросов разрешений официального процесса и авторазрешения в режиме субагента.',
 
   usageSection: 'Расход последнего хода',
+  usageInputLabel: 'Вход',
+  usageOutputLabel: 'Выход',
+  usageCacheLabel: 'Чтение из кэша',
+  usageDurationLabel: 'Длительность',
+  usageHintSummary: 'Почему здесь нет процента квоты?',
   usageInput: 'вход {tokens}',
   usageOutput: 'выход {tokens}',
   usageCache: 'чтение из кэша {tokens}',
@@ -73,6 +85,8 @@ export const dictionary: Record<AntigravityAcpLocaleKey, string> = {
   occupancyDetail: 'использовано {used} из {size}',
 
   scopeSection: 'Границы возможностей',
+  scopeSummary: 'Четыре объективных ограничения: нет слота системного промпта, новая сессия каждый ход, официальные инструменты в режиме субагента и отсутствие публикуемой квоты.',
+  scopeHintSummary: 'Показать четыре ограничения',
   scopeHint: 'Это объективные ограничения ACP и официального агента; данная линия их не обходит:',
   scopePrompt: 'В ACP нет отдельного слота системного промпта: системный промпт DSH передаётся в начале запроса, а собственный системный промпт официального агента убрать нельзя.',
   scopeHistory: 'Каждый ход заново создаёт ACP-сессию из полной истории DSH; если история сжата или переписана, создаётся новая сессия вместо продолжения той, что может уже не совпадать.',
@@ -81,6 +95,7 @@ export const dictionary: Record<AntigravityAcpLocaleKey, string> = {
 
   error: 'Не удалось выполнить действие: {detail}',
 
+  complianceSummary: 'Риск по условиям (нажмите, чтобы прочитать)',
   complianceNotice:
     'Риск по условиям использования: официальный FAQ Google Antigravity указывает, что доступ к Antigravity через стороннее программное обеспечение, инструменты или сервисы нарушает Условия использования и может привести к приостановке или прекращению действия аккаунта; там же сказано, что обёртывание agy в сторонние кодирующие агенты или приложения и автоматическая ротация аккаунтов не поддерживаются на потребительских тарифах. Плагин запускает официальные agy и ACP-сервер Google (без реверс-инжиниринга протокола, без доступа к учётным данным, один аккаунт, без ротации), но эти меры не устраняют риск. Продолжать пользоваться или нет — ваше решение. Если требуется нулевая спорность, используйте Gemini Enterprise или API-ключ Google AI Studio.',
   disabledHint: 'Линия сейчас отключена. Включите её на карточке в обзоре подписок — после этого она появится в выборе моделей.',

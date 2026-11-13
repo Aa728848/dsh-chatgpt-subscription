@@ -37,6 +37,8 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
   const [enabled, setEnabled] = useState<Set<string> | null>(null)
   const [binaryPath, setBinaryPath] = useState('')
   const [doctor, setDoctor] = useState<{ ok: boolean; steps: { id: string; ok: boolean; detail: string }[] } | null>(null)
+  /** Feedback for the sign-in action, cleared on the next attempt. */
+  const [loginNotice, setLoginNotice] = useState<string | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -104,11 +106,18 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
   const signIn = useCallback(() => {
     setBusy('login')
     setError(null)
+    setLoginNotice(null)
     void API.startLogin()
-      .then(() => reload())
+      .then(async (result) => {
+        setLoginNotice(result.started ? t.signInSuccess : t.signInAlready)
+        // Re-read the state right away: on a machine that is already signed in the
+        // spinner would otherwise be the only feedback and the card would still
+        // read "not signed in" next to a button that says "sign in".
+        await reload()
+      })
       .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => setBusy(null))
-  }, [reload])
+  }, [reload, t])
 
   const saveBinaryPath = useCallback(() => {
     void run('binary', () => API.update({ binaryPath: binaryPath.trim() === '' ? null : binaryPath.trim() }))
@@ -140,15 +149,15 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
           </div>
         </div>
         <p className="dsha-notice">{t.pageDesc}</p>
-        {/* The terms risk belongs on the card, not only in the docs: this is the
-            screen where a user decides whether to switch the line on. */}
-        <p className="dsha-notice">{t.complianceNotice}</p>
         {status !== null && !status.enabled && (
           <p className="dsha-notice">{t.disabledHint}</p>
         )}
-        {status !== null && status.enabled && (
-          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.toggleHint}</p>
-        )}
+        {/* 条款风险不再占据卡面正文：它太长，一屏就被它吃掉。原句整段保留在折叠区里
+            （默认收起、仍在 DOM 中），需要时展开即可，等于「隐藏」而不是「删掉」。 */}
+        <details className="dshagy-details">
+          <summary>{t.complianceSummary}</summary>
+          <p>{t.complianceNotice}</p>
+        </details>
         {status?.routeConflict !== undefined && (
           <p className="dsha-notice">{t.routeConflict.replace('{detail}', status.routeConflict)}</p>
         )}
@@ -174,28 +183,29 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
           <h3>{t.binarySection}</h3>
         </div>
         {status !== null && (
-          <p className="dsha-muted" style={{ fontSize: 12 }}>
-            {status.binary.kind === 'local-cli' && t.binaryKindLocal}
-            {status.binary.kind === 'configured' && t.binaryKindConfigured}
-            {status.binary.kind === 'downloaded' && t.binaryKindDownloaded}
-            {status.binary.kind === 'missing' && t.binaryKindMissing}
-            {status.binary.version !== undefined && ' · ' + t.binaryVersion.replace('{version}', status.binary.version)}
-          </p>
+          <div className="dsha-row">
+            <span className="dsha-label">{t.binarySourceLabel}</span>
+            <span className="dsha-value">
+              {status.binary.kind === 'local-cli' && t.binaryKindLocal}
+              {status.binary.kind === 'configured' && t.binaryKindConfigured}
+              {status.binary.kind === 'downloaded' && t.binaryKindDownloaded}
+              {status.binary.kind === 'missing' && t.binaryKindMissing}
+              {status.binary.version !== undefined && ' · ' + status.binary.version}
+            </span>
+          </div>
         )}
         {status?.binary.error !== undefined && (
           <p className="dsha-notice">{status.binary.error}</p>
         )}
-        {status?.binary.kind === 'missing' && (
-          <p className="dsha-muted" style={{ fontSize: 12 }}>{t.binaryMissingHint}</p>
-        )}
         <div className="dsha-pref-row">
-          <div>
-            <strong>{t.binaryPathLabel}</strong>
-            <p className="dsha-muted">{t.binaryPathPlaceholder}</p>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <span className="dsha-label">{t.binaryPathLabel}</span>
+          {/* Right-aligned like every other value on this card: the control block
+              takes the remaining width and pins itself to the right edge, and the
+              input grows inside it instead of sitting flush against the label. */}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginLeft: 'auto', flex: '0 1 520px' }}>
             <input
               className="dsha-input"
+              style={{ flex: '1 1 260px', minWidth: 180 }}
               value={binaryPath}
               placeholder={t.binaryPathPlaceholder}
               disabled={busy !== null}
@@ -206,22 +216,43 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
             </button>
           </div>
         </div>
+        <details className="dshagy-details">
+          <summary>{t.binaryHintSummary}</summary>
+          <p>{status?.binary.kind === 'missing' ? t.binaryMissingHint : t.binaryPathPlaceholder}</p>
+        </details>
       </div>
 
       <div className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.authSection}</h3>
-          <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={signIn}>
-            {busy === 'login' ? t.signInStarting : t.signIn}
+          <button
+            className="dsha-btn dsha-btn-primary"
+            disabled={busy !== null}
+            onClick={signIn}
+          >
+            {busy === 'login' ? t.signInStarting : auth?.authenticated === true ? t.signInAgain : t.signIn}
           </button>
         </div>
-        <p className="dsha-muted" style={{ fontSize: 12 }}>
-          {auth?.authenticated === true ? t.signedIn : t.signedOut}
-          {' · '}
-          {t.tierLabel}: {tier === undefined ? t.tierUnknown : tier.name}
-        </p>
-        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.signInHint}</p>
-        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.signInHeadless}</p>
+        <div className="dsha-row">
+          <span className="dsha-label">{t.statusLabel}</span>
+          <span className="dsha-value">
+            <span className={`dsha-badge ${auth?.authenticated === true ? 'active' : 'danger'}`}>
+              {auth?.authenticated === true ? t.signedIn : t.signedOut}
+            </span>
+          </span>
+        </div>
+        <div className="dsha-row">
+          <span className="dsha-label">{t.tierLabel}</span>
+          <span className="dsha-value">{tier === undefined ? t.tierUnknown : tier.name}</span>
+        </div>
+        {loginNotice !== null && (
+          <p className="dsha-notice" style={{ color: 'var(--dsha-success, #10b981)' }}>{loginNotice}</p>
+        )}
+        <details className="dshagy-details">
+          <summary>{t.signInHintSummary}</summary>
+          <p>{t.signInHint}</p>
+          <p>{t.signInHeadless}</p>
+        </details>
       </div>
 
       <div className="dsha-group">
@@ -313,38 +344,58 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
         </div>
         {usage === undefined
           ? <div className="dsha-empty">{t.usageNone}</div>
-          : <p className="dsha-muted" style={{ fontSize: 12 }}>
-            {t.usageInput.replace('{tokens}', formatTokens(usage.inputTokens))}
-            {' · '}
-            {t.usageOutput.replace('{tokens}', formatTokens(usage.outputTokens))}
-            {usage.cacheReadTokens === undefined
-              ? null
-              : ' · ' + t.usageCache.replace('{tokens}', formatTokens(usage.cacheReadTokens))}
-            {usage.durationMs === undefined
-              ? null
-              : ' · ' + t.usageDuration.replace('{seconds}', (usage.durationMs / 1000).toFixed(1))}
-          </p>}
+          : <>
+            <div className="dsha-row">
+              <span className="dsha-label">{t.usageInputLabel}</span>
+              <span className="dsha-value">{formatTokens(usage.inputTokens)}</span>
+            </div>
+            <div className="dsha-row">
+              <span className="dsha-label">{t.usageOutputLabel}</span>
+              <span className="dsha-value">{formatTokens(usage.outputTokens)}</span>
+            </div>
+            {usage.cacheReadTokens !== undefined && (
+              <div className="dsha-row">
+                <span className="dsha-label">{t.usageCacheLabel}</span>
+                <span className="dsha-value">{formatTokens(usage.cacheReadTokens)}</span>
+              </div>
+            )}
+            {usage.durationMs !== undefined && (
+              <div className="dsha-row">
+                <span className="dsha-label">{t.usageDurationLabel}</span>
+                <span className="dsha-value">{(usage.durationMs / 1000).toFixed(1)}s</span>
+              </div>
+            )}
+          </>}
         {status?.occupancy !== undefined && (
-          <p className="dsha-muted" style={{ fontSize: 12 }}>
-            {t.occupancyLabel}: {t.occupancyDetail
-              .replace('{used}', formatTokens(status.occupancy.used))
-              .replace('{size}', formatTokens(status.occupancy.size))}
-          </p>
+          <div className="dsha-row">
+            <span className="dsha-label">{t.occupancyLabel}</span>
+            <span className="dsha-value">
+              {t.occupancyDetail
+                .replace('{used}', formatTokens(status.occupancy.used))
+                .replace('{size}', formatTokens(status.occupancy.size))}
+            </span>
+          </div>
         )}
-        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.usageHint}</p>
+        <details className="dshagy-details">
+          <summary>{t.usageHintSummary}</summary>
+          <p>{t.usageHint}</p>
+        </details>
       </div>
 
       <div className="dsha-group">
         <div className="dsha-grouphead">
           <h3>{t.scopeSection}</h3>
         </div>
-        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.scopeHint}</p>
-        <ul className="dsha-notice" style={{ paddingLeft: 18 }}>
-          <li>{t.scopePrompt}</li>
-          <li>{t.scopeHistory}</li>
-          <li>{t.scopeTools}</li>
-          <li>{t.scopeQuota}</li>
-        </ul>
+        <p className="dsha-muted" style={{ fontSize: 12 }}>{t.scopeSummary}</p>
+        <details className="dshagy-details">
+          <summary>{t.scopeHintSummary}</summary>
+          <ul className="dshagy-boundary">
+            <li>{t.scopePrompt}</li>
+            <li>{t.scopeHistory}</li>
+            <li>{t.scopeTools}</li>
+            <li>{t.scopeQuota}</li>
+          </ul>
+        </details>
       </div>
     </div>
   )
