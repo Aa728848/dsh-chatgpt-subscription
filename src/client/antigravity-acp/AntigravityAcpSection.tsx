@@ -269,6 +269,12 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
         {status !== null && models.length === 0 && (
           <div className="dsha-empty">{t.catalogNeverSynced}</div>
         )}
+        {/* Nothing selected is NOT nothing synced: the checklist below stays
+            rendered so the user can pick models again, and this line says why the
+            picker is empty in the meantime. */}
+        {status !== null && models.length > 0 && enabled !== null && enabled.size === 0 && (
+          <p className="dsha-notice">{t.noneSelected}</p>
+        )}
         {status !== null && models.length > 0 && (
           <>
             <p className="dsha-muted" style={{ fontSize: 12 }}>

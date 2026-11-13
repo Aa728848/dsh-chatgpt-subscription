@@ -83,7 +83,10 @@ export async function readStatus(options: AntigravityAcpRouteOptions): Promise<A
           ...(resolved.binary.version === undefined ? {} : { version: resolved.binary.version }),
         },
     auth,
-    models: visibleModels(models, settings),
+    // The FULL catalogue, not the user's selection. The card needs every row to
+    // render its checklist: filtering here made "nothing selected" look exactly
+    // like "nothing synced", and hid the very control that could undo it.
+    models,
     enabledModelIds: settings.enabledModelIds,
     defaultReasoningEffort: settings.defaultReasoningEffort,
     permissionPolicy: settings.permissionPolicy,
@@ -200,10 +203,18 @@ export function registerAntigravityAcpRoutes(ctx: Context, options: AntigravityA
           if (!isSameOriginMutation(request)) {
             return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           }
-          await options.catalog.read({ force: true }).catch(() => undefined)
+          const refreshed = await options.catalog.read({ force: true }).catch(() => undefined)
           // The refresh click is the user saying "ask again", so the cached
           // sign-in answer is invalidated with it.
           await options.auth({ force: true }).catch(() => undefined)
+          if (refreshed === undefined) {
+            // A silent 200 over an empty catalogue is what made "sync models"
+            // look like it did nothing: the click has to report the failure.
+            return sendJson(response, 502, {
+              ok: false,
+              error: 'The Antigravity agent returned no model list. Run the self-check above, or check that the CLI is signed in.',
+            })
+          }
           return sendJson(response, 200, { ok: true, value: await readStatus(options) })
         }
 
