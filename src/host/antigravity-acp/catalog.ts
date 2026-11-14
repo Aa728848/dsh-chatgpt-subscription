@@ -32,8 +32,17 @@ import type { AntigravityAcpModelDto } from '../../shared/antigravity-acp-contra
 import type { AcpLaunch } from './adapter.ts'
 import { CATALOG_SNAPSHOT_NAME } from './types.ts'
 
-/** How long a live listing is trusted before a background refresh replaces it. */
-export const CATALOG_TTL_MS = 60_000
+/**
+ * How long a live listing is trusted before a background refresh replaces it.
+ *
+ * Fifteen minutes, the same value the Codex line uses, because one refresh is not
+ * cheap: it spawns the whole `agy` process (244 MB in the reference report) to
+ * read one `session/new`. The card polls this listing on every render, so a
+ * short TTL turned a model picker into a process spawner every minute. A plan
+ * change is rare and the card's own refresh button - `read({ force: true })` -
+ * is what a user reaches for when it happens.
+ */
+export const CATALOG_TTL_MS = 15 * 60_000
 
 /** Budget for one catalogue read; a hung agent must not hold the picker. */
 export const CATALOG_TIMEOUT_MS = 20_000

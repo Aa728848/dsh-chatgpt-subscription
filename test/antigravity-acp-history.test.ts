@@ -8,7 +8,13 @@
  * nearest thing that must force a cold replay.
  */
 import { describe, expect, it } from 'vitest'
-import { buildPrompt, canContinue, fingerprintMessages } from '../src/host/antigravity-acp/history.ts'
+import {
+  REPLAY_ANCHOR_INSTRUCTION,
+  buildPrompt,
+  canContinue,
+  fingerprintMessages,
+  fingerprintTools,
+} from '../src/host/antigravity-acp/history.ts'
 import type { Message } from '../src/host/common/llm-compat.ts'
 import { NO_RESOLVED_IMAGES } from '../src/host/common/request-images.ts'
 
@@ -25,12 +31,22 @@ describe('buildPrompt', () => {
     expect(prompt.blocks).toEqual([
       { type: 'text', text: 'hello' },
       { type: 'text', text: '[assistant]\nhi' },
+      // A replay is a transcript, not a task list: it ends with the boundary
+      // sentence so the newest request is not read as one more item in a queue.
+      { type: 'text', text: REPLAY_ANCHOR_INSTRUCTION },
     ])
     expect(prompt.coveredMessages).toBe(2)
   })
 
+  it('does not put the boundary marker on a first prompt that already ends with its request', () => {
+    const prompt = buildPrompt(optionsOf([USER]), NO_RESOLVED_IMAGES, 0)
+    expect(prompt.blocks).toEqual([{ type: 'text', text: 'hello' }])
+  })
+
   it('renders only the messages a live session has not seen', () => {
     const prompt = buildPrompt(optionsOf([USER, ANSWER, { role: 'user', content: [{ type: 'text', text: 'again' }] }]), NO_RESOLVED_IMAGES, 2)
+    // An increment is not a replay: no boundary marker, because the agent is not
+    // being handed a transcript it has to pick a request out of.
     expect(prompt.blocks).toEqual([{ type: 'text', text: 'again' }])
     expect(prompt.coveredMessages).toBe(3)
   })
@@ -61,6 +77,24 @@ describe('fingerprintMessages', () => {
     const a: Message = { role: 'user', content: [{ type: 'text', text: 'hello' }] }
     const b: Message = { role: 'user', content: [{ type: 'text', text: 'hello!' }] }
     expect(fingerprintMessages([a], 0, 1)).not.toBe(fingerprintMessages([b], 0, 1))
+  })
+})
+
+describe('fingerprintTools', () => {
+  it('is stable for one catalogue and changes when a schema changes', () => {
+    const tools = [{ name: 'read_file', description: 'read', parameters: { type: 'object', properties: { path: { type: 'string' } } } }]
+    expect(fingerprintTools(tools as never)).toBe(fingerprintTools(tools as never))
+    const renamed = [{ ...tools[0]!, name: 'write_file' }]
+    expect(fingerprintTools(renamed as never)).not.toBe(fingerprintTools(tools as never))
+    const widened = [{ ...tools[0]!, parameters: { type: 'object', properties: {} } }]
+    expect(fingerprintTools(widened as never)).not.toBe(fingerprintTools(tools as never))
+  })
+
+  it('does not depend on the order the harness lists tools in', () => {
+    const a = { name: 'alpha', description: '', parameters: {} }
+    const b = { name: 'beta', description: '', parameters: {} }
+    expect(fingerprintTools([a, b] as never)).toBe(fingerprintTools([b, a] as never))
+    expect(fingerprintTools(undefined)).toBe(fingerprintTools([]))
   })
 })
 

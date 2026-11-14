@@ -11,9 +11,10 @@
  *   that history is the only transcript the model may rely on.
  * - **An existing ACP session** is fed only the messages DSH added since the
  *   last prompt, because the agent already has the rest.
- * - A mismatch (compaction, an edited turn, a different model) means the ACP
+ * - A mismatch (compaction, an edited turn, a rewritten prefix) means the ACP
  *   transcript can no longer be trusted as a prefix of DSH's: the session is
- *   abandoned and replayed in full.
+ *   abandoned and replayed in full, behind a history boundary marker. A different
+ *   model is not a mismatch - it is a config option of the same conversation.
  *
  * The fingerprint is an HMAC-style digest rather than a stored transcript: it
  * costs one hash per message and never keeps a second copy of user content.
@@ -33,6 +34,29 @@ export type AcpPromptBlock =
 
 /** ACP's own image ceiling per content block. */
 export const ACP_MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024
+
+/**
+ * The sentence every replayed transcript ends with.
+ *
+ * ACP has no notion of "this is the current task". A session created now and fed
+ * a hundred messages is one long prompt, and a transcript that reads like a stack
+ * of outstanding requests is exactly how a long session ends up redoing its first
+ * request: the user writes "go with A" and the agent, reading a wall of earlier
+ * instructions, starts over on the first one. The anchor marks where the history
+ * ends and which line the turn is about.
+ *
+ * It is appended to a *replay* only. A fresh session's first prompt already ends
+ * with the request it is answering, and a boundary sentence there would be noise
+ * on every cold start.
+ */
+export const REPLAY_ANCHOR_INSTRUCTION = [
+  '[history boundary]',
+  'Everything above this line is earlier conversation, replayed to you for context only.',
+  'The current request is the LAST user message in that history.',
+  'Do not re-run, re-answer or re-dispatch work an earlier message already asked for; completed requests are completed.',
+  'A short reference such as "do that" or "go with A" points at the assistant message immediately before it.',
+  'Model names, providers and routing mentioned in older turns describe the turn they ran on, not the one you are answering now.',
+].join(' ')
 
 /** Content handed to `session/prompt` for one generation. */
 export interface AcpPrompt {
@@ -68,6 +92,12 @@ export function buildPrompt(
       return inlineBytes <= ACP_MAX_INLINE_IMAGE_BYTES
     })
   }
+  // A replay that carries earlier assistant turns is a transcript, not a task
+  // list; the boundary sentence keeps the newest request from being read as one
+  // more item in a queue.
+  if (start === 0 && messages.some((message) => message.role === 'assistant')) {
+    blocks.push({ type: 'text', text: REPLAY_ANCHOR_INSTRUCTION })
+  }
   return {
     blocks,
     coveredMessages: messages.length,
@@ -96,6 +126,38 @@ export function fingerprintMessages(messages: readonly Message[], from: number, 
     hash.update(message.role)
     hash.update('\u0000')
     for (const block of message.content) hash.update(canonicalBlock(block))
+    hash.update('\u0001')
+  }
+  return hash.digest('hex')
+}
+
+/**
+ * Digest over the tool catalogue an ACP session's bridge exposes.
+ *
+ * The catalogue is fixed when the session is created: the agent listed it once,
+ * and the bridge answers `listChanged: false`, so a session resumed after the
+ * harness's tool set changed would keep offering the old schemas to the agent. The
+ * digest is therefore part of "may this session be reused", and a changed
+ * catalogue forces a fresh session.
+ *
+ * @param tools - The tool schemas of one request.
+ * @returns Hex digest; one catalogue always produces one value.
+ */
+export function fingerprintTools(tools: GenerateOptions['tools']): string {
+  const hash = createHash('sha256')
+  const entries = (tools ?? [])
+    .map((tool) => ({
+      name: tool.name,
+      description: tool.description ?? '',
+      parameters: JSON.stringify(tool.parameters ?? {}),
+    }))
+    .sort((left, right) => (left.name === right.name ? 0 : left.name < right.name ? -1 : 1))
+  for (const entry of entries) {
+    hash.update(entry.name)
+    hash.update('\u0000')
+    hash.update(entry.description)
+    hash.update('\u0000')
+    hash.update(entry.parameters)
     hash.update('\u0001')
   }
   return hash.digest('hex')

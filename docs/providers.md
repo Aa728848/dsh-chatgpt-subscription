@@ -331,7 +331,7 @@
 - **工具由 DSH 执行并把关**：会话创建时带一个回环 MCP 桥描述符（127.0.0.1 + 每次会话新签发的 256-bit bearer token、校验 Host、拒绝浏览器 Origin、仅 `POST /mcp`、body ≤ 1 MiB）。agent 的 `tools/call` 被挂起并转成 DSH 工具调用，由 DSH 的权限预设执行；拒绝以 `isError` 回传，**永不绕过**。桥工具的权限请求**恒定放行**（它交回 DSH 后由 DSH 把关）；「工具权限」设置只作用于 agent 自己的工具，默认「自动批准」，可选「拒绝」。
 - **自带工具策略（`nativeToolPolicy`）**：ACP 无法在协议层卸载 agent 的内置 shell/文件工具。默认 `allow`：模型一旦使用自带工具，对话里出现一条可见记录（工具名 + 参数），本轮继续；`cancel` 保留旧的严格行为，遇到即报 `ACP_NATIVE_TOOLS_UNSUPPORTED` 并取消整轮。
 - **模型与思考档位**：目录来自实时 ACP `session/new`（`models.availableModels` 的档位 id 与 `configOptions[model].options` 的基名归一），思考档位走 DSH 的 reasoning effort → ACP `thought_level`；模型不接受的档位被丢弃而不是让整轮失败。
-- **会话复用**：以 DSH 会话为键保存 ACP 会话与前缀指纹；历史被压缩或改写时新建会话冷重放，避免复用与 DSH 不一致的会话。
+- **会话复用（跨轮）**：以 DSH 会话为键**停放**刚结束的 ACP 会话（连同跑它的进程与 MCP 桥，默认 2 个、闲置 5 分钟回收）；下一条用户消息若「前缀指纹未变 + 工具目录未变 + 进程存活」就只发送增量 prompt，换模型/思考档位用 `session/set_config_option` 在同一 conversation 内切。历史被压缩或改写、工具集变化、进程死亡、重配置被拒时一律新建会话冷重放，且重放 prompt 末尾追加 history-boundary 锚点（当前任务=最后一条用户消息、不重跑已完成请求）。会话标题与压缩这类辅助请求用同一个 `sessionId` 但历史独立，不消费也不覆盖停放的会话。
 - **子代理形态**：同时注册 `antigravity-acp` 子代理后端（`ctx.get('subagents')` 存在时才注册）；子代理子进程使用官方 Agent 自己的工具集，这是与主模型形态的已知不对称。
 - **明确的能力边界**：ACP 没有独立 system 提示槽位，也没有 `temperature` / `stop`（显式拒绝为 `ACP_UNSUPPORTED_OPTION`）；`maxTokens` 会被丢弃而不是拒绝，因为标题生成等辅助调用固定带一个上限。官方服务端**不公布剩余额度**，因此设置卡与额度胶囊只显示套餐档位与真实返回的 token 用量，不显示任何百分比或余额。
 

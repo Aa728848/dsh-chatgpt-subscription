@@ -150,6 +150,36 @@ agy 的事件顺序是 `tool_call` → `session/request_permission` → `tools/c
 
 守卫：`test/antigravity-acp-image-result.test.ts` 让脚本化服务端真的对桥发一次 HTTP `tools/call`，断言回传内容含 `image:image/png:`；把图片分支短路后该用例变红。
 
+### 6.7 每条用户消息都新开会话并全量重放（issue #109）
+
+现象：长会话里切到本条线路后，模型开始**重跑会话的第一条指令**（7 步工具调用全是旧动作），判分会话里同一任务被重复派发两批子代理。实测一轮重放 91 条消息 / 243,323 字符（≈7 万 token），其中 system 112,147 字符。
+
+根因是 `pump()` 的 `finally` 在**正常结束**时就把 live turn 删掉、进程还回池：
+
+| 位置 | 原实现 | 结果 |
+| --- | --- | --- |
+| `pump` finally（正常结束） | `live.delete` + `release` | 下一条消息时 `live === undefined`，`run()` 里那道 `canContinue` 门禁必然不成立 |
+| `startTurn` | `session/new` + `buildPrompt(options, images, 0)` | 每条消息一个新 conversation，整段历史拼成**一个** prompt |
+| `continueTurn` | 只处理轮内工具回灌 | 跨轮无法救 |
+
+ACP 里没有「当前任务」的锚点：模型拿到的是一份 90+ 条的 transcript，「按A执行」这种短指令被淹没，于是回头做它读到的第一条实质请求。
+
+修复（对应 issue 建议 1/2/3/4）：
+
+| # | 改法 | 守卫 |
+| --- | --- | --- |
+| 1 | **跨轮停放会话**：正常结束的 turn 连同 `{client, bridge, acpSessionId, covered, fingerprint, tools}` 进 dormant 表；下一条消息若前缀指纹未变、工具目录未变、进程存活，则只发 `buildPrompt(from=covered)` 的增量 | `antigravity-acp-session-reuse.test.ts`（同一会话、只发增量、进程不重启） |
+| 2 | **换模型/档位用 `session/set_config_option`** 在同一 conversation 内切（issue 已实测 carbon→hydrogen→carbon 保上下文）；失败即回落冷启动 | 同上（模型切换仍只有一次 `session/new`） |
+| 3 | **重放兜底**：`buildPrompt(start=0)` 且历史含 assistant 消息时，末尾追加 `REPLAY_ANCHOR_INSTRUCTION`（history boundary + 当前任务=最后一条用户消息 + 不重跑已完成请求 + 短指代对照紧邻 assistant） | `antigravity-acp-history.test.ts`（重放带锚点、首轮与增量不带） |
+| 4 | **中止路径**：先发 `session/cancel`（ACP 通知，不等待），再把进程放回 idle 池而不是 `dispose`；顺带删掉遗留的空 `if (turn.awaitingHarness) {}` | 同上（abort 后只 spawn 一次） |
+| 5 | **catalog TTL 60s → 15min**（与 `codex-catalog.ts` 同值；卡片/路由的 `refresh` 仍 `force: true` 立即拉取） | — |
+
+**不放松的边界**：前缀被改写（压缩/编辑）、工具目录变化、进程死亡、`set_config_option` 被拒，一律回落到原来的「新会话 + 全量重放」，绝不把 agent 与 harness 的 transcript 放进不可审计的分歧态。
+
+**一个真隐患（同一轮发现）**：会话标题请求用的是**同一个 `sessionId`**（`packages/session/session-title-llm/src/index.ts:269`，`purpose: 'session-title'`；压缩是 `purpose: 'compaction'`），历史却是它自己那份。若不区分，标题请求会① 因指纹不匹配销毁刚停放的会话，② 结束后 `park` 覆盖真实会话的停放位。现在 `LiveTurn.parkable` 让 `purpose !== undefined` 的辅助请求既不查 dormant 表也不停放，只走冷启动 + 进程回池。守卫是同一文件里的「辅助请求不消费也不覆盖停放会话」用例。
+
+停放上限：`dormantSessionLimit` 默认 2（一个停放会话钉住一个 `agy` 进程，244 MB 量级），`dormantSessionTimeoutMs` 默认 5 分钟；被淘汰的会话把进程还回 idle 池，所以换会话也不重付 spawn。
+
 ### 6.4 参照项目也承认做不到、我们同样做不到的
 
 - **不是 OS 沙箱**：ACP 只能观测与取消，不能阻止官方二进制在通知到达前完成一次原生写盘。参照项目原文："these protocol guardrails are not an OS sandbox"。
@@ -184,6 +214,6 @@ agy 的事件顺序是 `tool_call` → `session/request_permission` → `tools/c
 3. **子代理形态未做真实委派。** 单测覆盖 start/result/dispose 与 `subagents` 缺失降级，但没有在真实会话里让主代理委派一次。
 4. **官方服务端版本漂移。** 本机实测 1.5.3（server 自报 1.5.7），随包固定的是 Registry 的 1.5.0。若上游把 `models.availableModels` 的嵌套再改一次，思考档位会静默变空——`antigravity-acp-catalog-read.test.ts` 是这条的守卫。
 5. **第三方模型可见性。** Claude Opus/Sonnet 5.5 与 GPT-OSS 120B 在本机对非 JetBrains 客户端可见；上游若收紧，目录会自动消失，不做写死兜底。
-6. **`session/resume` 未使用。** 代码路径存在（history 模块的指纹判定），但当前实现一律新建会话；没有测量过复用能省多少。
+6. **跨轮复用已实现，但未在真实会话里测量节省。** 停放/增量/换模型路径见 §6.7，单测覆盖到位；真实 `agy` 上的 prefill 节省与 244 MB 进程常驻的实际内存占用还没量过，也还没跑过「90+ 条历史后发一句短指令」的原始复现场景。`session/load`（按 `sessionId` 重新挂载已废弃的会话）仍未使用：`session/close` 在部分版本不保证应答，放弃等待会占满客户端的协议槽位，因此停放会话到期后一律丢弃会话、保留进程。
 7. **doctor 只接到路由与卡片，没做独立 CLI。** 现在是 `POST /antigravity-acp/api/doctor` 与设置卡的「运行自检」按钮；参照项目那种 `dsh-antigravity-acp probe` 的独立 bin 没有做（本插件是单包多入口，新增 bin 要改 `files`/`bin` 与打包校验）。
 8. **`usage_update` 的 `cost` 字段未使用。** schema 里 `UsageUpdate` 还有 `cost`，本机实测拿不到该通知，所以没有实现；若将来服务端开始发送，需要先确认它的货币与计量口径再展示，不猜。

@@ -11,12 +11,22 @@
  * This class therefore keeps a *live turn* per DSH session: the ACP session, the
  * bridge, and how much history that turn has already been told about.
  *
- * Every other generation starts a fresh ACP session fed the complete DSH
- * history. That is deliberately conservative: ACP sessions are stateful and
- * resuming one would save a prefill, but the harness may compact or rewrite
- * history at any point, and a resumed session whose transcript no longer matches
- * the harness's would be a conversation the user cannot audit. The history module
- * can tell the two apart; a fresh session is the honest default.
+ * A turn that ends without a tool round does not lose its ACP session: it is
+ * parked *dormant* together with the process it runs on, and the next user
+ * message on the same DSH session is sent as an increment on that same
+ * conversation. That is worth more than the prefill it saves. A session created
+ * per message hands a thinking model a hundred-message transcript and hopes it
+ * picks out the newest line; the observed failure was a model re-running the
+ * conversation's *first* request when the user wrote "go with option A".
+ *
+ * Reuse is never assumed. The prefix the agent was told about must still match
+ * the harness's history (the history module's fingerprint), the tool catalogue
+ * the bridge exposed must be unchanged, and a different model or effort is
+ * applied with `session/set_config_option` on the same conversation. A
+ * compaction, an edited turn, a new tool set, a dead process, or a refused
+ * reconfiguration all fall back to a fresh session fed the complete history - and
+ * that replay ends with a history boundary marker, so it is read as a transcript
+ * rather than as a task list.
  *
  * Where the tool calls come from
  * ------------------------------
@@ -77,6 +87,7 @@ import {
   buildPrompt,
   canContinue,
   fingerprintMessages,
+  fingerprintTools,
   type AcpPromptBlock,
 } from './history.ts'
 import type { AntigravityAcpSettings, AntigravityAcpSettingsStore } from './settings.ts'
@@ -127,12 +138,28 @@ export const DEFAULT_MAX_ACTIVE_TURNS = 4
 /**
  * How many ACP sessions one agent process may open before it is recycled.
  *
- * Every generation creates a fresh ACP session, so a warm process that is reused
- * indefinitely accumulates sessions and whatever the agent keeps beside each of
- * them. The reference implementation caps this at 100 and recycles; the same
- * number is used here so the two behave alike under a long session.
+ * Every turn that cannot be continued on an existing conversation creates a fresh
+ * ACP session, so a warm process that is reused indefinitely accumulates sessions
+ * and whatever the agent keeps beside each of them - including conversations whose
+ * process outlived their parked session. The reference implementation caps this at
+ * 100 and recycles; the same number is used here so the two behave alike under a
+ * long session.
  */
 export const DEFAULT_MAX_SESSIONS_PER_PROCESS = 100
+
+/**
+ * How many finished ACP sessions stay parked, ready for the next user message.
+ *
+ * A parked session pins the agent process it runs on, and that process is not
+ * small (244 MB in the reference report). Two is the number of conversations a
+ * person is realistically switching between; beyond that the parked session is
+ * recycled and its process goes back to the idle pool, which keeps the spawn
+ * cheap even when the conversation is not.
+ */
+export const DEFAULT_DORMANT_SESSION_LIMIT = 2
+
+/** How long one parked session stays ready before its process is recycled. */
+export const DEFAULT_DORMANT_SESSION_TIMEOUT_MS = 300_000
 
 /** Where the executable comes from. */
 export interface AcpLaunch {
@@ -173,6 +200,10 @@ export interface AntigravityAcpAdapterOptions {
   maxActiveTurns?: number
   /** ACP sessions one warm process may open before it is recycled. */
   maxSessionsPerProcess?: number
+  /** Finished ACP sessions kept ready for the next user message. */
+  dormantSessionLimit?: number
+  /** How long one parked session may sit unused. */
+  dormantSessionTimeoutMs?: number
   /** Clock seam. */
   now?(): number
 }
@@ -203,6 +234,50 @@ interface LiveTurn {
   awaitingHarness: boolean
   /** ACP sessions this client has opened so far, carried into the idle pool. */
   sessionsUsed: number
+  /** Digest of the tool catalogue this turn's bridge exposes. */
+  tools: string
+  /**
+   * Whether this turn may leave its session parked for the next one.
+   *
+   * False for auxiliary requests. A session-title or compaction call runs on the
+   * same DSH session id but carries a history of its own; parking it would replace
+   * the real conversation with a transcript nobody is talking to.
+   */
+  parkable: boolean
+}
+
+/**
+ * One finished ACP session, kept alive between the harness's generations.
+ *
+ * Parked rather than released: the conversation inside the agent is the whole
+ * point. The process is held with it because ACP binds a session to a connection,
+ * and the bridge is held because its endpoint is what the agent's own tool list
+ * points at.
+ */
+interface DormantTurn {
+  dshSessionId: string
+  client: AcpClient
+  bridge: McpBridge
+  acpSessionId: string
+  /** How many leading DSH messages the agent already knows about. */
+  covered: number
+  /** Digest of that covered range, as it was when the agent was told. */
+  fingerprint: string
+  /** Digest of the tool catalogue the session was created with. */
+  tools: string
+  model: string
+  effort: string | undefined
+  sessionsUsed: number
+  /** Idle timer that recycles the process. */
+  timer: ReturnType<typeof setTimeout> | undefined
+}
+
+/** The parts of a turn that outlive it, for handing the process back. */
+interface ReleasableTurn {
+  client: AcpClient
+  bridge: McpBridge
+  queue?: UpdateQueue
+  sessionsUsed?: number
 }
 
 /** A tiny async queue of ACP updates with wake-on-push semantics. */
@@ -249,6 +324,8 @@ class UpdateQueue {
 /** The adapter itself. */
 export class AntigravityAcpAdapter extends LlmAdapter {
   private readonly live = new Map<string, LiveTurn>()
+  /** Finished sessions, keyed by DSH session, waiting for the next user message. */
+  private readonly dormant = new Map<string, DormantTurn>()
   private readonly idle: Array<{ client: AcpClient; timer: ReturnType<typeof setTimeout>; sessions: number }> = []
   private activeTurns = 0
   private lastUsage: AntigravityAcpUsageDto | undefined
@@ -315,12 +392,22 @@ export class AntigravityAcpAdapter extends LlmAdapter {
 
   /** Close every process this adapter owns. */
   async dispose(): Promise<void> {
+    for (const entry of [...this.dormant.values()]) await this.closeDormant(entry)
+    for (const turn of [...this.live.values()]) {
+      if (this.live.get(turn.dshSessionId) === turn) this.live.delete(turn.dshSessionId)
+      this.activeTurns = Math.max(0, this.activeTurns - 1)
+      turn.queue.close()
+      this.cancelTurn(turn)
+      await turn.bridge.close().catch(() => undefined)
+      await turn.client.dispose().catch(() => undefined)
+    }
+    this.live.clear()
+    // Dormant sessions parked their processes here on the way out; dispose drains
+    // the pool last so nothing is left listening after the adapter is gone.
     for (const entry of this.idle.splice(0)) {
       clearTimeout(entry.timer)
       await entry.client.dispose().catch(() => undefined)
     }
-    for (const turn of [...this.live.values()]) await this.closeTurn(turn)
-    this.live.clear()
   }
 
   /**
@@ -368,7 +455,27 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       return this.continueTurn(live, options, images, signal, activity)
     }
     if (live !== undefined) await this.closeTurn(live)
-    return this.startTurn(dshSessionId, options, settings, images, effort, signal, activity)
+
+    // Auxiliary requests - session titles, compaction - reuse this DSH session id
+    // while carrying a history of their own. They must neither consume the parked
+    // conversation nor be parked over it, so they go straight to a cold turn.
+    const auxiliary = options.purpose !== undefined
+    // A session parked by the previous turn is both the cheapest and the most
+    // faithful continuation available: the agent already holds this conversation,
+    // so only what the harness appended since is sent. It is used only while the
+    // two transcripts still agree - see `usableDormant`.
+    const dormant = auxiliary ? undefined : this.dormant.get(dshSessionId)
+    if (dormant !== undefined) {
+      if (this.usableDormant(dormant, options)) {
+        const resumed = await this.resumeDormant(dormant, options, settings, effort, images, signal, activity)
+        if (resumed !== undefined) return resumed
+        // A session that could not be reconfigured or prompted has already been
+        // handed back inside `resumeDormant`; the turn falls through to a cold one.
+      } else {
+        await this.closeDormant(dormant)
+      }
+    }
+    return this.startTurn(dshSessionId, options, settings, images, effort, signal, activity, !auxiliary)
   }
 
   /** Start a fresh ACP session for one generation and stream its answer. */
@@ -380,6 +487,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     effort: string | undefined,
     signal: AbortSignal,
     activity: { pulse(): void },
+    parkable: boolean,
   ): Promise<AsyncGenerator<StreamChunk>> {
     const limit = this.options.maxActiveTurns ?? DEFAULT_MAX_ACTIVE_TURNS
     if (this.activeTurns >= limit) {
@@ -433,6 +541,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         startedAt: this.now(),
         awaitingHarness: false,
         sessionsUsed: reusedSessions + 1,
+        tools: fingerprintTools(options.tools),
+        parkable,
       }
       this.live.set(dshSessionId, turn)
       void this.sendPrompt(turn, prompt.blocks)
@@ -626,17 +736,19 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       }
     } finally {
       if (!finished) {
-        if (turn.awaitingHarness) {
-          // The caller stopped consuming mid tool round: the turn cannot be resumed
-          // safely, so its process and bridge are released rather than leaked.
-        }
+        // The caller stopped consuming mid turn - a cancel, a failed stream, a dead
+        // process. The prompt may still be running inside the agent, so it is
+        // cancelled before the process is handed back: an abandoned prompt is what
+        // the next turn would otherwise race.
         await this.closeTurn(turn)
       } else if (!turn.awaitingHarness && this.live.get(turn.dshSessionId) === turn) {
-        // A turn that ended without a tool round is complete: release its process
-        // for the next generation. A tool round keeps it alive.
+        // A turn that ended without a tool round is complete. Its ACP session is
+        // parked instead of dropped, so the next user message is an increment on
+        // the conversation the agent already has. A tool round keeps it live.
         this.live.delete(turn.dshSessionId)
         this.activeTurns = Math.max(0, this.activeTurns - 1)
-        await this.release(turn)
+        if (turn.parkable) await this.park(turn)
+        else await this.release(turn)
       }
     }
   }
@@ -812,12 +924,177 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * Abandon one live turn.
+   *
+   * The turn cannot be resumed by the harness any more, so its prompt is cancelled
+   * and its process is handed back to the pool. Disposing the process instead -
+   * what this used to do - made every cancellation pay a fresh spawn and the
+   * agent's own start-up wait on the next message.
+   */
   private async closeTurn(turn: LiveTurn): Promise<void> {
     if (this.live.get(turn.dshSessionId) === turn) this.live.delete(turn.dshSessionId)
     this.activeTurns = Math.max(0, this.activeTurns - 1)
     turn.queue.close()
-    await turn.bridge.close().catch(() => undefined)
-    await turn.client.dispose().catch(() => undefined)
+    this.cancelTurn(turn)
+    await this.release(turn)
+  }
+
+  /**
+   * Ask the agent to stop the prompt this turn left running.
+   *
+   * `session/cancel` is an ACP notification, not a request, so it is written
+   * without waiting for an answer: a prompt that already settled ignores it, and a
+   * client that waited would hang on a server that never replies.
+   */
+  private cancelTurn(turn: LiveTurn): void {
+    if (!turn.client.alive) return
+    turn.client.notify('session/cancel', { sessionId: turn.acpSessionId })
+  }
+
+  /**
+   * Whether the parked session is still a prefix of the history about to be sent.
+   *
+   * Three questions, and every one of them must answer yes: the process is alive,
+   * the bridge still exposes the tool catalogue the agent listed (the bridge
+   * publishes no change feed, so a different set cannot reach a resumed session),
+   * and the harness history still begins with exactly what the agent was told.
+   *
+   * @param entry - The parked session.
+   * @param options - The generation about to run.
+   */
+  private usableDormant(entry: DormantTurn, options: GenerateOptions): boolean {
+    if (!entry.client.alive) return false
+    if (entry.tools !== fingerprintTools(options.tools)) return false
+    return canContinue(options.messages, entry.covered, entry.fingerprint)
+  }
+
+  /**
+   * Continue a parked session with only what the harness added since.
+   *
+   * @param entry - The parked session to reuse.
+   * @param options - The generation about to run.
+   * @param settings - This line's own preferences, read for the native-tool policy.
+   * @param effort - The thinking level this generation asked for.
+   * @param images - Images resolved for this request.
+   * @param signal - Caller cancellation.
+   * @param activity - Watchdog pulse.
+   * @returns the stream, or undefined when the session could not be reused. On
+   * that path the process has already been handed back, so the caller starts a
+   * cold turn rather than failing the generation.
+   */
+  private async resumeDormant(
+    entry: DormantTurn,
+    options: GenerateOptions,
+    settings: AntigravityAcpSettings,
+    effort: string | undefined,
+    images: ResolvedRequestImages,
+    signal: AbortSignal,
+    activity: { pulse(): void },
+  ): Promise<AsyncGenerator<StreamChunk> | undefined> {
+    const limit = this.options.maxActiveTurns ?? DEFAULT_MAX_ACTIVE_TURNS
+    if (this.activeTurns >= limit) return undefined
+    this.dormant.delete(entry.dshSessionId)
+    if (entry.timer !== undefined) clearTimeout(entry.timer)
+    const queue = new UpdateQueue()
+    try {
+      // A model is a config option of the conversation, not a property of the
+      // process: switching it here keeps the transcript the agent already has
+      // (verified against agy: carbon -> hydrogen -> carbon still answers a number
+      // it was told earlier in the conversation).
+      if (entry.model !== options.model || entry.effort !== effort) {
+        await this.applyModelAndEffort(entry.client, entry.acpSessionId, options.model, effort)
+      }
+      this.attachHandlers(entry.client, queue, activity)
+      const prompt = buildPrompt(options, images, entry.covered)
+      const turn: LiveTurn = {
+        dshSessionId: entry.dshSessionId,
+        client: entry.client,
+        bridge: entry.bridge,
+        acpSessionId: entry.acpSessionId,
+        covered: prompt.coveredMessages,
+        fingerprint: prompt.fingerprint,
+        model: options.model,
+        effort,
+        queue,
+        settled: undefined,
+        surfaced: new Set(),
+        notedNative: new Set(),
+        nativeToolPolicy: settings.nativeToolPolicy,
+        startedAt: this.now(),
+        awaitingHarness: false,
+        sessionsUsed: entry.sessionsUsed,
+        tools: entry.tools,
+        parkable: true,
+      }
+      this.live.set(turn.dshSessionId, turn)
+      this.activeTurns += 1
+      void this.sendPrompt(turn, prompt.blocks)
+      return this.pump(turn, signal, activity)
+    } catch {
+      queue.close()
+      await this.release({ client: entry.client, bridge: entry.bridge, sessionsUsed: entry.sessionsUsed })
+      return undefined
+    }
+  }
+
+  /**
+   * Keep a finished turn's session ready for the next user message.
+   *
+   * The bridge stays open on purpose: its endpoint is what the parked session's
+   * tool list points at, and closing it would leave the agent calling a port
+   * nobody answers.
+   */
+  private async park(turn: LiveTurn): Promise<void> {
+    turn.queue.close()
+    const limit = this.options.dormantSessionLimit ?? DEFAULT_DORMANT_SESSION_LIMIT
+    if (limit <= 0 || !turn.client.alive) {
+      await this.release(turn)
+      return
+    }
+    const previous = this.dormant.get(turn.dshSessionId)
+    if (previous !== undefined) await this.closeDormant(previous)
+    const entry: DormantTurn = {
+      dshSessionId: turn.dshSessionId,
+      client: turn.client,
+      bridge: turn.bridge,
+      acpSessionId: turn.acpSessionId,
+      covered: turn.covered,
+      fingerprint: turn.fingerprint,
+      tools: turn.tools,
+      model: turn.model,
+      effort: turn.effort,
+      sessionsUsed: turn.sessionsUsed,
+      timer: undefined,
+    }
+    const timer = setTimeout(() => {
+      void this.closeDormant(entry)
+    }, this.options.dormantSessionTimeoutMs ?? DEFAULT_DORMANT_SESSION_TIMEOUT_MS)
+    timer.unref?.()
+    entry.timer = timer
+    this.dormant.set(turn.dshSessionId, entry)
+    // Oldest first: the map keeps insertion order, and the conversation nobody is
+    // in any more is the one worth giving up.
+    while (this.dormant.size > limit) {
+      const oldest = this.dormant.values().next().value
+      if (oldest === undefined) break
+      await this.closeDormant(oldest)
+    }
+  }
+
+  /**
+   * Drop a parked session and hand its process back to the pool.
+   *
+   * The conversation itself is abandoned rather than closed with `session/close`:
+   * not every agent version this line supports answers that request, and a request
+   * that never settles would occupy one of the client's protocol slots for the
+   * life of the process. The next turn opens a fresh conversation on the same warm
+   * process.
+   */
+  private async closeDormant(entry: DormantTurn): Promise<void> {
+    if (this.dormant.get(entry.dshSessionId) === entry) this.dormant.delete(entry.dshSessionId)
+    if (entry.timer !== undefined) clearTimeout(entry.timer)
+    await this.release({ client: entry.client, bridge: entry.bridge, sessionsUsed: entry.sessionsUsed })
   }
 
   /**
@@ -863,12 +1140,14 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     })
   }
 
-  private async release(turn: LiveTurn): Promise<void> {
-    turn.queue.close()
+  /** Hand one turn's process back to the idle pool, disposing it when it is spent. */
+  private async release(turn: ReleasableTurn): Promise<void> {
+    turn.queue?.close()
     await turn.bridge.close().catch(() => undefined)
     const limit = this.options.idleProcessLimit ?? DEFAULT_IDLE_PROCESS_LIMIT
     const cap = this.options.maxSessionsPerProcess ?? DEFAULT_MAX_SESSIONS_PER_PROCESS
-    if (limit <= 0 || !turn.client.alive || turn.sessionsUsed >= cap) {
+    const sessionsUsed = turn.sessionsUsed ?? 1
+    if (limit <= 0 || !turn.client.alive || sessionsUsed >= cap) {
       await turn.client.dispose().catch(() => undefined)
       return
     }
@@ -879,7 +1158,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       void client.dispose().catch(() => undefined)
     }, this.options.idleProcessTimeoutMs ?? DEFAULT_IDLE_PROCESS_TIMEOUT_MS)
     timer.unref?.()
-    this.idle.push({ client, timer, sessions: turn.sessionsUsed ?? 1 })
+    this.idle.push({ client, timer, sessions: sessionsUsed })
     while (this.idle.length > limit) {
       const oldest = this.idle.shift()
       if (oldest === undefined) break
