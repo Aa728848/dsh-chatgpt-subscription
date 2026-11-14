@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.74.1 - 2026-11-14
+
 - **[antigravity-acp / 修复 #109] 跨轮复用 ACP 会话：每条用户消息不再新开 conversation 并全量重放历史**
   - **问题**：`pump()` 在正常结束时就把 live turn 删掉、进程还回池，于是 `run()` 的 `canContinue` 门禁只对「轮内被工具调用打断」的续跑有效。用户每发一条消息都走 `session/new` + `buildPrompt(..., 0)`：整段历史被拼成**一个** prompt 下发（实测第 4 轮重放 91 条消息 / 243,323 字符 / ≈7 万 token）。ACP 里没有「当前任务」的锚点，长会话里「按A执行」这类短指令被淹没，模型转而重跑会话的第一条指令，或对已完成的子任务重复派发子代理。
   - **跨轮停放会话**：正常结束的 turn 连同 `{client, bridge, acpSessionId, covered, fingerprint, tools}` 存入 dormant 表（默认上限 2、闲置 5 分钟后回收）；下一条消息若「前缀指纹未变 + 工具目录未变 + 进程存活」则只发送增量 prompt。换模型/思考档位时用 `session/set_config_option` 在**同一 conversation** 内切换（已实测保上下文），被拒即回落冷启动。
