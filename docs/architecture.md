@@ -127,6 +127,8 @@
    - `compaction-route/`：在 `llm/stream` 瀑布层识别 `purpose: 'compaction'` 请求，支持把上下文摘要改派给更轻量/便宜的模型，具备视频安全回退、图片占位替换与完整摘要缓冲保护。
    - 与内置 Agent Teams 的交叉点：`tools:sdk` 冻结取**未过滤**定义（`when` 门控的工具也在内），故 `team_task_*` 在 Kimi/MiniMax 的 SDK 中常驻可见——可见不等于可调用，判断可调用性要看调用结果；开关切换本身会让 `team:policy` 段从空串变成文本、改写 system prompt 一次，属于计划模式那类重建，但这段文本由 harness 拥有。
    - `team-policy-cache-guard.ts`（默认开启，`teamPolicyCacheGuard`）：把上面那处重建也压平——装配时摘掉 `team:policy` 段并捕获它当时的正文，开关打开后在 `agent/pre-step` 以尾部用户消息投递一次，关闭时补一条撤销通知；投递的是官方当次原文，不落本包副本，harness 改措辞不会过期。
+   - `timeline-cache-guard.ts`（默认开启，`timelineCacheGuard`）：实验性 Timeline 插件把 `language`/`uiLanguage` 拼进 `timeline:planning` 系统段、把 `taskPrompt` 挂在 `timeline_tasks` 的描述 getter 上，两者都是 volatile，而 Kimi/MiniMax 没有 `systemPromptUpdate: 'in-history'`，改一次就是整段重建。守卫按会话冻结首次装配到的正文，变更改为尾部用户消息投递一次，并在 `tools.definitions` 层冻结该工具描述；只对名单内线路生效，未安装 Timeline 时只记一条 warn。
+   - Kimi 的辅助请求分两类处理：**标题请求**（无前缀，跳过账号亲和与冷启动闸门）与**带前缀的旁路请求**（Timeline 报告、压缩摘要）。后者沿用主会话的系统提示与历史，因此继续参与 `cacheAffinityHint`，但不写入 `prefixSnapshots`/`driftCauses`——否则它缺省的 `tools` 会被记成一次「工具集变更」，并让下一轮主请求再被误判一次。
 
 ---
 

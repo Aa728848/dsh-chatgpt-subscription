@@ -79,6 +79,7 @@
 | `planModePipeline` | `boolean` | `true` | **热生效（volatile）** | 是否在 `dispatch` 预设下开放 `enter_plan_mode` / `leave_plan_mode` |
 | `dispatchExecutionGuard` | `boolean` | `true` | **热生效（volatile）** | 执行期拦截子代理越权调用主控专用工具、拦截空 `sleep` 及校验 Mandate v2 账本 |
 | `teamPolicyCacheGuard` | `boolean` | `true` | **热生效（volatile）** | 把内置 Agent Teams 的 `team:policy` 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作刷掉整段前缀缓存 |
+| `timelineCacheGuard` | `boolean` | `true` | **热生效（volatile）** | 冻结实验性 Timeline 插件的 `timeline:planning` 系统段与 `timeline_tasks` 工具描述，变更改为尾部用户消息投递一次；避免中途改显示语言/写作提示词时刷掉 Kimi/MiniMax 的整段前缀缓存。未安装 Timeline 时静默 |
 | `toolRunawayGuard` | `boolean` | `true` | **热生效（volatile）** | 各线路重复工具调用分级提醒；只有 Kimi 保留第 12 次强停，MiniMax 保留自己的官方失控规则 |
 | `mediaTools` | `boolean` | `true` | **重载插件 / 重启** | 统一注册 Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解；`false` 时四个工具均不进入 schema，MiniMax 仍叠加自己的线路开关；Kimi 既有会话在工具表变化后重建一次前缀缓存 |
 | `cacheWarmup` | `boolean` | `true` | **热生效（volatile）** | 受控线路的命令/日志大结果 `ref://` 预览与 `cache_warmup_result` 补读 |

@@ -185,6 +185,10 @@ import {
 } from './host/team-policy-cache-guard.ts'
 import { installCompactionPolicyGuard } from './host/compaction-policy-guard.ts'
 import {
+  installTimelineCacheGuard,
+  resolveTimelineCacheGuardEnabled,
+} from './host/timeline-cache-guard.ts'
+import {
   installDispatchExecutionGuard,
   resolveDispatchExecutionGuardEnabled,
 } from './host/dispatch-execution-guard.ts'
@@ -341,6 +345,20 @@ export interface Config {
    */
   teamPolicyCacheGuard?: Volatile<boolean>
   /**
+   * 「Timeline 规划段」缓存守卫：默认开启。
+   *
+   * 实验性 Timeline 插件把 `timeline:planning` 注册成 system 段，而这段正文里拼进了
+   * `config.language` / `uiLanguage`；自定义 `taskPrompt` 还通过 getter 挂在
+   * `timeline_tasks` 的工具描述上。两者都是 volatile，会话中途改一次就改写系统提示或
+   * 工具表。Kimi Code 与 MiniMax Code 没有声明 `systemPromptUpdate: 'in-history'`，
+   * 一改就是整段前缀重建。
+   *
+   * 本守卫把该段按会话冻结在首次装配到的正文上，变更改为**尾部用户消息**投递一次；
+   * 同时冻结 `timeline_tasks` 的描述。只在真正出现该段时才动手，没装 timeline 时
+   * 完全静默。volatile：设置保存后下一步就生效。
+   */
+  timelineCacheGuard?: Volatile<boolean>
+  /**
    * 「结果预览」总开关：Kimi 线路上超大的 `run_code` 结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
    *
@@ -492,6 +510,8 @@ export interface ConfigInput {
   mediaTools?: boolean
   /** 「Agent Teams 策略段」缓存守卫（默认开启）：摘段并改为尾部投递。 */
   teamPolicyCacheGuard?: boolean
+  /** 「Timeline 规划段」缓存守卫（默认开启）：冻结系统段与任务工具描述，变更改为尾部投递。 */
+  timelineCacheGuard?: boolean
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmup?: boolean
   /** 允许产生新结果预览的线路；默认覆盖 controlled providers。 */
@@ -564,6 +584,13 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 声明面，只在真正切开关时才起作用。volatile：下一步就生效。
   teamPolicyCacheGuard: z.boolean().default(true).volatile()
     .description('把内置 Agent Teams 的 team:policy 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作时刷掉整段前缀缓存；默认开启。'),
+
+  // Timeline 规划段守卫：timeline 把 language/uiLanguage 拼进 system 段，把 taskPrompt
+  // 挂在 timeline_tasks 的描述 getter 上，两者都是 volatile。Kimi/MiniMax 没有
+  // systemPromptUpdate 的 in-history 形态，一改就是整段重建。默认开启：没装 timeline 时
+  // 这条守卫完全静默（只有一次「没见过该段」的 warn）。
+  timelineCacheGuard: z.boolean().default(true).volatile()
+    .description('冻结实验性 Timeline 插件的规划段与任务工具描述，变更改为尾部用户消息投递，避免中途改语言/写作提示词时刷掉 Kimi/MiniMax 的整段前缀缓存；默认开启。'),
 
   // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
   // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
@@ -747,6 +774,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     })
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: team policy cache guard')
+
+  // 实验性 Timeline 插件把显示语言拼进 `timeline:planning` 系统段，把写作提示词挂在
+  // `timeline_tasks` 的描述 getter 上：两者都是 volatile，改一次就改写系统提示或工具表。
+  // Kimi/MiniMax 没有 in-history 的 systemPromptUpdate，代价是整段前缀重建。守卫按会话
+  // 冻结首次见到的正文，变更改为尾部投递；没装 timeline 时它只记一条 warn。
+  ctx.effect(() => {
+    const guard = installTimelineCacheGuard(ctx, {
+      enabled: () => resolveTimelineCacheGuardEnabled(pluginConfig),
+    })
+    return () => guard.dispose()
+  }, 'dsh-chatgpt-subscription: timeline cache guard')
 
   ctx.effect(() => {
     const guard = installCompactionPolicyGuard(ctx)
@@ -1842,12 +1880,25 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         canToggle: true,
         read: async () => {
           const current = await antigravityAcpSettings.read()
+          // The switch is answered before anything is probed. This card is polled
+          // by the settings page every time it opens, and the sign-in probe costs a
+          // whole `agy` process; a line the user switched off must not launch the
+          // official CLI just to decorate a card.
+          if (!current.enabled) {
+            return {
+              enabled: false,
+              accountCount: 0,
+              authenticated: false,
+              enabledModelCount: null,
+              totalModelCount: null,
+            }
+          }
           const catalog = await antigravityAcpCatalog.rehydrate()
           const total = catalog === undefined ? null : catalogTotal(catalog.models.length)
           const selected = current.enabledModelIds === null ? total : current.enabledModelIds.length
           const auth = await antigravityAcpAuth.read()
           return {
-            enabled: current.enabled !== false,
+            enabled: true,
             accountCount: auth.authenticated ? 1 : 0,
             authenticated: auth.authenticated,
             enabledModelCount: total === null || selected === null ? null : Math.min(selected, total),
