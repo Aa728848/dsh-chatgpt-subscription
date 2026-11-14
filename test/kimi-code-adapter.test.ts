@@ -1538,6 +1538,48 @@ describe('KimiCodeAdapter cache affinity', () => {
     expect(tokens[2]).toContain('at-acc-2')
   })
 
+  it('routes a prefixed auxiliary request to the account holding its prefix, but a title request to the strategy', async () => {
+    // Timeline 的第 0 层报告是「整段主对话前缀 + 一问」，它必须命中同一个账号，
+    // 否则那几万 token 全价重算；标题请求没有可复用的前缀，仍交给策略。
+    const tokens: string[] = []
+    const fetchFn = vi.fn(async (_url: unknown, init: RequestInit) => {
+      tokens.push(authTokenOf(init))
+      return sseResponse([
+        { choices: [{ delta: { content: 'ok' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ])
+    }) as unknown as typeof fetch
+    const { pool, setDefault } = fakePool({ ids: ['acc-1', 'acc-2'], defaultId: 'acc-1' })
+    const { adapter } = await buildAdapter({ fetchFn, pool })
+    const system = 'auxiliary prefixed system'
+
+    // 主会话把这份前缀暖在 acc-1 上。
+    await drain(adapter.stream(generateOptions('k3', { sessionId: 'kc-aux-a' as never, system })))
+    expect(tokens[0]).toContain('at-acc-1')
+
+    // 策略本来会轮换到 acc-2。
+    setDefault('acc-2')
+
+    // 带前缀的旁路请求（报告/压缩摘要）：跟着 prefix 走，不跟着策略走。
+    await drain(adapter.stream({
+      ...generateOptions('k3', { sessionId: 'kc-aux-b' as never, system }),
+      purpose: 'timeline-report',
+    } as unknown as GenerateOptions))
+    expect(tokens[1]).toContain('at-acc-1')
+
+    // 标题请求：没有可复用前缀，策略正常生效。
+    await drain(adapter.stream(generateOptions('k3', {
+      sessionId: 'kc-aux-c' as never,
+      system: 'Create a concise title for an AI coding-assistant session',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages: []' }],
+        source: { kind: 'dsh-session-title-llm' },
+      }] as never,
+    })))
+    expect(tokens[2]).toContain('at-acc-2')
+  })
+
   it('keeps an ordinary 429 on the same account across an outer round-robin retry', async () => {
     const tokens: string[] = []
     let call = 0

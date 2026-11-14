@@ -1552,12 +1552,25 @@ export class KimiCodeAdapter extends LlmAdapter {
   ): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
     const normalized = normalizeGenerateOptions(options)
-    // The side-channel title request runs on this route, under this session's
-    // identity, and is a DIFFERENT conversation: its prompt, its usage and its
-    // prefix have nothing to do with the session's. Everything that files state
-    // under the session has to know about it, or the title request would be
-    // read as the session's own turn.
-    const sideChannel = isAuxiliaryRequest(normalized) || isSideChannelTitleRequest(normalized)
+    // Two kinds of auxiliary request reach this route and they do NOT share a
+    // cache policy, so they are told apart before anything is judged:
+    //
+    // - A **title request** is a different conversation: empty history, its own
+    //   system prompt, no tools. It has no prefix worth preserving and nothing it
+    //   files could describe this session.
+    // - A **prefixed auxiliary request** (a Timeline interval report, a compaction
+    //   summary) carries the conversation's OWN system prompt and history. It is
+    //   the thing most in need of the warm account: its longest shared run is the
+    //   system prompt, which lives on whichever account served the last main turn.
+    //
+    // The two were once one boolean, and that collapsed the second case into the
+    // first's exemptions — a report was routed by rotation, away from the only
+    // account that could answer it from cache.
+    const titleSideChannel = isSideChannelTitleRequest(normalized)
+    // Everything that files state under the session keeps using this combined
+    // flag: neither kind is the session's own turn, and neither may move its
+    // hit-rate counters, activity clock, or image budget.
+    const sideChannel = titleSideChannel || isAuxiliaryRequest(normalized)
     const sessionKey = typeof options.sessionId === 'string' ? options.sessionId.trim() : ''
     const retrySignal = options.signal
     const sameAccountRetryId = sideChannel || retrySignal === undefined
@@ -1827,10 +1840,11 @@ export class KimiCodeAdapter extends LlmAdapter {
     // attempt: a warm prefix only ever narrows as `tried` grows, and the pool
     // skips tried ids itself, so recomputing would spend quota reads to learn
     // the same answer.
-    // The side-channel title request borrows the conversation's identity but not
-    // its prefix, so it has no account preference worth computing (and the pool
-    // read behind it would be spent for an answer nobody can use).
-    const cacheAffinity = sideChannel ? undefined : await this.cacheAffinityHint(pool, requestOptions)
+    // Only the TITLE request has no account preference worth computing: the pool
+    // read behind it would be spent for a prompt nobody can reuse. A prefixed
+    // auxiliary request (Timeline report, compaction summary) must follow the
+    // account that already holds this conversation's system prompt.
+    const cacheAffinity = titleSideChannel ? undefined : await this.cacheAffinityHint(pool, requestOptions)
     const affinity: AccountSelectionHint | undefined = sameAccountRetryId === undefined
       ? cacheAffinity
       : { preferAccountIds: [...new Set([sameAccountRetryId, ...cacheAffinity?.preferAccountIds ?? []])] }
@@ -2204,8 +2218,11 @@ export class KimiCodeAdapter extends LlmAdapter {
     // Recorded after the turn is built and sent, so the timestamp answers when
     // this conversation last ran — the input the cache-expiry hint needs. A
     // side-channel title request is not this conversation, so it must not
-    // refresh the session's timestamp.
-    if (!sideChannel) markSessionActive(requestOptions.sessionId)
+    // refresh the session's timestamp. A prefixed auxiliary request DOES warm the
+    // conversation's own prefix, so it keeps the timestamp honest: letting the
+    // clock run past the TTL because only reports were running would tell the user
+    // their cache went cold while it was in fact being refreshed.
+    if (!titleSideChannel) markSessionActive(requestOptions.sessionId)
     let buffer = ''
     /**
      * Set the moment ANY chunk reaches the caller, and never cleared.

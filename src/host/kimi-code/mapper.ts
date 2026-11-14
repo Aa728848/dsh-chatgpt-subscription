@@ -50,6 +50,7 @@ import {
   classifyPrefixDrift,
   orderStaticPrefixMessages as orderSharedStaticPrefixMessages,
 } from '../common/prefix-stability.ts'
+import { isAuxiliaryRequest } from '../common/prefix-request-coordinator.ts'
 import {
   KNOWN_REASONING_KEYS as SHARED_REASONING_KEYS,
   ReasoningKeyDialect as SharedReasoningKeyDialect,
@@ -3225,6 +3226,14 @@ export function trackPrefixStability(options: GenerateOptions): PrefixDriftCause
   // it must not become the snapshot the next real turn is diffed against: its
   // system prompt and its empty tool list would read as a broken prefix.
   if (isSideChannelTitleRequest(options)) return 'stable'
+  // A prefixed auxiliary request (Timeline interval report, compaction summary)
+  // does share the conversation's system prompt and history, but it is not a
+  // main turn: it carries no tool list. Fingerprinting it would (a) diff its
+  // null toolsHash against the main turn's and report a "tools" rebuild that
+  // never happened, and (b) overwrite the snapshot, so the NEXT main turn is
+  // blamed a second time. Auxiliary calls are not authoritative observers of
+  // the session's prefix; they neither read nor write the snapshot.
+  if (isAuxiliaryRequest(options)) return 'stable'
   const { systemPromptHash, toolsHash } = prefixFingerprints(options)
   const cacheKey = promptCacheKey(options) ?? null
 
@@ -3249,7 +3258,7 @@ const driftCauses = new Map<string, PrefixDriftCause>()
  * prompt or on its (absent) tool list.
  */
 export function recordDriftCause(cause: PrefixDriftCause, sessionId?: string, options?: GenerateOptions): void {
-  if (options !== undefined && isSideChannelTitleRequest(options)) return
+  if (options !== undefined && (isSideChannelTitleRequest(options) || isAuxiliaryRequest(options))) return
   rememberScoped(driftCauses, cacheScopeKey(sessionId), cause)
 }
 

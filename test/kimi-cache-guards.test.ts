@@ -998,6 +998,35 @@ describe('Kimi Code 侧信道标题请求的缓存隔离', () => {
     expect(getCacheStats('sess-main').requests).toBe(1)
   })
 
+  it('不改写漂移基线：带前缀的旁路请求（Timeline 报告 / 压缩摘要）既不记因也不换快照', () => {
+    // 主会话先跑一轮，打下真正的前缀基线。
+    const conversation = {
+      model: 'k3',
+      sessionId: 'sess-drift' as never,
+      system: 'the conversation system prompt',
+      messages: [],
+    } as unknown as GenerateOptions
+    buildRequest(conversation, 'openai')
+    expect(getLastDriftCause('sess-drift')).toBe('first-request')
+
+    // Timeline 的第 0 层报告：同一段 system、同一份历史，但没有 tools。
+    // 若按普通请求指纹化，toolsHash 从非空变 null 会被记成「工具集变更」，
+    // 并且把这份快照留下来，让下一轮主请求再被误判一次。
+    const report = {
+      model: 'k3',
+      sessionId: 'sess-drift' as never,
+      purpose: 'timeline-report',
+      system: 'the conversation system prompt',
+      messages: [],
+    } as unknown as GenerateOptions
+    buildRequest(report, 'openai')
+    expect(getLastDriftCause('sess-drift')).toBe('first-request')
+
+    // 报告之后的主请求仍是 stable，而不是被报告的「tools」快照带偏。
+    buildRequest(conversation, 'openai')
+    expect(getLastDriftCause('sess-drift')).toBe('stable')
+  })
+
   it('不会改写被起标题会话的前缀漂移归因', () => {
     const conversation = {
       model: 'k3',
