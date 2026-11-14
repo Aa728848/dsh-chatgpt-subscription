@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.74.0 - 2026-11-14
+
+- **[tool-runaway / 确定性零增量守卫] 下沉连续同族报错与无变化后台轮询检测至全受控线路共享**
+  - 将原 `minimax-code` 独有的 `same_error_family`（同一工具切换参数但连续报同类错达 3 次）与 `polling_repeat`（`job_output` / `task_output` 非阻塞轮询且输出无变化达 3 次）及错误归一化原语下沉至 `src/host/common/tool-runaway.ts`，接入 `ExactRepeatBreaker` / `KimiRepeatBreaker` 并统一受 `toolRunawayGuard` 开关控制。
+  - 保留 `kimi-code` 同名同参第 12 次强停，同时豁免后台轮询工具计入同参强停，且对正常多轮不同路径的只读探索保持零提醒、零拦截。
+- **[cache-warmup / 字面量定位] `cache_warmup_result` 支持按大小写敏感纯文本 `query` 跳转**
+  - `FileResultReferenceStore.page` 与 `cache_warmup_result` 新增可选 `query` 参数（纯文本模式）：支持从字节 `offset` 起检索字面量子串，命中时自动对齐逻辑行首（兼容普通 `\n` 与单行 minified JSON 转义 `\n`），并在超长单行下通过 UTF-8 安全的 Anchor Guard 保证命中词落入当页；未命中返回 `matched: false` 空页而不报错，配合 `nextOffset` 可连续定位下一处匹配，且查询词不写入指标日志。
+- **[dispatch / 执行经济与验收边界] 收紧同批读取与异构验证提示词约束**
+  - 明确仅对已知路径且互不依赖的文件同批读取（未知路径先探测后读取，防盲猜撒网）；验收阶段在无代码或配置变更时不重复运行已通过的同一等价检查，但仍须执行尚未跑过的 `typecheck` / 构建等异构检查。`agent.cordis.yml` 与 `src/host/agent-preset.ts` 保持逐字节一致。
 - 升级 DSH 宿主基线至 `^0.2.2-rc.3` 并前瞻兼容 `deepseek-harness` `master` (`39163dd30f7`)：
   - 将 `package.json` 中 18 个常规 `@deepseek-ai/dsh-*` `peerDependencies` 扩展至覆盖 `^0.2.2-rc.3`（保留 `0.1.2-alpha.5` 起全代次范围），可选 peer `@deepseek-ai/dsh-tool-executor-native` 覆盖 `^0.2.2-alpha.3 || ^0.2.2-rc.1 || ^0.2.2-rc.2 || ^0.2.2-rc.3`，全部 22 个 `@deepseek-ai/dsh-*` `devDependencies` 升级为 `^0.2.2-rc.3` 并完整重建 `package-lock.json`（69 个 `@deepseek-ai/*` 条目，含全部 10 个跨平台 `node-addon-require-builtin` 可选依赖键）。
   - 在 `src/host/common/llm-compat.ts` 收敛 `LlmError` 构造签名兼容桥：保持运行时与原生 `LlmError` 同引用不变，编译期将第 2 个参数 `code` 从 `0.2.2-rc.3` 收窄的 `BuiltinLlmFailureCode` 放宽为 `string`（并导出 `LlmErrorOptionsCompat` / `LlmErrorConstructorCompat`），将全仓 19 处抛出自定义错误码的导入站点统一切换至 `llm-compat.ts`。
