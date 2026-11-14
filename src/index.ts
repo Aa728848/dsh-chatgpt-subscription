@@ -318,7 +318,7 @@ export interface Config {
    * 的 `tools:sdk` 段与顶层工具 schema）保持逐字节恒定，前缀缓存零漂移。
    */
   dispatchExecutionGuard?: Volatile<boolean>
-  /** 工具失控治理总开关：各线路提醒重复调用；只有 Kimi 保留第 12 次强停。 */
+  /** 工具失控治理总开关：对零增量病态信号（同参重复/同族连续报错/无变化轮询）分级提醒；只有 Kimi 保留第 12 次同参强停。 */
   toolRunawayGuard?: Volatile<boolean>
   /**
    * 图片/视频工具总开关：控制 Codex 生图、Kimi 视频挂载，以及
@@ -486,7 +486,7 @@ export interface ConfigInput {
   planModePipeline?: boolean
   /** 「调度执行守卫」总开关（默认开启）：执行期拦截子代理越权调用与等待期空等。 */
   dispatchExecutionGuard?: boolean
-  /** 工具失控治理总开关（默认开启）；非 Kimi 线路只提醒，不继承强停。 */
+  /** 工具失控治理总开关（默认开启）：仅针对零增量病态信号（同参重复/同族报错/不变轮询）分级提醒；非 Kimi 线路只提醒，不继承强停。 */
   toolRunawayGuard?: boolean
   /** 五个图片/视频工具的注册期总开关（默认开启；修改后重载插件或重启）。 */
   mediaTools?: boolean
@@ -553,7 +553,7 @@ export const Config: z<ConfigInput, Config> = z.object({
   dispatchExecutionGuard: z.boolean().default(true).volatile()
     .description('启用调度执行守卫：在执行期拦截子代理越权调用主控专用工具，并拦截等待子代理期间的纯 sleep 空等命令；不修改工具声明面，零损耗保护 Kimi 缓存。'),
   toolRunawayGuard: z.boolean().default(true).volatile()
-    .description('启用工具失控治理：重复调用同一工具与参数时分级提醒；Kimi 保留第 12 次强停，其他线路只提醒。'),
+    .description('启用工具失控治理：对零增量病态信号（同名同参重复、同一工具连续同族报错、后台任务无变化轮询）分级提醒；Kimi 保留第 12 次同参强停，其他线路只提醒。'),
   // 注册期开关：volatile 只让设置写入器接受保存，apply 仍只读取一次，
   // 不在会话中途改变工具表。默认 true 保持既有工具表与缓存前缀不变。
   mediaTools: z.boolean().default(true).volatile()
@@ -757,7 +757,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // {"item": [...]} 拆包）、PTC 直调提醒、工具级失控守卫。三样都只对 MiniMax
   // Code 这条线路生效，线路判定走结构探测，不碰工具声明面。
   ctx.effect(
-    () => installMinimaxRuntimeEnhancements(ctx as unknown as MinimaxRuntimeEnhancementsContext),
+    () => installMinimaxRuntimeEnhancements(ctx as unknown as MinimaxRuntimeEnhancementsContext, {
+      runawayEnabled: () => resolveToolRunawayGuardEnabled(pluginConfig),
+    }),
     'dsh-chatgpt-subscription: MiniMax runtime enhancements',
   )
 

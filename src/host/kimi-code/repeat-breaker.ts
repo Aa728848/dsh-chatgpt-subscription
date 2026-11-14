@@ -44,7 +44,9 @@ import {
   canonicalToolCallKey,
   createExactRepeatBreaker,
   isToolRunawayExemptTool,
+  observationFromToolExecution,
   TOOL_RUNAWAY_EXEMPT_TOOLS,
+  type ExactRepeatExecutionObservation,
 } from '../common/tool-runaway.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -287,9 +289,15 @@ export interface KimiRepeatBreaker {
    * @param sessionId - 会话标识。
    * @param toolName - 工具名。
    * @param args - 工具参数。
+   * @param observation - 可选的本次执行可观察事实（用于同族错误与不变轮询判定）。
    * @returns 提醒正文；不提醒时是 undefined。
    */
-  recordAfterExecute(sessionId: string, toolName: string, args: unknown): string | undefined
+  recordAfterExecute(
+    sessionId: string,
+    toolName: string,
+    args: unknown,
+    observation?: ExactRepeatExecutionObservation,
+  ): string | undefined
   /**
    * 重置一个会话的连击计数（新一轮用户输入时调用）。
    *
@@ -547,7 +555,14 @@ export function installKimiRepeatBreaker(
       if (target === undefined) return decision
       const toolName = stringOf((exec as { name?: unknown }).name)
       if (toolName === undefined) return decision
-      const reminder = target.breaker.recordAfterExecute(target.key, toolName, (exec as { arguments?: unknown }).arguments)
+      const args = (exec as { arguments?: unknown }).arguments
+      const obs = observationFromToolExecution(toolName, args, result)
+      const reminder = target.breaker.recordAfterExecute(target.key, toolName, args, {
+        isError: obs.isError,
+        errorCode: obs.errorCode,
+        errorText: obs.errorText,
+        resultText: obs.resultText,
+      })
       if (reminder === undefined) return decision
       return withAdditionalContexts(decision, [createRepeatBreakerReminder(reminder)])
     } catch {

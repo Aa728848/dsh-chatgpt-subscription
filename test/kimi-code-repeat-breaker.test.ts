@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  renderPollingRepeatReminder,
+  renderSameErrorFamilyReminder,
+} from '../src/host/common/tool-runaway.ts'
+import {
   HANDOFF_VETO_TEXT,
   KIMI_CODE_PROVIDER,
   REMINDER_TEXT_1,
@@ -125,6 +129,7 @@ function guardReason(host: ReturnType<typeof fakeHost>, exec: Record<string, unk
 async function runPostExecute(
   host: ReturnType<typeof fakeHost>,
   exec: Record<string, unknown>,
+  result: unknown = { content: [] },
 ): Promise<Decision> {
   const listener = host.listenerOf('tools/post-execute')
   expect(listener, 'post-execute listener').toBeTypeOf('function')
@@ -132,7 +137,7 @@ async function runPostExecute(
     e: unknown,
     r: unknown,
     next: () => Promise<Decision>,
-  ) => Promise<Decision>)(exec, { content: [] }, async () => ({ kind: 'accept' }))
+  ) => Promise<Decision>)(exec, result, async () => ({ kind: 'accept' }))
   return decision
 }
 
@@ -484,5 +489,109 @@ describe('共享工具失控治理', () => {
         expect(contextTexts(await runPostExecute(host, exec))).toHaveLength(0)
       }
     }
+  })
+
+  it('不同参数但同一工具连续 3 次同族报错时给出 same_error_family 提醒，成功一次后清零', async () => {
+    const host = fakeHost({ providers: ['kimi-code', 'codex-chatgpt', 'glm-coding-plan'] })
+    for (const agent of [kimiAgent('err-kimi'), providerAgent('glm-coding-plan', 'err-glm')]) {
+      // 1-2 次同族报错：数字归一化后相同，尚未到 3 次不提醒。
+      expect(contextTexts(await runPostExecute(
+        host,
+        toolExec(agent, 'read', { path: 'a1.ts' }),
+        { isError: true, error: { message: 'ENOENT: no such file at line 10' } },
+      ))).toEqual([])
+      expect(contextTexts(await runPostExecute(
+        host,
+        toolExec(agent, 'read', { path: 'a2.ts' }),
+        { isError: true, error: { message: 'ENOENT: no such file at line 25' } },
+      ))).toEqual([])
+      // 第 3 次回退到 content 文本报错同样命中同一族错误。
+      const third = await runPostExecute(
+        host,
+        toolExec(agent, 'read', { path: 'a3.ts' }),
+        { isError: true, content: [{ type: 'text', text: 'ENOENT: no such file at line 99' }] },
+      )
+      expect(contextTexts(third)).toEqual([renderSameErrorFamilyReminder(3)])
+
+      // 不同工具或不同错误族不互相累加，且成功后清零该工具的错误连击。
+      expect(contextTexts(await runPostExecute(
+        host,
+        toolExec(agent, 'read', { path: 'ok.ts' }),
+        { isError: false, content: [{ type: 'text', text: 'ok' }] },
+      ))).toEqual([])
+      expect(contextTexts(await runPostExecute(
+        host,
+        toolExec(agent, 'read', { path: 'a4.ts' }),
+        { isError: true, error: { message: 'ENOENT: no such file at line 1' } },
+      ))).toEqual([])
+    }
+  })
+
+  it('连续 3 次不变的后台任务轮询给出 polling_repeat 提醒，输出变化或 wait:true 时绝不误拦', async () => {
+    const host = fakeHost({ providers: ['kimi-code', 'codex-chatgpt'] })
+    const agent = kimiAgent('poll-kimi')
+
+    const pollExec = toolExec(agent, 'job_output', { job_id: 'j1' })
+    expect(contextTexts(await runPostExecute(host, pollExec, { content: [{ type: 'text', text: 'running' }] }))).toEqual([])
+    expect(contextTexts(await runPostExecute(host, pollExec, { content: [{ type: 'text', text: 'running' }] }))).toEqual([])
+    const third = await runPostExecute(host, pollExec, { content: [{ type: 'text', text: 'running' }] })
+    expect(contextTexts(third)).toEqual([renderPollingRepeatReminder(3)])
+
+    // 只要输出有递增变化或显式 wait:true，即使连跑 15 次也零提醒且永不触发 Kimi 强停。
+    for (let index = 0; index < REPEAT_FORCE_STOP_STREAK + 3; index += 1) {
+      expect(guardReason(host, pollExec)).toBeUndefined()
+      expect(contextTexts(await runPostExecute(
+        host,
+        pollExec,
+        { content: [{ type: 'text', text: `step ${index}` }] },
+      ))).toEqual([])
+    }
+    const waitExec = toolExec(agent, 'job_output', { job_id: 'j1', wait: true })
+    for (let index = 0; index < REPEAT_FORCE_STOP_STREAK + 3; index += 1) {
+      expect(guardReason(host, waitExec)).toBeUndefined()
+      expect(contextTexts(await runPostExecute(
+        host,
+        waitExec,
+        { content: [{ type: 'text', text: 'waiting' }] },
+      ))).toEqual([])
+    }
+  })
+
+  it('正常的连续多轮不同路径只读调查零提醒、零拦截', async () => {
+    const host = fakeHost({ providers: ['kimi-code', 'glm-coding-plan'] })
+    for (const agent of [kimiAgent('ro-kimi'), providerAgent('glm-coding-plan', 'ro-glm')]) {
+      for (let index = 0; index < 10; index += 1) {
+        const exec = toolExec(agent, 'read', { path: `src/file-${index}.ts` })
+        expect(guardReason(host, exec)).toBeUndefined()
+        const decision = await runPostExecute(host, exec, {
+          isError: false,
+          content: [{ type: 'text', text: `contents ${index}` }],
+        })
+        expect(contextTexts(decision)).toEqual([])
+      }
+    }
+  })
+
+  it('新一轮真人用户输入重置 same_error_family 与 polling_repeat 计数', async () => {
+    const host = fakeHost({ providers: ['kimi-code', 'codex-chatgpt'] })
+    const agent = providerAgent('codex-chatgpt', 'reset-other')
+
+    await runPostExecute(host, toolExec(agent, 'read', { path: 'a.ts' }), { isError: true, error: { message: 'EACCES' } })
+    await runPostExecute(host, toolExec(agent, 'read', { path: 'b.ts' }), { isError: true, error: { message: 'EACCES' } })
+    await runPostExecute(host, toolExec(agent, 'job_output', { job_id: 'j1' }), { content: [{ type: 'text', text: 'same' }] })
+    await runPostExecute(host, toolExec(agent, 'job_output', { job_id: 'j1' }), { content: [{ type: 'text', text: 'same' }] })
+
+    await runPreStep(host, { agent, messages: [{ role: 'user', source: { kind: 'user' } }] })
+
+    expect(contextTexts(await runPostExecute(
+      host,
+      toolExec(agent, 'read', { path: 'c.ts' }),
+      { isError: true, error: { message: 'EACCES' } },
+    ))).toEqual([])
+    expect(contextTexts(await runPostExecute(
+      host,
+      toolExec(agent, 'job_output', { job_id: 'j1' }),
+      { content: [{ type: 'text', text: 'same' }] },
+    ))).toEqual([])
   })
 })

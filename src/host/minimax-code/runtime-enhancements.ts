@@ -36,7 +36,21 @@
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PostToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
-import { canonicalToolCallKey, createExactRepeatTracker } from '../common/tool-runaway.ts'
+import {
+  DEFAULT_REMIND_AFTER_OCCURRENCES,
+  POLLING_TOOL_NAMES,
+  createToolRunawayGuard,
+  observationFromToolExecution,
+  renderExactActionRepeatReminder,
+  renderPollingRepeatReminder,
+  renderSameErrorFamilyReminder,
+  type ToolRunawayGuard,
+  type ToolRunawayGuardOptions,
+  type ToolRunawayObservation,
+  type ToolRunawayReminder,
+  type ToolRunawaySignal,
+  type ToolRunawaySignalKind,
+} from '../common/tool-runaway.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -454,157 +468,33 @@ export function renderDirectCallReminder(toolNames: readonly string[]): string {
 }
 
 /** 失控守卫能识别的信号。 */
-export type MinimaxRunawaySignalKind =
-  | 'exact_action_repeat'
-  | 'same_error_family'
-  | 'polling_repeat'
-  | 'abab_action_cycle'
+export type MinimaxRunawaySignalKind = ToolRunawaySignalKind
 
 /** 一次工具执行的可观察事实。 */
-export interface MinimaxRunawayObservation {
-  /** 工具名。 */
-  readonly toolName: string
-  /** 已解析的参数。 */
-  readonly arguments?: unknown
-  /** 这次执行是否失败。 */
-  readonly isError?: boolean
-  /** 工具自己报的结构化错误码。 */
-  readonly errorCode?: string
-  /** 失败文本。 */
-  readonly errorText?: string
-  /** 成功结果文本（轮询判定用）。 */
-  readonly resultText?: string
-}
+export type MinimaxRunawayObservation = ToolRunawayObservation
 
 /** 一条要注入模型的提醒。 */
-export interface MinimaxRunawayReminder {
-  /** 信号种类。 */
-  readonly kind: MinimaxRunawaySignalKind
-  /** 连击次数。 */
-  readonly occurrences: number
-  /** 提醒正文。 */
-  readonly text: string
-}
+export type MinimaxRunawayReminder = ToolRunawayReminder
 
 /** 守卫观察到的一次信号。 */
-export interface MinimaxRunawaySignal {
-  /** 信号种类。 */
-  readonly kind: MinimaxRunawaySignalKind
-  /** 连击次数。 */
-  readonly occurrences: number
-  /** 涉及的工具名。 */
-  readonly toolName: string
-}
+export type MinimaxRunawaySignal = ToolRunawaySignal
 
 /** 工具级失控守卫。 */
-export interface MinimaxRunawayGuard {
-  /**
-   * 观察一次工具执行。
-   * @param observation - 这一次执行的可观察事实。
-   * @returns 要注入的提醒（每轮至多一条），没有时为 undefined。
-   */
-  observe(observation: MinimaxRunawayObservation): MinimaxRunawayReminder | undefined
-  /** 清空连击计数与「本轮已提醒」标记（新的一轮用户输入 / agent 拆除时调用）。 */
-  reset(): void
-  /** 到目前为止观察到的信号。 */
-  readonly signals: readonly MinimaxRunawaySignal[]
-}
+export type MinimaxRunawayGuard = ToolRunawayGuard
 
 /** 失控守卫选项。 */
-export interface MinimaxRunawayGuardOptions {
-  /** 连击多少次才提醒（默认 3）。 */
-  readonly remindAfterOccurrences?: number
+export type MinimaxRunawayGuardOptions = ToolRunawayGuardOptions
+
+export {
+  DEFAULT_REMIND_AFTER_OCCURRENCES,
+  POLLING_TOOL_NAMES,
+  renderExactActionRepeatReminder,
+  renderPollingRepeatReminder,
+  renderSameErrorFamilyReminder,
 }
 
 /**
- * 失控守卫的默认连击阈值。
- *
- * 与官方一致：提醒在**第三次**重复时给出。
- */
-export const DEFAULT_REMIND_AFTER_OCCURRENCES = 3
-
-/**
- * 官方提醒文案的后缀：提醒只对当前这一轮有效。
- * @returns 后缀正文。
- */
-const TURN_ONLY_SUFFIX = ' This is a temporary runtime reminder for the current Turn only, not a user preference or a durable rule; do not save this reminder or generalize it into Memory, Skills, or other persistent instruction files for future Turns or sessions.'
-
-/**
- * 渲染「同一个动作立刻重复」提醒。
- *
- * 与官方 `packages/agent-modules/runaway-guard/src/reminder.ts` 逐字一致。
- * @param occurrences - 连击次数。
- * @returns 提醒正文。
- */
-export function renderExactActionRepeatReminder(occurrences: number): string {
-  return `[runaway guard] The immediately repeated tool action has now occurred ${occurrences} times with the same arguments. Do not repeat it unchanged. Inspect the results already available, then either change strategy with a concrete expected state change, or report the blocker. Repetition alone does not establish that the task is complete or impossible.${TURN_ONLY_SUFFIX}`
-}
-
-/**
- * 渲染「同一族错误连续发生」提醒。
- *
- * 与官方 `packages/agent-modules/runaway-guard/src/reminder.ts` 逐字一致。
- * @param occurrences - 连击次数。
- * @returns 提醒正文。
- */
-export function renderSameErrorFamilyReminder(occurrences: number): string {
-  return `[runaway guard] The same tool error family has now occurred ${occurrences} times in a row. Do not retry the same route unchanged. Diagnose the cause, change one controlled variable or switch route. Do not infer that the entire task has failed from this signal.${TURN_ONLY_SUFFIX}`
-}
-
-/**
- * 渲染「反复轮询同一个后台任务」提醒。
- *
- * 与官方 `packages/agent-modules/runaway-guard/src/reminder.ts` 逐字一致：
- * 三次读同一个任务时写的是 `Three`，其它次数写数字。
- * @param occurrences - 连击次数。
- * @returns 提醒正文。
- */
-export function renderPollingRepeatReminder(occurrences: number): string {
-  const count = occurrences === 3 ? 'Three' : String(occurrences)
-  return [
-    '<system-reminder>',
-    `${count} task_output reads for the same task have returned an unchanged status and output cursor. Avoid repeated polling; you will be notified automatically and this conversation will resume when the background task completes.`,
-    'This reminder applies only to the current Turn. Do not save or generalize it into Memory, Skills, or other persistent instructions.',
-    '</system-reminder>',
-  ].join('\n')
-}
-
-/**
- * 轮询类工具名（后台任务的结果读取）。
- *
- * 这两个工具读的是后台任务的状态；反复读同一个任务而输出没变，就是官方说的
- * 「polling repeat」。
- */
-export const POLLING_TOOL_NAMES: readonly string[] = Object.freeze(['job_output', 'task_output'])
-
-/**
- * 规范化一段错误文本，取它的「族」。
- *
- * 族的作用是**把同一类错误认成同一类**：路径里的数字、id、时间戳都不该让
- * 两次一模一样的失败看起来是两回事。
- * @param text - 错误文本。
- * @returns 族标识。
- */
-function errorFamilyOf(text: string | undefined): string {
-  if (text === undefined || text === '') return 'unknown'
-  const firstLine = text.split(/\r?\n/, 1)[0] ?? ''
-  return firstLine.replace(/\d+/g, '#').slice(0, 200)
-}
-
-
-/**
- * 造一台工具级失控守卫。
- *
- * 三种可提醒信号（顺序即官方提醒优先级）：
- *
- * 1. `same_error_family` —— 同一个工具连续报同一族错误；
- * 2. `exact_action_repeat` —— 同一次动作（同名 + 同参数）立刻重复；
- * 3. `polling_repeat` —— 连续轮询同一个后台任务而输出没变。
- *
- * `abab_action_cycle`（A B A B 的循环）**只记录不提醒**：官方把它排在提醒
- * 候选之外——模型在两个动作之间来回跳时，提醒它「别重复」是没有意义的。
- *
- * 每轮**至多一条**提醒：官方在发出第一条后就把本轮的提醒机会用掉了。
+ * 造一台 MiniMax Code 会话的工具级失控守卫（实现已下沉至共享内核 `tool-runaway.ts`）。
  *
  * @param options - 守卫选项。
  * @returns 守卫。
@@ -612,149 +502,7 @@ function errorFamilyOf(text: string | undefined): string {
 export function createMinimaxRunawayGuard(
   options: MinimaxRunawayGuardOptions = {},
 ): MinimaxRunawayGuard {
-  const threshold = options.remindAfterOccurrences ?? DEFAULT_REMIND_AFTER_OCCURRENCES
-
-  /** 同一次动作的连击，由所有线路共享的规范键与跟踪器计算。 */
-  const exactActionRepeats = createExactRepeatTracker()
-  /** 同一族错误的连击（键是工具名 + 错误族）。 */
-  const errorStreaks = new Map<string, { toolName: string; count: number }>()
-  /** 轮询连击（键是工具名）。 */
-  const pollingStreaks = new Map<string, { key: string; count: number }>()
-  /** 最近几次动作，用来认 A B A B 的循环。 */
-  const recentActions: string[] = []
-  /** 当前正在计数的 A B 循环对。 */
-  let activeAbabKey: string | undefined
-  /** 本轮是否已经提醒过。 */
-  let reminderAttempted = false
-  /** 观察到的信号。 */
-  const signals: MinimaxRunawaySignal[] = []
-
-  /**
-   * 记一条信号。
-   * @param kind - 信号种类。
-   * @param occurrences - 连击次数。
-   * @param toolName - 工具名。
-   */
-  const record = (kind: MinimaxRunawaySignalKind, occurrences: number, toolName: string): void => {
-    signals.push({ kind, occurrences, toolName })
-  }
-
-  /**
-   * 判断这次执行是不是一次「原地不动」的轮询。
-   * @param observation - 观察事实。
-   * @returns 是轮询时为 true。
-   */
-  const isPolling = (observation: MinimaxRunawayObservation): boolean => {
-    if (!POLLING_TOOL_NAMES.includes(observation.toolName)) return false
-    const args = isPlainRecord(observation.arguments) ? observation.arguments : undefined
-    // wait=true 是「等它结束」，不是轮询；它打断轮询连击。
-    return args?.['wait'] !== true
-  }
-
-  return {
-    observe(observation: MinimaxRunawayObservation): MinimaxRunawayReminder | undefined {
-      const toolName = observation.toolName
-      const actionKey = canonicalToolCallKey(toolName, observation.arguments)
-      // 轮询类工具**不**计入「同一次动作重复」：官方给轮询工具单开一条策略，
-      // 它们只由 polling_repeat 计数。否则「等一个后台任务」会被说成「同一个
-      // 动作立刻重复」，而那正是模型该做的事。
-      const countsAsAction = !POLLING_TOOL_NAMES.includes(toolName)
-
-      // 1) 同一次动作立刻重复。
-      if (countsAsAction) {
-        const action = exactActionRepeats.observe(toolName, observation.arguments)
-        record('exact_action_repeat', action.count, toolName)
-      }
-
-      // 2) A B A B 的循环：只记，不提醒。
-      if (countsAsAction) {
-        recentActions.push(actionKey)
-        if (recentActions.length > 4) recentActions.shift()
-        if (recentActions.length === 4) {
-          const [a, b, c, d] = recentActions
-          if (a !== undefined && b !== undefined && a !== b && a === c && b === d) {
-            const episode = `${a}\u0000${b}`
-            if (activeAbabKey !== episode) {
-              activeAbabKey = episode
-              record('abab_action_cycle', 2, toolName)
-            }
-          } else {
-            activeAbabKey = undefined
-          }
-        }
-      }
-
-      // 3) 同一族错误连击。
-      if (observation.isError === true) {
-        const family = observation.errorCode ?? errorFamilyOf(observation.errorText)
-        const key = `${toolName}\u0000${family}`
-        const previous = errorStreaks.get(key)
-        const count = previous === undefined ? 1 : previous.count + 1
-        errorStreaks.set(key, { toolName, count })
-        record('same_error_family', count, toolName)
-      } else {
-        // 这个工具成功了：它的错误连击到此为止。
-        for (const [key, entry] of [...errorStreaks]) {
-          if (entry.toolName === toolName) errorStreaks.delete(key)
-        }
-      }
-
-      // 4) 轮询连击。
-      if (isPolling(observation)) {
-        // 「原地不动」= 同一个任务 + 同一份输出。任务变了或者输出变了，计数归零。
-        const key = `${canonicalToolCallKey(toolName, observation.arguments)}\u0000${observation.resultText ?? ''}`
-        const previous = pollingStreaks.get(toolName)
-        const count = previous !== undefined && previous.key === key ? previous.count + 1 : 1
-        pollingStreaks.set(toolName, { key, count })
-        record('polling_repeat', count, toolName)
-      } else {
-        pollingStreaks.delete(toolName)
-      }
-
-      if (reminderAttempted) return undefined
-
-      // 提醒优先级：同族错误 > 同一次动作重复 > 反复轮询（官方顺序）。
-      const errorCandidate = [...errorStreaks.values()].find(entry => entry.count >= threshold)
-      if (errorCandidate !== undefined) {
-        reminderAttempted = true
-        return {
-          kind: 'same_error_family',
-          occurrences: errorCandidate.count,
-          text: renderSameErrorFamilyReminder(errorCandidate.count),
-        }
-      }
-      const actionStreak = exactActionRepeats.current()
-      if (countsAsAction && actionStreak !== undefined && actionStreak.count >= threshold) {
-        reminderAttempted = true
-        return {
-          kind: 'exact_action_repeat',
-          occurrences: actionStreak.count,
-          text: renderExactActionRepeatReminder(actionStreak.count),
-        }
-      }
-      const pollingCandidate = [...pollingStreaks.values()].find(entry => entry.count >= threshold)
-      if (pollingCandidate !== undefined) {
-        reminderAttempted = true
-        return {
-          kind: 'polling_repeat',
-          occurrences: pollingCandidate.count,
-          text: renderPollingRepeatReminder(pollingCandidate.count),
-        }
-      }
-      return undefined
-    },
-    reset(): void {
-      exactActionRepeats.reset()
-      errorStreaks.clear()
-      pollingStreaks.clear()
-      recentActions.length = 0
-      activeAbabKey = undefined
-      reminderAttempted = false
-    },
-    get signals(): readonly MinimaxRunawaySignal[] {
-      return signals
-    },
-  }
+  return createToolRunawayGuard(options)
 }
 
 /** 工具注册面（本模块用到的两条接缝）。 */
@@ -966,57 +714,6 @@ function createRunawayReminder(reminder: MinimaxRunawayReminder): UserMessage {
 }
 
 /**
- * 读一次执行的结果是不是失败。
- * @param result - 工具执行结果。
- * @returns 失败时为 true。
- */
-function isErrorResult(result: unknown): boolean {
-  return isRecord(result) && result['isError'] === true
-}
-
-/**
- * 读一次执行的结构化错误码。
- * @param result - 工具执行结果。
- * @returns 错误码；没有时为 undefined。
- */
-function errorCodeOf(result: unknown): string | undefined {
-  if (!isRecord(result)) return undefined
-  const error = result['error']
-  if (!isRecord(error)) return undefined
-  const info = error['info']
-  if (!isRecord(info)) return undefined
-  return stringOf(info['code'])
-}
-
-/**
- * 读一次执行的失败文本。
- * @param result - 工具执行结果。
- * @returns 失败文本；没有时为 undefined。
- */
-function errorTextOf(result: unknown): string | undefined {
-  if (!isRecord(result)) return undefined
-  const error = result['error']
-  if (!isRecord(error)) return undefined
-  return stringOf(error['message'])
-}
-
-/**
- * 读一次执行的结果文本（轮询判定用）。
- * @param result - 工具执行结果。
- * @returns 结果文本；没有时是空串。
- */
-function resultTextOf(result: unknown): string {
-  if (!isRecord(result)) return ''
-  const content = result['content']
-  if (!Array.isArray(content)) return ''
-  const parts: string[] = []
-  for (const block of content) {
-    if (isRecord(block) && block['type'] === 'text') parts.push(stringOf(block['text']) ?? '')
-  }
-  return parts.join('\n')
-}
-
-/**
  * 找一次工具调用的参数 schema。
  * @param tools - 工具注册面。
  * @param name - 工具名。
@@ -1076,7 +773,7 @@ function repairExecutionArguments(execution: unknown, tools: ToolsLike | undefin
  */
 export function installMinimaxRuntimeEnhancements(
   ctx: MinimaxRuntimeEnhancementsContext,
-  options: { remindAfterOccurrences?: number } = {},
+  options: { remindAfterOccurrences?: number; runawayEnabled?: () => boolean } = {},
 ): () => void {
   /** 登记一个副作用；上下文没有 effect 时立即执行（测试用假上下文）。 */
   const track = (execute: () => unknown, label: string): void => {
@@ -1158,15 +855,15 @@ export function installMinimaxRuntimeEnhancements(
         contexts.push(createDirectCallReminder(directName))
       }
 
-      const reminder = guardOf(agent).observe({
-        toolName: exec.name,
-        arguments: exec.arguments,
-        isError: isErrorResult(result),
-        errorCode: errorCodeOf(result),
-        errorText: errorTextOf(result),
-        resultText: resultTextOf(result),
-      })
-      if (reminder !== undefined) contexts.push(createRunawayReminder(reminder))
+      const runawayActive = (() => {
+        try { return options.runawayEnabled?.() !== false } catch { return true }
+      })()
+      if (runawayActive) {
+        const reminder = guardOf(agent).observe(
+          observationFromToolExecution(exec.name, exec.arguments, result),
+        )
+        if (reminder !== undefined) contexts.push(createRunawayReminder(reminder))
+      }
 
       if (contexts.length === 0) return decision
       return withAdditionalContexts(decision, contexts)

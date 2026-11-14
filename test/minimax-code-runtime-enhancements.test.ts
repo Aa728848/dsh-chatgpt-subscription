@@ -47,7 +47,7 @@ function otherAgent(id = 'session-2'): Record<string, unknown> {
 }
 
 /** 假宿主：记录守卫与事件监听器。 */
-function fakeHost(options: { ptc?: boolean; schemas?: Record<string, unknown> } = {}) {
+function fakeHost(options: { ptc?: boolean; schemas?: Record<string, unknown>; runawayEnabled?: () => boolean } = {}) {
   const listeners = new Map<string, ((...args: never[]) => unknown)[]>()
   const guards: ((execution: unknown) => string | undefined)[] = []
   const tools = {
@@ -77,7 +77,9 @@ function fakeHost(options: { ptc?: boolean; schemas?: Record<string, unknown> } 
     get: (name: string) => (name === 'tools' ? tools : undefined),
     tools,
   } as unknown as MinimaxRuntimeEnhancementsContext
-  const dispose = installMinimaxRuntimeEnhancements(ctx)
+  const dispose = installMinimaxRuntimeEnhancements(ctx, {
+    ...(options.runawayEnabled === undefined ? {} : { runawayEnabled: options.runawayEnabled }),
+  })
   return {
     ctx,
     tools,
@@ -411,6 +413,20 @@ describe('MiniMax 运行时增强：装配', () => {
     const reason = host.guards[0]?.({ name: 'edit', arguments: args, agent })
     expect(reason).toBeUndefined()
     expect((args.edits as unknown[])).toEqual([{ oldText: 'a', newText: 'b' }])
+  })
+
+  it('runawayEnabled 返回 false 时旁路失控提醒但保留参数修复', async () => {
+    const host = fakeHost({ runawayEnabled: () => false })
+    const agent = minimaxAgent()
+    const args: Record<string, unknown> = { edits: '[{"oldText":"a","newText":"b"}]' }
+    expect(host.guards[0]?.({ name: 'edit', arguments: args, agent })).toBeUndefined()
+    expect((args.edits as unknown[])).toEqual([{ oldText: 'a', newText: 'b' }])
+
+    const call = { name: 'read', arguments: { file_path: 'a.ts' }, agent }
+    for (let index = 0; index < 4; index += 1) {
+      const decision = await runPostExecute(host, call)
+      expect(contextTexts(decision)).toEqual([])
+    }
   })
 
   it('PTC 会话里直接调原生工具时注入直调提醒', async () => {
