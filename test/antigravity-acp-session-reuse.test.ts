@@ -275,15 +275,20 @@ describe('ACP session reuse across turns', () => {
         }
       })()).rejects.toMatchObject({ failure: { code: 'ABORTED' } })
 
-      // The running prompt is cancelled rather than silently abandoned...
-      const cancels = harness.events.of('notify').filter((event) => event.method === 'session/cancel')
-      expect(cancels).toHaveLength(1)
-      expect(cancels[0]?.sessionId).toBe('session-1')
-
-      // ...and the process survives: the next message costs a session, not a spawn.
+      // The process survives: the next message costs a session, not a spawn.
       await collect(harness.adapter.stream(optionsOf({ messages: [user('unrelated follow-up')] }) as never))
       expect(harness.events.boot()).toBe(1)
       expect(harness.events.of('session/new')).toHaveLength(2)
+
+      // The running prompt was cancelled rather than silently abandoned. Asserted
+      // after the second generation on purpose: `session/cancel` is a fire-and-forget
+      // notification, and it shares the child's stdin with the frames of the turn
+      // that follows, so by the time that turn has answered the server has already
+      // read it. Reading the log straight after the abort is a race the Linux
+      // runner loses even when the client behaved correctly.
+      const cancels = harness.events.of('notify').filter((event) => event.method === 'session/cancel')
+      expect(cancels).toHaveLength(1)
+      expect(cancels[0]?.sessionId).toBe('session-1')
     } finally {
       await harness.adapter.dispose()
       harness.dispose()
