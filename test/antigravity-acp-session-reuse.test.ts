@@ -197,10 +197,12 @@ describe('ACP session reuse across turns', () => {
   it('applies a model switch on the same conversation instead of starting another', async () => {
     const harness = adapterHarness()
     try {
-      await collect(harness.adapter.stream(optionsOf({ reasoningEffort: 'low' }) as never))
+      // `reasoningEffort` is a branded id on the harness type; the adapter only
+      // reads the level name, which is what these literals carry.
+      await collect(harness.adapter.stream(optionsOf({ reasoningEffort: 'low' as never }) as never))
       await collect(harness.adapter.stream(optionsOf({
         model: 'gemini-4-hydrogen',
-        reasoningEffort: 'high',
+        reasoningEffort: 'high' as never,
         messages: [user('first request'), assistant('answer'), user('switch to hydrogen')],
       }) as never))
 
