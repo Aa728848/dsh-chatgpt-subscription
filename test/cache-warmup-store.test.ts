@@ -336,6 +336,131 @@ describe('FileResultReferenceStore 字节安全分页', () => {
   })
 })
 
+describe('FileResultReferenceStore 文本字面量 query 定位', () => {
+  it('按关键词跳到匹配行行首，返回 matched/matchOffset，并支持用 nextOffset 续搜下一处匹配', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const lines = [
+      '001 中文前缀日志开始',
+      ...Array.from({ length: 12 }, (_, idx) => `00${idx + 2} 普通输出行 ${idx}`),
+      '014 发现目标 CONTRACT_ALPHA 在这里',
+      '015 紧随其后的上下文行',
+      '016 再隔一行',
+      '017 第二处命中 CONTRACT_ALPHA 结尾',
+      '018 收尾行',
+    ]
+    const content = lines.join('\n')
+    const reference = await store.put({ sessionId: 'session-a', content })
+
+    const first = await store.page({
+      sessionId: 'session-a',
+      refId: reference.refId,
+      query: 'CONTRACT_ALPHA',
+      limit: 2,
+    })
+    expect(first.matched).toBe(true)
+    expect(first.matchOffset).toBe(Buffer.byteLength(content.slice(0, content.indexOf('CONTRACT_ALPHA')), 'utf8'))
+    expect(first.offset).toBe(Buffer.byteLength(content.slice(0, content.indexOf('014 发现目标')), 'utf8'))
+    expect(first.content).toBe('014 发现目标 CONTRACT_ALPHA 在这里\n015 紧随其后的上下文行\n')
+    expect(first.complete).toBe(false)
+    expect(first.nextOffset).toBeGreaterThan(first.matchOffset!)
+
+    const second = await store.page({
+      sessionId: 'session-a',
+      refId: reference.refId,
+      offset: first.nextOffset!,
+      query: 'CONTRACT_ALPHA',
+      limit: 2,
+    })
+    expect(second.matched).toBe(true)
+    expect(second.content).toBe('017 第二处命中 CONTRACT_ALPHA 结尾\n018 收尾行')
+    expect(second.complete).toBe(true)
+    expect(second.nextOffset).toBeNull()
+
+    const third = await store.page({
+      sessionId: 'session-a',
+      refId: reference.refId,
+      offset: first.matchOffset! + 'CONTRACT_ALPHA'.length,
+      query: 'NON_EXISTENT',
+    })
+    expect(third.matched).toBe(false)
+    expect(third.matchOffset).toBeUndefined()
+    expect(third.content).toBe('')
+    expect(third.complete).toBe(true)
+    expect(third.nextOffset).toBeNull()
+  })
+
+  it('单行超长文本命中后段时 Anchor Guard 保证命中词落在本页且不切坏 UTF-8 字符', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const prefix = '中'.repeat(10_000)
+    const content = `${prefix}TARGET_NEEDLE_HERE${'🙂'.repeat(1000)}`
+    const reference = await store.put({ sessionId: 'session-a', content })
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+
+    const page = await store.page({
+      sessionId: 'session-a',
+      refId: reference.refId,
+      query: 'TARGET_NEEDLE_HERE',
+      maxBytes: 4096,
+    })
+    expect(page.matched).toBe(true)
+    expect(page.matchOffset).toBe(Buffer.byteLength(prefix, 'utf8'))
+    expect(page.offset).toBeGreaterThan(0)
+    expect(page.offset).toBeLessThanOrEqual(page.matchOffset!)
+    expect(page.content).toContain('TARGET_NEEDLE_HERE')
+    expect(decoder.decode(Buffer.from(page.content, 'utf8'))).toBe(page.content)
+    expect(page.nextOffset).toBeGreaterThan(page.matchOffset!)
+  })
+
+  it('单行 minified JSON（转义 \\n）下也能对齐逻辑行首', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const minifiedJson = JSON.stringify({
+      stdout: ['alpha', 'beta literal-\\\\n-kept', 'gamma NEEDLE_HIT', 'delta'].join('\n'),
+    })
+    const reference = await store.put({ sessionId: 'session-a', content: minifiedJson })
+
+    const page = await store.page({
+      sessionId: 'session-a',
+      refId: reference.refId,
+      query: 'NEEDLE_HIT',
+      limit: 1,
+    })
+    expect(page.matched).toBe(true)
+    expect(page.content).toBe('gamma NEEDLE_HIT\\n')
+  })
+
+  it('未命中返回 matched:false 空页；空 query 或与结构化参数混用报 QUERY_INVALID', async () => {
+    const store = new FileResultReferenceStore({ rootDir: await makeRoot() })
+    const textRef = await store.put({ sessionId: 'session-a', content: 'hello\nworld' })
+    const miss = await store.page({ sessionId: 'session-a', refId: textRef.refId, query: 'WORLD' })
+    expect(miss.matched).toBe(false)
+    expect(miss.content).toBe('')
+    expect(miss.complete).toBe(true)
+    expect(miss.nextOffset).toBeNull()
+
+    expect((await storeError(store.page({ sessionId: 'session-a', refId: textRef.refId, query: '' }))).code).toBe(
+      'QUERY_INVALID',
+    )
+
+    const structuredRef = await store.put({ sessionId: 'session-a', content: '{"a":1}\n{"a":2}' })
+    expect(
+      (await storeError(store.page({
+        sessionId: 'session-a',
+        refId: structuredRef.refId,
+        query: '1',
+        fields: ['a'],
+      }))).code,
+    ).toBe('QUERY_INVALID')
+    expect(
+      (await storeError(store.page({
+        sessionId: 'session-a',
+        refId: structuredRef.refId,
+        query: '1',
+        equals: { a: '1' },
+      }))).code,
+    ).toBe('QUERY_INVALID')
+  })
+})
+
 describe('FileResultReferenceStore 结构化分页', () => {
   /** 五行 JSON Lines，三行 level=error。 */
   const rows = [

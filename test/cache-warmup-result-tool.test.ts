@@ -120,6 +120,40 @@ describe('cache_warmup_result page', () => {
     expect(request.equals).toEqual({ kind: 'file' })
   })
 
+  it('passes query through without putting undefined on normal calls, and never logs query text', async () => {
+    store = {
+      page: (request) => {
+        pageRequests.push(request)
+        return Promise.resolve({
+          content: 'line with SECRET_QUERY_TOKEN',
+          offset: 120,
+          matched: true,
+          matchOffset: 130,
+          complete: false,
+          nextOffset: 200,
+          omitted: 500,
+          totalChars: 700,
+        })
+      },
+      release: () => Promise.resolve(true),
+    }
+    const value = await run({ action: 'page', refId: 'ref://sess-1/abc', query: 'SECRET_QUERY_TOKEN' })
+    expect(pageRequests[0]?.query).toBe('SECRET_QUERY_TOKEN')
+    expect(value.ok).toBe(true)
+    expect(value.matched).toBe(true)
+    expect(value.matchOffset).toBe(130)
+    expect(render(value)).toContain('from offset 120 (matched at offset 130)')
+    expect(render(value)).toContain('continue at offset 200')
+    expect(JSON.stringify(logged)).not.toContain('SECRET_QUERY_TOKEN')
+  })
+
+  it('rejects an empty query before touching the store', async () => {
+    const value = await run({ action: 'page', refId: 'ref://sess-1/abc', query: '' })
+    expect(value.ok).toBe(false)
+    expect(value.error?.code).toBe('BAD_ARGUMENT')
+    expect(pageRequests).toHaveLength(0)
+  })
+
   it('refuses a non-integer offset instead of forwarding it', async () => {
     const value = await run({ action: 'page', refId: 'ref://sess-1/abc', offset: -3 })
     expect(value.ok).toBe(false)
@@ -226,5 +260,15 @@ describe('cache_warmup_result render', () => {
     const text = render(await run({ action: 'release', refId: 'ref://sess-1/abc' }))
     expect(text).toContain('Released ref://sess-1/abc')
     expect(text).toContain('unchanged')
+  })
+
+  it('renders a query miss explicitly', async () => {
+    store = {
+      page: () => Promise.resolve({ content: '', offset: 50, matched: false, complete: true, totalChars: 500 }),
+      release: () => Promise.resolve(true),
+    }
+    const text = render(await run({ action: 'page', refId: 'ref://sess-1/abc', offset: 50, query: 'NOT_THERE' }))
+    expect(text).toContain('from offset 50 — no match found of 500, complete')
+    expect(text).toContain('(no match)')
   })
 })

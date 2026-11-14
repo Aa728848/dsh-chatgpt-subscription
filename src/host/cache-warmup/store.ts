@@ -161,7 +161,28 @@ function countLines(text: string, escapedMode = usesEscapedNewlines(text)): numb
 }
 
 /**
- * 按 UTF-8 字节安全分页。
+ * 向上查找某 UTF-8 字节偏移所在逻辑行的行首字节偏移。
+ *
+ * 与 {@link countLines} / {@link pageText} 保持一致：支持真实换行 `\n` 以及
+ * 单行 JSON 里的转义换行 `\n`（前面紧邻奇数个 `\`）。
+ */
+function findLineStartByte(buffer: Buffer, fromByte: number, escapedMode: boolean): number {
+  for (let cursor = fromByte - 1; cursor >= 0; cursor -= 1) {
+    const byte = buffer[cursor]
+    if (byte === 0x0a) return cursor + 1
+    if (escapedMode && byte === 0x6e) {
+      let backslashes = 0
+      for (let probe = cursor - 1; probe >= 0 && buffer[probe] === 0x5c; probe -= 1) {
+        backslashes += 1
+      }
+      if ((backslashes & 1) === 1) return cursor + 1
+    }
+  }
+  return 0
+}
+
+/**
+ * 按 UTF-8 字节安全分页（可选按字面量 `query` 定位首个匹配行）。
  *
  * `offset` 是字节偏移，必须落在字符边界上（上一页的 `nextOffset` 天然满足）；
  * 每页最多 `limit` 行且不超过 `maxBytes` 字节，任何一页都不会把一个字符切成两半。
@@ -176,8 +197,9 @@ function pageText(args: {
   offset: number
   limit: number
   maxBytes: number
+  query?: string
 }): ResultPage {
-  const { sessionId, refId, text, buffer, offset, limit, maxBytes } = args
+  const { sessionId, refId, text, buffer, offset, limit, maxBytes, query } = args
   const totalBytes = buffer.length
   if (!Number.isInteger(offset) || offset < 0) {
     throw new CacheWarmupStoreError('offset must be a non-negative integer byte offset', 'OFFSET_OUT_OF_RANGE')
@@ -190,7 +212,43 @@ function pageText(args: {
   }
 
   const escapedMode = usesEscapedNewlines(text)
-  const rest = offset === 0 ? text : new TextDecoder('utf-8').decode(buffer.subarray(offset))
+  let sliceOffset = offset
+  let matchMeta: { matched: boolean; matchOffset?: number } | undefined
+
+  if (query !== undefined) {
+    const queryBytes = Buffer.from(query, 'utf8')
+    const hitByteOffset = offset === totalBytes ? -1 : buffer.indexOf(queryBytes, offset)
+    if (hitByteOffset < 0) {
+      return {
+        sessionId,
+        refId,
+        mode: 'text',
+        content: '',
+        offset,
+        nextOffset: null,
+        complete: true,
+        matched: false,
+        omitted: { reason: 'none', chars: 0, lines: 0, rows: 0, bytes: 0 },
+        totalChars: text.length,
+        totalBytes,
+        limit,
+        maxBytes,
+      }
+    }
+    const lineStartByte = findLineStartByte(buffer, hitByteOffset, escapedMode)
+    const maxLeadBytes = maxBytes >= 8 ? Math.min(2048, Math.floor(maxBytes / 4)) : 0
+    sliceOffset = lineStartByte
+    if (hitByteOffset - lineStartByte > maxLeadBytes) {
+      let pos = hitByteOffset - maxLeadBytes
+      while (pos < hitByteOffset && (buffer[pos]! & 0xc0) === 0x80) {
+        pos += 1
+      }
+      sliceOffset = pos
+    }
+    matchMeta = { matched: true, matchOffset: hitByteOffset }
+  }
+
+  const rest = sliceOffset === 0 ? text : new TextDecoder('utf-8').decode(buffer.subarray(sliceOffset))
   let content = ''
   let contentBytes = 0
   let lines = 0
@@ -221,7 +279,7 @@ function pageText(args: {
   }
 
   const consumedBytes = Buffer.byteLength(content, 'utf8')
-  const nextOffset = offset + consumedBytes
+  const nextOffset = sliceOffset + consumedBytes
   const complete = nextOffset >= totalBytes
   const remaining = rest.slice(content.length)
   return {
@@ -229,9 +287,10 @@ function pageText(args: {
     refId,
     mode: 'text',
     content,
-    offset,
+    offset: sliceOffset,
     nextOffset: complete ? null : nextOffset,
     complete,
+    ...(matchMeta ?? {}),
     omitted: {
       reason: complete ? 'none' : stoppedByBytes ? 'bytes' : stoppedByLines ? 'lines' : 'bytes',
       chars: remaining.length,
@@ -497,12 +556,21 @@ export class FileResultReferenceStore implements ResultReferenceStore {
     if (ttlMs !== undefined && ttlMs > 0 && this.now() - stats.mtimeMs > ttlMs) {
       throw new CacheWarmupStoreError('stored result expired', 'RESULT_EXPIRED')
     }
+    if (input.query !== undefined && (typeof input.query !== 'string' || input.query.length === 0)) {
+      throw new CacheWarmupStoreError('query must be a non-empty string', 'QUERY_INVALID')
+    }
     const buffer = await fs.readFile(file)
     const text = new TextDecoder('utf-8').decode(buffer)
     const limit = clampLimit(input.limit)
     const maxBytes = clampMaxBytes(input.maxBytes)
     const offset = input.offset ?? 0
     if (input.fields !== undefined || input.equals !== undefined) {
+      if (input.query !== undefined) {
+        throw new CacheWarmupStoreError(
+          'query applies to text mode only; omit fields and equals when using query',
+          'QUERY_INVALID',
+        )
+      }
       return pageStructured({
         sessionId,
         refId: input.refId,
@@ -515,7 +583,7 @@ export class FileResultReferenceStore implements ResultReferenceStore {
         equals: input.equals,
       })
     }
-    return pageText({ sessionId, refId: input.refId, text, buffer, offset, limit, maxBytes })
+    return pageText({ sessionId, refId: input.refId, text, buffer, offset, limit, maxBytes, query: input.query })
   }
 
   /**

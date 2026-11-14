@@ -225,6 +225,12 @@ export interface ResultPageQuery {
   refId: string
   /** 起始位置：文本模式是 UTF-8 字节偏移，结构化模式是（过滤后的）行下标。 */
   offset?: number
+  /**
+   * 文本模式下的大小写敏感字面量定位串（非空字符串）。
+   * 从 `offset`（默认 0）起搜索首个匹配：命中时返回从匹配所在行行首（受前置字节上限保护）开始的一页，
+   * 并附带 `matched: true` 与 `matchOffset`；未命中时返回空页与 `matched: false`。
+   */
+  query?: string
   /** 本页最多行数，默认 64，上限 512。 */
   limit?: number
   /** 本页最多字节数，默认 16384，上限 65536。 */
@@ -275,6 +281,10 @@ export interface ResultPage {
   limit: number
   /** 实际生效的 maxBytes。 */
   maxBytes: number
+  /** 传入 `query` 时，从 `offset` 起是否命中匹配。 */
+  matched?: boolean
+  /** `query` 命中时，首个匹配子串在原文中的精确 UTF-8 字节偏移。 */
+  matchOffset?: number
   /** 结构化模式下返回的字段。 */
   fields?: string[]
   /** 结构化模式下的总行数。 */
@@ -311,6 +321,7 @@ export type CacheWarmupErrorCode =
   | 'RESULT_EXPIRED'
   | 'OFFSET_OUT_OF_RANGE'
   | 'OFFSET_INVALID'
+  | 'QUERY_INVALID'
   | 'NOT_STRUCTURED'
   | 'FIELD_UNKNOWN'
 

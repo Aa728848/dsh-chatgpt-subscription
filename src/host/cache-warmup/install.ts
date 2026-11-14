@@ -113,7 +113,7 @@ export const CACHE_WARMUP_GUIDANCE = [
   'On large `run_code`/`code_run` results this line may replace the output with a preview: a short description plus one or more `ref://<session>/<sha256>` handles.',
   '',
   '- A preview is **not** the full result. It states `complete`, `omitted` and `nextOffset` explicitly; treat an incomplete preview as incomplete data, not as the whole output.',
-  '- To read the original, call `cache_warmup_result` with `action: "page"` and that `refId`, then follow `nextOffset` until `complete` is true.',
+  '- To read the original, call `cache_warmup_result` with `action: "page"` and that `refId` (pass `query` to jump directly to a literal keyword/error in text logs, or follow `offset` / `nextOffset` until `complete` is true).',
   '- Page in small slices (`limit` around 64-120 lines, `maxBytes` at most 8-16 KB) and read only the slice you actually need. Reading a whole stored result back in one call re-sends what the preview just saved.',
   '- `action: "release"` drops the stored copy. The preview already in the conversation stays identical; it simply can no longer be read back.',
   '- Source code, type and contract definitions, mixed evidence and anything that could not be parsed reliably are never replaced: they arrive in full.',

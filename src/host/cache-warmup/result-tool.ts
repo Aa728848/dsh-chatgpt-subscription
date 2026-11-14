@@ -72,6 +72,10 @@ export interface CacheWarmupResultValue {
   chars?: number
   /** page：原文总字符数（模型据此知道还剩多少要看）。 */
   totalChars?: number
+  /** page：传入 `query` 时是否命中匹配。 */
+  matched?: boolean
+  /** page：`query` 命中时，首个匹配子串的精确 UTF-8 字节偏移。 */
+  matchOffset?: number
   /** release：是否真的释放掉了。 */
   released?: boolean
   /** page：本页正文。 */
@@ -201,6 +205,8 @@ function pageValue(raw: unknown, refId: string, sessionId: string): CacheWarmupR
   const nextOffset = complete ? undefined : numberOf(page.nextOffset)
   const omitted = omittedCharsOf(page.omitted)
   const totalChars = numberOf(page.totalChars)
+  const matched = booleanOf(page.matched)
+  const matchOffset = numberOf(page.matchOffset)
   return {
     ok: true,
     action: 'page',
@@ -211,6 +217,8 @@ function pageValue(raw: unknown, refId: string, sessionId: string): CacheWarmupR
     ...(nextOffset === undefined ? {} : { nextOffset }),
     ...(omitted === undefined ? {} : { omitted }),
     ...(totalChars === undefined ? {} : { totalChars }),
+    ...(matched === undefined ? {} : { matched }),
+    ...(matchOffset === undefined ? {} : { matchOffset }),
     ...(text === undefined ? {} : { text, chars: text.length }),
   }
 }
@@ -234,7 +242,7 @@ export function createCacheWarmupResultTool(deps: CacheWarmupResultToolDeps): To
     name: CACHE_WARMUP_RESULT_TOOL,
     description: [
       'Read back a result that was replaced by a preview, using the `ref://<session>/<sha256>` handle written in that preview.',
-      'Use `action: "page"` to read a slice: pass `offset`, and optionally `limit`, `maxBytes`, `fields` and `equals`.',
+      'Use `action: "page"` to read a slice: pass `offset` (or `query` to locate a literal substring in text results), and optionally `limit`, `maxBytes`, `fields` and `equals`.',
       'Keep slices small (a page defaults to 64 lines / 16 KB and is capped at 25 KB): every character a page returns is processed again on the next turn, so read only the slice you need.',
       'Every page reports `complete`, `nextOffset`, `omitted` and `totalChars`, so you can see whether more remains instead of assuming a slice is the whole thing.',
       'Use `action: "release"` when the stored copy is no longer needed.',
@@ -255,9 +263,13 @@ export function createCacheWarmupResultTool(deps: CacheWarmupResultToolDeps): To
         type: 'integer',
         description: 'Where to start: a UTF-8 byte offset for text results, a row index for structured ones.',
       },
+      query: {
+        type: 'string',
+        description: 'Case-sensitive literal substring to locate in a text result starting from `offset` (default 0); returns a page starting at the matched line, or `matched: false` when absent.',
+      },
       limit: {
         type: 'integer',
-        description: 'Maximum number of rows for a structured result.',
+        description: 'Maximum number of lines (text) or rows (structured) in this page.',
       },
       maxBytes: {
         type: 'integer',
@@ -289,6 +301,8 @@ export function createCacheWarmupResultTool(deps: CacheWarmupResultToolDeps): To
           omitted: { type: 'number', description: 'Characters still not returned after this page.' },
           chars: { type: 'number', description: 'Characters in this page.' },
           totalChars: { type: 'number', description: 'Characters in the whole stored result.' },
+          matched: { type: 'boolean', description: 'Whether `query` matched in a text result.' },
+          matchOffset: { type: 'number', description: 'UTF-8 byte offset of the first `query` match.' },
           released: { type: 'boolean', description: 'Whether a stored copy was actually released.' },
           text: { type: 'string', description: 'This page of the stored result.' },
           error: {
@@ -316,15 +330,21 @@ export function createCacheWarmupResultTool(deps: CacheWarmupResultToolDeps): To
           }]
         }
         const at = value.offset ?? 0
-        const span = typeof value.chars === 'number' ? value.chars + ' chars' : 'no content'
         const total = typeof value.totalChars === 'number' ? ' of ' + value.totalChars : ''
+        if (value.matched === false) {
+          return [{ type: 'text', text: value.refId + ' from offset ' + at + ' — no match found' + total + ', complete\n\n(no match)' }]
+        }
+        const span = typeof value.chars === 'number' ? value.chars + ' chars' : 'no content'
+        const matchNote = value.matched === true && typeof value.matchOffset === 'number'
+          ? ' (matched at offset ' + value.matchOffset + ')'
+          : ''
         const tail = value.complete === true
           ? 'complete'
           : 'more remains'
             + (typeof value.nextOffset === 'number' ? ', continue at offset ' + value.nextOffset : '')
             + (typeof value.omitted === 'number' ? ', ' + value.omitted + ' chars omitted' : '')
         const body = typeof value.text === 'string' && value.text !== '' ? value.text : '(empty page)'
-        return [{ type: 'text', text: value.refId + ' from offset ' + at + ' — ' + span + total + ', ' + tail + '\n\n' + body }]
+        return [{ type: 'text', text: value.refId + ' from offset ' + at + matchNote + ' — ' + span + total + ', ' + tail + '\n\n' + body }]
       },
     },
     async execute(args, exec): Promise<CacheWarmupResultValue> {
@@ -376,8 +396,12 @@ export function createCacheWarmupResultTool(deps: CacheWarmupResultToolDeps): To
           return failure(action, refId, sessionId, 'BAD_ARGUMENT', name + ' must be a non-negative integer')
         }
       }
+      if (args.query !== undefined && (typeof args.query !== 'string' || args.query === '')) {
+        return failure(action, refId, sessionId, 'BAD_ARGUMENT', 'query must be a non-empty string')
+      }
       const request: Record<string, unknown> = { sessionId, refId }
       if (args.offset !== undefined) request.offset = args.offset
+      if (args.query !== undefined) request.query = args.query
       if (args.limit !== undefined) request.limit = args.limit
       if (args.maxBytes !== undefined) request.maxBytes = args.maxBytes
       if (args.fields !== undefined) request.fields = args.fields

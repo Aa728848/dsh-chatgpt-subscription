@@ -1990,7 +1990,7 @@ function planProjection(
 
 /** 预览尾部：把「怎么读全文」写死在预览里，模型不用猜。 */
 function footerFor(refId: string): string {
-  return `[full result: ${refId} · page with offset/limit(default 64 lines)/maxBytes(default 16384 bytes)]`
+  return `[full result: ${refId} · page with query/offset/limit(default 64 lines)/maxBytes(default 16384 bytes)]`
 }
 
 /** 一次投影的最终判定：要么换成预览，要么给出保持原样的原因。 */
