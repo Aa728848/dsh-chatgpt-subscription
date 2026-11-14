@@ -20,7 +20,7 @@ Source lives in `src/`; generated package output lives in `lib/` (git-ignored) a
 
 ## Harness Compatibility
 
-One codebase supports every DSH harness generation from `0.1.2-alpha.5` through `0.2.2-rc.2` (`peerDependencies` in `package.json`), because users are distributed across npm's `latest`, `next`, and `alpha` dist-tags. Never simplify an adapter, tool guard, or client slot by assuming only the newest generation's shape. Read `.dsh/skills/dsh-harness-upgrade/SKILL.md` before modifying version-sensitive boundaries, and `.dsh/skills/add-subscription-line/SKILL.md` when adding or extending a provider line.
+One codebase supports every DSH harness generation from `0.1.2-alpha.5` through `0.2.2-rc.3` (`peerDependencies` in `package.json`), because users are distributed across npm's `latest`, `next`, and `alpha` dist-tags. Never simplify an adapter, tool guard, or client slot by assuming only the newest generation's shape. Read `.dsh/skills/dsh-harness-upgrade/SKILL.md` before modifying version-sensitive boundaries, and `.dsh/skills/add-subscription-line/SKILL.md` when adding or extending a provider line.
 
 ## Build, Test, and Development Commands
 

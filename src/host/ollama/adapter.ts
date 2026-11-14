@@ -2,7 +2,6 @@ import { outputReservation } from '../common/output-reservation.ts'
 import { localizedProviderName } from '../common/i18n/index.ts'
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   resolveRetryPolicy,
   type GenerateOptions as HarnessGenerateOptions,
@@ -15,6 +14,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
+  LlmError,
   normalizeGenerateOptions,
   type GenerateOptions,
   type Message,

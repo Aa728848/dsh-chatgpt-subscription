@@ -15,7 +15,7 @@
  */
 
 import path from 'node:path'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError } from '../common/llm-compat.ts'
 import { dshHomeDir } from '../common/home.ts'
 import { t } from '../common/i18n/index.ts'
 import {

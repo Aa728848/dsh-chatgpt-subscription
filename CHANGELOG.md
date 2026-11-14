@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- 升级 DSH 宿主基线至 `^0.2.2-rc.3` 并前瞻兼容 `deepseek-harness` `master` (`39163dd30f7`)：
+  - 将 `package.json` 中 18 个常规 `@deepseek-ai/dsh-*` `peerDependencies` 扩展至覆盖 `^0.2.2-rc.3`（保留 `0.1.2-alpha.5` 起全代次范围），可选 peer `@deepseek-ai/dsh-tool-executor-native` 覆盖 `^0.2.2-alpha.3 || ^0.2.2-rc.1 || ^0.2.2-rc.2 || ^0.2.2-rc.3`，全部 22 个 `@deepseek-ai/dsh-*` `devDependencies` 升级为 `^0.2.2-rc.3` 并完整重建 `package-lock.json`（69 个 `@deepseek-ai/*` 条目，含全部 10 个跨平台 `node-addon-require-builtin` 可选依赖键）。
+  - 在 `src/host/common/llm-compat.ts` 收敛 `LlmError` 构造签名兼容桥：保持运行时与原生 `LlmError` 同引用不变，编译期将第 2 个参数 `code` 从 `0.2.2-rc.3` 收窄的 `BuiltinLlmFailureCode` 放宽为 `string`（并导出 `LlmErrorOptionsCompat` / `LlmErrorConstructorCompat`），将全仓 19 处抛出自定义错误码的导入站点统一切换至 `llm-compat.ts`。
+  - 在 `src/entry-plan-mode.ts` 与 `test/plan-mode-fork.test.ts` 对齐 `master` 结构化计划模式错误：基于全世代可导出的 `HarnessError` 新增并导出 `PlanModeError` / `PlanModeErrorCode`，新增内部 `PlanToolArgsError`（`INVALID_ARGS`）与 `PlanToolContextUnavailableError`（`TOOL_CONTEXT_UNAVAILABLE`），替换 `exit_plan_mode` 内全部 6 处裸 `Error` 并完整保留原错误消息文案。
+  - 在 `src/host/compaction-policy-guard.ts` 与 `test/kimi-cache-guards.test.ts` 对齐 `master` 的 `compactionAnsweredRoute`：在 `observeFrom` 中补充安全读取 `agent.model?.current?.()` 并从后向前观测 `summarize` 输入 `messages` 尾部 `assistant` 消息自带的 `source: { provider, model }`。
+  - **[codemode / `code_run` 改进]** 对齐上游 PTC 运行时与 `tool-executor-ptc` 机制升级（保留 `dispatch` 预设原有 `interrupt_agent` 配置）：
+    - 在 `src/entry-codemode.ts` 修复 `host.programImage` 调用 `@deepseek-ai/dsh-llm` `resolveImageAttachmentAccess` 的 3 参数签名 `(attachments, mapHostPath, ref)`（并保留单参测试桩兜底），恢复 `cua` 截图（无 `file_path` 字段）在 `code_run` 内的一等公民 `PtcImageLike` 句柄与 `inspect` 联动（未消费时仍自动 `deferContext` 兜底）。
+    - 在 `src/host/codemode/rules.ts` 同步上游 `#8275` 常驻 REPL（`scoped-repl` / `repl` / `script`）提示词规则：区分常驻 REPL 与 `function-body`，禁止常驻模式下写顶层/分支早退 `return` 并优先引导 `inspect(...values)`；说明动态 `await import('./src/x.ts')` 相对路径锚定会话初始工作目录、`process.cwd()` 与相对文件读写跟随每次调用目录；补充顶层作用域拷贝防坑约束（防 `let x = x + 1` / 块内 `var` / `__$binding_*`）；并在常用返回值索引追加 `` `subagent` → `{ kind, name }` ``（同一部署下保持逐字节恒定）。
+    - 在 `src/host/codemode/transport.ts` 当结构化 `result.output` 已含显式 `inspect` / 图片 / 文本块时抑制隐式末尾完成值 `result.value`，防止状态赋值语句把巨型对象打入上下文，同时保留空 `output` 下单表达式直出结果。
+    - 在 `src/host/codemode/transport.ts` 与 `src/entry-codemode.ts` 对齐 `#7869` 未开放沙箱参数（`runtime.sandboxMode === undefined`）前置拒绝及上游结构化错误分类，新增并导出 `CodemodeArgsError`（`ToolArgsError` / `INVALID_ARGS`）、`CodemodeContextUnavailableError`（`TOOL_CONTEXT_UNAVAILABLE`）与 `SandboxEscalationError`（`SANDBOX_ESCALATION_*`），并按 `ptc.ts:668` 保留 `HarnessError` 与 `AbortError` 身份、为 `CodeRunFailedError` 传递 `{ cause }`。
+  - 验证结果：主仓库（`0.2.2-rc.3`）强制 `tsc -b`、`test/tsconfig.json`、`scripts/tsconfig.json`、`npm run build`、`npm ci --dry-run`、`npm pack --dry-run`（982 files / 4.4 MB）全绿，Vitest **379 passed | 3 skipped (382)** 文件、**6796 passed | 10 skipped (6806)** 用例；`0.2.2-rc.1` clean-room（50 个可达 DSH 包）强制 `tsc` 全绿、复跑 Vitest 同为 **379 passed | 3 skipped (382)** / **6791 passed | 10 skipped (6801)**（前序升级基线）；`0.1.5-rc.1` clean-room（36 个可达 DSH 包）排除 3 个缺失 `0.2.2+` 包的 generation-bound 文件后 Vitest **376 passed | 3 skipped (379)** 文件、**6734 passed | 11 skipped (6745)** 用例，0 失败。
+
 ## 0.73.0 - 2026-11-13
 - **[antigravity-acp / 读图修复] `read_image` 的像素现在真的会回到 agent 手里**
   - **问题**：用户反馈这条线路「读不了图」。工具调用链本身是通的——`read_image` 确实经回环 MCP 桥交回 DSH 执行——但结果回传把图片丢了：`collectToolResults` 只取 `type === 'text'` 的块，图片块被过滤成空串，桥又只能发 `{type:'text'}`，agent 收到的是一条**空内容**，看起来就和「工具什么都没返回」一样。

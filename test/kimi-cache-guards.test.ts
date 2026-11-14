@@ -583,6 +583,51 @@ describe('installCompactionPolicyGuard', () => {
     guard.dispose()
   })
 
+  it('observes a dynamic Kimi model from summarize input message source after requestHeader switched away', async () => {
+    const engine = new FakeEngine()
+    const guard = installCompactionPolicyGuard(createHost(undefined).ctx)
+    guard.patchEngine(engine)
+    const scope = createScope('codex-chatgpt', 'gpt-5')
+    await engine.summarize({
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'earlier answer' }],
+          source: { provider: KIMI_COMPACTION_PROVIDER, model: 'kimi-k3-dynamic' },
+        },
+        {
+          role: 'user',
+          content: [{ type: 'text', text: `${SHIPPED_INSTRUCTION_OPENING} Do the thing.` }],
+        },
+      ],
+    }, scope)
+    const { override, retention } = resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'kimi-k3-dynamic',
+    })
+    expect(override).toBeDefined()
+    expect(retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
+    guard.dispose()
+  })
+
+  it('observes a dynamic Kimi model from agent.model.current() when session and options are absent', async () => {
+    const engine = new FakeEngine()
+    const guard = installCompactionPolicyGuard(createHost(undefined).ctx)
+    guard.patchEngine(engine)
+    await engine.compactIfNeeded({
+      model: {
+        current: () => ({ provider: KIMI_COMPACTION_PROVIDER, model: 'kimi-k3-current' }),
+      },
+    })
+    const { override, retention } = resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'kimi-k3-current',
+    })
+    expect(override).toBeDefined()
+    expect(retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
+    guard.dispose()
+  })
+
   it('is idempotent per engine', () => {
     const engine = new FakeEngine()
     const guard = installCompactionPolicyGuard(createHost(undefined).ctx)

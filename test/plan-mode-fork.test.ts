@@ -1,6 +1,8 @@
 import { Context, Service } from '@deepseek-ai/cordis'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
 import PlanModeController, {
+  PlanModeError,
   APPROVE_LABEL,
   EXIT_PLAN_MODE,
   KEEP_PLANNING_LABEL,
@@ -558,10 +560,16 @@ describe('exit_plan_mode', () => {
   it('refuses to run outside plan mode (the only admission gate it has)', async () => {
     const { tools } = await mountedController()
     const definition = definitionOf(tools)
-    await expect(definition.execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) }))
-      .rejects.toThrow(EXIT_PLAN_MODE + ' is only available in plan mode')
-    await expect(definition.execute({ plan: '# P' }, {}))
-      .rejects.toThrow('is only available in plan mode')
+    const inactive = definition.execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) })
+    const missingAgent = definition.execute({ plan: '# P' }, {})
+    await Promise.all([
+      expect(inactive).rejects.toThrow(EXIT_PLAN_MODE + ' is only available in plan mode'),
+      expect(inactive).rejects.toBeInstanceOf(PlanModeError),
+      expect(inactive).rejects.toMatchObject({ code: 'PLAN_NOT_ACTIVE' }),
+      expect(missingAgent).rejects.toThrow('is only available in plan mode'),
+      expect(missingAgent).rejects.toBeInstanceOf(HarnessError),
+      expect(missingAgent).rejects.toMatchObject({ code: 'TOOL_CONTEXT_UNAVAILABLE' }),
+    ])
   })
 
   it('refuses a plan that does not start with a markdown heading', async () => {
@@ -569,15 +577,27 @@ describe('exit_plan_mode', () => {
     const definition = definitionOf(tools)
     const questions = fakeQuestions(async () => ({ answers: [] }))
     const exec = { agent: fakeAgent(fakeSession()), callId: 'c1' }
-    await expect(definition.execute({ plan: 'no heading' }, exec)).rejects.toThrow('starting with a # heading')
+    const rejected = definition.execute({ plan: 'no heading' }, exec)
+    await Promise.all([
+      expect(rejected).rejects.toThrow('starting with a # heading'),
+      expect(rejected).rejects.toBeInstanceOf(HarnessError),
+      expect(rejected).rejects.toMatchObject({ name: 'ToolArgsError', code: 'INVALID_ARGS' }),
+    ])
     expect(questions.ask).not.toHaveBeenCalled()
   })
 
   it('refuses when no user-questions channel exists', async () => {
     const { tools } = await mountedController({ state: { active: true } })
     const definition = definitionOf(tools)
-    await expect(definition.execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) }))
-      .rejects.toThrow('no user-questions channel')
+    const rejected = definition.execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) })
+    await Promise.all([
+      expect(rejected).rejects.toThrow('no user-questions channel'),
+      expect(rejected).rejects.toBeInstanceOf(HarnessError),
+      expect(rejected).rejects.toMatchObject({
+        name: 'ToolContextUnavailableError',
+        code: 'TOOL_CONTEXT_UNAVAILABLE',
+      }),
+    ])
   })
 
   it('asks with the frozen review contract and, on approval, exits silently', async () => {
@@ -623,8 +643,12 @@ describe('exit_plan_mode', () => {
       state: { active: true },
     })
     const definition = definitionOf(tools)
-    await expect(definition.execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) }))
-      .rejects.toThrow('their feedback: add a rollback step')
+    const rejected = definition.execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) })
+    await Promise.all([
+      expect(rejected).rejects.toThrow('their feedback: add a rollback step'),
+      expect(rejected).rejects.toBeInstanceOf(PlanModeError),
+      expect(rejected).rejects.toMatchObject({ code: 'PLAN_REVISION_REQUESTED' }),
+    ])
   })
 
   it('keeps planning with a generic message when the user gave no feedback', async () => {
@@ -633,8 +657,12 @@ describe('exit_plan_mode', () => {
       services: { userQuestions: questions },
       state: { active: true },
     })
-    await expect(definitionOf(tools).execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) }))
-      .rejects.toThrow('revise the plan and present it again')
+    const rejected = definitionOf(tools).execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) })
+    await Promise.all([
+      expect(rejected).rejects.toThrow('revise the plan and present it again'),
+      expect(rejected).rejects.toBeInstanceOf(PlanModeError),
+      expect(rejected).rejects.toMatchObject({ code: 'PLAN_REVISION_REQUESTED' }),
+    ])
   })
 
   it('concludes the turn when the review is dismissed and the harness can do it', async () => {
@@ -659,8 +687,15 @@ describe('exit_plan_mode', () => {
       services: { userQuestions: questions },
       state: { active: true },
     })
-    await expect(definitionOf(tools).execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) }))
-      .rejects.toThrow('cannot conclude the turn')
+    const rejected = definitionOf(tools).execute({ plan: '# P' }, { agent: fakeAgent(fakeSession()) })
+    await Promise.all([
+      expect(rejected).rejects.toThrow('cannot conclude the turn'),
+      expect(rejected).rejects.toBeInstanceOf(HarnessError),
+      expect(rejected).rejects.toMatchObject({
+        name: 'ToolContextUnavailableError',
+        code: 'TOOL_CONTEXT_UNAVAILABLE',
+      }),
+    ])
   })
 
   it('keeps a non-cancellation failure as itself', async () => {

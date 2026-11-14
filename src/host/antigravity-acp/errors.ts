@@ -15,7 +15,7 @@
  * @module dsh-chatgpt-subscription/host/antigravity-acp/errors
  */
 
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError } from '../common/llm-compat.ts'
 
 /** Every failure code this line raises. */
 export const ACP_ERROR_CODES = {
@@ -63,7 +63,7 @@ export function acpError(code: AcpErrorCode, detail?: string): LlmError {
   // this line's codes are deliberately outside it (they are more specific, and
   // the retry policy above opts into them by name). The cast is the one place
   // that boundary is crossed.
-  return new LlmError(detail === undefined ? base : `${base} ${detail}`, code as never)
+  return new LlmError(detail === undefined ? base : `${base} ${detail}`, code)
 }
 
 /** Whether a string is one of this line's codes. */

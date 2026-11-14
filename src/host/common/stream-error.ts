@@ -1,4 +1,4 @@
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError } from './llm-compat.ts'
 
 /**
  * A failure the provider reported INSIDE a 200 stream.

@@ -278,6 +278,39 @@ export function installCompactionPolicyGuard(
     if (isRecord(config)) {
       observe(readString(config['provider']), readString(config['model']))
     }
+    // `agent.model?.current?.()` 在首轮或切模型尚未写入 requestHeader 时提供最新选择。
+    const modelField = source['model']
+    if (isRecord(modelField) && typeof modelField['current'] === 'function') {
+      let current: unknown
+      try {
+        current = (modelField['current'] as () => unknown).call(modelField)
+      } catch {
+        current = undefined
+      }
+      if (isRecord(current)) {
+        observe(readString(current['provider']), readString(current['model']))
+      }
+    }
+    // `compaction-basic@master` 的 summarize(input, agent) 优先读取折叠区尾部已回答
+    // `assistant` 消息自带的 `source: { provider, model }` 路由；这里从后向前补充观测，
+    // 跳过末尾可能追加的 user 压缩指令消息。
+    const messages = source['messages']
+    if (Array.isArray(messages)) {
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const msg = messages[i]
+        if (!isRecord(msg)) continue
+        const role = msg['role']
+        if (role !== undefined && role !== 'assistant') continue
+        const msgSource = msg['source']
+        if (!isRecord(msgSource)) continue
+        const provider = readString(msgSource['provider'])
+        const model = readString(msgSource['model'])
+        if (provider !== undefined && model !== undefined) {
+          observe(provider, model)
+          break
+        }
+      }
+    }
   }
 
   /**

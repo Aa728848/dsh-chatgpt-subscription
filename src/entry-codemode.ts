@@ -40,11 +40,13 @@ import {
 } from './host/codemode/rules.ts'
 import { findScopeKey, resolveCatalogView, resolveNameView } from './host/codemode/scope.ts'
 import {
+  CodemodeArgsError,
   CodeResetFailedError,
   createTransportDefinition,
   currentCatalogSnapshot,
   isImageAttachmentRefLike,
   PtcImageLike,
+  SandboxEscalationError,
   type CallToolOutcome,
   type CallToolRequest,
   type CatalogEntry,
@@ -285,18 +287,27 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       : undefined
     const effectiveMode = typeof record?.['mode'] === 'string' ? record['mode'] : undefined
     if (record === undefined || effectiveMode === undefined) {
-      throw new Error('sandbox_permissions is not available for this PTC runtime')
+      throw new CodemodeArgsError('sandbox_permissions and justification are not available for this PTC runtime')
     }
     if (input.requestedMode === effectiveMode) return input.standingPolicy
     if (!(WIDER_SANDBOX_MODES[effectiveMode] ?? []).includes(input.requestedMode)) {
-      throw new Error(`sandbox escalation to "${input.requestedMode}" is not strictly wider than this call's current "${effectiveMode}" mode`)
+      throw new SandboxEscalationError(
+        `sandbox escalation to "${input.requestedMode}" is not strictly wider than this call's current "${effectiveMode}" mode`,
+        'SANDBOX_ESCALATION_INVALID_ARGUMENT',
+      )
     }
     const approver = serviceOf('approval') as ApprovalServiceLike | undefined
     if (typeof approver?.request !== 'function') {
-      throw new Error(`sandbox escalation to "${input.requestedMode}" requires approval, but no approval service is composed`)
+      throw new SandboxEscalationError(
+        `sandbox escalation to "${input.requestedMode}" requires approval, but no approval service is composed`,
+        'SANDBOX_ESCALATION_UNAVAILABLE',
+      )
     }
     if (input.agent === undefined) {
-      throw new Error(`sandbox escalation to "${input.requestedMode}" requires approval, but the call has no agent to route it through`)
+      throw new SandboxEscalationError(
+        `sandbox escalation to "${input.requestedMode}" requires approval, but the call has no agent to route it through`,
+        'SANDBOX_ESCALATION_UNAVAILABLE',
+      )
     }
     const outcome = await approver.request({
       agent: input.agent,
@@ -313,11 +324,21 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       case 'allowed-once':
         return { ...record, mode: input.requestedMode }
       case 'rejected':
-        throw new Error(`the user rejected escalating this program to "${input.requestedMode}"; it stays denied, so stop and explain instead of working around it`)
+        throw new SandboxEscalationError(
+          `the user rejected escalating this program to "${input.requestedMode}"; it stays denied, so stop and explain instead of working around it`,
+          'SANDBOX_ESCALATION_REJECTED',
+        )
       case 'cancelled':
-        throw new Error(`approval for escalating to "${input.requestedMode}" was cancelled`)
+        input.signal.throwIfAborted()
+        throw new SandboxEscalationError(
+          `approval for escalating to "${input.requestedMode}" was cancelled`,
+          'SANDBOX_ESCALATION_CANCELLED',
+        )
       case 'unavailable':
-        throw new Error(`sandbox escalation to "${input.requestedMode}" requires approval, but no approval channel is available`)
+        throw new SandboxEscalationError(
+          `sandbox escalation to "${input.requestedMode}" requires approval, but no approval channel is available`,
+          'SANDBOX_ESCALATION_UNAVAILABLE',
+        )
       default:
         throw new Error(`unexpected approval outcome: ${String(outcome)}`)
     }
@@ -347,7 +368,20 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       const resolveAccess = (dshLlm as Record<string, unknown>)['resolveImageAttachmentAccess']
       if (typeof resolveAccess === 'function') {
         try {
-          const access = (resolveAccess as (ref: unknown) => { readonly readonlyPath?: unknown } | undefined)(attachment)
+          const attachments = serviceOf('attachments')
+          const fsService = serviceOf('fs') as { processPathFromHostPath?: (hostPath: string) => string | undefined } | undefined
+          const mapHostPath = typeof fsService?.processPathFromHostPath === 'function'
+            ? (hostPath: string) => fsService.processPathFromHostPath!(hostPath)
+            : undefined
+          const access = attachments !== undefined && mapHostPath !== undefined
+            ? (resolveAccess as (
+                attachments: unknown,
+                mapHostPath: (hostPath: string) => string | undefined,
+                ref: unknown,
+              ) => { readonly readonlyPath?: unknown } | undefined)(attachments, mapHostPath, attachment)
+            : resolveAccess.length <= 1
+              ? (resolveAccess as (ref: unknown) => { readonly readonlyPath?: unknown } | undefined)(attachment)
+              : undefined
           if (typeof access?.readonlyPath === 'string' && access.readonlyPath.length > 0) {
             return new PtcImageLike(access.readonlyPath, attachment)
           }

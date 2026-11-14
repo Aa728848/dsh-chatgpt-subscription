@@ -24,10 +24,13 @@ import { DISABLED_VIEW, resolveCatalogView, resolveNameView } from '../src/host/
 import { createCodemodeExecutor, isNestedCall, markNested } from '../src/host/codemode/executor.ts'
 import { createRetention } from '../src/host/codemode/retention.ts'
 import {
+  CodemodeArgsError,
+  CodemodeContextUnavailableError,
   CodeResetFailedError,
   CodeRunFailedError,
   PTC_IMAGE_TAG,
   PtcImageLike,
+  SandboxEscalationError,
   ToolCallLimitExceededError,
   createTransportDefinition,
   normalizeSubCallArgs,
@@ -1503,5 +1506,110 @@ describe('DSH 内核 PTC 机制对齐与宿主层入参别名容错', () => {
     }, { callId: 'c-iso', signal: new AbortController().signal, agent })
     const settled = loggedEvents.find((e) => e.type === 'tool/ptc-dispatch')?.data as { arguments: unknown }
     expect(settled.arguments).toEqual({ file_path: 'original.ts' })
+  })
+
+  it('scoped-repl 显式 inspect/output 存在时抑制末尾隐式完成值防刷屏，空 output 时保留完成值直出', async () => {
+    const modeRef = { explicit: true }
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+      runtime: () => ({
+        language: 'typescript',
+        programFormat: 'scoped-repl',
+        async run() {
+          if (modeRef.explicit) {
+            return {
+              output: [{ type: 'text' as const, text: 'summary: 2 items\n' }],
+              // 模拟模型最后一行写了 state.cached = hugePayload 产生了巨大隐式完成值
+              value: { hugeCache: ['a', 'b', 'c'] },
+            }
+          }
+          return {
+            output: [],
+            value: { soleFinal: 42 },
+          }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, createRules({}))
+    const execute = definition.execute as (args: unknown, exec: unknown) => Promise<{ logs: string[]; result?: unknown }>
+
+    const explicitOut = await execute(
+      { code: 'inspect("summary: 2 items"); cached = { hugeCache: ["a", "b", "c"] }', description: 'inspect suppresses completion' },
+      { callId: 'c-sup-1', signal: new AbortController().signal },
+    )
+    expect(explicitOut.logs).toEqual(['summary: 2 items'])
+    expect(explicitOut.result).toBeUndefined()
+    expect(definition.output.render({}, explicitOut)).toEqual([{ type: 'text', text: 'summary: 2 items' }])
+
+    modeRef.explicit = false
+    const implicitOut = await execute(
+      { code: '({ soleFinal: 42 })', description: 'empty output keeps completion' },
+      { callId: 'c-sup-2', signal: new AbortController().signal },
+    )
+    expect(implicitOut.logs).toEqual([])
+    expect(implicitOut.result).toEqual({ soleFinal: 42 })
+    expect(definition.output.render({}, implicitOut)).toEqual([{ type: 'text', text: '{\n  "soleFinal": 42\n}' }])
+  })
+
+  it('未开放沙箱参数前置校验（#7869）与结构化错误身份（INVALID_ARGS / TOOL_CONTEXT_UNAVAILABLE）', async () => {
+    const makeHost = (runtimeValue: unknown) => ({
+      catalog: () => catalog,
+      runtime: () => runtimeValue,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+    })
+
+    // 1. 运行时缺失 -> CodemodeContextUnavailableError (TOOL_CONTEXT_UNAVAILABLE)
+    const noRuntimeDef = createTransportDefinition(makeHost(undefined) as never, createRules({}))
+    const runNoRuntime = noRuntimeDef.execute as (args: unknown, exec: unknown) => Promise<unknown>
+    await expect(runNoRuntime({ code: '1', description: 'd' }, { callId: 'c1', signal: new AbortController().signal }))
+      .rejects.toSatisfy((err: unknown) =>
+        err instanceof CodemodeContextUnavailableError
+        && err.name === 'ToolContextUnavailableError'
+        && err.code === 'TOOL_CONTEXT_UNAVAILABLE')
+
+    // 2. 参数不合法 -> CodemodeArgsError (INVALID_ARGS)
+    await expect(runNoRuntime(null, { callId: 'c2', signal: new AbortController().signal }))
+      .rejects.toSatisfy((err: unknown) =>
+        err instanceof CodemodeArgsError && err.name === 'ToolArgsError' && err.code === 'INVALID_ARGS')
+    await expect(runNoRuntime({ code: '1', description: 'd', timeoutMs: 0 }, { callId: 'c3', signal: new AbortController().signal }))
+      .rejects.toSatisfy((err: unknown) =>
+        err instanceof CodemodeArgsError && err.code === 'INVALID_ARGS')
+
+    // 3. sandboxMode 为 undefined 时，即使仅单传 sandbox_permissions 也不先追问 justification，直接拒绝不可用
+    const noSandboxDef = createTransportDefinition(makeHost({
+      language: 'typescript',
+      programFormat: 'scoped-repl',
+      sandboxMode: undefined,
+    }) as never, createRules({}))
+    const runNoSandbox = noSandboxDef.execute as (args: unknown, exec: unknown) => Promise<unknown>
+    await expect(runNoSandbox({
+      code: '1',
+      description: 'unpaired when unsupported',
+      sandbox_permissions: 'workspace-write',
+    }, { callId: 'c4', signal: new AbortController().signal }))
+      .rejects.toSatisfy((err: unknown) =>
+        err instanceof CodemodeArgsError
+        && err.code === 'INVALID_ARGS'
+        && err.message.includes('sandbox_permissions and justification are not available for this PTC runtime'))
+
+    // 4. 支持 sandboxMode 时先走配对校验并抛出 SandboxEscalationError
+    const withSandboxDef = createTransportDefinition(makeHost({
+      language: 'typescript',
+      programFormat: 'scoped-repl',
+      sandboxMode: 'read-only',
+    }) as never, createRules({}))
+    const runWithSandbox = withSandboxDef.execute as (args: unknown, exec: unknown) => Promise<unknown>
+    await expect(runWithSandbox({
+      code: '1',
+      description: 'unpaired when supported',
+      sandbox_permissions: 'workspace-write',
+    }, { callId: 'c5', signal: new AbortController().signal }))
+      .rejects.toSatisfy((err: unknown) =>
+        err instanceof SandboxEscalationError && err.code === 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
   })
 })

@@ -53,7 +53,7 @@
  */
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { HarnessError, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -97,6 +97,49 @@ declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** 本 fork 在 agent/pre-step 末尾追加的计划模式提示（不是新的用户回合）。 */
     'plan-mode-notice': { kind: 'plan-mode-notice' } & { form?: 'notice', summary?: string }
+  }
+}
+
+/**
+ * 计划模式可路由错误码，与 `@deepseek-ai/dsh-plan-mode` 保持同一契约：
+ * - `PLAN_NOT_ACTIVE`：当前会话未处于计划模式；
+ * - `PLAN_REVIEW_INTERRUPTED`：审批等待期间计划模式服务被重载；
+ * - `PLAN_REVISION_REQUESTED`：用户要求继续规划；
+ * - `PLAN_STATE_UNAVAILABLE`：计划投影读取器尚未就绪。
+ */
+export type PlanModeErrorCode =
+  | 'PLAN_NOT_ACTIVE'
+  | 'PLAN_REVIEW_INTERRUPTED'
+  | 'PLAN_REVISION_REQUESTED'
+  | 'PLAN_STATE_UNAVAILABLE'
+
+/** 计划模式结构化错误（基于全世代通用的 `HarnessError`）。 */
+export class PlanModeError extends HarnessError {
+  readonly code: PlanModeErrorCode
+
+  constructor(message: string, code: PlanModeErrorCode, options?: ErrorOptions) {
+    super(message, code, options)
+    this.code = code
+    this.name = 'PlanModeError'
+  }
+}
+
+/** 与 `@deepseek-ai/dsh-tools` `ToolArgsError` 同码的结构化参数错误，不引入 `<0.2.x` 缺失的导出。 */
+class PlanToolArgsError extends HarnessError {
+  readonly violations: string[]
+
+  constructor(message: string, violations: string[]) {
+    super(message, 'INVALID_ARGS')
+    this.violations = violations
+    this.name = 'ToolArgsError'
+  }
+}
+
+/** 与 `@deepseek-ai/dsh-tools` `ToolContextUnavailableError` 同码的上下文缺失错误，不引入 `<0.2.x` 缺失的导出。 */
+class PlanToolContextUnavailableError extends HarnessError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, 'TOOL_CONTEXT_UNAVAILABLE', options)
+    this.name = 'ToolContextUnavailableError'
   }
 }
 
@@ -996,16 +1039,20 @@ export class PlanModeController extends Service {
         const agent = execution.agent as AgentLike | undefined
         // 准入不再由 { when } 表达：这里就是唯一的门。工具随时在表里，但只有计划
         // 模式生效时才允许交计划。
-        if (agent === undefined || agent === null || !controller.loggedActive(agent.session)) {
-          throw new Error(EXIT_PLAN_MODE + ' is only available in plan mode')
+        if (agent === undefined || agent === null) {
+          throw new PlanToolContextUnavailableError(EXIT_PLAN_MODE + ' is only available in plan mode')
+        }
+        if (!controller.loggedActive(agent.session)) {
+          throw new PlanModeError(EXIT_PLAN_MODE + ' is only available in plan mode', 'PLAN_NOT_ACTIVE')
         }
         const plan = typeof (args as { plan?: unknown }).plan === 'string' ? (args as { plan: string }).plan : ''
         if (!/^#\s+\S/.test(plan.trim())) {
-          throw new Error(EXIT_PLAN_MODE + ' requires a non-empty markdown plan starting with a # heading')
+          const message = EXIT_PLAN_MODE + ' requires a non-empty markdown plan starting with a # heading'
+          throw new PlanToolArgsError(message, ['plan: ' + message])
         }
         const interaction = serviceOf<UserQuestionsLike>(ctx, 'userQuestions')
         if (interaction === undefined || typeof interaction.ask !== 'function') {
-          throw new Error('no user-questions channel is available to review the plan; '
+          throw new PlanToolContextUnavailableError('no user-questions channel is available to review the plan; '
             + 'ask the user to switch the session mode instead')
         }
         let answer: { answers?: readonly UserQuestionAnswerLike[] }
@@ -1036,7 +1083,7 @@ export class PlanModeController extends Service {
               execution.concludeTurn()
               return { approved: false }
             }
-            throw new Error('the user dismissed the plan review and this harness generation cannot conclude the turn '
+            throw new PlanToolContextUnavailableError('the user dismissed the plan review and this harness generation cannot conclude the turn '
               + 'from a tool; present the plan again or switch the session mode instead')
           }
           throw cause
@@ -1044,16 +1091,19 @@ export class PlanModeController extends Service {
         // 审批可能比本插件 fiber 活得久。没有 pre-step 监听器，一个被批准的选择永远
         // 落不进日志，所以这里失败并让模型继续规划。
         if (controller.disposed) {
-          throw new Error('the plan-mode service was reloaded while the plan was under review; '
-            + 'present the plan again')
+          throw new PlanModeError('the plan-mode service was reloaded while the plan was under review; '
+            + 'present the plan again', 'PLAN_REVIEW_INTERRUPTED')
         }
         const items = (answer?.answers ?? []).filter(entry => entry.id === REVIEW_ID)
         const item = items.length === 1 ? items[0] : undefined
         if (item?.selected.length !== 1 || item.selected[0] !== APPROVE_LABEL || item.custom !== undefined) {
           const feedback = typeof item?.custom === 'string' ? item.custom : ''
-          throw new Error(feedback === ''
-            ? 'The user chose to keep planning; revise the plan and present it again.'
-            : 'The user chose to keep planning; their feedback: ' + feedback)
+          throw new PlanModeError(
+            feedback === ''
+              ? 'The user chose to keep planning; revise the plan and present it again.'
+              : 'The user chose to keep planning; their feedback: ' + feedback,
+            'PLAN_REVISION_REQUESTED',
+          )
         }
         // 本批工具调用余下步骤仍要看到计划指引：静默选择在下一个被接受的 pre-step
         // 之前落日志（工具结果已经讲清了切换，所以不再补通知）。

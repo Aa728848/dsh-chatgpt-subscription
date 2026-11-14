@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { apply } from '../src/entry-codemode.ts'
+import { PTC_IMAGE_TAG, PtcImageLike, SandboxEscalationError } from '../src/host/codemode/transport.ts'
 
 /** 一个按内核契约校验「必须先 resolve」的假运行时。 */
 function kernelRuntime(seen: { spec?: Record<string, unknown>; policyRequest?: Record<string, unknown> }[], deployment = 'read-only') {
@@ -42,6 +43,8 @@ function createContext(options: {
   sandboxPolicy?: unknown
   workingDirectory?: unknown
   approval?: unknown
+  attachments?: unknown
+  fs?: unknown
   execute?: (input: unknown) => Promise<unknown>
   waterfall?: unknown
   exposeExecutor?: boolean
@@ -54,6 +57,8 @@ function createContext(options: {
   if (options.sandboxPolicy !== undefined) services['sandboxPolicy'] = options.sandboxPolicy
   if (options.workingDirectory !== undefined) services['workingDirectory'] = options.workingDirectory
   if (options.approval !== undefined) services['approval'] = options.approval
+  if (options.attachments !== undefined) services['attachments'] = options.attachments
+  if (options.fs !== undefined) services['fs'] = options.fs
   const tools: Record<string, unknown> = {
     register(definition: { name: string }) {
       registered.push(definition as never)
@@ -101,6 +106,8 @@ function mount(options: {
   sandboxPolicy?: unknown
   workingDirectory?: unknown
   approval?: unknown
+  attachments?: unknown
+  fs?: unknown
 }) {
   const { registered } = createContext(options)
   const definition = registered.find((entry) => entry.name === 'code_run')
@@ -280,5 +287,158 @@ describe('Code Mode 入口的会话授权', () => {
     const fallback = events.filter((event) => event.type === 'tool/ptc-dispatch')
     expect(fallback).toHaveLength(1)
     expect(fallback[0]!.data['content']).toEqual([{ type: 'text', text: 'body' }])
+  })
+
+  it('cua 截图（无路径字段）通过 3 参数 resolveImageAttachmentAccess(attachments, mapHostPath, ref) 构造 PtcImageLike', async () => {
+    const imgRef = {
+      kind: 'image-attachment' as const,
+      attachmentId: 'sha256:cua_shot_1',
+      mediaType: 'image/png' as const,
+      width: 1280,
+      height: 720,
+      byteLength: 4096,
+    }
+    const receivedImages: unknown[] = []
+    let inspectOutput = true
+    const hostSeenPaths: string[] = []
+    const runtime = {
+      language: 'typescript',
+      programFormat: 'scoped-repl',
+      executionInstructions: 'Use inspect(...values) to display output. Do not use console.',
+      resolve: (request: Record<string, unknown>) => ({
+        ...request,
+        sandboxPolicy: request['sandboxPolicy'] ?? { mode: 'read-only' },
+      }),
+      async run(spec: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+        const cua = spec.bindings[0]!.functions['cua']!
+        const img = await cua({ action: 'screenshot' })
+        receivedImages.push(img)
+        return inspectOutput
+          ? { output: [{ type: 'image' as const, attachment: imgRef }] }
+          : { output: [] }
+      },
+    }
+    const { registered, executor } = createContext({
+      runtime,
+      exposeExecutor: true,
+      attachments: {
+        imageHostPath: (ref: { attachmentId: string }) => {
+          hostSeenPaths.push(ref.attachmentId)
+          return 'C:/dsh-home/attachments/cua_shot_1.png'
+        },
+      },
+      fs: {
+        processPathFromHostPath: (hostPath: string) =>
+          hostPath.replace('C:/dsh-home/attachments', '/sandbox/attachments'),
+      },
+      execute: async () => ({
+        results: [{
+          callId: 'sub-1',
+          // cua 返回没有 path 字段，也没有 file_path 入参
+          result: { isError: false, value: { ok: true }, content: [{ type: 'image', attachment: imgRef }] },
+        }],
+      }),
+    })
+    const describe = (executor as { describe(tools: readonly unknown[]): unknown }).describe.bind(executor)
+    describe([{ name: 'cua', description: 'computer use', parameters: {} }])
+    const codeRun = registered.find((entry) => entry.name === 'code_run')!
+    const deferred: unknown[] = []
+
+    await codeRun.execute(
+      { code: 'const shot = await tools.cua({ action: "screenshot" }); inspect(shot)', description: 'cua image' },
+      { callId: 'c-cua-1', signal: new AbortController().signal, agent: { session }, deferContext: (msg: unknown) => deferred.push(msg) },
+    )
+    expect(hostSeenPaths).toEqual(['sha256:cua_shot_1'])
+    expect(receivedImages).toHaveLength(1)
+    const imageHandle = receivedImages[0] as PtcImageLike
+    expect(imageHandle).toBeInstanceOf(PtcImageLike)
+    expect((imageHandle as unknown as Record<symbol, unknown>)[PTC_IMAGE_TAG]).toBe(true)
+    expect(imageHandle.path).toBe('/sandbox/attachments/cua_shot_1.png')
+    expect(imageHandle.width).toBe(1280)
+    expect(imageHandle.height).toBe(720)
+    // 已被 inspect 显式输出的图片不再通过 deferContext 重复注入
+    expect(deferred).toEqual([])
+
+    inspectOutput = false
+    await codeRun.execute(
+      { code: 'await tools.cua({ action: "screenshot" })', description: 'cua forgot inspect' },
+      { callId: 'c-cua-2', signal: new AbortController().signal, agent: { session }, deferContext: (msg: unknown) => deferred.push(msg) },
+    )
+    // 程序拿到了一等公民 PtcImageLike 但漏了 inspect，兜底通过 deferContext 补发给下一轮
+    expect(deferred).toHaveLength(1)
+  })
+
+  it('escalateSandbox 抛出对齐上游的 SandboxEscalationError 结构化错误码', async () => {
+    let decision: 'rejected' | 'cancelled' | 'unavailable' = 'rejected'
+    const standing = { mode: 'workspace-write', workspaceRoot: 'C:/work' }
+    const makeRuntime = () => ({
+      language: 'typescript',
+      programFormat: 'scoped-repl',
+      sandboxMode: 'workspace-write',
+      resolve: (request: Record<string, unknown>) => ({ ...request, sandboxPolicy: request['sandboxPolicy'] ?? standing }),
+      async run() { return { output: [] } },
+    })
+
+    // 1. 缺 approval 服务 -> SANDBOX_ESCALATION_UNAVAILABLE
+    const noApproval = mount({
+      runtime: makeRuntime(),
+      sandboxPolicy: { resolve: () => standing },
+    })
+    await expect(noApproval.execute({
+      code: '1',
+      description: 'no approval',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'need write',
+    }, exec())).rejects.toMatchObject({
+      name: 'SandboxEscalationError',
+      code: 'SANDBOX_ESCALATION_UNAVAILABLE',
+    })
+
+    // 2. 非严格加宽 -> SANDBOX_ESCALATION_INVALID_ARGUMENT
+    const withApproval = mount({
+      runtime: makeRuntime(),
+      sandboxPolicy: { resolve: () => standing },
+      approval: { async request() { return decision } },
+    })
+    await expect(withApproval.execute({
+      code: '1',
+      description: 'not wider',
+      sandbox_permissions: 'workspace-write',
+      justification: 'need write',
+    }, { callId: 'call-same', signal: new AbortController().signal, agent: { session } })).resolves.toMatchObject({ logs: [] })
+
+    // read-only 下允许提权，workspace-write 下传未知目标由 validateEscalationArgs 拒绝
+    await expect(withApproval.execute({
+      code: '1',
+      description: 'bad mode',
+      sandbox_permissions: 'read-only',
+      justification: 'downgrade',
+    }, exec())).rejects.toSatisfy((err: unknown) =>
+      err instanceof SandboxEscalationError && err.code === 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
+
+    // 3. rejected / cancelled / unavailable -> 各自精确错误码
+    decision = 'rejected'
+    await expect(withApproval.execute({
+      code: '1',
+      description: 'rejected',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'need full',
+    }, exec())).rejects.toMatchObject({ name: 'SandboxEscalationError', code: 'SANDBOX_ESCALATION_REJECTED' })
+
+    decision = 'cancelled'
+    await expect(withApproval.execute({
+      code: '1',
+      description: 'cancelled',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'need full',
+    }, exec())).rejects.toMatchObject({ name: 'SandboxEscalationError', code: 'SANDBOX_ESCALATION_CANCELLED' })
+
+    decision = 'unavailable'
+    await expect(withApproval.execute({
+      code: '1',
+      description: 'unavailable',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'need full',
+    }, exec())).rejects.toMatchObject({ name: 'SandboxEscalationError', code: 'SANDBOX_ESCALATION_UNAVAILABLE' })
   })
 })

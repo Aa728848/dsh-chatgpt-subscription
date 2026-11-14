@@ -12,13 +12,17 @@
  */
 import {
   EMPTY_RESPONSE_CODE,
-  LlmError,
   ToolCallId,
   type ContentBlock,
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock as CompatContentBlock, GenerateOptions, Message } from '../common/llm-compat.ts'
+import {
+  LlmError,
+  type ContentBlock as CompatContentBlock,
+  type GenerateOptions,
+  type Message,
+} from '../common/llm-compat.ts'
 import {
   imageBlockToInline,
   unavailableImageText,

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError } from '../common/llm-compat.ts'
 import type {
   WorkBuddyAccount,
   WorkBuddyAccountQuota,

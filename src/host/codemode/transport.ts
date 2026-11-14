@@ -77,8 +77,8 @@ export class ToolCallLimitExceededError extends Error {
  * 程序运行自身失败时抛出的结构化错误（对齐内核 `CodeRunFailedError`，`code: 'CODE_RUN_FAILED'`）。
  */
 export class CodeRunFailedError extends HarnessError {
-  constructor(message: string) {
-    super(message, 'CODE_RUN_FAILED')
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, 'CODE_RUN_FAILED', options)
     this.name = 'CodeRunFailedError'
   }
 }
@@ -90,6 +90,49 @@ export class CodeResetFailedError extends HarnessError {
   constructor(message: string) {
     super(message, 'CODE_RESET_FAILED')
     this.name = 'CodeResetFailedError'
+  }
+}
+
+/**
+ * Code Mode 参数校验失败（对齐 `@deepseek-ai/dsh-tools` 的 `ToolArgsError`，`code: 'INVALID_ARGS'`）。
+ */
+export class CodemodeArgsError extends HarnessError {
+  readonly violations: readonly string[]
+
+  constructor(message: string) {
+    super(message, 'INVALID_ARGS')
+    this.name = 'ToolArgsError'
+    this.violations = [message]
+  }
+}
+
+/**
+ * Code Mode 缺少必须宿主上下文时抛出的结构化错误（对齐 `@deepseek-ai/dsh-tools` 的 `ToolContextUnavailableError`）。
+ */
+export class CodemodeContextUnavailableError extends HarnessError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, 'TOOL_CONTEXT_UNAVAILABLE', options)
+    this.name = 'ToolContextUnavailableError'
+  }
+}
+
+/** 沙箱提权结构化错误码（对齐 `@deepseek-ai/dsh-sandbox` 的 `SandboxEscalationErrorCode`）。 */
+export type SandboxEscalationErrorCode =
+  | 'SANDBOX_ESCALATION_INVALID_ARGUMENT'
+  | 'SANDBOX_ESCALATION_UNAVAILABLE'
+  | 'SANDBOX_ESCALATION_REJECTED'
+  | 'SANDBOX_ESCALATION_CANCELLED'
+
+/**
+ * 单次沙箱提权未获准时抛出的结构化错误（对齐 `@deepseek-ai/dsh-sandbox` 的 `SandboxEscalationError`）。
+ */
+export class SandboxEscalationError extends HarnessError {
+  override readonly code: SandboxEscalationErrorCode
+
+  constructor(message: string, code: SandboxEscalationErrorCode) {
+    super(message, code)
+    this.name = 'SandboxEscalationError'
+    this.code = code
   }
 }
 
@@ -595,11 +638,18 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
       const input = readArguments(args)
       const runtime = host.runtime()
       if (runtime === undefined) {
-        throw new Error('codemode: no PTC runtime is mounted (ctx.ptcRuntime); the program transport is unavailable')
+        throw new CodemodeContextUnavailableError('codemode: no PTC runtime is mounted (ctx.ptcRuntime); the program transport is unavailable')
       }
       if (input.timeoutMs !== undefined && runtime.timeout !== undefined === false && isStrictTimeoutUnsupported(runtime)) {
-        throw new Error('timeoutMs is not available for this PTC runtime')
+        throw new CodemodeArgsError('timeoutMs is not available for this PTC runtime')
       }
+      const hasRawEscalation = input.rawSandboxPermissions !== undefined || input.rawJustification !== undefined
+      if (hasRawEscalation && isStrictSandboxUnsupported(runtime)) {
+        throw new CodemodeArgsError('sandbox_permissions and justification are not available for this PTC runtime')
+      }
+      const prevalidatedEscalation = hasRawEscalation && runtime.sandboxMode !== undefined
+        ? validateEscalationArgs(input.rawSandboxPermissions, input.rawJustification)
+        : undefined
       await host.awaitPredecessors?.(exec.agent, exec.signal)
       const catalog = host.catalog(exec.agent, exec.toolSet)
       const runController = new AbortController()
@@ -771,26 +821,29 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
           }
           let effectivePolicy = standingPolicy
           let escalated = false
-          if (input.sandboxPermissions !== undefined && input.justification !== undefined) {
+          if (hasRawEscalation) {
             if (standingPolicy === undefined || typeof host.escalateSandbox !== 'function') {
-              throw new Error('sandbox_permissions is not available for this PTC runtime')
+              throw new CodemodeArgsError('sandbox_permissions and justification are not available for this PTC runtime')
             }
-            if (approvedEscalatedMode === undefined) {
-              const nextPolicy = await host.escalateSandbox({
-                requestedMode: input.sandboxPermissions,
-                justification: input.justification,
-                standingPolicy,
-                agent: exec.agent,
-                callId: String(exec.callId),
-                toolName: runToolName,
-                signal: nestedSignal,
-              })
-              effectivePolicy = nextPolicy
-              approvedEscalatedMode = modeOfPolicy(nextPolicy) as EscalationTargetMode | undefined
-            } else if (typeof standingPolicy === 'object' && standingPolicy !== null) {
-              effectivePolicy = { ...(standingPolicy as Record<string, unknown>), mode: approvedEscalatedMode }
+            const escalation = prevalidatedEscalation ?? validateEscalationArgs(input.rawSandboxPermissions, input.rawJustification)
+            if (escalation.sandboxPermissions !== undefined && escalation.justification !== undefined) {
+              if (approvedEscalatedMode === undefined) {
+                const nextPolicy = await host.escalateSandbox({
+                  requestedMode: escalation.sandboxPermissions,
+                  justification: escalation.justification,
+                  standingPolicy,
+                  agent: exec.agent,
+                  callId: String(exec.callId),
+                  toolName: runToolName,
+                  signal: nestedSignal,
+                })
+                effectivePolicy = nextPolicy
+                approvedEscalatedMode = modeOfPolicy(nextPolicy) as EscalationTargetMode | undefined
+              } else if (typeof standingPolicy === 'object' && standingPolicy !== null) {
+                effectivePolicy = { ...(standingPolicy as Record<string, unknown>), mode: approvedEscalatedMode }
+              }
+              escalated = modeOfPolicy(effectivePolicy) !== modeOfPolicy(standingPolicy)
             }
-            escalated = modeOfPolicy(effectivePolicy) !== modeOfPolicy(standingPolicy)
           }
           const runMode = standingMode ?? modeOfPolicy(effectivePolicy)
           if (runMode !== undefined) {
@@ -826,11 +879,17 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             result = await attempt()
           } catch (error: unknown) {
             // 常驻环境拒绝换策略时（会话切了沙盒模式），释放后按新策略重跑一次。
-            if (!isRetainedPolicyChange(error)) throw error
+            if (!isRetainedPolicyChange(error)) {
+              rethrowClassifiedRunError(error, exec.signal, runtime)
+            }
             await host.releaseOwner(owner)
             // 重跑会重建常驻环境，owner 必须重新登记，否则新环境没人释放。
             host.stateOwner(exec.agent)
-            result = await attempt()
+            try {
+              result = await attempt()
+            } catch (retryError: unknown) {
+              rethrowClassifiedRunError(retryError, exec.signal, runtime)
+            }
           }
         } finally {
           runController.abort(runToolName + ' settled')
@@ -888,9 +947,14 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
           throw new CodeRunFailedError('program failed (' + result.error.kind + '): ' + failureText + logsText + sandboxText + hint)
         }
         const logs = extractLogsList(result)
+        // 新代 scoped-repl 若已产生显式 output（inspect / stdout / 图片），不再回传末尾隐式完成值，
+        // 避免末尾赋值语句（如状态缓存）重复输出或将巨型对象打入上下文；空 output 时保留完成值直出。
+        const effectiveValue = hasStructuredOutput && hasExplicitOutputBlocks(outputBlocks)
+          ? undefined
+          : result.value
         const output: TransportOutput = {
           logs,
-          ...(result.value === undefined ? {} : { result: result.value }),
+          ...(effectiveValue === undefined ? {} : { result: effectiveValue }),
           ...(result.sandbox === undefined
             ? {}
             : {
@@ -907,7 +971,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             inspections.set(exec, {
               blocks: renderStructuredOutputBlocks(
                 outputBlocks,
-                result.value,
+                effectiveValue,
                 output.sandbox,
                 runtime.sandboxMode,
                 runToolName,
@@ -947,6 +1011,31 @@ function safeRuntime(host: CodemodeHost): PtcRuntimeLike | undefined {
 /** 只有明确声明了 `timeout: undefined` 自身属性（而非测试假对象省略字段）才视作不支持 `timeoutMs`。 */
 function isStrictTimeoutUnsupported(runtime: PtcRuntimeLike): boolean {
   return Object.prototype.hasOwnProperty.call(runtime, 'timeout') && runtime.timeout === undefined
+}
+
+/** 判断运行时是否显式不支持单次沙箱提权参数（Python 运行时或显式声明 `sandboxMode: undefined`）。 */
+function isStrictSandboxUnsupported(runtime: PtcRuntimeLike): boolean {
+  return runtime.language === 'python'
+    || (Object.prototype.hasOwnProperty.call(runtime, 'sandboxMode') && runtime.sandboxMode === undefined)
+}
+
+/** 将 `attempt()` 阶段的底层运行异常按上游 `ptc.ts:668` 契约分类并抛出。 */
+function rethrowClassifiedRunError(error: unknown, execSignal: AbortSignal, runtime: PtcRuntimeLike): never {
+  if (error instanceof HarnessError) throw error
+  if (execSignal.aborted) {
+    const message = runtime.retainsState ? `tool call aborted: ${messageOf(error)}` : 'tool call aborted'
+    const abortError = new HarnessError(message, 'ABORTED')
+    abortError.name = 'AbortError'
+    throw abortError
+  }
+  throw new CodeRunFailedError('code run failed: ' + messageOf(error), { cause: error })
+}
+
+/** 判定结构化 `result.output` 是否已经包含显式输出（图片或非空文本）。 */
+function hasExplicitOutputBlocks(blocks: readonly PtcOutputBlock[]): boolean {
+  return blocks.some((block) =>
+    block.type === 'image' || (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0),
+  )
 }
 
 function modeOfPolicy(policy: unknown): string | undefined {
@@ -1027,14 +1116,13 @@ function renderStructuredOutputBlocks(
       out.push({ type: 'image', attachment: block.attachment })
     }
   }
-  const renderedValue = resultValue === undefined ? '' : renderProgramValue(resultValue)
+  const renderedValue = !hasExplicitOutputBlocks(blocks) && resultValue !== undefined
+    ? renderProgramValue(resultValue)
+    : ''
   if (renderedValue.length > 0) {
-    const trimmedPending = pendingText.endsWith('\n') ? pendingText.slice(0, -1) : pendingText
-    if (trimmedPending !== renderedValue) {
-      pendingText = pendingText.length === 0
-        ? renderedValue
-        : (pendingText.endsWith('\n') ? pendingText + renderedValue : pendingText + '\n' + renderedValue)
-    }
+    pendingText = pendingText.length === 0
+      ? renderedValue
+      : (pendingText.endsWith('\n') ? pendingText + renderedValue : pendingText + '\n' + renderedValue)
   }
   const sandboxNotes: string[] = []
   if (sandbox?.enforcement === 'partial') {
@@ -1218,19 +1306,19 @@ export function validateEscalationArgs(
   justification: unknown,
 ): { sandboxPermissions?: EscalationTargetMode; justification?: string } {
   if (sandboxPermissions !== undefined && justification === undefined) {
-    throw new Error('invalid escalation: sandbox_permissions requires a justification')
+    throw new SandboxEscalationError('invalid escalation: sandbox_permissions requires a justification', 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
   }
   if (justification !== undefined && sandboxPermissions === undefined) {
-    throw new Error('invalid escalation: justification is only valid together with sandbox_permissions')
+    throw new SandboxEscalationError('invalid escalation: justification is only valid together with sandbox_permissions', 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
   }
   if (sandboxPermissions === undefined && justification === undefined) {
     return {}
   }
   if (typeof sandboxPermissions !== 'string' || !(ESCALATION_TARGETS as readonly string[]).includes(sandboxPermissions)) {
-    throw new Error('invalid sandbox_permissions: expected "workspace-write" or "danger-full-access"')
+    throw new SandboxEscalationError('invalid sandbox_permissions: expected "workspace-write" or "danger-full-access"', 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
   }
   if (typeof justification !== 'string' || justification.trim().length === 0) {
-    throw new Error('invalid justification: expected a non-empty sentence')
+    throw new SandboxEscalationError('invalid justification: expected a non-empty sentence', 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
   }
   return {
     sandboxPermissions: sandboxPermissions as EscalationTargetMode,
@@ -1283,10 +1371,10 @@ interface TransportInput {
   description: string
   /** 单次运行的时间预算。 */
   timeoutMs?: number
-  /** 单次沙箱提权目标模式。 */
-  sandboxPermissions?: EscalationTargetMode
-  /** 提权理由。 */
-  justification?: string
+  /** 未经配对校验的原始 `sandbox_permissions` 入参。 */
+  rawSandboxPermissions?: unknown
+  /** 未经配对校验的原始 `justification` 入参。 */
+  rawJustification?: unknown
   /** 需要补发的进展简报。 */
   narration?: Narration
 }
@@ -1380,11 +1468,11 @@ function excerpt(text: string): string {
 /** 参数完全不成形时的错误。 */
 function invalidArgumentsError(args: unknown, raw: string, keys?: readonly string[]): Error {
   const head = 'codemode: invalid arguments: expected an object with "code" and "description"'
-  if (args === null) return new Error(head + ' (received null)')
-  if (typeof args !== 'string') return new Error(head + ' (received ' + typeof args + ')')
-  if (keys !== undefined && keys.length > 0) return new Error(head + ' (received keys: ' + keys.join(', ') + ')')
-  if (raw.trim().length === 0) return new Error(head + ' (received an empty string)')
-  return new Error(head + ' (received a string that is not a JSON object: ' + excerpt(raw) + ')')
+  if (args === null) return new CodemodeArgsError(head + ' (received null)')
+  if (typeof args !== 'string') return new CodemodeArgsError(head + ' (received ' + typeof args + ')')
+  if (keys !== undefined && keys.length > 0) return new CodemodeArgsError(head + ' (received keys: ' + keys.join(', ') + ')')
+  if (raw.trim().length === 0) return new CodemodeArgsError(head + ' (received an empty string)')
+  return new CodemodeArgsError(head + ' (received a string that is not a JSON object: ' + excerpt(raw) + ')')
 }
 
 /** 参数里没有程序源码、又不是可救形态时的错误。 */
@@ -1395,7 +1483,7 @@ function missingCodeError(record: Record<string, unknown>, raw: string): Error {
     : ' (received keys: ' + keys.join(', ')
       + (raw.trim().length > 0 ? '; raw: ' + excerpt(raw) : '')
       + '; pass program source in "code")'
-  return new Error('codemode: invalid code: expected a non-empty string' + note)
+  return new CodemodeArgsError('codemode: invalid code: expected a non-empty string' + note)
 }
 
 /** 一段文本像不像程序源码（模型把源码直接发成字符串时判这个）。 */
@@ -1466,7 +1554,7 @@ function splicedMember(text: string, key: string): string | undefined {
 
 /** 参数是「被切坏的 JSON」时的错误：说明形态，并把下一步写清楚。 */
 function damagedArgumentsError(args: unknown, raw: string): Error {
-  return new Error(invalidArgumentsError(args, raw).message
+  return new CodemodeArgsError(invalidArgumentsError(args, raw).message
     + '; the payload looks damaged (embedded tool-call markup or a truncated JSON object)'
     + ' — resend one complete call with "code" holding the program source')
 }
@@ -1584,18 +1672,20 @@ function readArguments(args: unknown): TransportInput {
     ?? stringOf(record['summary'])?.trim()
     ?? parsed.narration?.title
     ?? descriptionFromCode(code)
-  const escalation = validateEscalationArgs(record['sandbox_permissions'], record['justification'])
   const timeoutMs = record['timeoutMs']
   if (timeoutMs !== undefined) {
     if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      throw new Error('codemode: invalid timeoutMs: expected a positive finite number')
+      throw new CodemodeArgsError('codemode: invalid timeoutMs: expected a positive finite number')
     }
   }
+  const rawSandboxPermissions = record['sandbox_permissions']
+  const rawJustification = record['justification']
   return {
     code,
     description,
     ...timeoutMs === undefined ? {} : { timeoutMs },
-    ...escalation,
+    ...rawSandboxPermissions === undefined ? {} : { rawSandboxPermissions },
+    ...rawJustification === undefined ? {} : { rawJustification },
     ...parsed.narration === undefined ? {} : { narration: parsed.narration },
   }
 }

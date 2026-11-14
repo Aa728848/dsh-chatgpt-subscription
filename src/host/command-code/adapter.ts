@@ -4,7 +4,6 @@ import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-
 import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   errorChain,
   resolveRetryPolicy,
@@ -57,7 +56,7 @@ import {
   type CommandCodeStreamState,
   type InBandStreamError,
 } from './mapper.ts'
-import { normalizeGenerateOptions } from '../common/llm-compat.ts'
+import { LlmError, normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { reclassifyInBandError, reclassifyInBandResponsesError } from '../common/stream-error.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'

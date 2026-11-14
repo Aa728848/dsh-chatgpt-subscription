@@ -11,7 +11,6 @@
  */
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   resolveRetryPolicy,
   type GenerateOptions as HarnessGenerateOptions,
@@ -25,7 +24,7 @@ import {
 import { localizedProviderName } from '../common/i18n/index.ts'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import { normalizeGenerateOptions, type GenerateOptions } from '../common/llm-compat.ts'
+import { LlmError, normalizeGenerateOptions, type GenerateOptions } from '../common/llm-compat.ts'
 import { DEFAULT_EFFORTS, POOL_COOLDOWN_MS, PROVIDER_ID, PROVIDER_NAME } from './types.ts'
 import { resolveModelInfo } from './catalog.ts'
 import { openDesignVisibleModelIds } from './line.ts'

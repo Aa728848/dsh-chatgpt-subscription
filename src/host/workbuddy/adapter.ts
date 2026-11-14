@@ -4,7 +4,6 @@ import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-
 import { outputReservation } from '../common/output-reservation.ts'
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   resolveRetryPolicy,
   type GenerateOptions,
@@ -81,7 +80,7 @@ import {
   type WorkBuddyModelRouteDto,
 } from '../../shared/workbuddy-contracts.ts'
 import { requestImageTargetOrOriginal } from '../common/request-images.ts'
-import { normalizeGenerateOptions } from '../common/llm-compat.ts'
+import { LlmError, normalizeGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import type { WorkBuddyCredentials } from './token-store.ts'

@@ -4,7 +4,6 @@ import { CONTEXT_OVERFLOW_CODE, isContextOverflow, isHttpContextOverflow } from 
 import { toToolCallId } from './common/brand-compat.ts'
 
 import {
-  LlmError,
   ProviderRequestId,
   errorChain,
   type FinishReason,
@@ -19,7 +18,7 @@ import { chatGPTConcurrency, type CodexAccountPool } from './codex-account-pool.
 import { OAuthService } from './oauth-service.ts'
 import { buildResponsesPayload, withoutCodexToolChanges, type LocalRawImageOptions } from './responses-mapper.ts'
 import { disableCodexToolUpdate } from './model-catalog.ts'
-import { normalizeGenerateOptions } from './common/llm-compat.ts'
+import { LlmError, normalizeGenerateOptions } from './common/llm-compat.ts'
 import { withStaticPrefixOrdering } from './common/prefix-stability.ts'
 import { promptCachePolicyOf, type PromptCacheOverride } from './common/prompt-cache-policy.ts'
 import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from './common/prefix-request-coordinator.ts'

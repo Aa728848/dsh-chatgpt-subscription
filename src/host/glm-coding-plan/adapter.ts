@@ -23,7 +23,6 @@
 
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   resolveRetryPolicy,
   type GenerateOptions,
@@ -39,7 +38,11 @@ import { localizedProviderName } from '../common/i18n/index.ts'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { outputReservation } from '../common/output-reservation.ts'
-import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
+import {
+  LlmError,
+  normalizeGenerateOptions,
+  type GenerateOptions as NormalizedGenerateOptions,
+} from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import { retryAfterMs } from '../wire-auth.ts'
 import {

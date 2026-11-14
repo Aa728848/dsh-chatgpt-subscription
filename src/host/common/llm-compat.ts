@@ -16,19 +16,37 @@
  * @module dsh-chatgpt-subscription/llm-compat
  */
 
-import type {
-  ContentBlock as HarnessContentBlock,
-  GenerateOptions as HarnessGenerateOptions,
-  ToolSchema as HarnessToolSchema,
+import {
+  LlmError as HarnessLlmError,
+  type ContentBlock as HarnessContentBlock,
+  type GenerateOptions as HarnessGenerateOptions,
+  type ToolSchema as HarnessToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm/message'
 
 export {
-  LlmError,
   type FinishReason,
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+
+export type LlmErrorOptionsCompat = ConstructorParameters<typeof HarnessLlmError>[2]
+
+export interface LlmErrorConstructorCompat {
+  new (message: string, code: string, options?: LlmErrorOptionsCompat): HarnessLlmError
+  readonly prototype: HarnessLlmError
+}
+
+export type LlmError = HarnessLlmError
+
+/**
+ * `@deepseek-ai/dsh-llm@0.2.2-rc.3` 将 `new LlmError(msg, code, options)` 的第 2 参数收窄为
+ * `BuiltinLlmFailureCode`，但运行时构造函数与 `LlmFailure.code` 仍接受任意非空字符串，
+ * 且插件各线路长期使用 `PROVIDER_ERROR` / `UPSTREAM` 等自定义码。这里保持同一运行时引用，
+ * 仅在编译期将 `code` 放宽为 `string` 以同时兼容全世代 harness。
+ */
+export const LlmError: LlmErrorConstructorCompat =
+  HarnessLlmError as unknown as LlmErrorConstructorCompat
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {

@@ -25,7 +25,6 @@
 
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   resolveRetryPolicy,
   type GenerateOptions,
@@ -45,6 +44,7 @@ import {
   type StreamActivity,
 } from '../common/idle-watchdog.ts'
 import {
+  LlmError,
   normalizeGenerateOptions,
   type GenerateOptions as NormalizedGenerateOptions,
 } from '../common/llm-compat.ts'

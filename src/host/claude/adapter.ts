@@ -130,7 +130,6 @@ import { promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-
 import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from '../common/prefix-request-coordinator.ts'
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   resolveRetryPolicy,
   type GenerateOptions,
@@ -199,7 +198,7 @@ import {
   type ClaudeToolNames,
 } from './mapper.ts'
 import { ClaudeUnauthorizedError, ensureAccessToken, type ClaudeTokenStore } from './oauth.ts'
-import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
+import { LlmError, normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import {
   MAX_REQUEST_IMAGE_BYTES,

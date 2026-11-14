@@ -18,7 +18,6 @@ import { localizedProviderName } from '../common/i18n/index.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   resolveRetryPolicy,
   type GenerateOptions,
@@ -86,7 +85,7 @@ import {
 import { agentBaseUrl } from './types.ts'
 import { fileRef, uploadMediaFile } from './files-api.ts'
 import type { MinimaxCodeAccountPool } from './account-pool.ts'
-import { normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
+import { LlmError, normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { sharedPrefixGroupKey, withStaticPrefixOrdering } from '../common/prefix-stability.ts'
 import { promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-cache-policy.ts'
 import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from '../common/prefix-request-coordinator.ts'

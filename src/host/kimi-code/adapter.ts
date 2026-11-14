@@ -10,7 +10,6 @@ import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.t
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../common/context-overflow.ts'
 import {
   LlmAdapter,
-  LlmError,
   ReasoningEffortId,
   errorChain,
   resolveRetryPolicy,
@@ -123,6 +122,7 @@ import {
 // own: mapper.ts re-exports both, but importing a type from where it is declared
 // keeps the two media kinds symmetric and the dependency one hop shorter.
 import type { ResolvedRequestVideos } from '../common/video-request.ts'
+import { LlmError } from '../common/llm-compat.ts'
 import { orderReasoningEfforts } from '../common/reasoning-efforts.ts'
 
 /**

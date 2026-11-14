@@ -32,6 +32,7 @@ describe('结果形状索引', () => {
     expect(text).toContain('`edit` → `{ path, before, after }`')
     expect(text).toContain('`write` → `{ path, operation, before, after }`')
     expect(text).toContain('`win_bash` → `{ stdout, stderr, exitCode }`')
+    expect(text).toContain('`subagent` → `{ kind, name }`')
     // 两个「顶层就是数组」的工具必须点名，否则模型会照旧 `list.map(...)`。
     expect(text).toContain('`job_list` and `list_agents` are the only bare arrays')
   })
@@ -63,6 +64,17 @@ describe('程序文本陷阱（仅 TypeScript 形态）', () => {
     const text = section()
     expect(text).toContain("import('./src/x.ts')")
     expect(text).toContain("import('vscode')")
+  })
+
+  it('常驻 scoped-repl 形态对齐 #8275：禁早退顶层 return、声明动态 import 基准目录与顶层作用域拷贝规则且逐字节恒定', () => {
+    const first = buildCodemodeSectionText({ ...base, language: 'typescript', programFormat: 'scoped-repl' })
+    const second = buildCodemodeSectionText({ ...base, language: 'typescript', programFormat: 'scoped-repl' })
+    expect(second).toBe(first)
+    expect(first).toContain('early `return` inside `if` is a SyntaxError')
+    expect(first).toContain("await import('./src/x.ts')` resolves relative to the session's initial working directory")
+    expect(first).toContain('let x = x + 1')
+    expect(first).toContain('__$binding_*')
+    expect(first).toContain('`subagent` → `{ kind, name }`')
   })
 
   it('Python 形态换成自己的读法，且不出现 TS 专属条目', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError } from '../src/host/common/llm-compat.ts'
 import {
   inBandAnthropicStatus,
   inBandResponsesCode,
