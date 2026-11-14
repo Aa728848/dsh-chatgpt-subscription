@@ -13,6 +13,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { AntigravityAcpSection } from '../src/client/antigravity-acp/AntigravityAcpSection.tsx'
 
 const STATUS = {
+  enabled: true,
   binary: { kind: 'local-cli', path: '/usr/local/bin/agy', version: '1.5.3' },
   auth: { authenticated: true, method: 'oauth-personal', tier: { id: 't', name: 'Google AI Ultra' } },
   models: [
@@ -82,6 +83,24 @@ describe('AntigravityAcpSection', () => {
     const text = container.textContent ?? ''
     expect(text).toContain('记录并继续')
     expect(text).toContain('立即取消整轮')
+  })
+
+  it('does not claim a sign-in state it never checked while the line is off', async () => {
+    // The disabled status omits the probe entirely, so `authenticated: false` there
+    // means "not asked", not "signed out". A red signed-out badge would be a claim
+    // the host never made.
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      ok: true,
+      value: { ...STATUS, enabled: false, binary: { kind: 'missing' }, auth: { authenticated: false }, models: [] },
+    })))
+    await act(async () => root.render(createElement(AntigravityAcpSection, {})))
+    const text = container.textContent ?? ''
+    expect(text).toContain('线路已停用，未查询登录状态')
+    expect(text).not.toContain('未登录')
+    // The runtime row is the same story: the executable was never resolved, so
+    // "not found" would be a diagnostic nobody ran.
+    expect(text).toContain('线路已停用，未检测运行环境')
+    expect(text).not.toContain('未找到可用的 agy')
   })
 
   it('states the ACP boundaries rather than leaving the user to discover them', async () => {

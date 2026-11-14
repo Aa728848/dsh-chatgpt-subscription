@@ -25,6 +25,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { LlmError } from '../common/llm-compat.ts'
 import type { ContentBlock } from '../common/llm-compat.ts'
 import { AcpClient, type AcpClientHandlers } from './acp-client.ts'
 import type { AcpLaunch } from './adapter.ts'
@@ -133,8 +134,18 @@ export function createProvider(options: AntigravityAcpSubagentOptions): Antigrav
     capabilities: { agentOptions: false, agentPreset: false, outputSchema: false, depthLimit: false },
     inheritsParentContext: false,
     async start(request): Promise<AntigravitySubagentRun> {
-      const launch = await options.resolveLaunch()
+      // The registry outlives the switch: a provider is registered once, while
+      // `enabled` is a setting the user can flip at any time and the host offers no
+      // per-start gate of its own. Without this check a switched-off line would
+      // still spawn the official agent for every delegated task.
       const settings = await options.settings.read()
+      if (!settings.enabled) {
+        throw new LlmError(
+          'The Antigravity (ACP) line is switched off. Enable it in the subscription overview before delegating to it.',
+          'ACP_DISABLED',
+        )
+      }
+      const launch = await options.resolveLaunch()
       const task = promptText(request.prompt)
       let settled = false
       const running = startRun(launch, request.cwd, task, settings.permissionPolicy, options, request.signal)

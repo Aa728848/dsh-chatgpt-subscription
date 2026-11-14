@@ -361,9 +361,13 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   }
 
   async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const view = await this.options.loadCatalog().catch(() => undefined)
+    // The switch is read first, like every other line in this repository: a line
+    // the user switched off must not spawn the agent just to answer with an empty
+    // list. Reading the catalogue first meant a disabled line still paid a whole
+    // `agy` process on every picker refresh.
     const settings = await this.options.settings.read()
     if (!settings.enabled) return []
+    const view = await this.options.loadCatalog().catch(() => undefined)
     return this.visibleModels(view?.models ?? [], settings).map((model) => toModelInfo(provider, model))
   }
 

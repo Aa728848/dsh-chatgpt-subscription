@@ -66,6 +66,52 @@ describe('readStatus', () => {
     }
   })
 
+  it('answers a disabled line from settings alone, without resolving or probing anything', async () => {
+    // The hub overview and the composer badge poll this route; a line the user
+    // switched off must not launch `agy` behind their back just to decorate a card.
+    const harness = options({
+      resolveBinary: async () => {
+        throw new Error('a disabled line must not resolve the executable')
+      },
+      auth: async () => {
+        throw new Error('a disabled line must not probe the sign-in')
+      },
+    })
+    try {
+      await harness.options.settings.update({ enabled: false })
+      const status = await readStatus(harness.options as never)
+      expect(status.enabled).toBe(false)
+      expect(status.binary).toEqual({ kind: 'missing' })
+      expect(status.auth).toEqual({ authenticated: false })
+      expect(status.models).toEqual([])
+      expect(status.catalogSynced).toBe(false)
+      // The user's own choices are still reported, so the card renders the switch
+      // and the selection it will apply once it is switched back on.
+      expect(status.permissionPolicy).toBe('allow')
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  it('reports the switch as off while the probe is still in flight elsewhere', async () => {
+    // The card must never render a disabled line as "signed in, 3 models": the
+    // switch is the user's statement about the line, and every other field is a
+    // fact about a process that is not running.
+    const harness = options()
+    try {
+      const enabledStatus = await readStatus(harness.options as never)
+      expect(enabledStatus.enabled).toBe(true)
+      expect(enabledStatus.auth.authenticated).toBe(true)
+      await harness.options.settings.update({ enabled: false })
+      const disabledStatus = await readStatus(harness.options as never)
+      expect(disabledStatus.enabled).toBe(false)
+      expect(disabledStatus.auth.authenticated).toBe(false)
+      expect(disabledStatus.models).toEqual([])
+    } finally {
+      harness.dispose()
+    }
+  })
+
   it('surfaces a route conflict without hiding the rest of the card', async () => {
     const harness = options({ conflict: () => 'route already owned' })
     try {

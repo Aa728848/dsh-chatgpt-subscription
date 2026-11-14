@@ -49,7 +49,7 @@
 > **合规与风险提示**：
 > - `claude-subscription` 通过订阅 OAuth 凭据模拟官方 CLI 身份转发请求，与 Anthropic 现行服务条款存在冲突，未获官方授权，存在账号被限制或封禁的风险。
 > - `workbuddy-subscription`、`qoder` 等线路部分依赖非公开或逆向协议契约；`step-code` 额度面板使用非公开开发者中心接口（与对话请求完全隔离）。
-> - **`antigravity-acp` 的合规风险不是技术风险，而是条款风险**：它运行的是 Google 官方 `agy` 与其官方 ACP 服务器（协议、凭据、网络全部由官方程序负责，与旧的逆向 `antigravity` 线路有本质区别），但 Google 的 Antigravity FAQ 明确写着：*使用第三方软件、工具或服务访问 Antigravity 违反其服务条款*，且 *把 `agy` 包在第三方编码 Agent/应用中、或自动化账号轮换，在消费者套餐下不受支持*，可能导致账号被暂停或终止。Google 同时公开推荐了 ACP 接入编辑器的方式，两者之间存在解释空间。**默认关闭该线路**；是否启用由使用者自行判断并承担账号风险。Gemini Enterprise / AI Studio API Key 是 Google 官方指引中风险最低的替代路径。
+> - **`antigravity-acp` 的合规风险不是技术风险，而是条款风险**：它运行的是 Google 官方 `agy` 与其官方 ACP 服务器（协议、凭据、网络全部由官方程序负责，与旧的逆向 `antigravity` 线路有本质区别），但 Google 的 Antigravity FAQ 明确写着：*使用第三方软件、工具或服务访问 Antigravity 违反其服务条款*，且 *把 `agy` 包在第三方编码 Agent/应用中、或自动化账号轮换，在消费者套餐下不受支持*，可能导致账号被暂停或终止。Google 同时公开推荐了 ACP 接入编辑器的方式，两者之间存在解释空间。**该线路默认启用**，可在「订阅服务」总览页的卡片上随时关闭（关闭后不再启动 `agy`、不再出现在模型选择器，子代理也拒绝委派）；是否继续使用由使用者自行判断并承担账号风险。Gemini Enterprise / AI Studio API Key 是 Google 官方指引中风险最低的替代路径。
 > - 各线路详细的鉴权细节、验证置信度分档与宿主 API 路由请参阅 **[供应线路完整指南（docs/providers.md）](docs/providers.md)**。
 
 ---

@@ -147,6 +147,31 @@ describe('AntigravityAcpAdapter', () => {
     }
   })
 
+  it('reads the switch before it spawns the agent, so a disabled line costs nothing', async () => {
+    let catalogReads = 0
+    const harness = adapterHarness({
+      loadCatalog: async () => {
+        catalogReads += 1
+        return { models: [{ id: 'gemini-4-carbon', name: 'Gemini 4 Carbon', efforts: [] }], synced: true }
+      },
+    })
+    try {
+      // Before the fix the catalogue was read first: a line the user had switched
+      // off still resolved the executable and spawned `agy` for every picker
+      // refresh, then threw the answer away.
+      await harness.settings.update({ enabled: false })
+      expect(await harness.adapter.listModels('antigravity-acp')).toEqual([])
+      expect(catalogReads).toBe(0)
+      // ...and the same line asks for it once it is switched back on.
+      await harness.settings.update({ enabled: true })
+      expect(await harness.adapter.listModels('antigravity-acp')).toHaveLength(1)
+      expect(catalogReads).toBe(1)
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
   it('maps max_tokens to the harness length reason', async () => {
     const harness = adapterHarness({
       spawnClient: undefined,

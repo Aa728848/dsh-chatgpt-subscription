@@ -65,6 +65,12 @@ export interface AntigravityAcpRouteOptions {
 /** Build the status payload the card renders. */
 export async function readStatus(options: AntigravityAcpRouteOptions): Promise<AntigravityAcpStatusDto> {
   const settings = await options.settings.read()
+  // A line the user switched off answers from the settings document alone. The
+  // hub overview polls this route for every card on the settings page, and the
+  // composer badge polls it every minute; resolving the executable and probing the
+  // sign-in costs a whole `agy` process each time, which meant "switched off"
+  // still launched the official CLI behind the user's back.
+  if (!settings.enabled) return disabledStatus(settings)
   const resolved: { binary?: ResolvedAcpBinary; error?: string } = await options.resolveBinary()
     .catch((): { binary?: ResolvedAcpBinary; error?: string } => ({ error: 'The executable could not be resolved.' }))
   const catalog = await options.catalog.rehydrate()
@@ -98,6 +104,33 @@ export async function readStatus(options: AntigravityAcpRouteOptions): Promise<A
     ...(options.usage() === undefined ? {} : { usage: options.usage() }),
     ...(options.occupancy?.() === undefined ? {} : { occupancy: options.occupancy() }),
     ...(conflict === null ? {} : { routeConflict: conflict }),
+  }
+}
+
+/**
+ * The whole status payload for a line the user switched off.
+ *
+ * Deliberately answered without touching the agent: the executable is not
+ * resolved, the sign-in is not probed and the catalogue snapshot is not read, so
+ * a disabled line costs nothing but one file read. The model rows are kept as an
+ * empty list rather than the cached catalogue on purpose - a card that still
+ * lists models while the line is off reads as "available but hidden", which is
+ * exactly the claim the switch is meant to make false.
+ *
+ * @param settings - The line's stored preferences.
+ * @returns A status with nothing running and the switch reported as off.
+ */
+function disabledStatus(settings: AntigravityAcpSettings): AntigravityAcpStatusDto {
+  return {
+    enabled: false,
+    binary: { kind: 'missing' },
+    auth: { authenticated: false },
+    models: [],
+    enabledModelIds: settings.enabledModelIds,
+    defaultReasoningEffort: settings.defaultReasoningEffort,
+    permissionPolicy: settings.permissionPolicy,
+    nativeToolPolicy: settings.nativeToolPolicy,
+    catalogSynced: false,
   }
 }
 

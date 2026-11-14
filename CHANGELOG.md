@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **[antigravity-acp / 停用即静默] 关掉开关后不再拉起 `agy`：模型目录、状态接口、订阅卡与子代理四处补齐门禁**
+  - **问题**：`enabled: false` 原本只挡住 `listModels` 的返回值，却挡不住副作用——`listModels` 先读目录再判开关，状态接口每次都解析可执行文件并探测登录，订阅总览卡与输入框胶囊定时轮询同一条路由，子代理后端则完全没有 `enabled` 判断。用户把线路关掉之后，`agy` 仍会在每次页面渲染、每次选择器刷新、每次委派时被拉起，一次登录探测就是一个完整进程加一次 `session/new`。
+  - **改法**：`listModels` 先读开关再读目录（与 Kimi/Ollama 同序）；`readStatus` 增加停用快路径，只回答设置文档本身，不解析可执行文件、不探测登录、不读目录快照；hub 总览卡的 `read` 同样在探测前返回；子代理 `start()` 在停用时以 `ACP_DISABLED` 拒绝，且在解析可执行文件之前。
+  - **卡片文案**：停用后不再显示红色「未登录」与「未找到可用的 agy」——这两个诊断都从未执行过。改为中性文案「线路已停用，未查询登录状态 / 未检测运行环境」，中英俄三语齐备。
+  - **文档纠错**：README、`docs/providers.md`、`docs/antigravity-acp-line-plan.md` 与 CHANGELOG 0.72.0 条目四处都把这条线路描述成出厂即停用（`enabled: false`、须显式打开），与代码及 `test/antigravity-acp-default-state.test.ts` 的 `enabled === true` 断言直接矛盾（首次提交 `4414123` 起就一直是 `true`）。四处统一改为「默认启用、可随时关闭」，并新增文档守卫用例：任何提到 `antigravity-acp` 的段落不得再出现该停用表述。
+  - **验证**：`npm run typecheck` 三工程全绿；全量 Vitest **381 文件通过 / 3 跳过（6844 例通过 / 10 跳过 / 0 失败）**；`npm run build` 通过并复核构建产物（`listModels` 已先读开关、`ACP_DISABLED` 已打包）。新增 6 条守护用例：停用时不读目录、不解析可执行文件、不探测登录、子代理拒绝委派、卡片不谎报状态、文档不再把这条线路写成出厂停用。
+
+- **[timeline-cache-guard / 新守卫] 冻结实验性 Timeline 插件的规划段与任务工具描述，避免中途改语言/写作提示词刷掉整段前缀缓存**
+  - Timeline 插件把 `language` / `uiLanguage` 拼进 `timeline:planning` 系统段，把自定义 `taskPrompt` 挂在 `timeline_tasks` 的描述 getter 上，两者都是 volatile。Kimi Code 与 MiniMax Code 未声明 `systemPromptUpdate: 'in-history'`（协议面只有一个头部 system 槽位），系统段一改就是整段前缀重建。
+  - 守卫按会话冻结首次装配到的正文，后续变更改为**尾部用户消息**投递一次；同时在 `tools.definitions` 层冻结该工具描述。只对名单内线路生效，未安装 Timeline 时只记一条 warn。开关 `timelineCacheGuard` 默认开启、volatile 热生效。
+
+- **[kimi-code / 前缀缓存] 带前缀的辅助请求不再换号、不再污染漂移快照**
+  - Timeline 定时报告与压缩摘要都携带会话自己的 system prompt 与历史，必须跟随持有该前缀的账号；只有无工具的标题请求没有需要保护的前缀。
+  - 辅助请求同时停止读写前缀漂移快照：它们缺失的工具表原本会被记成一次「tools」重建，再在下一次主轮被重复归因。
+
+- **[tool-result-pruner / 可观测性] 守卫裹不到 pruner 时记一条可操作告警**
+  - 跨 realm 的守卫是一层纯旁路：当 pruner 位于它看不见的 realm 时，它静默不做任何事，而 kimi-code 的历史照常被裁剪、每轮重建缓存前缀。现在连续三个 agent 事件没有一次包住实例，就记一条告警。
+
 ## 0.74.1 - 2026-11-14
 
 - **[antigravity-acp / 修复 #109] 跨轮复用 ACP 会话：每条用户消息不再新开 conversation 并全量重放历史**
@@ -67,7 +85,7 @@
   - **可执行文件**：优先本机 `agy`，缺失时按官方 ACP Registry 的固定版本与 sha256 下载到 `<DSH_HOME>/cache/antigravity-acp/`；拒绝重定向、校验哈希、失败按名删除半成品，**不随包分发 Google 二进制**。
   - **明确不做**：不显示任何额度百分比或余额（官方不公布）；不复用旧线路的代码或凭据；不把 `agy_acp_server` 打进 npm 包。
   - **设置卡体验修复**：登录区块展示已登录/未登录徽标、已登录时按钮切换为“重新登录”并立即回显登录结果与刷新状态；长说明折叠进 `details` 面板；`readStatus` 拆分返回完整目录与已勾选模型列表，避免清空模型勾选后误显示为“从未同步目录”而隐藏勾选列表，`POST /refresh` 在上游未返回目录时报 502 可读错误。
-  - **⚠️ 条款风险与默认关闭**：Google Antigravity 官方 FAQ 明确写着「使用第三方软件、工具或服务访问 Antigravity 违反其服务条款」，且「把 `agy` 包装进第三方编码 Agent/应用、或自动化账号轮换，在消费者套餐下不受支持」，可能导致账号被暂停或终止。虽然 Google 同时公开提供 ACP 接入编辑器的文档（两者存在解释空间），且本线路运行的是官方 `agy` 与官方 ACP 服务器、不逆向协议、不读取凭据、单账号不轮换，但这些措施**不能消除条款风险**。因此本线路**默认关闭**（`enabled: false`），设置卡与 README/providers 文档均明示该风险；需要零争议时请改用 Gemini Enterprise 或 Google AI Studio API Key。
+  - **⚠️ 条款风险与默认启用**：Google Antigravity 官方 FAQ 明确写着「使用第三方软件、工具或服务访问 Antigravity 违反其服务条款」，且「把 `agy` 包装进第三方编码 Agent/应用、或自动化账号轮换，在消费者套餐下不受支持」，可能导致账号被暂停或终止。虽然 Google 同时公开提供 ACP 接入编辑器的文档（两者存在解释空间），且本线路运行的是官方 `agy` 与官方 ACP 服务器、不逆向协议、不读取凭据、单账号不轮换，但这些措施**不能消除条款风险**。因此本线路**默认启用**（`enabled: true`，与全仓其余线路一致），用户可在「订阅服务」总览卡片上一键关闭；设置卡与 README/providers 文档均明示该风险，需要零争议时请改用 Gemini Enterprise 或 Google AI Studio API Key。
   - **验证**：`npx tsc -b`、测试工程与脚本工程类型检查通过；全量 Vitest 通过；`npm run build` 与 `npm pack --dry-run`（无 Google 二进制）通过；反向对照证明 `antigravity-acp-catalog-read.test.ts` 能在错误实现下变红。真实上游探针见 `docs/antigravity-acp-line-plan.md` §3。
   - **未完成**：UI Before/After 截图对（视觉验收门禁因此未满足），以及真实 `dsh web` 会话内的完整 agent 轮次与真实子代理委派——三项都写进了线路计划的「左未验证清单」。
 
@@ -2418,3 +2436,4 @@
 ## 0.1.12 - 2026-08-20
 
 - 适配 DSH `0.1.0-rc.8`，升级依赖生态与客户端插槽声明。
+

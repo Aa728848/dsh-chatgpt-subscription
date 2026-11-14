@@ -186,11 +186,19 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
           <div className="dsha-row">
             <span className="dsha-label">{t.binarySourceLabel}</span>
             <span className="dsha-value">
-              {status.binary.kind === 'local-cli' && t.binaryKindLocal}
-              {status.binary.kind === 'configured' && t.binaryKindConfigured}
-              {status.binary.kind === 'downloaded' && t.binaryKindDownloaded}
-              {status.binary.kind === 'missing' && t.binaryKindMissing}
-              {status.binary.version !== undefined && ' · ' + status.binary.version}
+              {/* A disabled line never resolves the executable, so "not found" would
+                  be a diagnostic it never ran. The switch explains the empty row. */}
+              {status.enabled
+                ? (
+                    <>
+                      {status.binary.kind === 'local-cli' && t.binaryKindLocal}
+                      {status.binary.kind === 'configured' && t.binaryKindConfigured}
+                      {status.binary.kind === 'downloaded' && t.binaryKindDownloaded}
+                      {status.binary.kind === 'missing' && t.binaryKindMissing}
+                      {status.binary.version !== undefined && ' · ' + status.binary.version}
+                    </>
+                  )
+                : t.binaryDisabled}
             </span>
           </div>
         )}
@@ -218,7 +226,7 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
         </div>
         <details className="dshagy-details">
           <summary>{t.binaryHintSummary}</summary>
-          <p>{status?.binary.kind === 'missing' ? t.binaryMissingHint : t.binaryPathPlaceholder}</p>
+          <p>{status !== null && !status.enabled ? t.disabledHint : status?.binary.kind === 'missing' ? t.binaryMissingHint : t.binaryPathPlaceholder}</p>
         </details>
       </div>
 
@@ -236,9 +244,16 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
         <div className="dsha-row">
           <span className="dsha-label">{t.statusLabel}</span>
           <span className="dsha-value">
-            <span className={`dsha-badge ${auth?.authenticated === true ? 'active' : 'danger'}`}>
-              {auth?.authenticated === true ? t.signedIn : t.signedOut}
-            </span>
+            {/* A disabled line answers the status route without probing the official
+                CLI, so "not signed in" would be a claim nobody checked. It says so
+                instead of showing a red badge for a question it did not ask. */}
+            {status !== null && !status.enabled ? (
+              <span className="dsha-badge">{t.authDisabled}</span>
+            ) : (
+              <span className={`dsha-badge ${auth?.authenticated === true ? 'active' : 'danger'}`}>
+                {auth?.authenticated === true ? t.signedIn : t.signedOut}
+              </span>
+            )}
           </span>
         </div>
         <div className="dsha-row">

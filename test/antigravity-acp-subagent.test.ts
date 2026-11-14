@@ -78,6 +78,49 @@ describe('Antigravity subagent provider', () => {
     }
   })
 
+  it('refuses to start while the line is switched off', async () => {
+    const space = harness()
+    try {
+      const settings = (space.options as { settings: AntigravityAcpSettingsStore }).settings
+      await settings.update({ enabled: false })
+      const provider = createProvider(space.options)
+      // The registry outlives the switch, so this is the only gate between a
+      // delegated task and a spawned `agy` process on a line the user turned off.
+      await expect(provider.start({ cwd: process.cwd(), prompt: [{ type: 'text', text: 'x' }] } as never))
+        .rejects.toMatchObject({ failure: { code: 'ACP_DISABLED' } })
+      await settings.update({ enabled: true })
+      const run = await provider.start({ cwd: process.cwd(), prompt: [{ type: 'text', text: 'do the thing' }] } as never)
+      expect((await run.result).stopReason).toBe('completed')
+      await run.dispose()
+    } finally {
+      space.dispose()
+    }
+  })
+
+  it('refuses a switched-off line before it even resolves the executable', async () => {
+    // The provider cannot unregister itself from the host's registry, so a disabled
+    // line stays listed and refuses instead. What must never happen is a resolved
+    // (let alone spawned) `agy` for a task the line will not run.
+    const space = harness()
+    try {
+      const settings = (space.options as { settings: AntigravityAcpSettingsStore }).settings
+      let launches = 0
+      const provider = createProvider({
+        resolveLaunch: async () => {
+          launches += 1
+          throw new Error('a disabled line must not resolve the executable')
+        },
+        settings,
+      } as never)
+      await settings.update({ enabled: false })
+      await expect(provider.start({ cwd: process.cwd(), prompt: [{ type: 'text', text: 'x' }] } as never))
+        .rejects.toMatchObject({ failure: { code: 'ACP_DISABLED' } })
+      expect(launches).toBe(0)
+    } finally {
+      space.dispose()
+    }
+  })
+
   it('reports a start failure as an error result rather than rejecting the run', async () => {
     const space = harness()
     try {
