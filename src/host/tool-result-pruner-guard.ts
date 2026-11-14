@@ -100,7 +100,17 @@ interface HostContextLike {
   off?: (name: string, listener: Listener) => unknown
   /** 按名字取服务（不要求注入）。 */
   get?: (name: string, strict?: boolean) => unknown
+  /** 日志面（可选）：空转时的点名只走这里。 */
+  logger?: { warn?: (message: string, ...rest: unknown[]) => void }
 }
+
+/**
+ * 扫过多少次事件之后仍然一个修剪器都没包上，就点名一次。
+ *
+ * 只数「有事件、但一次都没成功」的轮次：装得太早的部署会在第一两步里补上，
+ * 连着几步还包不上就不是时序问题，而是实例真的不在守卫看得见的位置。
+ */
+const INERT_WARN_AFTER_EVENTS = 3
 
 /** 会先跑一遍扫描的宿主事件（全部是 Cordis 瀑布事件，监听器必须转交 `next()`）。 */
 const GUARDED_EVENTS: readonly string[] = ['agent/pre-step', 'agent/request', 'agent/request-error']
@@ -130,6 +140,33 @@ export function installToolResultPrunerGuard(
   /** 事件监听的 disposer。 */
   const disposers: Array<() => void> = []
   let disposed = false
+  /** 已经包上的实例数（含直接调用 `wrapPruner` 的外部调用）。 */
+  let wrappedCount = 0
+  /** 已经跑过的事件轮次。 */
+  let eventRounds = 0
+  /** 空转点名只报一次。 */
+  let inertWarned = false
+
+  /**
+   * 连跑几轮事件仍然一个实例都没包上时，点名一次。
+   *
+   * 这个守卫是纯旁路：包不上时它什么都不做、也不报错，于是部署里「修剪器在
+   * 另一层 realm、守卫根本看不见」会静默退化成「kimi-code 的历史工具结果被修剪，
+   * 前缀缓存每轮重建」。一条 warn 是唯一能把这种静默退化变成可诊断事实的通道。
+   */
+  const warnIfInert = (): void => {
+    if (inertWarned || wrappedCount > 0) return
+    if (eventRounds < INERT_WARN_AFTER_EVENTS) return
+    inertWarned = true
+    try {
+      host?.logger?.warn?.(
+        '[dsh-chatgpt-subscription] tool result pruner guard has wrapped no pruner after '
+        + eventRounds + ' agent events; prefix-cache pruning skip is inert on this deployment',
+      )
+    } catch {
+      // 日志失败不影响守卫。
+    }
+  }
 
   /**
    * 把一个修剪器实例的 `pruneSession` 包上 provider 短路。
@@ -160,6 +197,7 @@ export function installToolResultPrunerGuard(
     if (!installMethod(target, replacement)) return false
     markPatched(patchedMethods, target.holder, target.name)
     alreadyWrapped.add(pruner)
+    wrappedCount += 1
     restores.push(() => {
       restoreMethod(target)
     })
@@ -257,6 +295,7 @@ export function installToolResultPrunerGuard(
     const next = args.length > 0 && typeof args[args.length - 1] === 'function'
       ? (args[args.length - 1] as () => unknown)
       : undefined
+    eventRounds += 1
     try {
       scanAndWrap()
       const agentCtx = findAgentContext(args)
@@ -267,6 +306,7 @@ export function installToolResultPrunerGuard(
     } catch {
       // 守卫是旁路：任何一步失败都不该影响这一步本身。
     }
+    warnIfInert()
     // 瀑布的返回值必须来自 `next()`：短路会让这一步拿到 `undefined`。
     return next === undefined ? undefined : next()
   }

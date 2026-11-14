@@ -549,6 +549,42 @@ describe('宿主级跨 preset 守卫', () => {
     guard.dispose()
   })
 
+  it('一个修剪器都包不上时点名一次，而不是静默空转', () => {
+    // 修剪器实例若落在守卫看不见的 realm，短路就完全失效：kimi-code 的历史工具结果
+    // 会被修剪，前缀缓存每轮重建，而界面上没有任何信号。这条 warn 是唯一的出口。
+    const host = createFakeHost()
+    const warnings: string[] = []
+    ;(host.ctx as Record<string, unknown>)['logger'] = { warn: (message: string) => { warnings.push(message) } }
+    const guard = installToolResultPrunerGuard(host.ctx)
+
+    // 前两轮还没到阈值：装得早的部署会在这里补上实例，不该误报。
+    host.emit('agent/pre-step', { ctx: { reflect: { store: {} } } })
+    host.emit('agent/pre-step', { ctx: { reflect: { store: {} } } })
+    expect(warnings).toHaveLength(0)
+
+    host.emit('agent/pre-step', { ctx: { reflect: { store: {} } } })
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('pruner guard has wrapped no pruner')
+
+    // 只报一次。
+    host.emit('agent/pre-step', { ctx: { reflect: { store: {} } } })
+    expect(warnings).toHaveLength(1)
+    guard.dispose()
+  })
+
+  it('包上实例之后不再点名空转', () => {
+    const host = createFakeHost()
+    const warnings: string[] = []
+    ;(host.ctx as Record<string, unknown>)['logger'] = { warn: (message: string) => { warnings.push(message) } }
+    host.store[Symbol('pruner')] = { name: PRUNER_SERVICE_NAME, value: createPruner() }
+    const guard = installToolResultPrunerGuard(host.ctx)
+    for (let index = 0; index < 5; index += 1) {
+      host.emit('agent/pre-step', { ctx: { reflect: { store: {} } } })
+    }
+    expect(warnings).toHaveLength(0)
+    guard.dispose()
+  })
+
   it('kimi-code 会话被短路，非 kimi 会话原样转给底层实现', () => {
     const host = createFakeHost()
     const pruner = createPruner()
