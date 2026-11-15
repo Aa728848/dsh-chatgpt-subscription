@@ -53,6 +53,20 @@ describe('SessionCacheStateStore', () => {
     })
   })
 
+  it('keeps the write-reported flag across a reload, and reads an older record as silence', () => {
+    const store = new SessionCacheStateStore(file)
+    store.write('reported', record({ cacheWriteReported: true }))
+    store.write('silent', record({ updatedAt: NOW + 1 }))
+    store.flush()
+
+    const reopened = new SessionCacheStateStore(file)
+    expect(reopened.read('reported')?.cacheWriteReported).toBe(true)
+    // Absent is not the same fact as false: a record written before the field
+    // existed means the service never said anything, and the card must keep
+    // printing 未报告 rather than adopting a zero it never measured.
+    expect(reopened.read('silent')?.cacheWriteReported).toBeUndefined()
+  })
+
   it('answers with the most recently active conversation when none is named', () => {
     const store = new SessionCacheStateStore(file)
     store.write('older', record({ updatedAt: NOW - 10_000 }))

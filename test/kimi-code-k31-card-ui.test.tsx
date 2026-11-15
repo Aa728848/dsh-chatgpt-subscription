@@ -10,7 +10,11 @@
  *   HTTP 400, and the reason has to be on the card rather than left to the
  *   missing option;
  * - a cache-write count of zero must print as 0, because a blank cell would read
- *   as "nothing was measured".
+ *   as "nothing was measured";
+ * - a NULL total must print 未报告 instead: on this line's chat wire the service
+ *   never states a write field at all (a live probe returned only
+ *   `prompt_tokens_details.cached_tokens`), so 0 there would be a reading the
+ *   service never gave.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -280,6 +284,26 @@ describe('kimi-code K3.1 Pro card', () => {
     const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
     const writeRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWrite)
     expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe('0')
+  })
+
+  it('prints 未报告 when no request behind the total ever stated a write', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 2,
+        cachedTokens: 470_272,
+        freshTokens: 270,
+        outputTokens: 1_834,
+        hitRatio: 470_272 / 470_542,
+        // The live shape of this line's chat wire, measured with a probe: the hit
+        // is reported and the write field is absent for every single request.
+        cacheWriteTokens: null,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const writeRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWrite)
+    expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe(zh.metricNotReported)
   })
 
 

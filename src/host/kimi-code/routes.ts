@@ -351,8 +351,11 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
   const opening = openingInheritanceOf(sessionId)
   const continuation = continuationOf(sessionId)
   const lastRequest = lastRequestDiagnosticOf(sessionId)
+  // Whether a write was ever stated is an input to the card's wording, not a
+  // field of its own: the DTO says it as `cacheWriteTokens: null`.
+  const { cacheWriteReported, ...totals } = stats
   return {
-    ...stats,
+    ...totals,
     ...(lastDrift === undefined ? {} : { lastDrift }),
     ...(warmup === undefined ? {} : { warmup }),
     ...(opening === undefined ? {} : { opening }),
@@ -370,7 +373,13 @@ function cacheStatsOrNull(sessionId?: string): KimiCodeCacheStatsDto | null {
     // never states the split. All three are already rolling totals in `stats`;
     // they are named here so the DTO's write counters stay visible in one place
     // instead of two of them hiding in a spread.
-    cacheWriteTokens: stats.cacheWriteTokens,
+    //
+    // The total is null when no request behind it stated the field, because 0
+    // then describes silence rather than a reading: this line's chat wire has no
+    // write field at all, and a card that prints 0 for it claims a measurement
+    // the service never made. The tier splits stay numbers — the contract
+    // defines an absent header as silence and they are never drawn alone.
+    cacheWriteTokens: cacheWriteReported ? stats.cacheWriteTokens : null,
     cacheWrite5mTokens: stats.cacheWrite5mTokens,
     cacheWrite1hTokens: stats.cacheWrite1hTokens,
   }
@@ -427,7 +436,9 @@ function durableCacheStats(sessionId?: string): KimiCodeCacheStatsDto | null {
     freshTokens: durable.freshTokens,
     outputTokens: durable.outputTokens,
     hitRatio: hitRatioOf(durable.cachedTokens, durable.freshTokens),
-    cacheWriteTokens: durable.cacheWriteTokens,
+    // Same distinction the live path draws, read off the durable flag: older
+    // records carry none, and "unknown" must not become "zero writes".
+    cacheWriteTokens: durable.cacheWriteReported === true ? durable.cacheWriteTokens : null,
     cacheWrite5mTokens: durable.cacheWrite5mTokens,
     cacheWrite1hTokens: durable.cacheWrite1hTokens,
     ...(lastDrift === undefined ? {} : { lastDrift }),

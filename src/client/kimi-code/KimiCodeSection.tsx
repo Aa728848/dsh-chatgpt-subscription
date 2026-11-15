@@ -740,11 +740,14 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
             {/* The write side gets its own row rather than a slot in the meter:
                 a write is billed separately from a fresh prompt token, and
                 folding it into the fresh count would make the hit ratio above
-                describe something other than what it says. Zero still renders —
-                see `tokenCount`. Only the total is drawn: the 5m/1h split the
-                response headers carry is still reported by the host, but the
-                number a user acts on is the sum, and the tier wording invited
-                more questions than it answered. */}
+                describe something other than what it says. A reported zero
+                still renders as 0 (see `tokenCount`), but the host sends null
+                when no request behind the total ever stated the field — this
+                line's chat wire has no write field at all — and that prints as
+                「未报告」 instead of inventing a zero. Only the total is drawn:
+                the 5m/1h split the response headers carry is still reported by
+                the host, but the number a user acts on is the sum, and the tier
+                wording invited more questions than it answered. */}
             <div className="dsha-row">
               <span className="dsha-label">{t.cacheWrite}</span>
               <span className="dsha-value">{tokenCount(status.cache.cacheWriteTokens, t)}</span>

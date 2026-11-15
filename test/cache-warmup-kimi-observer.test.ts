@@ -229,7 +229,9 @@ describe('the Kimi cache-warmup observation', () => {
     // 'first-request' rather than a real prefix break. The two `firstRequest*`
     // fields are this turn's opening measurement; the two `lastRequest*` fields
     // are the new per-request continuation counters, with no previous baseline
-    // on a first request.
+    // on a first request. `cacheWriteReported` is set because this fixture's
+    // usage states `cache_write_tokens: 0` — an explicit zero is a reading, and
+    // the flag is what lets the card tell it from a wire that says nothing.
     expect(writeSpy.mock.calls[0]).toEqual([session, {
       lastActiveAt: expect.any(Number),
       totalTokens: 400,
@@ -240,6 +242,7 @@ describe('the Kimi cache-warmup observation', () => {
       cacheWriteTokens: 0,
       cacheWrite5mTokens: 0,
       cacheWrite1hTokens: 0,
+      cacheWriteReported: true,
       lastRequestCachedTokens: 300,
       lastRequestFreshTokens: 100,
       recentRequests: [expect.objectContaining({

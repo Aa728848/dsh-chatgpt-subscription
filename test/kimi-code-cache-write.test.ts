@@ -246,6 +246,93 @@ describe('the chat-completions wire through the adapter', () => {
   })
 })
 
+/**
+ * The two shapes the write side can take on the wire, told apart at the DTO.
+ *
+ * Measured against the live service: `/chat/completions` states
+ * `prompt_tokens_details.cached_tokens` and no write field at all, while
+ * `/v1/messages` states `cache_creation_input_tokens: 0` explicitly. Printing
+ * both as "0" is the bug these cases exist to prevent.
+ */
+describe('a reported zero versus silence', () => {
+  /** The chat-completions usage this line actually receives, verbatim. */
+  const CHAT_TURN_WITHOUT_WRITE_FIELD = [
+    { choices: [{ delta: { content: 'hi' } }] },
+    {
+      choices: [{ delta: {}, finish_reason: 'stop' }],
+      usage: {
+        prompt_tokens: 40,
+        completion_tokens: 6,
+        prompt_tokens_details: { cached_tokens: 30 },
+      },
+    },
+  ]
+
+  const catalogFetch = (async () => new Response(JSON.stringify({ data: [] }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })) as unknown as typeof fetch
+
+  it('answers null when the chat wire never stated a write', async () => {
+    const fetchFn = (async () => sseResponse(CHAT_TURN_WITHOUT_WRITE_FIELD)) as unknown as typeof fetch
+    const { adapter, store, modelSettings } = await buildAdapter({ fetchFn })
+    await drain(adapter.stream(generateOptions('k3.1-pro', { sessionId: 'sess-silent-write' })))
+
+    expect(getCacheStats('sess-silent-write')).toMatchObject({ cacheWriteTokens: 0, cacheWriteReported: false })
+    const status = await getKimiCodeWebStatus(store, modelSettings, undefined, {
+      sessionId: 'sess-silent-write',
+      fetchFn: catalogFetch,
+    })
+    // Null, not 0: the card prints 未报告 for this, and it must never be able to
+    // claim the service measured no writes.
+    expect(status.cache?.cacheWriteTokens).toBeNull()
+  })
+
+  it('keeps 0 when the Anthropic surface states the write as zero', async () => {
+    const fetchFn = (async () => sseResponse([
+      {
+        type: 'message_start',
+        message: {
+          usage: { input_tokens: 100, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        },
+      },
+      { type: 'message_stop' },
+    ])) as unknown as typeof fetch
+    const { adapter, store, modelSettings } = await buildAdapter({
+      fetchFn,
+      catalog: [{ id: 'k3.1-pro', contextWindow: 262_144, protocol: 'anthropic' }],
+    })
+    await drain(adapter.stream(generateOptions('k3.1-pro', { sessionId: 'sess-zero-write' })))
+
+    expect(getCacheStats('sess-zero-write').cacheWriteReported).toBe(true)
+    const status = await getKimiCodeWebStatus(store, modelSettings, undefined, {
+      sessionId: 'sess-zero-write',
+      fetchFn: catalogFetch,
+    })
+    // A stated zero is a reading and stays one: it prints as 0, not 未报告.
+    expect(status.cache?.cacheWriteTokens).toBe(0)
+  })
+
+  it('stays a measurement once any request behind the total stated a write', async () => {
+    // Two turns on the same session: the second is silent, the first was not.
+    // A total that flipped back to 未报告 would hide a number it already has.
+    const turns = [
+      sseResponse([{ choices: [{ delta: { content: 'a' } }] }, {
+        choices: [{ delta: {}, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 20, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 20 } },
+      }]),
+      sseResponse(CHAT_TURN_WITHOUT_WRITE_FIELD),
+    ]
+    let call = 0
+    const fetchFn = (async () => turns[Math.min(call++, turns.length - 1)]!) as unknown as typeof fetch
+    const { adapter } = await buildAdapter({ fetchFn })
+    await drain(adapter.stream(generateOptions('k3.1-pro', { sessionId: 'sess-sticky-write' })))
+    await drain(adapter.stream(generateOptions('k3.1-pro', { sessionId: 'sess-sticky-write' })))
+
+    expect(getCacheStats('sess-sticky-write')).toMatchObject({ cacheWriteTokens: 20, cacheWriteReported: true })
+  })
+})
+
 describe('the thinking gate', () => {
   it('lifts a disabled level to the model default on the chat wire', async () => {
     const bodies: Array<Record<string, unknown>> = []

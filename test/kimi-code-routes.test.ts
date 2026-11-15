@@ -418,18 +418,25 @@ describe('Kimi Code settings routes', () => {
     recordCacheStats(state, session)
     const live = fakeExchange()
     await handler(fakeRequest({ url: '/kimi-code/api/status?sessionId=' + session }), live.response)
-    const liveCache = (live.captured.body as { value: { cache: { continuation?: unknown; lastRequest?: unknown } } }).value.cache
+    const liveCache = (live.captured.body as { value: { cache: { continuation?: unknown; lastRequest?: unknown; cacheWriteTokens?: unknown } } }).value.cache
     expect(liveCache.continuation).toEqual(expected)
     expect(liveCache.lastRequest).toEqual(lastRequest)
+    // This record states no cache-write field, exactly like every record this
+    // line's chat wire produces — so the card gets null and prints 未报告 rather
+    // than a 0 the service never measured.
+    expect(liveCache.cacheWriteTokens).toBeNull()
 
     // Durable path: a restarted process has no in-memory requests, yet the
     // status route must return the same measurement from disk-backed state.
     resetCacheStats(session)
     const durable = fakeExchange()
     await handler(fakeRequest({ url: '/kimi-code/api/status?sessionId=' + session }), durable.response)
-    const durableCache = (durable.captured.body as { value: { cache: { continuation?: unknown; lastRequest?: unknown } } }).value.cache
+    const durableCache = (durable.captured.body as { value: { cache: { continuation?: unknown; lastRequest?: unknown; cacheWriteTokens?: unknown } } }).value.cache
     expect(durableCache.continuation).toEqual(expected)
     expect(durableCache.lastRequest).toEqual(lastRequest)
+    // The same answer survives a restart: a record written before the flag
+    // existed must not start claiming zero writes.
+    expect(durableCache.cacheWriteTokens).toBeNull()
   })
 
   /**

@@ -1141,6 +1141,11 @@ function noteSessionCacheState(
           ? {}
           : { firstRequestPromptTokens: priorRecord.firstRequestPromptTokens }),
       }
+  // Sticky across turns and restarts: once any request of this conversation
+  // stated a write, the totals it left behind stay measurements, so a later
+  // silent turn must not erase that. Written as an optional field so a record
+  // that never saw a reported write keeps the shape it has always had.
+  const cacheWriteReported = stats.cacheWriteReported || priorRecord?.cacheWriteReported === true
   sessionCacheState.write(sessionId, {
     lastActiveAt: now,
     totalTokens: state.cacheReadTokens + state.inputTokens + state.cacheWriteTokens,
@@ -1151,6 +1156,7 @@ function noteSessionCacheState(
     cacheWriteTokens: stats.cacheWriteTokens,
     cacheWrite5mTokens: stats.cacheWrite5mTokens,
     cacheWrite1hTokens: stats.cacheWrite1hTokens,
+    ...(cacheWriteReported ? { cacheWriteReported: true } : {}),
     lastRequestCachedTokens: state.cacheReadTokens,
     lastRequestFreshTokens: state.inputTokens,
     ...accountObservation,

@@ -82,10 +82,20 @@ return { kind: 'hint', idleSeconds, totalTokens };
 上游有 `client-configs.ts`（POST `{name}` 取配置，1 天本地持久化 + `peek` 同步读缓存）。
 我们所有阈值都是硬编码常量——Kimi 改了 TTL 策略或我们算错 `min_tokens_to_hint`，都得等发版。
 
-#### 🟡 C5　`cacheWriteTokens` 恒为 0
+#### ✅ C5　`cacheWriteTokens` 恒为 0　**已按证据处理**
 
-[mapper.ts:2221](../src/host/kimi-code/mapper.ts#L2221) 注释自己写了 "always 0 on this route"，
-但字段仍被统计和上报，容易让人误以为在追踪写入成本。建议要么删掉，要么在 UI 上明确标注不适用。
+原判断：注释自述 "always 0 on this route"，字段却仍被统计和上报，容易让人误以为在追踪写入成本。
+
+**实测（真实凭据，冷/热各两次，打印原始 `usage` 与全部响应头）**：
+`/chat/completions` 的热请求只给 `prompt_tokens_details.cached_tokens`（冷请求连
+`prompt_tokens_details` 都没有），`/v1/messages` 显式给 `cache_creation_input_tokens: 0`，
+两条线路都没有 `Msh-Usage-Cache-Write-Tokens-*` 响应头。结论不是解析丢字段，而是这条线路的
+前缀缓存自动生效、写侧上游不报——真正的缺陷是「报了 0」与「从未上报」被渲染成同一个数字。
+
+**处理**：字段保留（形状与其它 provider 对齐），但两者分开：
+`KimiCodeCacheStats.cacheWriteReported` 粘性累积并落盘，DTO 的 `cacheWriteTokens` 改为
+`number | null`，`null` 在卡片渲染「未报告」；显式 0 仍渲染 0。
+探测脚本见 `scripts/probe-kimi-cache-write.probe.ts`。
 
 ---
 

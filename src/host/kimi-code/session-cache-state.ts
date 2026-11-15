@@ -55,6 +55,16 @@ export interface KimiCodeSessionCacheRecord {
   cacheWriteTokens: number
   cacheWrite5mTokens: number
   cacheWrite1hTokens: number
+  /**
+   * Whether the service ever stated a cache-write count for this conversation.
+   *
+   * Durable for the same reason the totals are: after a restart the card still
+   * has to tell "the service reported zero writes" from "the service never said
+   * anything", and this record is then the only evidence either way. Absent in
+   * records written before the field existed, which reads as silence — the
+   * conservative side, and the one that cannot invent a number.
+   */
+  cacheWriteReported?: boolean
   /** Cause attributed to the most recent request's prefix break, when there was one. */
   lastDrift?: string
   /**
@@ -294,6 +304,7 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
   const lastRequestImageBytes = nonNegative(value.lastRequestImageBytes)
   const lastDroppedImages = nonNegative(value.lastDroppedImages)
   const recentRequests = normalizeRecentRequests(value.recentRequests)
+  const cacheWriteReported = value.cacheWriteReported === true ? true : undefined
   return {
     lastActiveAt,
     updatedAt,
@@ -305,6 +316,7 @@ function normalizeRecord(value: unknown): KimiCodeSessionCacheRecord | undefined
     cacheWriteTokens: count(value.cacheWriteTokens),
     cacheWrite5mTokens: count(value.cacheWrite5mTokens),
     cacheWrite1hTokens: count(value.cacheWrite1hTokens),
+    ...(cacheWriteReported === undefined ? {} : { cacheWriteReported }),
     ...(drift === undefined ? {} : { lastDrift: drift }),
     ...(firstRequestCachedTokens === undefined ? {} : { firstRequestCachedTokens }),
     ...(firstRequestPromptTokens === undefined ? {} : { firstRequestPromptTokens }),

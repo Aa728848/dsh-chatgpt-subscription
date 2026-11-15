@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-- **[docs / 注释与契约对齐] 全面梳理并同步 README、核心参考文档、AGENTS 规范与入口 JSDoc 注释**
+- **[kimi-code / 缓存卡片] 「缓存写入」不再把「上游没上报」画成 0：区分「报了 0」与「从未上报」**
+  - **问题**：设置页缓存卡片中，「本次输入」那行诚实写着「缓存写 未报告」，而下面「缓存写入」行把同一个事实渲染成 `0`。一个累计 170 条请求、47 万命中 token 的会话里，这张卡自相矛盾，读起来就是「统计没取到」。
+  - **证据（真实探测，非推断）**：用本机凭据对 `api.kimi.com` 冷/热各发两次并打印原始 `usage` 与全部响应头——chat-completions 的热请求只有 `prompt_tokens_details.cached_tokens`（冷请求连 `prompt_tokens_details` 都没有），Anthropic 面则显式给 `cache_creation_input_tokens: 0`；两条线路都没有任何 `Msh-Usage-Cache-Write-Tokens-*` 头。即：mapper 没有丢字段，这条线路的前缀缓存自动生效，读侧有数、写侧上游根本不报。本机 durable 记录里 170 条请求的 `cacheWriteTokens` 也全是 `null`。
+  - **改法**：`KimiCodeCacheStats` 增加粘性 `cacheWriteReported`（按会话/账号累积，跨轮不回退），`noteSessionCacheState` 把它写进 durable 记录（老记录缺该字段读作「沉默」）；`KimiCodeCacheStatsDto.cacheWriteTokens` 改为 `number | null`——从未上报即 `null`，卡片沿用既有 `tokenCount(null) →「未报告」`，显式 `0`（Anthropic 面）仍原样渲染 0。5m/1h 头部分桶与其它线路的写侧形状不变。
+  - **测试**：新增 3 例（chat 线沉默 → DTO `null`；Anthropic 显式 0 → `0`；一次上报后后续沉默不回退）、卡片 UI 1 例（`null` 渲染「未报告」）、durable 记录 1 例（跨重启保留、老记录仍读作沉默）；`test/cache-warmup-kimi-observer.test.ts` 的整条记录断言补 `cacheWriteReported: true`（该 fixture 确实是显式 0）。保留一次性探测脚本 `scripts/probe-kimi-cache-write.probe.ts`，线路将来若开始上报写侧可复查。
+ 全面梳理并同步 README、核心参考文档、AGENTS 规范与入口 JSDoc 注释**
   - **跨代际版本与导出对齐**：将 `README.md`、`docs/architecture.md` 与 `src/entry-tool-result-pruner.ts` 的 DSH Harness 兼容上限统一更新为 `0.2.2-rc.3`（补充 `0.2.2-rc.3` 的 `LlmError` 错误码收窄兼容与 `resolveImageAttachmentAccess` 三参签名说明）；在 `AGENTS.md` 与 `docs/architecture.md` 补齐第 13 条线路 `antigravity-acp`、`./codemode`（`src/entry-codemode.ts` / `lib/codemode.js`）子入口导出、宿主/客户端 `codemode`、`subagent`、`dispatch-ledger` 目录结构及 16 个强类型 `LocaleNamespaceMap` 命名空间。
   - **供应线路与工具手册补全**：在 `docs/providers.md` 目录与第 1 节线路总览表补齐 `antigravity-acp`，将 OpenDesign 随包模型数量修正为 41 款（与 `MODEL_CATALOG` 对齐）；在 `README.md` 与 `docs/cache-warmup.md` 补充 `./codemode` 工具集（`code_run` / `code_tools_*`）及 `cache_warmup_result` 的 `query` 纯文本字面量定位能力；在 `docs/troubleshooting.md` 补充 `antigravity-acp` 停用（`ACP_DISABLED`）与 `agy` 可执行文件排障条目。
   - **配置、并发闸门与环境变量速查补齐**：在 `README.md` 与 `docs/configuration.md` 补齐 `cacheAffinity`、`teamPolicyCacheGuard`、`timelineCacheGuard`、`toolRunawayGuard`、`mediaTools` 配置项，以及 `DSH_KIMI_CODE_CACHE_AFFINITY`、`STEPCODE_*`、`QODER_CLI_*`、`DSH_ANTIGRAVITY_ACP_BIN` 环境变量；将 `docs/configuration.md` 与 `docs/provider-runtime-controls.md` 的 `DSH_PROVIDER_CONCURRENCY` 线路键列表与 `CONTROLLED_PROVIDERS`（13 条线路）完全对齐。

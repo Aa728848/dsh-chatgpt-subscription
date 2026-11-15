@@ -320,9 +320,17 @@ export interface KimiCodeCacheStatsDto {
    * A field of its own rather than part of the prompt totals: a cache write is
    * billed differently from a fresh prompt token, and folding it into
    * {@link freshTokens} would make the hit ratio describe something other than
-   * what it says. 0 when the service reported no write.
+   * what it says.
+   *
+   * Null means no request behind these totals ever stated the field — the same
+   * rule {@link KimiCodeRequestUsageDiagnostic.cacheWriteTokens} follows. It is
+   * the normal answer on the chat-completions wire, whose usage carries no write
+   * field at all (a live probe of this line returned only
+   * `prompt_tokens_details.cached_tokens`), so the card prints 未报告 instead of
+   * an invented 0. A real 0 is reserved for a service that stated it, which the
+   * Anthropic surface does with `cache_creation_input_tokens: 0`.
    */
-  cacheWriteTokens: number
+  cacheWriteTokens: number | null
   /**
    * Share of {@link cacheWriteTokens} the service attributed to the 5m tier.
    *

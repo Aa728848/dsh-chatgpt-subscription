@@ -3542,6 +3542,19 @@ export interface KimiCodeCacheStats {
   cacheWrite5mTokens: number
   /** Share of the writes above the service attributed to the 1h tier (headers). */
   cacheWrite1hTokens: number
+  /**
+   * Whether ANY request behind these totals stated a cache-write count.
+   *
+   * A live probe of both wires this line speaks found the write field absent
+   * rather than zero on chat-completions (`prompt_tokens_details` carries
+   * `cached_tokens` and nothing else), while the Anthropic surface states
+   * `cache_creation_input_tokens: 0` explicitly. So a zero total means one of
+   * two different things and only this flag tells them apart: "the service
+   * reported zero writes" versus "the service never answered". Rendering the
+   * second as 0 turns silence into a measurement — exactly what a cost card
+   * must not do.
+   */
+  cacheWriteReported: boolean
 }
 
 /**
@@ -3561,6 +3574,7 @@ const EMPTY_CACHE_STATS: KimiCodeCacheStats = {
   cacheWriteTokens: 0,
   cacheWrite5mTokens: 0,
   cacheWrite1hTokens: 0,
+  cacheWriteReported: false,
 }
 
 /** Record one request's usage into its own session's totals. */
@@ -3579,6 +3593,10 @@ export function recordCacheStats(state: KimiCodeStreamState, sessionId?: string,
     cacheWriteTokens: previous.cacheWriteTokens + state.cacheWriteTokens,
     cacheWrite5mTokens: previous.cacheWrite5mTokens + state.cacheWrite5mTokens,
     cacheWrite1hTokens: previous.cacheWrite1hTokens + state.cacheWrite1hTokens,
+    // Sticky for the scope: one request that stated the field makes the total a
+    // measurement from then on, and no later silent request may turn it back
+    // into "未报告" while the older reading still stands in the sum.
+    cacheWriteReported: previous.cacheWriteReported || state.cacheWriteReported,
   })
 }
 
@@ -3591,6 +3609,7 @@ function accumulate(totals: KimiCodeCacheStats, stats: KimiCodeCacheStats): void
   totals.cacheWriteTokens += stats.cacheWriteTokens
   totals.cacheWrite5mTokens += stats.cacheWrite5mTokens
   totals.cacheWrite1hTokens += stats.cacheWrite1hTokens
+  totals.cacheWriteReported = totals.cacheWriteReported || stats.cacheWriteReported
 }
 
 /**
