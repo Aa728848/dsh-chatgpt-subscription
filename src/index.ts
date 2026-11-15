@@ -294,7 +294,7 @@ export interface Config {
   progressUpdates?: Volatile<boolean>
   /** 进展更新的催促阈值：连续这么多轮带工具调用却没有进展更新时提醒一次。默认 8。 */
   progressUpdatesNudgeThreshold?: Volatile<number>
-  /** 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文。 */
+  /** 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文、`ru` 俄文。 */
   progressUpdatesLanguage?: Volatile<ProgressUpdateLanguage>
   /**
    * 「计划模式管线」总开关：打开后调度模式可以在 R-G 澄清访谈收敛之后用
@@ -359,7 +359,7 @@ export interface Config {
    */
   timelineCacheGuard?: Volatile<boolean>
   /**
-   * 「结果预览」总开关：Kimi 线路上超大的 `run_code` 结果会被换成带 `ref://`
+   * 「结果预览」总开关：受控线路上超大的 `run_code` / `code_run` 与日志工具结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
    *
    * 线路范围由 `cacheWarmupProviders` 控制；缺省兼容回退仍是 Kimi。
@@ -415,7 +415,7 @@ export interface Config {
   subagentModelTools?: string[]
   /**
    * Delegation tools that always run their child on the calling agent's route
-   * and therefore expose no `provider`/`model` (default `['subagent_fork']`).
+   * and therefore expose no `provider`/`model` (default `['subagent_fork', 'spawn_teammate']`).
    * An allowlist-carrying Session then still denies the call when the inherited
    * route is not authorized, instead of silently running an unauthorized child.
    * Set `[]` to leave these tools on the built-in behavior.
@@ -506,7 +506,7 @@ export interface ConfigInput {
   dispatchExecutionGuard?: boolean
   /** 工具失控治理总开关（默认开启）：仅针对零增量病态信号（同参重复/同族报错/不变轮询）分级提醒；非 Kimi 线路只提醒，不继承强停。 */
   toolRunawayGuard?: boolean
-  /** 五个图片/视频工具的注册期总开关（默认开启；修改后重载插件或重启）。 */
+  /** 四个图片/视频工具的注册期总开关（默认开启；修改后重载插件或重启）。 */
   mediaTools?: boolean
   /** 「Agent Teams 策略段」缓存守卫（默认开启）：摘段并改为尾部投递。 */
   teamPolicyCacheGuard?: boolean
@@ -561,7 +561,7 @@ export const Config: z<ConfigInput, Config> = z.object({
   progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
     .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
   progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en'), z.const('ru')]).default('auto').volatile()
-    .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文。'),
+    .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文，ru 俄文。'),
   // 计划模式管线：实现挂在独立的 loader 行上（preset 的 planning 组），字段留在这里
   // 的理由与进展更新相同。volatile 让设置保存后就地写新值，递交下去的读取器每次都
   // 重读活引用，因此开关在同一个会话里下一步就生效。
@@ -636,7 +636,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => () => installHostLocale(undefined), 'dsh-chatgpt-subscription: host locale')
   const fetchConfiguration = resolveFetchConfiguration(pluginConfig)
   // Where every line's account pool lives. Read here, once, because the choice is
-  // one per deployment: the eleven pools are built below from that one value.
+  // one per deployment: the twelve multi-account pools are built below from that one value.
   //
   // Two sources, in this order: the settings card's own document (written by
   // `POST /storage`, remembered across restarts) and the profile's `poolStorage`.

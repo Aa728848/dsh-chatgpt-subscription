@@ -2,15 +2,15 @@
 
 ## Project Structure & Module Organization
 
-This repository (`@eddyskywalker/dsh-chatgpt-subscription`) is a multi-provider subscription hub and agent runtime enhancement plugin for **DeepSeek Harness (DSH)**. It registers **12 provider lines** (`codex-chatgpt`, `claude-subscription`, `kimi-code`, `minimax-code`, `command-code`, `glm-coding-plan`, `step-code`, `cline-pass`, `qoder`, `opendesign`, `workbuddy-subscription`, and `ollama`), bundled agent presets, multimodal tools, prefix-cache guards, and Web UI extensions.
+This repository (`@eddyskywalker/dsh-chatgpt-subscription`) is a multi-provider subscription hub and agent runtime enhancement plugin for **DeepSeek Harness (DSH)**. It registers **13 provider lines** (`codex-chatgpt`, `claude-subscription`, `kimi-code`, `minimax-code`, `command-code`, `glm-coding-plan`, `step-code`, `cline-pass`, `qoder`, `opendesign`, `workbuddy-subscription`, `ollama`, and `antigravity-acp`), bundled agent presets, multimodal tools, prefix-cache guards, and Web UI extensions.
 
 Source lives in `src/`; generated package output lives in `lib/` (git-ignored) and must be refreshed via build rather than edited by hand.
 
-- `src/index.ts`: core host plugin entry, `Config` schema (including `volatile()` settings), 12-provider wiring, global guards, and tool registrations.
-- `src/entry-*.ts`: sub-entry exports (`progress-updates`, `plan-mode-pipeline`, `plan-mode`, `tool-result-pruner`).
+- `src/index.ts`: core host plugin entry, `Config` schema (including `volatile()` settings), 13-provider wiring, global guards, and tool registrations.
+- `src/entry-*.ts`: sub-entry exports (`progress-updates`, `plan-mode-pipeline`, `plan-mode`, `tool-result-pruner`, `codemode`).
 - `src/host/common/`: shared kernel — multi-account pool, `poolStorage` (`keyring` / `credentials`), catalog snapshots, proxy manager, 120s two-phase stream idle watchdog, context-overflow / image-budget helpers, and 3-language (`zh` / `en` / `ru`) host i18n runtime.
 - `src/host/<line>/`: per-provider adapter, OAuth/auth flows, token/settings stores, mapper, streaming client, quota reader, and HTTP routes.
-- `src/host/{cache-warmup,dispatch-ledger,progress-updates,compaction-route,no-answer-resume,reasoning-collapse-guard,widget-board}/`: host runtime subsystems.
+- `src/host/{cache-warmup,codemode,dispatch-ledger,progress-updates,compaction-route,no-answer-resume,reasoning-collapse-guard,widget-board}/`: host runtime subsystems.
 - `src/client/`: Web GUI settings hub (`src/client/hub/`), per-line tabs & composer quota badges, shared pool UI (`src/client/common/`), Russian language pack (`src/client/locales-ru/`), Mermaid renderer, and image/video tool views.
 - `src/shared/`: side-effect-free DTOs and shared wire contracts.
 - `presets/dispatch/`: bundled `dispatch` orchestrator agent preset.
@@ -37,7 +37,7 @@ Runs the offline Vitest suite with mocked OAuth, SSE streams, quota payloads, DP
 ```powershell
 npm run build
 ```
-Builds TypeScript declarations and bundles `lib/index.js`, sub-entries (`lib/progress-updates.js`, `lib/plan-mode-pipeline.js`, `lib/plan-mode.js`, `lib/tool-result-pruner.js`), and `lib/client.js`.
+Builds TypeScript declarations and bundles `lib/index.js`, sub-entries (`lib/progress-updates.js`, `lib/plan-mode-pipeline.js`, `lib/plan-mode.js`, `lib/tool-result-pruner.js`, `lib/codemode.js`), and `lib/client.js`.
 
 Use `npm pack --dry-run` when changing package metadata, exports, or published files.
 

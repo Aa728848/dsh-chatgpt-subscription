@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **[docs / 注释与契约对齐] 全面梳理并同步 README、核心参考文档、AGENTS 规范与入口 JSDoc 注释**
+  - **跨代际版本与导出对齐**：将 `README.md`、`docs/architecture.md` 与 `src/entry-tool-result-pruner.ts` 的 DSH Harness 兼容上限统一更新为 `0.2.2-rc.3`（补充 `0.2.2-rc.3` 的 `LlmError` 错误码收窄兼容与 `resolveImageAttachmentAccess` 三参签名说明）；在 `AGENTS.md` 与 `docs/architecture.md` 补齐第 13 条线路 `antigravity-acp`、`./codemode`（`src/entry-codemode.ts` / `lib/codemode.js`）子入口导出、宿主/客户端 `codemode`、`subagent`、`dispatch-ledger` 目录结构及 16 个强类型 `LocaleNamespaceMap` 命名空间。
+  - **供应线路与工具手册补全**：在 `docs/providers.md` 目录与第 1 节线路总览表补齐 `antigravity-acp`，将 OpenDesign 随包模型数量修正为 41 款（与 `MODEL_CATALOG` 对齐）；在 `README.md` 与 `docs/cache-warmup.md` 补充 `./codemode` 工具集（`code_run` / `code_tools_*`）及 `cache_warmup_result` 的 `query` 纯文本字面量定位能力；在 `docs/troubleshooting.md` 补充 `antigravity-acp` 停用（`ACP_DISABLED`）与 `agy` 可执行文件排障条目。
+  - **配置、并发闸门与环境变量速查补齐**：在 `README.md` 与 `docs/configuration.md` 补齐 `cacheAffinity`、`teamPolicyCacheGuard`、`timelineCacheGuard`、`toolRunawayGuard`、`mediaTools` 配置项，以及 `DSH_KIMI_CODE_CACHE_AFFINITY`、`STEPCODE_*`、`QODER_CLI_*`、`DSH_ANTIGRAVITY_ACP_BIN` 环境变量；将 `docs/configuration.md` 与 `docs/provider-runtime-controls.md` 的 `DSH_PROVIDER_CONCURRENCY` 线路键列表与 `CONTROLLED_PROVIDERS`（13 条线路）完全对齐。
+  - **核心入口注释修正**：修正 `src/index.ts` 与 `src/entry-progress-updates.ts` 中 `progressUpdatesLanguage`（补齐 `ru` 俄文）、`mediaTools`（修正为四个媒体工具）、`subagentModelInheritTools` 默认值、`cacheWarmup` 作用范围及多账号池数量等 JSDoc 注释。
+
 ## 0.75.0 - 2026-11-14
 
 - **[antigravity-acp / 停用即静默] 关掉开关后不再拉起 `agy`：模型目录、状态接口、订阅卡与子代理四处补齐门禁**

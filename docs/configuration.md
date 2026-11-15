@@ -49,11 +49,14 @@
     progressUpdatesLanguage: auto         # auto | zh | en | ru（热生效）
     planModePipeline: true                # 启用调度模式 enter_plan_mode / leave_plan_mode（热生效）
     dispatchExecutionGuard: true          # 启用调度执行守卫与 Mandate v2 账本守卫（热生效）
-    toolRunawayGuard: true                # 工具重复调用分级提醒；Kimi 保留强停（热生效）
+    teamPolicyCacheGuard: true            # 摘除 Agent Teams team:policy 系统段并改为尾部投递（热生效）
+    timelineCacheGuard: true              # 冻结 Timeline 规划段与任务工具描述，变更改为尾部投递（热生效）
+    toolRunawayGuard: true                # 工具重复调用/同族报错/无变化轮询分级提醒；Kimi 保留强停（热生效）
     mediaTools: true                      # 注册四个图片/视频工具（重载插件或重启后生效）
     cacheWarmup: true                     # 受控线路的大结果 ref:// 预览（热生效）
     cacheWarmupRetrieval: true            # 受控线路的导航检索大纲投影（热生效）
     cacheWaitWarmup: true                 # 默认 Kimi 的等待续热；其他线路需显式策略（热生效）
+    cacheAffinity: true                   # 轮换优先选前缀缓存仍热的账号（剩余额度 ≥20%，热生效）
     promptCacheOverrides: {}              # 部署级缓存语义覆盖；修改后重载插件
 ```
 
@@ -86,6 +89,7 @@
 | `cacheWarmupProviders` | `string[]` | 全部 controlled providers | **热生效（volatile）** | 允许产生新预览的线路；`[]` 关闭所有新投影，已有 ref 不受影响 |
 | `cacheWarmupRetrieval` | `boolean` | `true` | **热生效（volatile）** | 受控线路明确导航意图下的文件/网页检索结果大纲投影 |
 | `cacheWaitWarmup` | `boolean` | `true` | **热生效（volatile）** | 默认用于 Kimi 的等待期缓存保活；其他线路需 TTL 与显式策略 |
+| `cacheAffinity` | `boolean` | `true` | **热生效（volatile）** | 轮换时优先选择该前缀缓存仍热且剩余额度 ≥20% 的账号 |
 | `promptCacheOverrides` | `Record<string, object>` | `{}` | **重载插件** | 覆盖线路缓存 TTL、账号作用域、冷启动、亲和、续热与提示；未知证据默认关闭 |
 
 #### `promptCacheOverrides` 示例
@@ -173,7 +177,7 @@ promptCacheOverrides:
 $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queueTimeoutMs":120000}'
 ```
 
-- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`。
+- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`、`antigravity-acp`。
 - `0` 或缺省表示不限制；非法 JSON 或未知字段会在启动时直接报错拒绝（fail-closed）。
 
 ### 脱敏请求诊断日志（`DSH_PROVIDER_DIAGNOSTICS`）
@@ -213,6 +217,7 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | | `DSH_KIMI_CODE_BYTES_PER_TOKEN` | 可选提前压缩窗口折算系数（如 ASCII 取 `4`、混合 `8`、中文 `12`） |
 | | `DSH_KIMI_CODE_PRESERVE_THINKING` | 设为 `0` 关闭历史思考内容保留 |
 | | `DSH_KIMI_CODE_CACHE_WAIT_WARMUP` | 设为 `1` 允许大上下文主代理在等待子代理满 20 分钟时做单次轻量续热 |
+| | `DSH_KIMI_CODE_CACHE_AFFINITY` | 覆盖多账号轮换时的前缀缓存亲和选号开关（`1` / `0`） |
 | | `DSH_KIMI_CODE_TOOL_UPDATE` | 控制动态工具更新策略 |
 | | `KIMI_CODE_CUSTOM_HEADERS` | 追加换行分隔的 `Name: Value` 自定义最低优先级请求头 |
 | | `KIMI_CODE_REPEAT_BREAKER` | 控制 Kimi 四段式重复工具连击刹车开关 |
@@ -228,9 +233,13 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | | `DSH_GLM_CN_AUTHORIZE_URL` / `DSH_GLM_INTL_AUTHORIZE_URL` | 覆盖两区浏览器授权地址 |
 | | `DSH_GLM_CN_APP_ID` / `DSH_GLM_CLIENT_ID` / `DSH_GLM_KEY_NAME` | 覆盖 OAuth 应用标识与自动创建的 Key 名称 |
 | | `DSH_GLM_OAUTH_API_BASE` / `DSH_GLM_OAUTH_WEB_BASE` | 覆盖 ZCode OAuth 控制面基址 |
+| **Step Code** | `STEPCODE_AUTH_PATH` / `STEPCODE_LEGACY_AUTH_PATH` | 显式指定本机 `stepcode` 客户端 `auth.json` 或旧登录态路径 |
+| | `STEPCODE_CONFIG_DIR` / `STEP_CODING_AGENT_DIR` | 覆盖本机 `stepcode` 配置目录或 Agent 根目录 |
 | **Cline Pass** | `CLINE_PASS_API_KEY` | 号池为空时自动投射为首要账号的静态 API Key（不落盘） |
+| **Qoder** | `QODER_CLI_AUTH_PATH` / `QODER_CLI_MACHINE_ID_PATH` | 显式指定本机 `qodercli` 凭据文件或 `machine_id` 路径 |
 | **OpenDesign** | `OPENDESIGN_API_KEY` | 号池为空时自动投射为首要账号的静态 API Key（不落盘） |
 | **WorkBuddy** | `CODEBUDDY_AUTH_DIR` / `WORKBUDDY_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` | 覆盖本机 CodeBuddy / WorkBuddy 桌面端凭据与密钥目录 |
+| **Antigravity (ACP)** | `DSH_ANTIGRAVITY_ACP_BIN` | 显式覆盖官方 `agy` / `agy_acp_server` 可执行文件路径 |
 
 ---
 

@@ -5,7 +5,7 @@
 插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **13 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
 
 - **跨平台支持**：Windows、macOS、Linux（含无桌面密钥环的远程服务器部署模式）
-- **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.2** 全系列版本
+- **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.3** 全系列版本
 - **全栈多语言**：Web 设置中心与宿主侧提示/报错完整支持 **简体中文（`zh`）/ English（`en`）/ Русский（`ru`）**
 
 ---
@@ -69,7 +69,7 @@
 ### 3. 精细上下文预算、独立压缩路由与前缀缓存保护
 - **逐模型能力与窗口覆盖**：按上游实时目录与官方注册表精确声明图片/视频模态、思考档位梯子与上下文窗口（支持 `1M`、`512K`、`272000` 等自定义覆盖写法）。
 - **独立压缩模型**：支持在设置页指定更快或更便宜的跨线路模型专门执行上下文压缩摘要（`purpose: 'compaction'`），自动处理多模态降级与半截摘要回退。
-- **前缀缓存零漂移架构**：针对 Kimi Code、MiniMax Code、Claude 等前缀缓存敏感线路，内置计划模式指引尾部一次性投递、PTC `tools:sdk` 声明冻结、历史工具结果修剪自动跳过（`./tool-result-pruner`），以及 Kimi 大结果 `ref://` 引用投影与 `cache_warmup_result` 分页补读。
+- **前缀缓存零漂移架构**：针对 Kimi Code、MiniMax Code、Claude 等前缀缓存敏感线路，内置计划模式指引尾部一次性投递、Agent Teams `team:policy` 与实验性 Timeline `timeline:planning` 系统段尾部投递及描述冻结、PTC `tools:sdk` 与 Code Mode 恒定说明段冻结、历史工具结果修剪自动跳过（`./tool-result-pruner`），以及受控线路大结果 `ref://` 引用投影与 `cache_warmup_result` 分页/字面量定位补读。
 
 ---
 
@@ -77,7 +77,7 @@
 
 - **操作系统**：Windows（需内置 PowerShell 以支持 CurrentUser DPAPI）、macOS 或 Linux
 - **运行时**：Node.js **≥ 22.19**（内置 `undici` 8 的下限，已写入 `package.json` 的 `engines`；建议 24 LTS）与 npm
-- **宿主版本**：DeepSeek Harness `@deepseek-ai/dsh` `0.1.2-alpha.5` 至 `0.2.2-rc.2`
+- **宿主版本**：DeepSeek Harness `@deepseek-ai/dsh` `0.1.2-alpha.5` 至 `0.2.2-rc.3`
 
 ---
 
@@ -141,9 +141,10 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 | --- | --- | --- |
 | `progress_update` | 全线路通用 | 在不中断当前回合的前提下向用户汇报结构化阶段进展，渲染于对话行与右侧进展面板 |
 | `dispatch_ledger` | 全线路通用（配合 `dispatch` 预设） | 只读查询委派账本并获取 Mandate v2 协议及预填好的可复制头部骨架 |
-| `codex_image_generate` | 需已登录 `codex-chatgpt` | 通过 ChatGPT 订阅生图接口生成 PNG 图片并写入会话附件 |
+| `code_run` / `code_tools_*` | `dispatch` 预设会话（`./codemode`） | Code Mode 程序传输与按需工具检索（`list` / `search` / `describe` / `debug`），支持 `inspect` 图文混排投影与沙箱提权 |
+| `codex_image_generate` | 需已登录 `codex-chatgpt` | 通过 ChatGPT 订阅生图接口生成 PNG 图片（或基于最多 5 张参考图改图）并写入会话附件 |
 | `kimi_attach_video` | `kimi-code` 支持视频的模型 | 将本地视频路径或 URL 挂载进下一轮多模态请求 |
-| `cache_warmup_result` | `kimi-code` 会话 | 对被替换为 `ref://<session>/<sha256>` 预览的大工具结果按字节/行精确分页补读或释放 |
+| `cache_warmup_result` | 受控线路会话 | 对被替换为 `ref://<session>/<sha256>` 预览的大工具结果按字节/行或字面量 `query` 精确分页补读与释放 |
 | `minimax_generate_video` | `minimax-code` 会话 | 调用 MiniMax-H3 / H3-Max / Hailuo-2.3 生成视频（支持首尾帧与参考图/视频/音频）并下载至工作区 |
 | `minimax_understand_video` | `minimax-code` 会话 | 上传或内联本地视频并调用 MiniMax 视频理解接口回答问题 |
 | `enter_plan_mode` / `leave_plan_mode` | `dispatch` 预设会话 | 调度模式下在澄清访谈收敛后进入只读计划模式，或显式放弃规划 |
@@ -159,9 +160,9 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 
 ## Agent 编排与运行时增强
 
-- **随包分发 `dispatch`（调度模式）预设**：安装插件后自动注册到新建会话的 Agent Preset 列表中。遵循 `分诊(L0/L1/L2) → 澄清访谈(R-G) → 计划模式审批(R9) → 拓扑派发(Lead-Core / Hybrid / Fan-out) → 证据验收(R6)` 纪律，配合 `dispatchExecutionGuard` 与 `dispatch_ledger` Mandate v2 血缘守卫防重、防越权、禁空 `sleep`。详见 **[调度模式说明（presets/dispatch/README.md）](presets/dispatch/README.md)**。
-- **子代理模型白名单强制守卫（`subagentModelAuthorization`）**：消除省略 `provider`/`model` 时悄悄继承主模型绕过白名单的漏洞（覆盖直接工具调用与 PTC `run_code` 内 SDK 调用）；客户端插件页同步提供支持「全局默认 + 按主代理模型分别配置」的增强版 **子智能体** 设置卡。
-- **流式健康与自动续跑保护**：全线路配备双阶段流式空闲看门狗（响应头脉冲 + 流内 120s 静默判死重试，Ollama 为 300s）、空结束轮次自动续跑（`noAnswerResume`，默认开启），以及可选的字面 + 语义双信号推理复读熔断器（`reasoningCollapseGuard`，默认关闭）。
+- **随包分发 `dispatch`（调度模式）预设**：安装插件后自动注册到新建会话的 Agent Preset 列表中。遵循 `分诊(L0/L1/L2-Clear/L2-Governed) → 澄清访谈(R-G) → 计划模式审批(R9) → 拓扑派发(Lead-Core / Hybrid / Fan-out) → Lead 证据验收(R6)` 纪律，基于 Code Mode（`code_run`）收敛顶层工具声明面，配合 `dispatchExecutionGuard` 与 `dispatch_ledger` Mandate v2 血缘守卫防重、防越权、禁空 `sleep`。详见 **[调度模式说明（presets/dispatch/README.md）](presets/dispatch/README.md)**。
+- **子代理模型白名单强制守卫（`subagentModelAuthorization`）**：消除省略 `provider`/`model` 时悄悄继承主模型绕过白名单的漏洞（覆盖直接工具调用与 PTC / `code_run` 内 SDK 调用）；客户端插件页同步提供支持「全局默认 + 按主代理模型分别配置」的增强版 **子智能体** 设置卡。
+- **流式健康、失控治理与自动续跑保护**：全线路配备双阶段流式空闲看门狗（响应头脉冲 + 流内 120s 静默判死，Kimi 首帧预算 360s 且看门狗 TIMEOUT 不自动重发、Ollama 为 300s）、工具失控确定性零增量守卫（`toolRunawayGuard`：检测同名同参重复、同一工具连续同族报错 `same_error_family` 与后台任务无变化轮询 `polling_repeat`）、空结束轮次自动续跑（`noAnswerResume`，默认开启），以及可选的字面 + 语义双信号推理复读熔断器（`reasoningCollapseGuard`，默认关闭）。
 
 ---
 
@@ -175,10 +176,14 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 | `fetchProvider` | `'auto'` | 重载插件 | `web_fetch` 策略：`auto`（有代理或 Codex 搜索时插件接管）/ `plugin` / `dsh` |
 | `syncAgentPresets` | `true` | 重启 / 重载 | 是否自动注册或同步随包 `dispatch` Agent Preset |
 | `subagentModelAuthorization` | `true` | 重载插件 | 启用子代理显式/继承路由白名单单调守卫 |
+| `mediaTools` | `true` | 重载插件 / 重启 | 注册 Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解四个媒体工具 |
 | `progressUpdates` | `true` | 热生效 | 启用 `progress_update` 工具、提示词引导与右侧进展面板 |
 | `planModePipeline` | `true` | 热生效 | 允许 `dispatch` 预设使用 `enter_plan_mode` / `leave_plan_mode` |
 | `dispatchExecutionGuard` | `true` | 热生效 | 启用子代理主控工具越权拦截、空等拦截与 Mandate v2 账本守卫 |
-| `cacheWarmup` / `cacheWarmupRetrieval` | `true` | 热生效 | Kimi Code 大日志结果与导航检索大纲的 `ref://` 预览投影 |
+| `toolRunawayGuard` | `true` | 热生效 | 对同参重复、同族连续报错与后台无变化轮询做分级提醒（Kimi 保留第 12 次强停） |
+| `teamPolicyCacheGuard` / `timelineCacheGuard` | `true` | 热生效 | 冻结 Agent Teams `team:policy` 与 Timeline 规划段/任务工具描述，变更走尾部投递保缓存 |
+| `cacheWarmup` / `cacheWarmupRetrieval` | `true` | 热生效 | 受控线路大日志结果与导航检索大纲的 `ref://` 预览投影 |
+| `cacheAffinity` / `cacheWaitWarmup` | `true` | 热生效 | 轮换优先选前缀缓存仍热的账号（剩余额度 ≥20%），以及等待子代理期间的缓存保活 |
 | `noAnswerResume` | `{}`（开启） | 重载插件 | 无正文且无工具调用异常收尾时自动续跑；设 `false` 关闭 |
 | `reasoningCollapseGuard` | `false`（关闭） | 重载插件 | 传 `{}` 或阈值对象开启双信号推理复读熔断器 |
 

@@ -22,6 +22,7 @@
 12. [OpenDesign：`opendesign`](#12-opendesignopendesign)
 13. [WorkBuddy（CodeBuddy 订阅）：`workbuddy-subscription`](#13-workbuddycodebuddy-订阅workbuddy-subscription)
 14. [Ollama：`ollama`](#14-ollamaollama)
+15. [Antigravity（ACP）：`antigravity-acp`](#15-antigravityacpantigravity-acp)
 
 ---
 
@@ -43,6 +44,7 @@
 | `opendesign` | OpenDesign | OpenAI Chat Completions | AMR 浏览器设备授权（签发控制 Key + 运行时 Key）/ 粘贴 API Key | 随包 41 模型表 + AMR 控制面与实时 `/v1/models` | `/opendesign/api` |
 | `workbuddy-subscription` | WorkBuddy（CodeBuddy 订阅） | OpenAI `/v2/chat/completions`；国区 Claude 走 `/v1/messages` | 浏览器轮询授权 / 只读采纳 CodeBuddy 桌面端登录态 | 实时 `/v3/config` + 本地快照与随包兜底 | `/workbuddy/api` |
 | `ollama` | Ollama | Ollama Native `/api/chat` + OpenAI `/v1/chat/completions` | 粘贴 Ollama Cloud API Key | 实时 `/api/tags` + `/api/show` 按模型元数据探测 | `/ollama/api` |
+| `antigravity-acp` | Antigravity（ACP） | ACP v1 / stdio JSON-RPC（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 | `/antigravity-acp/api` |
 
 > **合规与风险声明**：
 > - `claude-subscription` 使用订阅 OAuth 凭据模拟客户端身份转发请求，与 Anthropic 现行服务条款冲突，未获官方授权，存在账号受限或封禁风险。
@@ -282,7 +284,7 @@
   - **推荐浏览器设备授权**：签发 `vela_ctrl_…` 控制 Key（读取钱包余额与 Go / Plus / Pro / Max 账单周期摘要）与 `sk-amr-…` 运行时 Key（走 `https://amr-link.open-design.ai/v1` 对话）；
   - **回退粘贴 API Key**（或环境变量 `OPENDESIGN_API_KEY`）：仅用于对话，不含控制 Key 故不展示账单摘要。
 - **模型目录与预算**：
-  - 随包内置 37 款模型及官方公开单价与同族核对能力，登录后自动同步 AMR 控制面目录（含真实 `contextWindowTokens`）与网关 `/v1/models`；
+  - 随包内置 41 款模型及官方公开单价与同族核对能力，登录后自动同步 AMR 控制面目录（含真实 `contextWindowTokens`）与网关 `/v1/models`；
   - 按官方规则自动区分 `max_tokens` 与 `max_completion_tokens`，并对特定字段拒收 400 做单次精确降级重试。
 
 ### 宿主路由（`/opendesign/api`）

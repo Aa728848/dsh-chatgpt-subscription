@@ -26,6 +26,7 @@
 │   ├── entry-plan-mode-pipeline.ts  # 子入口：./plan-mode-pipeline（enter/leave_plan_mode）
 │   ├── entry-plan-mode.ts           # 子入口：./plan-mode（尾部一次性投递的计划模式服务）
 │   ├── entry-tool-result-pruner.ts  # 子入口：./tool-result-pruner（缓存感知的工具结果修剪器）
+│   ├── entry-codemode.ts            # 子入口：./codemode（Code Mode 原生工具 + code_run 呈现）
 │   ├── compat.ts                    # 跨层常量与插件版本标识
 │   ├── host/                        # Node.js 宿主侧实现
 │   │   ├── common/                  # 共享内核（号池、存储、快照、代理、超时、i18n 等）
@@ -41,7 +42,8 @@
 │   │   ├── qoder/                   # Qoder 线路
 │   │   ├── step-code/               # Step Code 线路
 │   │   ├── workbuddy/               # WorkBuddy 线路
-│   │   ├── cache-warmup/            # Kimi 大结果投影与 ref:// 补读子包
+│   │   ├── cache-warmup/            # 受控线路大结果投影与 ref:// 补读子包
+│   │   ├── codemode/                # Code Mode 工具发现、常驻 REPL 传输与恒定说明段
 │   │   ├── dispatch-ledger/         # 调度模式 Mandate v2 账本与血缘守卫
 │   │   ├── progress-updates/        # progress_update 宿主服务与存储
 │   │   ├── compaction-route/        # 上下文压缩独立模型路由
@@ -53,6 +55,9 @@
 │   │   ├── hub/                     # 订阅服务总览页与一键更新检查
 │   │   ├── common/                  # 共享号池卡片、模型勾选表、语言镜像与样式
 │   │   ├── antigravity-acp/         # Antigravity（ACP）设置卡、API 封装与输入框胶囊
+│   │   ├── codemode/                # code_run 工具调用视图与样式
+│   │   ├── dispatch-ledger/         # Mandate v2 账本工具调用视图
+│   │   ├── subagent/                # 增强版「子智能体」模型白名单设置卡
 │   │   ├── locales-ru/              # 俄语语言包（16 个命名空间）
 │   │   ├── mermaid/                 # 对话流 Mermaid 图表监听与安全渲染
 │   │   └── <line>/                  # 各线路独立设置页、API 封装与输入框额度胶囊
@@ -74,6 +79,7 @@
 | `./plan-mode-pipeline` | `lib/plan-mode-pipeline.js` | 调度模式 `planning` 组挂载的 `enter_plan_mode` / `leave_plan_mode` |
 | `./plan-mode` | `lib/plan-mode.js` | 保护前缀缓存的计划模式指引尾部投递版 |
 | `./tool-result-pruner` | `lib/tool-result-pruner.js` | 自动跳过前缀缓存计费线路的工具结果修剪器 |
+| `./codemode` | `lib/codemode.js` | 调度模式挂载的「原生工具白名单 + `code_run` 程序传输」预设行 |
 | `./presets/*` | `presets/*` | 随包 Agent Preset 静态资源 |
 
 ---
@@ -141,21 +147,22 @@
 - **多媒体工具视图与命令**：`codex_image_generate` 生图预览卡，`minimax_generate_video` 视频卡片、右侧栏文档预览器及 `/video` 斜杠命令参数表单。
 - **进展更新面板**与 **Mermaid 图表观察器**（自动将代码块安全渲染为交互图表）。
 - **全栈三语国际化（`zh` / `en` / `ru`）**：
-  - 客户端共 14 个强类型 `LocaleNamespaceMap` 命名空间；
+  - 客户端共 16 个强类型 `LocaleNamespaceMap` 命名空间；
   - 客户端通过 `installHostLocaleMirror` 将当前激活语言同步至宿主 `POST /api/dsh-chatgpt-subscription/i18n/locale`，使宿主侧的 `providerInfo()` 显示名、号池报错、登录引导与限流文案同步支持中文、英文与俄文（`en.ts` 与 `ru.ts` 由 TypeScript 编译期强制对齐 `zh.ts` 的全部键集合）。
 
 ---
 
 ## 6. 跨代际 DSH Harness 兼容策略
 
-**单一代码库同时兼容 `@deepseek-ai/dsh*` 从 `0.1.2-alpha.5` 到 `0.2.2-rc.2` 的全部代际**（详见 `package.json` 的 `peerDependencies`）。核心兼容边界包括：
+**单一代码库同时兼容 `@deepseek-ai/dsh*` 从 `0.1.2-alpha.5` 到 `0.2.2-rc.3` 的全部代际**（详见 `package.json` 的 `peerDependencies`）。核心兼容边界包括：
 
 1. **消息与工具结果模型（0.1.7 分界）**：`<= 0.1.6` 将工具结果放在 user 消息的 `tool-result` 内容块中；`>= 0.1.7` 改为独立 `role: 'tool'` 消息（且 `toolCallId` 可能位于顶层、`source.callId` 或内部块上）。所有适配器统一经 `llm-compat` 归一化，严禁假设单一形态。
 2. **偏好设置持久化（0.1.7 分界）**：`<= 0.1.6` 使用 `settings.register`；`>= 0.1.7` 改用插件自持 `<dshHome>/storages/*` 原子 JSON 存储并在首次启动时无感迁移旧配置。
 3. **Agent Preset 分发（0.1.6 / 0.1.7 分界）**：`>= 0.1.7` 通过 `@deepseek-ai/dsh-agent-preset` 的 `agentPresets.register()` 运行时注册；`<= 0.1.6` 同步至 `<dshHome>/.agent-presets/` 并按运行环境自动探测重写 `@deepseek-ai/dsh-workflow-worker-thread` 与 `@deepseek-ai/dsh-workflow-ptc`。
 4. **子代理配置拆分（0.2.1-rc.1 分界）**：`modelSelectionSettings` 拆分为 `modelSelection` + `modelDiscovery`，预设与守卫运行时动态探测工具参数定义以保持双向兼容；0.2.2 无 Session allowlist 时官方仍可能把显式选择限为父路由，提示词不得再称其为完全不受限。
 5. **客户端远程文件与图片解析**：同时兼容 `uiConversation.imageUrl` / `conversation.resolveImage`，以及 `workspaceFiles.readBytes(id, path, {})` / `workspaceFiles.readAll`。
-6. **PTC executor 拆分（0.2.2 分界）**：`resolveDispatchPreset` 探测到 `@deepseek-ai/dsh-tool-executor-ptc` 时直接挂载官方 executor；旧代保留 `@deepseek-ai/dsh-agent-tool-presentation` 的 `{ mode: 'ptc' }` 兼容行。
+6. **PTC executor 拆分与 Code Mode 降级（0.2.2 分界）**：`resolveDispatchPreset` 按内核安装树能否解析到可选 peer `@deepseek-ai/dsh-tool-executor-native` 优先挂载 `./codemode`；解析不到时检测 `@deepseek-ai/dsh-tool-executor-ptc`，更早代次保留 `@deepseek-ai/dsh-agent-tool-presentation` 的 `{ mode: 'ptc' }` 兼容行。
+7. **结构化错误码收窄与 `resolveImageAttachmentAccess` 三参签名（0.2.2-rc.3 分界）**：`src/host/common/llm-compat.ts` 保持原生 `LlmError` 运行时同引用不变，编译期将自定义错误码放宽为 `string`；`src/entry-codemode.ts` 调用 `resolveImageAttachmentAccess(attachments, mapHostPath, ref)` 三参签名并保留单参兼容回退。
 
 > 涉及跨代际兼容接缝的修改前，请先阅读仓库内 `.dsh/skills/dsh-harness-upgrade/SKILL.md`；新增供应线路前，请遵循 `.dsh/skills/add-subscription-line/SKILL.md` 的冻结契约与检查清单。
 

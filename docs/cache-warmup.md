@@ -83,10 +83,10 @@ cacheReadTokens / (inputTokens + cacheReadTokens)
 
 `cache_warmup_result` 支持：
 
-- `action: "page"`：按 `offset`、`limit`、`maxBytes`、`fields`、`equals` 精确读取；
+- `action: "page"`：按 `offset`、`limit`、`maxBytes`、`query`（纯文本字面量子串定位）、`fields`、`equals` 精确读取；
 - `action: "release"`：删除一条原文副本，历史 preview 不变。
 
-文本模式的 offset 是 UTF-8 字节偏移；结构化模式是过滤后的行下标。每页都报告 `complete`、`nextOffset` 和 `omitted`，模型不得把不完整页面当成完整结果。
+文本模式的 offset 是 UTF-8 字节偏移；传入大小写敏感纯文本 `query` 时，从 `offset` 起检索字面量子串并自动对齐逻辑行首（兼容普通 `\n` 与单行 minified JSON 转义 `\n`，超长单行经 UTF-8 安全的 Anchor Guard 保证命中词落入当页；未命中返回 `matched: false` 空页而不报错，配合 `nextOffset` 可连续定位下一处匹配）；结构化模式是过滤后的行下标。每页都报告 `complete`、`nextOffset` 和 `omitted`，模型不得把不完整页面当成完整结果。
 
 单页上限 25 KB（默认 16 KB）。上限刻意不放大：补读的每一页都会原样进入下一轮的提示，一次 45 KB 的整页重读等于把预览省下来的又付一遍；需要看全文就分页翻，每页都要过模型的门。
 
