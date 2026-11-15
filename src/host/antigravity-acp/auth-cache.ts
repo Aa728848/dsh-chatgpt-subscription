@@ -19,8 +19,17 @@
 
 import type { AntigravityAcpAuthDto } from '../../shared/antigravity-acp-contracts.ts'
 
-/** How long one probe answers for. */
-export const AUTH_CACHE_TTL_MS = 60_000
+/**
+ * How long one probe answers for.
+ *
+ * Ten minutes, not one. A probe is a whole `agy` process plus a `session/new`
+ * against Google, and the card, the hub overview and the composer badge each poll
+ * this route - at a one-minute window that was a process launch per minute for a
+ * question whose answer changes only when the user signs in or out. Those two
+ * events are exactly what invalidates the cache (`login/start`, `login/status`,
+ * the refresh click), so the window does not delay a real state change.
+ */
+export const AUTH_CACHE_TTL_MS = 10 * 60_000
 
 /** The cache itself. */
 export class AcpAuthCache {

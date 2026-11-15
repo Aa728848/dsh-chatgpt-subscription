@@ -35,6 +35,54 @@ function options(overrides: Record<string, unknown> = {}) {
 }
 
 describe('readStatus', () => {
+  it('does not claim a passive read failed to download', async () => {
+    // The passive sentence already says the install happens on the first turn.
+    // Wrapping it in "and the official ACP server could not be downloaded" would
+    // report an attempt that never happened and contradict that sentence.
+    const harness = options({
+      resolveBinary: async () => ({
+        error: 'No Antigravity CLI (agy) is installed yet. This line downloads the official ACP server the first time you start a turn.',
+        deferred: true,
+      }),
+      auth: async () => ({ authenticated: false }),
+    })
+    try {
+      const status = await readStatus(harness.options as never)
+      expect(status.binary.error).toContain('is installed yet')
+      expect(status.binary.error).not.toContain('could not be downloaded')
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  it('separates a passive poll from an explicit read', async () => {
+    // The card, the hub overview and the composer badge poll this route. A poll
+    // must not download a release, and must not force a fresh sign-in probe.
+    const binaryCalls: Array<{ fresh?: boolean } | undefined> = []
+    const authCalls: Array<{ force?: boolean } | undefined> = []
+    const harness = options({
+      resolveBinary: async (request?: { fresh?: boolean }) => {
+        binaryCalls.push(request)
+        return { binary: { path: '/usr/local/bin/agy', kind: 'local-cli' as const } }
+      },
+      auth: async (request?: { force?: boolean }) => {
+        authCalls.push(request)
+        return { authenticated: true }
+      },
+    })
+    try {
+      await readStatus(harness.options as never)
+      expect(binaryCalls.at(-1)).toMatchObject({ fresh: false })
+      expect(authCalls.at(-1)).toMatchObject({ force: false })
+
+      await readStatus(harness.options as never, { fresh: true })
+      expect(binaryCalls.at(-1)).toMatchObject({ fresh: true })
+      expect(authCalls.at(-1)).toMatchObject({ force: true })
+    } finally {
+      harness.dispose()
+    }
+  })
+
   it('reports the executable, the tier and the catalogue', async () => {
     const harness = options()
     try {

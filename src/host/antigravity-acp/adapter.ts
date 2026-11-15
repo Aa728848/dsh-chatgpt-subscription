@@ -97,6 +97,7 @@ import {
   PROVIDER_ID,
   PROVIDER_NAME,
   findModel,
+  preferAuthMethod,
   toModelInfo,
   toResolvedModelInfo,
 } from './types.ts'
@@ -244,6 +245,17 @@ interface LiveTurn {
    * the real conversation with a transcript nobody is talking to.
    */
   parkable: boolean
+  /**
+   * Set once this turn's process has been handed back.
+   *
+   * Releasing is not idempotent on its own - it closes the bridge and may park the
+   * process - so every path that ends a turn (a completed stream, an abandoned
+   * one, a turn closed by someone else) goes through {@link finishTurn}, which
+   * checks this flag first. Before the flag existed, a turn whose session entry
+   * had been overwritten by another turn was neither parked nor released: the
+   * process, its bridge and its slot in `activeTurns` simply leaked.
+   */
+  closed: boolean
 }
 
 /**
@@ -270,6 +282,19 @@ interface DormantTurn {
   sessionsUsed: number
   /** Idle timer that recycles the process. */
   timer: ReturnType<typeof setTimeout> | undefined
+}
+
+/**
+ * The ACP session one turn owns, held mutably.
+ *
+ * A process that is reused keeps receiving frames for as long as its previous
+ * conversation lives, and the handlers are installed before `session/new` answers
+ * (on a warm process they are installed before `session/prompt`). This holder is
+ * how a handler knows which session id is current, so it can drop anything that
+ * belongs to the conversation it replaced.
+ */
+interface SessionBinding {
+  acpSessionId?: string
 }
 
 /** The parts of a turn that outlive it, for handing the process back. */
@@ -399,6 +424,9 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     for (const entry of [...this.dormant.values()]) await this.closeDormant(entry)
     for (const turn of [...this.live.values()]) {
       if (this.live.get(turn.dshSessionId) === turn) this.live.delete(turn.dshSessionId)
+      // A pump that is still running exits through `closeTurn`; marking the turn
+      // closed here keeps that second path from releasing the same process again.
+      turn.closed = true
       this.activeTurns = Math.max(0, this.activeTurns - 1)
       turn.queue.close()
       this.cancelTurn(turn)
@@ -453,17 +481,22 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       ? settings.defaultReasoningEffort ?? undefined
       : String(options.reasoningEffort)
 
-    const live = this.live.get(dshSessionId)
-    if (live !== undefined && live.model === options.model && live.effort === effort
-      && canContinue(options.messages, live.covered, live.fingerprint)) {
-      return this.continueTurn(live, options, images, signal, activity)
-    }
-    if (live !== undefined) await this.closeTurn(live)
-
     // Auxiliary requests - session titles, compaction - reuse this DSH session id
     // while carrying a history of their own. They must neither consume the parked
-    // conversation nor be parked over it, so they go straight to a cold turn.
+    // conversation, nor be parked over it, nor touch the live one: this decision
+    // therefore comes *first*. It used to come after the live lookup, which meant
+    // a title request (fired at the first prompt, while the answer is still
+    // streaming) compared its one-message history against the live turn's covered
+    // prefix, failed the comparison, and closed the turn the user was reading.
     const auxiliary = options.purpose !== undefined
+    if (!auxiliary) {
+      const live = this.live.get(dshSessionId)
+      if (live !== undefined && live.model === options.model && live.effort === effort
+        && canContinue(options.messages, live.covered, live.fingerprint)) {
+        return this.continueTurn(live, options, images, signal, activity)
+      }
+      if (live !== undefined) await this.closeTurn(live)
+    }
     // A session parked by the previous turn is both the cheapest and the most
     // faithful continuation available: the agent already holds this conversation,
     // so only what the harness appended since is sent. It is used only while the
@@ -503,6 +536,9 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     this.activeTurns += 1
     const queue = new UpdateQueue()
     const bridge = new McpBridge(options.tools ?? [])
+    // Which ACP session this turn owns, once it has one. The handlers are
+    // installed before `session/new` answers, so they read it through a holder.
+    const binding: SessionBinding = {}
     let client: AcpClient | undefined
     let reusedSessions = 0
     try {
@@ -514,12 +550,13 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       if (warm !== undefined) {
         client = warm.client
         reusedSessions = warm.sessions
-        this.attachHandlers(client, queue, activity)
+        this.attachHandlers(client, queue, activity, binding)
       } else {
-        client = this.spawn(launch, queue, activity)
+        client = this.spawn(launch, queue, activity, binding)
       }
       const descriptor = await bridge.start()
       const sessionId = await this.openSession(client, options, [descriptor], settings)
+      binding.acpSessionId = sessionId
       await this.applyModelAndEffort(client, sessionId, options.model, effort)
       const prompt = buildPrompt(options, images, 0)
       // When a bridge is attached the agent must not touch the workspace itself;
@@ -547,8 +584,12 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         sessionsUsed: reusedSessions + 1,
         tools: fingerprintTools(options.tools),
         parkable,
+        closed: false,
       }
-      this.live.set(dshSessionId, turn)
+      // An auxiliary request never owns the session's live entry: registering it
+      // would hide the turn the user is actually reading from `run()`, and that
+      // turn would then be neither parked nor released when it ended.
+      if (parkable) this.live.set(dshSessionId, turn)
       void this.sendPrompt(turn, prompt.blocks)
       return this.pump(turn, signal, activity)
     } catch (error) {
@@ -745,14 +786,13 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         // cancelled before the process is handed back: an abandoned prompt is what
         // the next turn would otherwise race.
         await this.closeTurn(turn)
-      } else if (!turn.awaitingHarness && this.live.get(turn.dshSessionId) === turn) {
+      } else if (!turn.awaitingHarness) {
         // A turn that ended without a tool round is complete. Its ACP session is
         // parked instead of dropped, so the next user message is an increment on
-        // the conversation the agent already has. A tool round keeps it live.
-        this.live.delete(turn.dshSessionId)
-        this.activeTurns = Math.max(0, this.activeTurns - 1)
-        if (turn.parkable) await this.park(turn)
-        else await this.release(turn)
+        // the conversation the agent already has - or released when it may not be
+        // parked (an auxiliary request owns no conversation of the user's). A tool
+        // round keeps it live.
+        await this.finishTurn(turn, true)
       }
     }
   }
@@ -790,9 +830,11 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     launch: AcpLaunch,
     queue: UpdateQueue,
     activity: { pulse(): void },
+    binding: SessionBinding,
   ): AcpClient {
     const handlers: AcpClientHandlers = {
-      onSessionUpdate: (_sessionId, update) => {
+      onSessionUpdate: (sessionId, update) => {
+        if (!ownsSession(binding, sessionId)) return
         queue.push(update)
         activity.pulse()
       },
@@ -910,16 +952,14 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         sessionId: turn.acpSessionId,
         prompt: blocks,
       }))
-      const usage = asRecord(result?.usage)
+      const rawUsage = asRecord(result?.usage)
+      const usage = rawUsage === undefined ? undefined : readUsage(rawUsage)
       turn.settled = {
         stopReason: typeof result?.stopReason === 'string' ? result.stopReason : 'end_turn',
-        ...(usage === undefined ? {} : { usage: readUsage(usage) }),
+        ...(usage === undefined ? {} : { usage }),
       }
       if (usage !== undefined) {
-        const read = readUsage(usage)
-        if (read !== undefined) {
-          this.lastUsage = { ...read, at: this.now(), durationMs: this.now() - startedAt }
-        }
+        this.lastUsage = { ...usage, at: this.now(), durationMs: this.now() - startedAt }
       }
     } catch (error) {
       turn.settled = { error: asError(error) }
@@ -937,11 +977,37 @@ export class AntigravityAcpAdapter extends LlmAdapter {
    * agent's own start-up wait on the next message.
    */
   private async closeTurn(turn: LiveTurn): Promise<void> {
-    if (this.live.get(turn.dshSessionId) === turn) this.live.delete(turn.dshSessionId)
-    this.activeTurns = Math.max(0, this.activeTurns - 1)
+    if (turn.closed) return
     turn.queue.close()
     this.cancelTurn(turn)
-    await this.release(turn)
+    await this.finishTurn(turn, false)
+  }
+
+  /**
+   * Account for one turn exactly once, then hand its process back.
+   *
+   * Every ending goes through here: a completed stream parks the conversation, an
+   * abandoned one releases the process, and a turn whose live entry was replaced
+   * releases it too - it no longer owns this session's conversation, so parking it
+   * would replace the parked one with a transcript nobody is talking to.
+   *
+   * The `closed` flag is what makes this safe to call from a second path: the pump
+   * finishing after a cancellation, and a cancellation arriving after the pump
+   * finished, both used to be able to decrement `activeTurns` or release a process
+   * twice.
+   *
+   * @param turn - The turn being ended.
+   * @param parkAllowed - Whether a conversation may be left parked behind it.
+   */
+  private async finishTurn(turn: LiveTurn, parkAllowed: boolean): Promise<void> {
+    if (turn.closed) return
+    turn.closed = true
+    const owned = this.live.get(turn.dshSessionId) === turn
+    if (owned) this.live.delete(turn.dshSessionId)
+    this.activeTurns = Math.max(0, this.activeTurns - 1)
+    turn.queue.close()
+    if (parkAllowed && turn.parkable && owned) await this.park(turn)
+    else await this.release(turn)
   }
 
   /**
@@ -1009,7 +1075,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       if (entry.model !== options.model || entry.effort !== effort) {
         await this.applyModelAndEffort(entry.client, entry.acpSessionId, options.model, effort)
       }
-      this.attachHandlers(entry.client, queue, activity)
+      this.attachHandlers(entry.client, queue, activity, { acpSessionId: entry.acpSessionId })
       const prompt = buildPrompt(options, images, entry.covered)
       const turn: LiveTurn = {
         dshSessionId: entry.dshSessionId,
@@ -1030,6 +1096,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         sessionsUsed: entry.sessionsUsed,
         tools: entry.tools,
         parkable: true,
+        closed: false,
       }
       this.live.set(turn.dshSessionId, turn)
       this.activeTurns += 1
@@ -1130,9 +1197,11 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     client: AcpClient,
     queue: UpdateQueue,
     activity: { pulse(): void },
+    binding: SessionBinding,
   ): void {
     client.rebind({
-      onSessionUpdate: (_sessionId, update) => {
+      onSessionUpdate: (sessionId, update) => {
+        if (!ownsSession(binding, sessionId)) return
         queue.push(update)
         activity.pulse()
       },
@@ -1383,13 +1452,6 @@ function needsAuth(error: unknown, authMethods: readonly string[]): boolean {
   return /authentication required/i.test(message) && authMethods.length > 0
 }
 
-function preferAuthMethod(authMethods: readonly string[]): string {
-  for (const candidate of ['oauth-personal', 'terminal-login', 'oauth-business', 'gemini-api-key', 'agent-platform']) {
-    if (authMethods.includes(candidate)) return candidate
-  }
-  return authMethods[0] ?? 'oauth-personal'
-}
-
 function readUsage(raw: Record<string, unknown>): TokenUsage | undefined {
   const input = numberField(raw.inputTokens)
   const output = numberField(raw.outputTokens)
@@ -1404,6 +1466,16 @@ function readUsage(raw: Record<string, unknown>): TokenUsage | undefined {
     ...(numberField(raw.totalTokens) === undefined ? {} : { totalTokens: numberField(raw.totalTokens) }),
   }
 }
+
+/**
+ * Text that means the *service* declined the account rather than the agent failing.
+ *
+ * ACP carries upstream failures inside a JSON-RPC error message, so the sentence
+ * is the only place that distinction survives. The list is deliberately about
+ * what a user can act on - a quota, a policy or verification block, a rate limit -
+ * and a match is reported as {@link ACP_UPSTREAM_BLOCKED}, which is not retried.
+ */
+const UPSTREAM_DECLINED = /\b(?:429|403)\b|rate.?limit|too many requests|quota|resource[_ ]exhausted|terms of service|\btos\b|violat|valid(?:ation)?[_ ]required|permission[_ ]denied|account[_ ](?:disabled|suspended)|policy[_ ]violation|verification|verify your|unusual activity|risk|suspended|forbidden/i
 
 function numberField(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
@@ -1435,13 +1507,60 @@ function settleReason(stopReason: string | undefined): SettleReason {
   }
 }
 
+/**
+ * Whether one `session/update` frame belongs to the turn reading right now.
+ *
+ * A reused process can still be flushing the conversation it ran before: the
+ * `session/cancel` that ended it is a notification, not a barrier, and the process
+ * is handed back to the pool without waiting for its prompt to settle. Those late
+ * frames carry the old session id, and appending them would put another
+ * conversation's text into this answer.
+ *
+ * The id decides whenever it is present. Two cases look similar and are not:
+ *
+ * - A frame that carries *no* id keeps the previous behaviour, because a server
+ *   that never repeats the id in a notification must still work - the id has
+ *   always been part of the ACP envelope rather than something this line added.
+ * - A frame that names a session while this turn has not created one yet is a
+ *   leftover by construction: a warm process is checked out and rewired *before*
+ *   `session/new` answers, so anything addressed in that window can only belong
+ *   to the conversation it was running before. Keeping it "because we have no id
+ *   yet" was the hole in the first version of this filter.
+ *
+ * @param binding - The session this turn owns, once it exists.
+ * @param sessionId - The id the frame carries, empty when it carried none.
+ * @returns whether the frame belongs to this turn.
+ */
+function ownsSession(binding: SessionBinding, sessionId: string): boolean {
+  if (sessionId === '') return true
+  if (binding.acpSessionId === undefined) return false
+  return sessionId === binding.acpSessionId
+}
+
 function asLlmError(error: unknown): LlmError {
   if (error instanceof LlmError) return error
+  // A cancellation is not a disconnect. This used to fall through to
+  // `ACP_DISCONNECTED`, which is a retryable code: a turn the caller had just
+  // cancelled was classified as a transport fault. The watchdog and the retry
+  // policy both check the caller's signal, so nothing actually re-ran - but the
+  // classification was wrong, and it was one heuristic away from being harmful.
+  if (error instanceof Error && error.name === 'AbortError') {
+    return new LlmError('The Antigravity ACP turn was cancelled.', 'ABORTED')
+  }
   if (error instanceof AcpError) {
-    if (error.code === ACP_AUTH_REQUIRED_CODE) return acpError('ACP_AUTH_REQUIRED')
+    // The same wall also arrives with a different code, or with no code at all;
+    // `needsAuth` already treats the sentence as proof, so the classification
+    // does too instead of reporting a retryable transport fault.
+    if (error.code === ACP_AUTH_REQUIRED_CODE || /authentication required/i.test(error.message)) {
+      return acpError('ACP_AUTH_REQUIRED')
+    }
     // JSON-RPC's own reserved codes: the server understood the shape and said no.
     if (error.code === -32602) return acpError('ACP_INVALID_PARAMS')
     if (error.code === -32601) return acpError('ACP_METHOD_UNSUPPORTED')
+    // Everything else used to become one retryable `ACP_RPC_ERROR`. A refusal, a
+    // quota wall, a policy block or a verification challenge is not a transport
+    // fault, so it is reported once and left alone.
+    if (UPSTREAM_DECLINED.test(error.message)) return acpError('ACP_UPSTREAM_BLOCKED', error.message)
     return acpError('ACP_RPC_ERROR', error.message)
   }
   const message = error instanceof Error ? error.message : String(error)

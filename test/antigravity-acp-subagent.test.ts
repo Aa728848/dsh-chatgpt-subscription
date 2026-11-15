@@ -52,12 +52,15 @@ function harness(): { options: never; dispose(): void } {
 }
 
 describe('Antigravity subagent provider', () => {
-  it('advertises no start-time capabilities it cannot honour', () => {
+  it('advertises the one start-time capability it can honour', () => {
     const space = harness()
     try {
       const provider = createProvider(space.options)
       expect(provider.name).toBe('antigravity-acp')
-      expect(provider.capabilities).toEqual({ agentOptions: false, agentPreset: false, outputSchema: false, depthLimit: false })
+      // `agentOptions` is claimed because a model and a thinking level are two
+      // `session/set_config_option` calls. The rest stay false: ACP has no preset,
+      // no output schema and no depth budget to enforce.
+      expect(provider.capabilities).toEqual({ agentOptions: true, agentPreset: false, outputSchema: false, depthLimit: false })
       expect(provider.inheritsParentContext).toBe(false)
     } finally {
       space.dispose()

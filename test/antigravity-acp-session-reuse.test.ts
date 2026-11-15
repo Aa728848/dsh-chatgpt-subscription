@@ -326,6 +326,40 @@ describe('ACP session reuse across turns', () => {
     }
   })
 
+  it('does not cancel the answer the user is reading when a title request arrives', async () => {
+    // The bug this pins: the auxiliary decision used to come *after* the live
+    // lookup, so a title request - same DSH session id, one-message history, fired
+    // while the first answer is still streaming - failed the "same conversation"
+    // comparison and closed the live turn it had just found.
+    const harness = adapterHarness()
+    try {
+      const reading = collect(harness.adapter.stream(optionsOf({ messages: [user('SLOW main request')] }) as never))
+      // Let the main turn reach its live state (process spawned, session opened,
+      // prompt sent) before the title request goes out.
+      await new Promise((resolve) => setTimeout(resolve, 600))
+
+      const title = await collect(harness.adapter.stream(optionsOf({
+        purpose: 'session-title',
+        messages: [user('name this conversation')],
+      }) as never))
+      const main = await reading
+
+      expect(title.at(-1)).toMatchObject({ type: 'finish' })
+      const text = main
+        .filter((chunk) => chunk.type === 'text-delta')
+        .map((chunk) => chunk.text)
+        .join('')
+      expect(text).toContain('ok:session-1')
+      expect(main.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+      // The main conversation was neither cancelled nor replaced.
+      expect(harness.events.of('notify').filter((event) => event.method === 'session/cancel')).toHaveLength(0)
+      expect(harness.events.of('session/new')).toHaveLength(2)
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
   it('recycles a parked session when parking is switched off', async () => {
     const harness = adapterHarness({ dormantSessionLimit: 0 })
     try {

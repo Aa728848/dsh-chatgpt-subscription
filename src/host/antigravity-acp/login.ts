@@ -27,6 +27,19 @@ import type { AntigravityAcpAuthDto } from '../../shared/antigravity-acp-contrac
 /** How long the login launcher may run before it is considered detached. */
 export const LOGIN_LAUNCH_BUDGET_MS = 10_000
 
+/**
+ * How long a launcher is watched for a start-up failure before it is left alone.
+ *
+ * A successful sign-in keeps the process alive until the browser callback lands,
+ * so this may not wait for the exit: it only has to catch the failures that
+ * happen before the CLI ever gets going - an executable that cannot be spawned,
+ * or a command line the CLI rejects.
+ */
+export const LOGIN_FAILURE_WINDOW_MS = 1_000
+
+/** Most stderr kept for that failure sentence; a login banner is not a diagnostic. */
+const LOGIN_STDERR_CAP = 2_000
+
 /** Budget for one auth probe. */
 export const AUTH_PROBE_BUDGET_MS = 30_000
 
@@ -41,27 +54,91 @@ export interface LoginStartResult {
 /**
  * Start the official sign-in.
  *
- * The process is spawned detached and its stdout/stderr are drained: on a desktop
- * it opens the browser and exits once the callback lands, on a headless host it
- * prints the URL it would have opened. Either way this call returns as soon as
- * the process exists - it never waits for the user.
+ * The process is spawned detached: on a desktop it opens the browser and exits
+ * once the callback lands, on a headless host it prints the URL it would have
+ * opened. Either way this call never waits for the user.
+ *
+ * What it *does* wait for is the failure that happens before the CLI gets going.
+ * The command line is `agy acp --login`, and a rejected command line, a
+ * misconfigured path or a binary that cannot be spawned all exit (or error)
+ * within milliseconds - and the previous version reported "sign-in started" for
+ * every one of them while discarding the only sentence that explained it. The
+ * launcher is therefore watched for {@link LOGIN_FAILURE_WINDOW_MS}: a spawn
+ * error, or a non-zero exit that left stderr behind, is returned as the reason.
  *
  * @param launch - The resolved executable.
- * @returns whether a process was started.
+ * @returns whether a process was started, and why it was not.
  */
-export function startLogin(launch: AcpLaunch): LoginStartResult {
+export function startLogin(launch: AcpLaunch): Promise<LoginStartResult> {
+  let child: ReturnType<typeof spawn>
   try {
-    const child = spawn(launch.command, [...launch.args.slice(0, -1), 'acp', '--login'], {
+    // `launch.args` already selects ACP stdio mode (`acp`, plus any flags), and
+    // `--login` is a flag of that same subcommand: appending it to the args is the
+    // whole command. Building it by slicing the last arg and re-adding `acp` sent
+    // `acp acp --login`, which the CLI rejects.
+    child = spawn(launch.command, [...launch.args, '--login'], {
       detached: true,
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
     })
-    child.stderr?.resume()
-    child.unref()
-    return { started: true }
   } catch (error) {
-    return { started: false, error: error instanceof Error ? error.message : String(error) }
+    return Promise.resolve({ started: false, error: error instanceof Error ? error.message : String(error) })
   }
+  return watchLauncher(child)
+}
+
+/**
+ * Watch one launcher through its start-up window.
+ *
+ * @param child - The detached sign-in process.
+ * @returns whether it started, and the CLI's own explanation when it did not.
+ */
+function watchLauncher(child: ReturnType<typeof spawn>): Promise<LoginStartResult> {
+  let stderr = ''
+  child.stderr?.setEncoding('utf8')
+  child.stderr?.on('data', (chunk: string) => {
+    if (stderr.length < LOGIN_STDERR_CAP) stderr += chunk.slice(0, LOGIN_STDERR_CAP - stderr.length)
+  })
+  // The buffer is bounded above; this keeps a chatty launcher from holding the
+  // event loop open once the answer has already been given.
+  child.unref()
+
+  return new Promise<LoginStartResult>((resolve) => {
+    let settled = false
+    const settle = (result: LoginStartResult): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(windowTimer)
+      clearTimeout(detachTimer)
+      resolve(result)
+    }
+    const detail = (): string => stderr.trim().split(/\r?\n/u).filter((line) => line !== '').slice(-3).join(' ')
+    const failed = (reason: string): LoginStartResult => ({
+      started: false,
+      error: detail() === '' ? reason : reason + ': ' + detail(),
+    })
+
+    const windowTimer = setTimeout(() => settle({ started: true }), LOGIN_FAILURE_WINDOW_MS)
+    windowTimer.unref?.()
+    // Whatever happens after the window belongs to the CLI: it may sit there
+    // waiting for the browser for as long as the user takes.
+    const detachTimer = setTimeout(() => {
+      child.stderr?.removeAllListeners('data')
+      child.removeAllListeners()
+    }, LOGIN_LAUNCH_BUDGET_MS)
+    detachTimer.unref?.()
+
+    child.once('error', (error: Error) => settle(failed(error.message)))
+    child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+      if (code === 0 || signal !== null) {
+        // A launcher that exited cleanly (headless hosts print the URL and stop)
+        // or was killed by the user did what it was asked to do.
+        settle({ started: true })
+        return
+      }
+      settle(failed(`The Antigravity CLI exited with code ${String(code ?? 'null')} before sign-in began.`))
+    })
+  })
 }
 
 /**

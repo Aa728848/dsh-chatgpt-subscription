@@ -46,8 +46,16 @@ const CATALOG_FRESHNESS_MS = 24 * 60 * 60 * 1_000
 export interface AntigravityAcpRouteOptions {
   settings: AntigravityAcpSettingsStore
   catalog: AcpCatalog
-  /** Resolve the executable on demand, so the card always shows the current one. */
-  resolveBinary(): Promise<{ binary?: ResolvedAcpBinary; error?: string }>
+  /**
+   * Resolve the executable on demand, so the card always shows the current one.
+   *
+   * `fresh` means the user asked (a refresh click, a settings change): only then may
+   * the resolver download a release. A passive render must never start an install,
+   * which is why this is a request and not a getter.
+   */
+  resolveBinary(options?: { fresh?: boolean }): Promise<{ binary?: ResolvedAcpBinary; error?: string; deferred?: boolean }>
+  /** Forget the cached resolution, e.g. after `binaryPath` changed. */
+  invalidateBinary?(): void
   /** Start the official sign-in. */
   login(): Promise<{ started: boolean; error?: string }>
   /** Read the auth state; `force` bypasses any cache the line keeps around it. */
@@ -62,8 +70,18 @@ export interface AntigravityAcpRouteOptions {
   runDoctor?(): Promise<{ ok: boolean; steps: { id: string; ok: boolean; detail: string }[] }>
 }
 
-/** Build the status payload the card renders. */
-export async function readStatus(options: AntigravityAcpRouteOptions): Promise<AntigravityAcpStatusDto> {
+/**
+ * Build the status payload the card renders.
+ *
+ * @param options - The line's live state and actions.
+ * @param read - `fresh` when this read is a user action rather than a poll.
+ * @returns The status the card renders.
+ */
+export async function readStatus(
+  options: AntigravityAcpRouteOptions,
+  read: { fresh?: boolean } = {},
+): Promise<AntigravityAcpStatusDto> {
+  const fresh = read.fresh === true
   const settings = await options.settings.read()
   // A line the user switched off answers from the settings document alone. The
   // hub overview polls this route for every card on the settings page, and the
@@ -71,18 +89,28 @@ export async function readStatus(options: AntigravityAcpRouteOptions): Promise<A
   // sign-in costs a whole `agy` process each time, which meant "switched off"
   // still launched the official CLI behind the user's back.
   if (!settings.enabled) return disabledStatus(settings)
-  const resolved: { binary?: ResolvedAcpBinary; error?: string } = await options.resolveBinary()
-    .catch((): { binary?: ResolvedAcpBinary; error?: string } => ({ error: 'The executable could not be resolved.' }))
+  const resolved: { binary?: ResolvedAcpBinary; error?: string; deferred?: boolean } = await options.resolveBinary({ fresh })
+    .catch((): { binary?: ResolvedAcpBinary; error?: string; deferred?: boolean } => ({
+      error: 'The executable could not be resolved.',
+    }))
   const catalog = await options.catalog.rehydrate()
   const auth = resolved.binary === undefined
     ? { authenticated: false }
-    : await options.auth().catch(() => ({ authenticated: false }))
+    : await options.auth({ force: fresh }).catch(() => ({ authenticated: false }))
   const models = catalog?.models ?? []
   const conflict = options.conflict()
   return {
     enabled: settings.enabled,
     binary: resolved.binary === undefined
-      ? { kind: 'missing', ...(resolved.error === undefined ? {} : { error: missingBinaryMessage(resolved.error) }) }
+      ? {
+          kind: 'missing',
+          // A passive read that stopped before installing is not a failed
+          // download: prefixing it with "could not be downloaded" would report an
+          // attempt that never happened and contradict the rest of the sentence.
+          ...(resolved.error === undefined
+            ? {}
+            : { error: resolved.deferred === true ? resolved.error : missingBinaryMessage(resolved.error) }),
+        }
       : {
           kind: resolved.binary.kind,
           path: resolved.binary.path,
@@ -175,11 +203,15 @@ export function registerAntigravityAcpRoutes(ctx: Context, options: AntigravityA
           if (!sameSettings(before, wrote)) ctx.emit?.('llm/adapters-updated')
           if (update.binaryPath !== undefined) {
             // A different executable means a different account and a different
-            // catalogue; the cached one belongs to the old binary.
+            // catalogue; the cached ones belong to the old binary.
             options.catalog.invalidate()
+            options.invalidateBinary?.()
             await options.catalog.read({ force: true }).catch(() => undefined)
           }
-          return sendJson(response, 200, { ok: true, value: await readStatus(options) })
+          // A settings change is a user action, so this answer may resolve the
+          // executable for real (and download it when the user just pointed at
+          // "automatic" on a machine that has none yet).
+          return sendJson(response, 200, { ok: true, value: await readStatus(options, { fresh: true }) })
         }
 
         if (path === 'login/start') {
@@ -196,7 +228,9 @@ export function registerAntigravityAcpRoutes(ctx: Context, options: AntigravityA
 
         if (path === 'login/status') {
           if (method !== 'GET') return sendMethodNotAllowed(response)
-          return sendJson(response, 200, { ok: true, value: await options.auth() })
+          // Asked after a sign-in attempt, where the cached answer is the one thing
+          // that must not be returned.
+          return sendJson(response, 200, { ok: true, value: await options.auth({ force: true }) })
         }
 
         if (path === 'logout') {
@@ -237,9 +271,11 @@ export function registerAntigravityAcpRoutes(ctx: Context, options: AntigravityA
           if (!isSameOriginMutation(request)) {
             return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           }
+          // The refresh click is the user saying "ask again": the cached catalogue,
+          // the cached sign-in answer and the cached executable resolution are all
+          // re-read, and this is one of the few paths allowed to download.
+          options.invalidateBinary?.()
           const refreshed = await options.catalog.read({ force: true }).catch(() => undefined)
-          // The refresh click is the user saying "ask again", so the cached
-          // sign-in answer is invalidated with it.
           await options.auth({ force: true }).catch(() => undefined)
           if (refreshed === undefined) {
             // A silent 200 over an empty catalogue is what made "sync models"
@@ -249,7 +285,7 @@ export function registerAntigravityAcpRoutes(ctx: Context, options: AntigravityA
               error: 'The Antigravity agent returned no model list. Run the self-check above, or check that the CLI is signed in.',
             })
           }
-          return sendJson(response, 200, { ok: true, value: await readStatus(options) })
+          return sendJson(response, 200, { ok: true, value: await readStatus(options, { fresh: true }) })
         }
 
         return sendJson(response, 404, { ok: false, error: 'Not found.' })

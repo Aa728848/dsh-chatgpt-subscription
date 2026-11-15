@@ -108,6 +108,12 @@ export interface AcpBinaryDiagnostics {
   tried: string[]
   /** The failure that ended the search, when nothing usable was found. */
   error?: string
+  /**
+   * True when the search stopped short of installing: nothing local was found and
+   * this read was not allowed to download. The card says so instead of claiming
+   * the download failed - it was never attempted.
+   */
+  deferred?: boolean
 }
 
 /** Test seams so this module can be exercised with no network and no home directory. */
@@ -124,6 +130,25 @@ export interface AcpBinaryOptions {
   home?(): string
   /** Reads the CLI version; returns undefined when the binary does not answer. */
   readVersion?(command: string): Promise<string | undefined>
+  /**
+   * Whether a missing executable may be downloaded.
+   *
+   * A *passive* read (the settings card rendering, the composer badge polling) may
+   * not: downloading a ~100 MB archive is an action, and it used to happen behind
+   * a page render for a user who had not asked for anything. Only an explicit
+   * action - a refresh click, the self-check, or an actual turn - sets this true.
+   * Defaults to true so every existing caller keeps the active behaviour.
+   */
+  download?: boolean
+}
+
+/** How long a resolved executable is reused before the disk is read again. */
+export const BINARY_CACHE_TTL_MS = 5 * 60_000
+
+/** One resolution result, exactly as the resolver returned it. */
+export interface AcpBinaryResolution {
+  binary?: ResolvedAcpBinary
+  diagnostics: AcpBinaryDiagnostics
 }
 
 /** Candidate paths the local CLI may live at, most specific first. */
@@ -189,6 +214,18 @@ export async function resolveAcpBinary(
   if (await exists(cachedPath)) {
     return { binary: { path: cachedPath, kind: 'downloaded', version: release.version }, diagnostics: { tried } }
   }
+  if (options.download === false) {
+    // A passive read stops here. The sentence is composed for the card directly -
+    // it is not a "download failed" detail, because no download was attempted -
+    // and that is what the `deferred` flag tells the route about it.
+    return {
+      diagnostics: {
+        tried,
+        deferred: true,
+        error: 'No Antigravity CLI (agy) is installed yet. This line downloads the official ACP server the first time you start a turn, run the self-check, or press refresh.',
+      },
+    }
+  }
   try {
     const downloaded = await downloadRelease(release, root, options.fetchFn ?? fetch)
     return { binary: { path: downloaded, kind: 'downloaded', version: release.version }, diagnostics: { tried } }
@@ -199,6 +236,90 @@ export async function resolveAcpBinary(
         error: error instanceof Error ? error.message : String(error),
       },
     }
+  }
+}
+
+/**
+ * A cached answer to "which executable may this line run?".
+ *
+ * Resolution touches the disk once per candidate and spawns `agy --version` to
+ * prove the file answers, which is not something a page render should do. The
+ * answer is therefore reused for a few minutes; a change of `binaryPath` and the
+ * refresh click invalidate or force it.
+ *
+ * A cached *passive* answer is never served to an active caller: if the reading
+ * was taken without permission to download and found nothing, a turn asking the
+ * same question must still be allowed to fetch the release.
+ */
+export class AcpBinaryCache {
+  private value: AcpBinaryResolution | undefined
+  private fetchedAt = 0
+  private withDownload = false
+  private inflight: Promise<AcpBinaryResolution> | undefined
+  /** Whether the in-flight read is allowed to install. */
+  private inflightDownload = false
+
+  /**
+   * @param resolve - Reads the real answer; called at most once per window.
+   * @param now - Clock seam.
+   * @param ttlMs - How long one answer stays valid.
+   */
+  constructor(
+    private readonly resolve: (options: { download?: boolean }) => Promise<AcpBinaryResolution>,
+    private readonly now: () => number = Date.now,
+    private readonly ttlMs: number = BINARY_CACHE_TTL_MS,
+  ) {}
+
+  /** The cached answer, when one is still valid. */
+  peek(): AcpBinaryResolution | undefined {
+    if (this.value === undefined) return undefined
+    return this.now() - this.fetchedAt < this.ttlMs ? this.value : undefined
+  }
+
+  /**
+   * Read the resolution, reusing a valid answer or one in-flight read.
+   *
+   * @param options - `force` re-reads the disk; `download` allows fetching a release.
+   * @returns The executable (when one was found) and what was tried.
+   */
+  async read(options: { force?: boolean; download?: boolean } = {}): Promise<AcpBinaryResolution> {
+    if (options.force !== true) {
+      const cached = this.peek()
+      // A passive reading that found nothing must not hide the download from an
+      // active caller asking the same question moments later.
+      const usable = cached !== undefined
+        && (options.download !== true || this.withDownload || cached.binary !== undefined)
+      if (usable) return cached
+    }
+    const download = options.download !== false
+    if (this.inflight !== undefined) {
+      // Same rule as a cached answer: a read that may not install cannot answer a
+      // caller that may. Waiting for it to settle and then resolving again is what
+      // keeps a turn from reporting "not installed" because a page render happened
+      // to be reading the disk at that moment.
+      if (!(download && !this.inflightDownload)) return this.inflight
+      await this.inflight.catch(() => undefined)
+    }
+    const promise = this.resolve({ download })
+      .then((value) => {
+        this.value = value
+        this.fetchedAt = this.now()
+        this.withDownload = download
+        return value
+      })
+      .finally(() => {
+        if (this.inflight === promise) this.inflight = undefined
+      })
+    this.inflight = promise
+    this.inflightDownload = download
+    return promise
+  }
+
+  /** Forget the answer, e.g. because the configured path just changed. */
+  invalidate(): void {
+    this.value = undefined
+    this.fetchedAt = 0
+    this.withDownload = false
   }
 }
 

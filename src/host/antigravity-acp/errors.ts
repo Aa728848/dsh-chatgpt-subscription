@@ -27,6 +27,16 @@ export const ACP_ERROR_CODES = {
   ACP_DISCONNECTED: 'The Antigravity agent process ended mid-turn. Retry to reconnect.',
   /** A JSON-RPC error the line has no specific handling for. */
   ACP_RPC_ERROR: 'The Antigravity ACP server returned a JSON-RPC error.',
+  /**
+   * The service declined the account or the request itself - a quota wall, a
+   * policy block, a verification challenge, a rate limit.
+   *
+   * Kept apart from {@link ACP_RPC_ERROR} because the two want opposite
+   * treatment: a transport fault is worth another attempt, while putting the same
+   * account in front of the same wall two more times is how a strict policy turns
+   * one failure into a pattern.
+   */
+  ACP_UPSTREAM_BLOCKED: 'The Antigravity service declined this account or request (quota, policy or verification). Retrying here will not change the answer - resolve it in the official client first.',
   /** The server rejected the request parameters or the model id. */
   ACP_INVALID_PARAMS: 'The Antigravity ACP server rejected the request parameters or the model id.',
   /** The server does not implement the method this client called. */

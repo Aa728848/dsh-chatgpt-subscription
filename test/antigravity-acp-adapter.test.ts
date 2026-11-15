@@ -19,6 +19,7 @@ const SERVER = `
 let buffer = ''
 process.stdin.setEncoding('utf8')
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n')
+const replyError = (id, code, message) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }) + '\\n')
 const notify = (params) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params }) + '\\n')
 let session = 0
 process.stdin.on('data', (chunk) => {
@@ -56,6 +57,28 @@ process.stdin.on('data', (chunk) => {
     }
     if (request.method === 'session/prompt') {
       const text = request.params.prompt.map((block) => block.text || '').join('')
+      if (text.includes('QUOTA')) {
+        replyError(request.id, -32050, 'Quota exhausted for this project')
+        continue
+      }
+      if (text.includes('VALIDATION')) {
+        replyError(request.id, -32051, 'VALIDATION_REQUIRED: verify this account to continue')
+        continue
+      }
+      // A control that must NOT look like a policy block: "photos" contains
+      // "tos", which the refusal pattern matches only as a whole word.
+      if (text.includes('PHOTOS')) {
+        replyError(request.id, -32052, 'the photos service is unavailable')
+        continue
+      }
+      if (text.includes('AUTHMSG')) {
+        replyError(request.id, -32053, 'Authentication required: sign in first')
+        continue
+      }
+      // A reused process can still flush the conversation it ran before.
+      if (text.includes('STALE')) {
+        notify({ sessionId: 'session-0', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'stale answer from session-0' } } })
+      }
       notify({ sessionId: request.params.sessionId, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking...' } } })
       notify({ sessionId: request.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer for: ' + text.slice(0, 40) } } })
       reply(request.id, { stopReason: 'end_turn', usage: { inputTokens: 11, outputTokens: 7, cachedReadTokens: 3, thoughtTokens: 2 } })
@@ -88,6 +111,76 @@ function adapterHarness(overrides: Partial<Record<string, unknown>> = {}): {
     ...overrides,
   })
   return { adapter, settings, dispose: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+/**
+ * A server that flushes one frame of the previous conversation while the second
+ * turn is being set up - before \`session/new\` answers for it.
+ */
+const REUSE_SERVER = String.raw`
+let buffer = ''
+process.stdin.setEncoding('utf8')
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n')
+const notify = (params) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params }) + '\n')
+let sessions = 0
+let initializes = 0
+process.stdin.on('data', (chunk) => {
+  buffer += chunk
+  let index
+  while ((index = buffer.indexOf('\n')) >= 0) {
+    const line = buffer.slice(0, index)
+    buffer = buffer.slice(index + 1)
+    if (!line.trim()) continue
+    const request = JSON.parse(line)
+    if (request.method === 'initialize') {
+      initializes += 1
+      if (initializes === 2) {
+        notify({ sessionId: 'session-1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'stale before session' } } })
+      }
+      reply(request.id, { protocolVersion: 1, authMethods: [] })
+      continue
+    }
+    if (request.method === 'session/new') {
+      sessions += 1
+      reply(request.id, {
+        sessionId: 'session-' + sessions,
+        configOptions: [
+          { id: 'model', type: 'select', options: [{ value: 'gemini-4-carbon' }] },
+          { id: 'thought_level', type: 'select', options: [{ value: 'low' }, { value: 'high' }] },
+        ],
+      })
+      continue
+    }
+    if (request.method === 'session/set_config_option') {
+      reply(request.id, { configOptions: [] })
+      continue
+    }
+    if (request.method === 'session/prompt') {
+      const text = request.params.prompt.map((block) => block.text || '').join('')
+      notify({ sessionId: request.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer for: ' + text.slice(0, 40) } } })
+      reply(request.id, { stopReason: 'end_turn' })
+      continue
+    }
+    reply(request.id, {})
+  }
+})
+`
+
+/** Like {@link adapterHarness}, but the finished turn's process goes to the pool. */
+function reuseHarness(): { adapter: AntigravityAcpAdapter; dispose(): void } {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-reuse-window-test-'))
+  const server = join(dir, 'server.mjs')
+  writeFileSync(server, REUSE_SERVER, 'utf8')
+  const settings = new AntigravityAcpSettingsStore(join(dir, 'settings.json'))
+  const adapter = new AntigravityAcpAdapter({
+    settings,
+    resolveLaunch: async () => ({ command: process.execPath, args: [server] }),
+    loadCatalog: async () => ({ models: [], synced: true }),
+    // No parking: the process is released to the idle pool, which is the path
+    // that rewires handlers before \`session/new\` for the next turn.
+    dormantSessionLimit: 0,
+  })
+  return { adapter, dispose: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
 function optionsOf(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
@@ -209,6 +302,85 @@ describe('AntigravityAcpAdapter', () => {
     } finally {
       await harness.adapter.dispose()
       harness.dispose()
+    }
+  })
+
+  it('drops frames that belong to a session this turn no longer owns', async () => {
+    // A warm process keeps flushing the conversation it ran before: the cancel
+    // that ended it is a notification, not a barrier. Appending those frames
+    // would put another conversation's text into this answer.
+    const harness = adapterHarness()
+    try {
+      const chunks = await collect(harness.adapter.stream(optionsOf({
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'STALE please' }] }],
+      }) as never))
+      const text = chunks.filter((chunk) => chunk.type === 'text-delta')
+        .map((chunk) => (chunk as { text: string }).text).join('')
+      expect(text).toContain('answer for: STALE please')
+      expect(text).not.toContain('stale answer from session-0')
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
+  it('reports an upstream refusal once instead of retrying it as a transport fault', async () => {
+    const harness = adapterHarness()
+    try {
+      await expect(collect(harness.adapter.stream(optionsOf({
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'QUOTA please' }] }],
+      }) as never))).rejects.toMatchObject({ failure: { code: 'ACP_UPSTREAM_BLOCKED' } })
+      const policy = harness.adapter.providerRetryPolicy() as { retryableCodes: readonly string[] }
+      expect(policy.retryableCodes).not.toContain('ACP_UPSTREAM_BLOCKED')
+      expect(policy.retryableCodes).toContain('ACP_DISCONNECTED')
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
+  it('classifies upstream refusals by their real vocabulary', async () => {
+    const harness = adapterHarness()
+    try {
+      const codeOf = async (marker: string): Promise<string | undefined> => {
+        try {
+          await collect(harness.adapter.stream(optionsOf({
+            messages: [{ role: 'user', content: [{ type: 'text', text: marker }] }],
+          }) as never))
+          return undefined
+        } catch (error) {
+          return (error as { failure?: { code?: string } }).failure?.code
+        }
+      }
+      // A verification/policy block is a refusal, not a transport fault.
+      expect(await codeOf('VALIDATION')).toBe('ACP_UPSTREAM_BLOCKED')
+      // The auth wall is reported as such, whatever code it arrives with.
+      expect(await codeOf('AUTHMSG')).toBe('ACP_AUTH_REQUIRED')
+      // And a word that merely ends in "tos" stays an ordinary retryable error.
+      expect(await codeOf('PHOTOS')).toBe('ACP_RPC_ERROR')
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
+  it('drops frames addressed to a session while this turn has none yet', async () => {
+    // The reuse window: a warm process is rewired and then \`session/new\` answers.
+    // Anything addressed in between belongs to the conversation it was running
+    // before, and "we have no id yet" used to let it through.
+    const space = reuseHarness()
+    try {
+      await collect(space.adapter.stream(optionsOf() as never))
+      const chunks = await collect(space.adapter.stream(optionsOf({
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'second one' }] }],
+      }) as never))
+      const text = chunks.filter((chunk) => chunk.type === 'text-delta')
+        .map((chunk) => (chunk as { text: string }).text).join('')
+      expect(text).not.toContain('stale before session')
+      expect(text).toContain('answer for: second one')
+    } finally {
+      await space.adapter.dispose()
+      space.dispose()
     }
   })
 })

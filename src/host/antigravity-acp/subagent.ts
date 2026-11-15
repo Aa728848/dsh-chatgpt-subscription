@@ -29,6 +29,7 @@ import { LlmError } from '../common/llm-compat.ts'
 import type { ContentBlock } from '../common/llm-compat.ts'
 import { AcpClient, type AcpClientHandlers } from './acp-client.ts'
 import type { AcpLaunch } from './adapter.ts'
+import { acpError } from './errors.ts'
 import type { AntigravityAcpSettingsStore } from './settings.ts'
 
 /** Provider name this line registers under. */
@@ -36,6 +37,19 @@ export const SUBAGENT_PROVIDER_NAME = 'antigravity-acp'
 
 /** Budget for one subagent run's single prompt. */
 export const SUBAGENT_PROMPT_TIMEOUT_MS = 30 * 60_000
+
+/**
+ * How many delegated runs may be in flight at once.
+ *
+ * The same number the main-model half allows (`DEFAULT_MAX_ACTIVE_TURNS` in
+ * `adapter.ts`), applied to this backend's own runs. Delegation used to be
+ * unbounded: every run spawns a whole official agent (244 MB in the reference
+ * report), and nothing stopped a burst of subagents from doing it all at once
+ * while the line's own switch was still on. Kept as a separate budget rather than
+ * shared with the main-model turns so a burst of delegation cannot lock the user
+ * out of their own conversation.
+ */
+export const DEFAULT_MAX_ACTIVE_RUNS = 4
 
 /** Why one subagent run ended, in the seam's vocabulary. */
 export type AntigravitySubagentStopReason = 'completed' | 'max-tokens' | 'refusal' | 'aborted' | 'error'
@@ -54,10 +68,29 @@ export interface AntigravitySubagentRun {
   dispose(): Promise<void>
 }
 
+/**
+ * The agent options this backend can honour.
+ *
+ * ACP can select a model and a thinking level on a session and nothing else: it
+ * has no temperature, no stop sequence and no output-token cap. `maxTokens` is
+ * therefore read and dropped rather than refused - refusing it would make every
+ * caller that passes a cap fail for a bound the protocol cannot express.
+ */
+export interface AntigravitySubagentAgentOptions {
+  /** Model id to select on the child's ACP session. */
+  readonly model?: string
+  /** Thinking level to apply, when the server publishes one for that model. */
+  readonly reasoningEffort?: string
+  /** Dropped: ACP has no output-token cap. */
+  readonly maxTokens?: number
+}
+
 /** The part of `SubagentStartRequest` this backend reads. */
 export interface AntigravitySubagentStartRequest {
   readonly cwd: string
   readonly prompt: readonly ContentBlock[]
+  /** Host-requested model and effort, when the caller selected them. */
+  readonly agentOptions?: AntigravitySubagentAgentOptions
   readonly signal?: AbortSignal
 }
 
@@ -80,6 +113,8 @@ export interface AntigravityAcpSubagentOptions {
   resolveLaunch(): Promise<AcpLaunch>
   /** This line's preferences (permission policy and default effort). */
   settings: AntigravityAcpSettingsStore
+  /** Delegated runs allowed in flight at once. */
+  maxActiveRuns?: number
   /** Test seam. */
   spawnClient?(launch: AcpLaunch, cwd: string, handlers: AcpClientHandlers): AcpClient
 }
@@ -129,9 +164,17 @@ export function registerAntigravityAcpSubagent(
  * working directory, and that is all.
  */
 export function createProvider(options: AntigravityAcpSubagentOptions): AntigravitySubagentProvider {
+  // One budget per registered provider: every run is a whole agent process, and a
+  // burst of delegation must be bounded the way the main-model turns are.
+  const cap = options.maxActiveRuns ?? DEFAULT_MAX_ACTIVE_RUNS
+  let active = 0
   return {
     name: SUBAGENT_PROVIDER_NAME,
-    capabilities: { agentOptions: false, agentPreset: false, outputSchema: false, depthLimit: false },
+    // `agentOptions` is advertised because the model and the thinking level *are*
+    // expressible (one `session/set_config_option` each). The host refuses to let a
+    // caller select a model or a preset on a backend that does not claim it, which
+    // is why delegation used to run on whatever model the agent defaulted to.
+    capabilities: { agentOptions: true, agentPreset: false, outputSchema: false, depthLimit: false },
     inheritsParentContext: false,
     async start(request): Promise<AntigravitySubagentRun> {
       // The registry outlives the switch: a provider is registered once, while
@@ -145,19 +188,37 @@ export function createProvider(options: AntigravityAcpSubagentOptions): Antigrav
           'ACP_DISABLED',
         )
       }
-      const launch = await options.resolveLaunch()
-      const task = promptText(request.prompt)
-      let settled = false
-      const running = startRun(launch, request.cwd, task, settings.permissionPolicy, options, request.signal)
-      return {
-        id: SUBAGENT_PROVIDER_NAME,
-        result: running.result,
-        dispose: async () => {
-          if (settled) return
-          settled = true
-          running.settle({ output: running.output(), stopReason: 'aborted' })
-          await running.client.dispose().catch(() => undefined)
-        },
+      if (active >= cap) {
+        throw acpError('ACP_SESSION_LIMIT', `${active} delegated runs are already in flight (limit ${cap}).`)
+      }
+      active += 1
+      let released = false
+      const release = (): void => {
+        if (released) return
+        released = true
+        active = Math.max(0, active - 1)
+      }
+      try {
+        const launch = await options.resolveLaunch()
+        const task = promptText(request.prompt)
+        let settled = false
+        const running = startRun(launch, request.cwd, task, settings.permissionPolicy, options, request)
+        // The run's own settlement is the normal exit; a dispose without settle is
+        // the cancellation path, and both must hand the budget back exactly once.
+        void running.result.then(release, release)
+        return {
+          id: SUBAGENT_PROVIDER_NAME,
+          result: running.result,
+          dispose: async () => {
+            if (settled) return
+            settled = true
+            running.settle({ output: running.output(), stopReason: 'aborted' })
+            await running.client.dispose().catch(() => undefined)
+          },
+        }
+      } catch (error) {
+        release()
+        throw error
       }
     },
   }
@@ -169,8 +230,11 @@ function startRun(
   task: string,
   permissionPolicy: 'reject' | 'allow',
   options: AntigravityAcpSubagentOptions,
-  signal: AbortSignal | undefined,
+  request: AntigravitySubagentStartRequest,
 ): { client: AcpClient; result: Promise<AntigravitySubagentResult>; settle(result: AntigravitySubagentResult): void; output(): readonly ContentBlock[] } {
+  const signal = request.signal
+  const model = textField(request.agentOptions?.model)
+  const effort = textField(request.agentOptions?.reasoningEffort)
   let settle: (result: AntigravitySubagentResult) => void = () => undefined
   const result = new Promise<AntigravitySubagentResult>((resolve) => {
     settle = resolve
@@ -223,6 +287,17 @@ function startRun(
       const session = asRecord(await client.request('session/new', { cwd, mcpServers: [] }))
       const sessionId = typeof session?.sessionId === 'string' ? session.sessionId : undefined
       if (sessionId === undefined) throw new Error('Antigravity ACP did not return a session id.')
+      // The model the caller asked for is applied to this conversation before the
+      // prompt: a rejected model fails the run here, because answering on a
+      // different model would be an answer to a request nobody made. A thinking
+      // level the account does not publish stays a preference and is dropped.
+      if (model !== undefined) {
+        await client.request('session/set_config_option', { sessionId, configId: 'model', value: model })
+      }
+      if (effort !== undefined) {
+        await client.request('session/set_config_option', { sessionId, configId: 'thought_level', value: effort })
+          .catch(() => undefined)
+      }
       const answer = asRecord(await withTimeout(client.request('session/prompt', {
         sessionId,
         prompt: [{ type: 'text', text: task }],
@@ -244,6 +319,11 @@ function startRun(
     }
   })()
   return { client, result, settle, output }
+}
+
+/** A non-empty string, or undefined; the host's own values are untrusted input here. */
+function textField(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
 }
 
 /** Flatten the prompt blocks a caller supplied into the one text the agent gets. */

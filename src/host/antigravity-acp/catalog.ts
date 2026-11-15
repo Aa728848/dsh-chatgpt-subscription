@@ -22,7 +22,7 @@
 
 import type { AcpClient } from './acp-client.ts'
 import { AcpClient as Client } from './acp-client.ts'
-import { collapseModels, type AcpAvailableModel, type AcpModelOption } from './types.ts'
+import { collapseModels, preferAuthMethod, type AcpAvailableModel, type AcpModelOption } from './types.ts'
 import {
   catalogSnapshotName,
   readCatalogSnapshot,
@@ -154,7 +154,9 @@ export async function readCatalogFrom(
     clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
     clientInfo: { name: 'dsh-chatgpt-subscription', version: '1.0.0' },
   }, signal))
-  const authMethods = Array.isArray(init?.authMethods) ? init.authMethods : []
+  const authMethods = Array.isArray(init?.authMethods)
+    ? init.authMethods.map((entry) => String((entry as Record<string, unknown>).id ?? '')).filter((id) => id !== '')
+    : []
   const create = async (): Promise<Record<string, unknown>> => {
     const value = asRecord(await client.request('session/new', { cwd: process.cwd(), mcpServers: [] }, signal))
     if (value === undefined) throw new Error('Antigravity ACP did not return a session.')
@@ -166,7 +168,9 @@ export async function readCatalogFrom(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (!/authentication required/i.test(message) || authMethods.length === 0) throw error
-    await client.request('authenticate', { methodId: 'oauth-personal' }, signal)
+    // Same preference the main-model session uses; a hard-coded method was a
+    // method the server might not have offered at all.
+    await client.request('authenticate', { methodId: preferAuthMethod(authMethods) }, signal)
     session = await create()
   }
   // The server nests the tier list under `models.availableModels`; an older

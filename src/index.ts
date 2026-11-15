@@ -65,7 +65,7 @@ import { AntigravityAcpAdapter } from './host/antigravity-acp/adapter.ts'
 import { AntigravityAcpSettingsStore } from './host/antigravity-acp/settings.ts'
 import { AcpCatalog } from './host/antigravity-acp/catalog.ts'
 import { AcpClient } from './host/antigravity-acp/acp-client.ts'
-import { resolveAcpBinary } from './host/antigravity-acp/binary.ts'
+import { AcpBinaryCache, resolveAcpBinary } from './host/antigravity-acp/binary.ts'
 import { probeAuth, startLogin } from './host/antigravity-acp/login.ts'
 import { registerAntigravityAcpRoutes } from './host/antigravity-acp/routes.ts'
 import { AcpAuthCache } from './host/antigravity-acp/auth-cache.ts'
@@ -1121,9 +1121,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // and this line neither reads nor copies it. A pool here would be a promise
     // the protocol cannot keep.
     const antigravityAcpSettings = new AntigravityAcpSettingsStore()
-    const resolveAntigravityLaunch = async () => {
+    // One resolution, shared by every reader. Finding the executable reads the
+    // disk and spawns `agy --version`; the card, the composer badge and the
+    // self-check all ask, so the answer is cached and the download is only
+    // permitted to an explicit answer.
+    const antigravityAcpBinary = new AcpBinaryCache(async (options) => {
       const settings = await antigravityAcpSettings.read()
-      const resolved = await resolveAcpBinary(settings.binaryPath)
+      return resolveAcpBinary(settings.binaryPath, { download: options.download !== false })
+    })
+    const resolveAntigravityLaunch = async () => {
+      const resolved = await antigravityAcpBinary.read({ download: true })
       if (resolved.binary === undefined) {
         throw new Error(resolved.diagnostics.error ?? 'No usable Antigravity CLI (agy) was found.')
       }
@@ -1147,9 +1154,26 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // behind it, exactly like every other line's catalog.
     void antigravityAcpCatalog.rehydrate().catch(() => undefined)
     // The auth probe costs one process spawn. The card polls, the hub polls, and
-    // three readers on one screen must not mean three `agy` launches, so the
-    // answer is cached briefly and invalidated by an explicit sign-in or refresh.
-    const antigravityAcpAuth = new AcpAuthCache(() => probeAuthWithLaunch(resolveAntigravityLaunch))
+    // three readers on one screen must not mean three `agy` launches, so the answer
+    // is cached for a few minutes and invalidated by an explicit sign-in or refresh.
+    //
+    // The probe itself may not install anything: it is what the hub overview card
+    // and the status route answer with, and a page render used to be enough to
+    // download the release. This resolver reports only what is already on disk, so
+    // "not installed yet" answers as "not signed in" instead of starting an
+    // install behind a card. A real turn, the refresh click and the self-check
+    // download through `resolveAntigravityLaunch`.
+    const antigravityAcpAuth = new AcpAuthCache(() => probeAuthWithLaunch(async () => {
+      const resolved = await antigravityAcpBinary.read({ download: false })
+      if (resolved.binary === undefined) {
+        throw new Error(resolved.diagnostics.error ?? 'No usable Antigravity CLI (agy) was found.')
+      }
+      return {
+        command: resolved.binary.path,
+        args: ['acp', '--disable-telemetry'],
+        version: resolved.binary.version,
+      }
+    }))
     // The video reader this route needs: DSH's attachment service is image-only,
     // so videos are ingested by this plugin's own tool and stored locally. The
     // reader verifies each reference against the stored bytes before handing
@@ -1208,15 +1232,19 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const disposeAntigravityAcpRoutes = registerAntigravityAcpRoutes(ctx, {
       settings: antigravityAcpSettings,
       catalog: antigravityAcpCatalog,
-      resolveBinary: async () => {
-        const settings = await antigravityAcpSettings.read()
-        const resolved = await resolveAcpBinary(settings.binaryPath)
-        return { binary: resolved.binary, error: resolved.diagnostics.error }
+      resolveBinary: async (options) => {
+        const resolved = await antigravityAcpBinary.read({ download: options?.fresh === true })
+        return {
+          binary: resolved.binary,
+          error: resolved.diagnostics.error,
+          deferred: resolved.diagnostics.deferred === true,
+        }
       },
+      invalidateBinary: () => antigravityAcpBinary.invalidate(),
       login: async () => {
         try {
           const launch = await resolveAntigravityLaunch()
-          const started = startLogin(launch)
+          const started = await startLogin(launch)
           // A sign-in changes the answer, so the cached one must not outlive it.
           antigravityAcpAuth.invalidate()
           return started
@@ -1229,8 +1257,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       occupancy: () => antigravityAcpAdapter.occupancy(),
       runDoctor: () => runDoctor({
         resolveBinary: async () => {
-          const settings = await antigravityAcpSettings.read()
-          const resolved = await resolveAcpBinary(settings.binaryPath)
+          const resolved = await antigravityAcpBinary.read({ download: true })
           return resolved.binary === undefined
             ? { error: resolved.diagnostics.error }
             : { path: resolved.binary.path, version: resolved.binary.version, kind: resolved.binary.kind }

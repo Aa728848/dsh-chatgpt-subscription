@@ -109,7 +109,7 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
     setLoginNotice(null)
     void API.startLogin()
       .then(async (result) => {
-        setLoginNotice(result.started ? t.signInSuccess : t.signInAlready)
+        setLoginNotice(t.signInSuccess)
         // Re-read the state right away: on a machine that is already signed in the
         // spinner would otherwise be the only feedback and the card would still
         // read "not signed in" next to a button that says "sign in".
@@ -122,6 +122,14 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
   const saveBinaryPath = useCallback(() => {
     void run('binary', () => API.update({ binaryPath: binaryPath.trim() === '' ? null : binaryPath.trim() }))
   }, [run, binaryPath])
+
+  const resetBinaryPath = useCallback(() => {
+    void run('binary', async () => {
+      const result = await API.update({ binaryPath: null })
+      setBinaryPath('')
+      return result
+    })
+  }, [run])
 
   return (
     <div>
@@ -221,6 +229,9 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
             />
             <button className="dsha-btn" disabled={busy !== null} onClick={saveBinaryPath}>
               {t.binaryPathSave}
+            </button>
+            <button className="dsha-btn" disabled={busy !== null} onClick={resetBinaryPath}>
+              {t.binaryPathReset}
             </button>
           </div>
         </div>

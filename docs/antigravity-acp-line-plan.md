@@ -189,7 +189,7 @@ ACP 里没有「当前任务」的锚点：模型拿到的是一份 90+ 条的 t
 
 ## 7. `ACP_*` 错误码表
 
-每个码对应一个可操作的状况，文案在 `src/host/antigravity-acp/errors.ts` 与本表保持一致；适配器的重试策略按这些码选择（`ACP_DISCONNECTED` / `ACP_RPC_ERROR` 可重试，其余不可）。
+每个码对应一个可操作的状况，文案在 `src/host/antigravity-acp/errors.ts` 与本表保持一致；适配器的重试策略按这些码选择（`ACP_DISCONNECTED` / `ACP_RPC_ERROR` / `TRANSPORT` / `SERVER` / `TIMEOUT` / `STREAM_CLOSED` 可重试，其余不可）。调用方取消会被归成 `ABORTED`（不可重试），配额/风控/验证类拒绝归成 `ACP_UPSTREAM_BLOCKED`（不可重试）——把同一账号再送进同一堵墙两次并不划算。
 
 | 码 | 触发条件 | 该做什么 |
 | --- | --- | --- |
@@ -197,6 +197,7 @@ ACP 里没有「当前任务」的锚点：模型拿到的是一份 90+ 条的 t
 | `ACP_BINARY_UNAVAILABLE` | 找不到可用的 `agy`，或启动失败 | 安装 Antigravity CLI，或在卡片里指定可执行文件路径；本线路也能自动下载官方 ACP server |
 | `ACP_DISCONNECTED` | agent 进程在回合中途退出 / 管道断开 | 重试（可自动重试）；持续失败检查 `agy` 版本与日志 |
 | `ACP_RPC_ERROR` | JSON-RPC 返回了没有专属处理的错误 | 看错误文案里的原始 message；重试通常可恢复 |
+| `ACP_UPSTREAM_BLOCKED` | 错误文案里出现配额、限流、策略、服务条款、验证或风控信号（429/403、`quota`、`rate limit`、`resource_exhausted`、`verification` 等）——是服务拒绝了账号或请求，不是 agent 掉了 | 不自动重试。先去官方客户端把配额/验证/策略问题解决掉，再回来重试；换个账号或等额度恢复 |
 | `ACP_INVALID_PARAMS` | 服务端拒绝请求参数或模型 id（`-32602`） | 换一个服务端公布的模型 id；不要用未公布的档位名 |
 | `ACP_METHOD_UNSUPPORTED` | 服务端不实现本客户端调用的方法（`-32601`） | 升级 Antigravity CLI |
 | `ACP_NATIVE_TOOLS_UNSUPPORTED` | agent 用了它自己的工具（`write_file` / shell 等），绕过了 DSH 桥，且 `nativeToolPolicy` 为 `cancel` | 默认策略下不会出现；若已切到严格模式又反复遇到，说明该任务需要 DSH 未提供的工具 —— 在卡片里补充工具、换线路，或把策略切回「记录并继续」 |
@@ -206,6 +207,29 @@ ACP 里没有「当前任务」的锚点：模型拿到的是一份 90+ 条的 t
 | `ACP_SESSION_LIMIT` | 同时在跑的回合超过 `maxActiveTurns`，或 agent 达到自身的回合请求上限 | 结束/取消一个回合后重试 |
 | `ACP_UNSUPPORTED_OPTION` | 请求带了 ACP 表达不了的采样参数（`temperature` / `maxTokens` / `stop`） | 去掉这些参数；用模型档位而非 token 上限控制输出 |
 | `ACP_TEARDOWN_FAILED` | 进程清理无法确认 | 重启 DSH profile |
+
+### 6.8 第二轮审查修复（未发布）
+
+同一份外部审查又指出了六处问题，逐条核对后全部成立并已修复；其中第一条比报告描述得更严重。
+
+1. **辅助请求会杀掉正在读的那一轮。** 标题请求与主回答是并发发出的（harness 在 `request/header` 落盘后立刻起标题任务），且共用同一个 `sessionId`；`run()` 里「是否辅助请求」的判断原本排在 live 查询**之后**，于是一句话历史的标题请求 `canContinue` 必然为 false，直接 `closeTurn` 掉用户正在读的主回合。更糟的分支是两个请求都在 `live` 为空时通过判断，后写者覆盖前者，前者结束时 `live.get(id) === turn` 为假 —— 既不 park 也不 release，进程、桥与 `activeTurns` 一起泄漏，四次新会话后整条线开始报 `RATE_LIMIT`。现在辅助判定前置、辅助回合不注册 live 条目，所有结束路径统一走幂等的 `finishTurn()`（`antigravity-acp-session-reuse.test.ts` 新增用例，反向改动会让它报错）。
+2. **登录命令拼成 `acp acp --login` 且失败静默。** `launch.args` 已经包含 `acp`，旧实现 `slice(0, -1)` 后补 `'acp', '--login'` 送出重复子命令；stderr 被丢弃、退出码无人观察，失败仍返回 `started: true`。现在改成 `[...launch.args, '--login']`，并用 1 秒窗口观察 spawn 错误/非零退出（`LOGIN_FAILURE_WINDOW_MS`），把 CLI 自己的句子带回来（`antigravity-acp-login.test.ts`）。
+3. **取消被归成可重试的断连。** `abortError()` 是普通 `Error`，落到 `asLlmError` 的兜底分支变成可重试的 `ACP_DISCONNECTED`。watchdog 与 `llm-retry` 都会在 `signal.aborted` 时短路，所以现网没真的重跑，但分类是错的；现在显式归为 `ABORTED`。
+4. **配额/风控错误被自动重试两次。** 除 `-32000/-32602/-32601` 外的所有 `AcpError` 都变成可重试的 `ACP_RPC_ERROR`，于是配额、限流、策略与验证类拒绝会在同一账号上再撞两次。现在按错误文本识别并归为不可重试的 `ACP_UPSTREAM_BLOCKED`。
+5. **同一进程复用时会串音。** `session/cancel` 是通知而非屏障，`closeTurn` 不等待旧 prompt 结算就把进程放回池；两处 `onSessionUpdate` 都忽略 `sessionId`，旧会话的尾帧可能被追加到新回答里。现在按 `sessionId` 过滤（帧里没带 id 时保持旧行为），并在 `antigravity-acp-adapter.test.ts` 用会先发一帧旧会话内容的脚本服务端守住。
+6. **被动读取在静默下载并每分钟冷启动。** `GET /status` 在启用状态下会 `resolveBinary()`（找不到就下载归档）并探活（TTL 60 s，卡片+总览+胶囊各轮询一次）。现在：解析结果进 `AcpBinaryCache`（5 分钟）且被动读取 `download: false`；登录探测缓存 10 分钟；`/refresh`、`/login/status`、`POST /settings` 才是强制路径。另外 `catalog` 与主会话共用 `preferAuthMethod()`（原来 catalog 硬编码 `oauth-personal`），`mcp-bridge` 死状态 `withdrawn` 删除，`sendPrompt` 只解析一次 usage，子代理补上模型下发与独立并发预算。
+
+### 6.9 复查补刀（同一轮，未发布）
+
+外部复查在 6.8 的改动上又找到五处缝隙，逐条核对后全部成立：
+
+1. **总览卡仍会静默下载。** 6.8 只把 `GET /status` 分档，订阅总览卡的 `read()` 直接调 `AcpAuthCache.read()`，而它的探活闭包用的是 `download: true` 的 `resolveAntigravityLaunch` —— 打开总览页、缓存为空或过期时照样会下载并冷启动 `agy`。现在探活闭包单独一条**不允许安装**的解析路径：没装就回答「未登录」，下载只发生在真实回合、刷新与自检。
+2. **复用窗口仍会漏旧帧。** `ownsSession` 最初在「本轮还没有 session id」时一律放行；而温进程是**先 rewiring 再等 `session/new`**，这段窗口里带旧 id 的帧会混进新队列（当时的新增用例把脏帧跟在 `prompt` 之后，恰好绕过了窗口）。现在：不带 id 的帧继续放行（服务端不重复 id 也要能用），**带 id 但本轮尚无 id 一律丢弃**；用例改成在第二次 `initialize` 之前发脏帧，反向改动会变红。
+3. **拒绝词表漏真码且边界写错。** 补 `VALIDATION_REQUIRED` / `PERMISSION_DENIED` / `ACCOUNT_DISABLED` / `POLICY_VIOLATION`；`tos` 补上前置词边界（原来会把 `photos` 这类词当条款违规）。`CAPACITY_EXHAUSTED` **故意不列**：容量耗尽与配额不同，属于瞬时故障，重试才是正确动作。
+4. **文案自相矛盾 + 单飞升级缝隙。** 被动解析的句子被外层 `missingBinaryMessage()` 又包了一层「且官方 ACP server 无法下载」，与「首次对话时才下载」打架 —— 现在 `AcpBinaryDiagnostics.deferred` 标记这条路径，路由按原样呈现；`AcpBinaryCache` 同时记住 in-flight 那次是否允许下载，不允许安装的读取不会再回答一个允许安装的调用方。
+5. **收尾。** `dispose()` 给正在拆的 turn 补上 `closed = true`（pump 随后退出时不会再 release 一次）；`GET /login/status` 在两处文档里误写成 `POST`，已改；本节之前误标 `0.75.2`，改回「未发布」。
+
+**仍未验证**：以上全部是离线单测证据（真机探针测试仍为跳过状态）。辅助请求与标题并发的真实时间线、被动读取在真实总览页上的表现（现在有代码级守卫，但没有真机进程计数或截图）、以及子代理模型下发在真实 `agy` 上的效果，都还需要一次真机会话确认。
 
 ## 8. 左未验证清单（下一个人应先读这里）
 

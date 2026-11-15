@@ -109,4 +109,24 @@ describe('AntigravityAcpSection', () => {
     expect(text).toContain('ACP 没有独立的 system 提示槽位')
     expect(text).toContain('官方服务端不公布剩余额度')
   })
+
+  it('offers a restore-automatic button that clears the configured executable path', async () => {
+    // The catalog already ships a "restore automatic resolution" label; the card
+    // used to render only "save path", so the reset wording was dead. The user
+    // action that matters is the request body: a null path tells the host to go
+    // back to resolving the executable itself.
+    const requests: { url: string; body: string | null }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: { body?: string | null }) => {
+      requests.push({ url: String(input), body: init?.body ?? null })
+      return Response.json({ ok: true, value: STATUS })
+    }))
+    await act(async () => root.render(createElement(AntigravityAcpSection, {})))
+    const button = [...container.querySelectorAll('button')]
+      .find((entry) => entry.textContent === '恢复自动查找')
+    expect(button).toBeDefined()
+    await act(async () => { button?.click() })
+    const patch = requests.find((entry) => entry.url === '/antigravity-acp/api/settings')
+    expect(patch).toBeDefined()
+    expect(JSON.parse(patch?.body ?? 'null')).toEqual({ binaryPath: null })
+  })
 })

@@ -101,7 +101,6 @@ export class McpBridge {
   private descriptor: BridgeDescriptor | undefined
   private readonly token = randomBytes(32).toString('base64url')
   private readonly exposed: ExposedTool[]
-  private readonly withdrawn = new Map<string, ExposedTool>()
   private readonly parked = new Map<string, ParkedToolCall>()
   private readonly waiters = new Set<() => void>()
   private closed = false
@@ -145,7 +144,15 @@ export class McpBridge {
     return calls
   }
 
-  /** How many calls are currently waiting for an answer. */
+  /**
+   * How many calls the harness has not picked up yet.
+   *
+   * Deliberately the *parked* set - calls the agent has made that the harness has
+   * not taken yet - and not the responses still held open. The cap exists to stop
+   * a runaway agent from piling up calls nobody has picked up; a call the harness
+   * already took is one it answers by the next generation, and counting those as
+   * well would fire the cap during a legitimate multi-step round.
+   */
   get pendingCount(): number {
     return this.parked.size
   }
@@ -303,7 +310,6 @@ export class McpBridge {
       : {}
     const exposedName = typeof record.name === 'string' ? record.name : ''
     const tool = this.exposed.find((entry) => entry.exposedName === exposedName)
-      ?? this.withdrawn.get(exposedName)
     if (tool === undefined) {
       respond(response, 200, jsonRpcResult(id, {
         content: [{ type: 'text', text: `Unknown tool: ${exposedName}` }],

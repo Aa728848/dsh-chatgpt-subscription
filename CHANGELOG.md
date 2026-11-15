@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **[antigravity-acp / 第二轮审查] 辅助请求不再杀掉正在读的主回合、登录命令修正且失败可见、配额与风控拒绝不再重试**
+  - **辅助请求误杀主回合（最严重）**：harness 在 `request/header` 落盘后立刻并发发出会话标题请求，与主回答共用同一个 `sessionId`；`run()` 里「是否辅助请求」的判断原本排在 live 查询之后，于是只有一条消息的标题历史必然 `canContinue === false`，直接 `closeTurn` 掉用户正在读的主回合。另一个分支同样致命：两个请求都在 `live` 为空时通过判断，后写者覆盖前者，前者结束时 `live.get(id) === turn` 为假，既不 park 也不 release —— 进程、MCP 桥与 `activeTurns` 一起泄漏，四次新会话后整条线开始报 `RATE_LIMIT`。改法：辅助判定前置，辅助回合不注册 live 条目，所有结束路径统一走幂等的 `finishTurn()`（`closed` 标记保证只结算一次；丢了 live 归属的回合改为 release 而不是 park）。
+  - **登录命令拼错且失败静默**：`launch.args` 已含 `acp`，旧实现 `slice(0, -1)` 再补 `'acp', '--login'`，实际送出 `acp acp --login`；stderr 被 `resume()` 丢掉、退出码无人观察，被 CLI 拒绝时仍返回 `started: true`。现在改为 `[...launch.args, '--login']`，并用 `LOGIN_FAILURE_WINDOW_MS`（1 s）观察 spawn 错误与非零退出，把 CLI 自己的句子带进 `error`；超过窗口即视为已脱离，`LOGIN_LAUNCH_BUDGET_MS` 之后停止监听。`startLogin` 因此变成 async（路由本来就 `await`）。
+  - **取消被归成可重试的断连**：`abortError()` 是普通 `Error`，在 `asLlmError` 的兜底分支变成可重试的 `ACP_DISCONNECTED`。watchdog 与 `llm-retry` 都会在 `signal.aborted` 时短路，所以现网没有真的重跑，但分类是错的；现在显式归为 `ABORTED`。
+  - **配额/风控拒绝被重试两次**：除 `-32000/-32602/-32601` 外的 `AcpError` 全部映射为可重试的 `ACP_RPC_ERROR`，于是配额耗尽、限流、服务条款与验证类拒绝会在同一账号上再撞两次。新增错误码 `ACP_UPSTREAM_BLOCKED`（不可重试）：错误文本出现 429/403、`quota`、`rate limit`、`resource_exhausted`、`verification`、`unusual activity` 等信号时按它上报，其余仍归 `ACP_RPC_ERROR`。`refusal` 依旧是 `ACP_REFUSAL`。
+  - **同进程复用时的会话串音**：`session/cancel` 是通知不是屏障，`closeTurn` 不等待旧 prompt 结算就把进程放回池；两处 `onSessionUpdate` 都忽略帧里的 `sessionId`，旧会话尾帧可能被追加到新回答。现在按 `sessionId` 过滤（帧里没带 id 时保持旧行为，避免把不重复 id 的服务端写死）。
+  - **被动读取在静默下载与每分钟冷启动**：`GET /status` 在启用状态下会解析可执行文件（找不到就下载归档）并探活（登录缓存 TTL 60 s，卡片/总览/胶囊各轮询一次）。改法：新增 `AcpBinaryCache`（5 分钟、单飞）与 `download: false` 被动解析（找不到就报告，不安装），登录缓存 TTL 提到 10 分钟；`GET /status`、`GET /settings` 是被动读取，只有 `POST /refresh`、`GET /login/status`、`POST /settings` 与真实回合/自检才允许下载或强制探活。
+  - **子代理**：声明 `agentOptions` 能力后，调用方选的模型与思考档位会以 `session/set_config_option` 下发到子会话（模型被拒让该次委派失败，档位被拒按官方默认继续；`maxTokens` 因 ACP 无法表达被丢弃），并为委派加上独立并发预算（默认 4，超出返回 `ACP_SESSION_LIMIT`，不与主对话的 `maxActiveTurns` 争抢）。
+  - **一并清理**：`catalog.readCatalogFrom` 与主会话共用 `types.preferAuthMethod()`（原来 catalog 硬编码 `oauth-personal`，可能请求服务端未公布的方法）；删除 `McpBridge` 的死状态 `withdrawn` 并把 `pendingCount` 的注释改成它真正的语义（`parked` 而非 `pendingResponses`）；`sendPrompt` 只解析一次 `usage`；卡片去掉不可达的「已登录」分支并接上一直没渲染的「恢复自动查找」按钮；`scopeHistory` 三语改写成跨轮停放复用的真实行为。
+  - **测试**：新增 `antigravity-acp-login.test.ts`（命令行为 `acp --disable-telemetry --login`、失败带 stderr、1 s 内返回）与 `antigravity-acp-subagent-runs.test.ts`（模型/档位在 prompt 之前下发、超预算拒绝、预算随结算归还）；`antigravity-acp-session-reuse.test.ts` 增「标题请求不取消正在读的主回合」，`antigravity-acp-adapter.test.ts` 增「旧会话帧被丢弃」与「配额拒绝只报一次且不可重试」；`antigravity-acp-routes.test.ts` 增被动/显式分档断言；`antigravity-acp-binary.test.ts` 增 `download: false` 不 fetch 与缓存不把被动 miss 交给主动调用方。辅助请求与帧过滤两条用例做过反向改动确认会变红。
+  - **验证**：`npm run typecheck`（三工程）全绿；`npx vitest run antigravity` **24 文件通过 / 1 跳过，138 例通过 / 1 跳过**；全量 Vitest **383 文件通过 / 3 跳过（386），6866 例通过 / 10 跳过（6876）**，0 失败（0.75.1 基线为 381/3 文件、6854/10 例）。真机 `agy` 回归仍未做，探针用例仍为跳过状态。
+
+- **[antigravity-acp / 第二轮复查补刀] 总览卡不再静默下载、复用窗口不再漏旧帧、拒绝词表补齐真实码**
+  - **总览卡绕过被动分档**：上一轮只把 `GET /status` 分了档，订阅总览卡的 `read()` 却直接调 `AcpAuthCache.read()`，而探活闭包传给 `probeAuthWithLaunch` 的是 `download: true` 的 `resolveAntigravityLaunch`——打开总览页、缓存为空或过期时照样会下载官方 ACP server 并冷启动 `agy` 探活。现在探活走单独的**不允许安装**的解析路径（没装即回答 `authenticated: false`），下载只发生在真实回合、刷新点击、自检与显式设置变更。
+  - **温进程复用窗口的旧帧**：`ownsSession` 最初在「本轮还没有 session id」时一律放行，而温进程是**先重装 handler 再等 `session/new`**，这段窗口里带旧 `sessionId` 的帧会混进新队列。现在：不带 id 的帧仍放行（服务端不重复 id 也要能用），带 id 但本轮尚无 id 一律丢弃。用例改成在第二次 `initialize` 之前发脏帧（旧用例把脏帧跟在 `prompt` 之后，恰好绕过了窗口），反向改动会变红。
+  - **拒绝词表**：补 `VALIDATION_REQUIRED`、`PERMISSION_DENIED`、`ACCOUNT_DISABLED`/`ACCOUNT_SUSPENDED`、`POLICY_VIOLATION`；`tos` 补前置词边界（原来会把 `photos` 这类词判成条款违规）。`CAPACITY_EXHAUSTED` 故意不列入不可重试：容量耗尽属于瞬时故障，重试才是正确动作。另外错误文本里的 `Authentication required` 现在直接归 `ACP_AUTH_REQUIRED`，不再落到可重试的 `ACP_RPC_ERROR`。
+  - **文案与单飞**：被动解析的句子不再被 `missingBinaryMessage()` 二次包装成「且无法下载」（新增 `AcpBinaryDiagnostics.deferred`，路由按原样呈现）；`AcpBinaryCache` 记住 in-flight 读取是否允许安装，不允许安装的读取不会再回答一个允许安装的调用方。
+  - **收尾**：`dispose()` 给正在拆除的 turn 补 `closed = true`；`GET /login/status` 在 README 侧文档与 CHANGELOG 中误写为 `POST` 的问题已改；line-plan 6.8 之前提前标注的 `0.75.2` 改回「未发布」。
+  - **测试**：新增/加固 5 例——复用窗口脏帧、`VALIDATION_REQUIRED` 与 `photos` 对照组、`Authentication required` 归类、被动 miss 的 `deferred` 标记、被动读在飞时主动调用的升级重解析。前两例做过反向改动确认会变红。
+  - **验证**：`npm run typecheck`（三工程）全绿；全量 Vitest **383 文件通过 / 3 跳过（386）、6870 例通过 / 10 跳过（6880）**，0 失败；`npx vitest run antigravity` **24 文件 / 142 例通过 + 1 例跳过**。真机 `agy` 回归仍未做。
+
+
 ## 0.75.1 - 2026-11-15
 - **[antigravity-acp / 修复 #110] 冷重放不再对着「最后一条 user 消息」猜当前请求：引用真人请求 + 单份指令 + 有界纯文本档案**
   - **问题**：0.74.1 的重放兜底把「当前任务」写成「history 里的最后一条 user 消息」。DSH 会在真人输入之后追加 `source.kind !== 'user'` 的合成消息（插件召回、时间快照、进度提醒），照字面执行时锚点选中的是 `Time sampled while preparing turn 2: ...` 而不是用户那句「A。记得把改进建议也写进 README。」；同一次重放还把每轮带回来的 `system` 快照与全部工具流原样倾倒——报告方真机实测 183 条消息的会话累计 11 份 system（1,237,345 字符）、单次冷重放 1,451,598 字符，几十个字符的最新指令被前文淹没。只看报告的话要记住：只修行 ① 的 v1 在真机长会话里仍复现，两处一起修才恢复。

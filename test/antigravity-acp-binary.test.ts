@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 import {
   ACP_BINARY_RELEASES,
+  AcpBinaryCache,
   cachedExecutablePath,
   downloadRelease,
   localCliCandidates,
@@ -167,3 +168,85 @@ describe('the pinned registry entry', () => {
     }
   })
 })
+
+
+describe('passive resolution', () => {
+  it('reports a missing CLI without downloading one', async () => {
+    // The settings card renders through this path. Downloading a release behind a
+    // page render is an install nobody asked for.
+    const space = workspace()
+    try {
+      let fetched = 0
+      const resolved = await resolveAcpBinary(null, {
+        platform: 'linux-x64',
+        env: {},
+        home: () => join(space.dir, 'home'),
+        cacheRoot: () => join(space.dir, 'cache'),
+        fetchFn: (async () => {
+          fetched += 1
+          throw new Error('a passive read must not fetch')
+        }) as unknown as typeof fetch,
+        download: false,
+      })
+      expect(resolved.binary).toBeUndefined()
+      expect(resolved.diagnostics.deferred).toBe(true)
+      expect(resolved.diagnostics.error).toContain('is installed yet')
+      expect(fetched).toBe(0)
+    } finally {
+      space.dispose()
+    }
+  })
+})
+
+describe('AcpBinaryCache', () => {
+  it('never serves a download-less miss to an active caller', async () => {
+    let calls = 0
+    const cache = new AcpBinaryCache(async () => {
+      calls += 1
+      return calls === 1
+        ? { diagnostics: { tried: [], error: 'not installed yet' } }
+        : { binary: { path: '/opt/agy', kind: 'downloaded' as const }, diagnostics: { tried: [] } }
+    })
+    const passive = await cache.read({ download: false })
+    expect(passive.binary).toBeUndefined()
+    expect(calls).toBe(1)
+    // The turn asks the same question a moment later: it may still install.
+    const active = await cache.read({ download: true })
+    expect(active.binary?.path).toBe('/opt/agy')
+    expect(calls).toBe(2)
+    // And once resolved, the passive poll reuses it instead of re-reading the disk.
+    const again = await cache.read({ download: false })
+    expect(again.binary?.path).toBe('/opt/agy')
+    expect(calls).toBe(2)
+    cache.invalidate()
+    await cache.read({ download: false })
+    expect(calls).toBe(3)
+  })
+
+  it('re-resolves when a download-allowed caller arrives during a passive read', async () => {
+    type Resolution = Awaited<ReturnType<AcpBinaryCache['read']>>
+    let releasePassive: (value: Resolution) => void = () => undefined
+    const calls: boolean[] = []
+    const cache = new AcpBinaryCache((options) => {
+      const download = options.download !== false
+      calls.push(download)
+      if (!download) {
+        return new Promise<Resolution>((resolve) => {
+          releasePassive = resolve
+        })
+      }
+      return Promise.resolve<Resolution>({
+        binary: { path: '/opt/agy', kind: 'downloaded' as const },
+        diagnostics: { tried: [] },
+      })
+    })
+    const passive = cache.read({ download: false })
+    const active = cache.read({ download: true })
+    releasePassive({ diagnostics: { tried: [], error: 'nothing local', deferred: true } })
+    expect((await passive).binary).toBeUndefined()
+    // The turn may still install: it must not inherit the page render's answer.
+    expect((await active).binary?.path).toBe('/opt/agy')
+    expect(calls).toEqual([false, true])
+  })
+})
+

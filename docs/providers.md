@@ -330,13 +330,16 @@
   - **单账号**：ACP 服务端只持有一套凭据，插件**不读取、不复制、不保存**任何 Google token；登录由 `agy acp --login` 或设置卡的「登录 Google 账号」发起，浏览器**只由官方进程打开一次**；
   - 与已移除的旧 `antigravity` 线路（Cloud Code Assist `streamGenerateContent` 逆向实现，v0.70.0 删除）**没有任何代码或凭据迁移关系**。
 - **可执行文件**：`配置的路径` → `DSH_ANTIGRAVITY_ACP_BIN` → `~/.gemini/bin/agy` → 官方 ACP Registry 归档（版本与 sha256 随包固定，仅缺失时下载到 `<DSH_HOME>/cache/antigravity-acp/`）。下载拒绝重定向、校验哈希、失败按名删除半成品；**不随包分发 Google 二进制**。
+  - **被动读取不下载**：卡片渲染、订阅总览与输入框胶囊的轮询只报告本地已有的事实，不会因为一次页面刷新就静默安装；只有发起对话、点「刷新」、改可执行文件路径或运行自检才允许下载。解析结果（含 `--version`）缓存 5 分钟，避免每次轮询都拉起一个进程。
 - **工具由 DSH 执行并把关**：会话创建时带一个回环 MCP 桥描述符（127.0.0.1 + 每次会话新签发的 256-bit bearer token、校验 Host、拒绝浏览器 Origin、仅 `POST /mcp`、body ≤ 1 MiB）。agent 的 `tools/call` 被挂起并转成 DSH 工具调用，由 DSH 的权限预设执行；拒绝以 `isError` 回传，**永不绕过**。桥工具的权限请求**恒定放行**（它交回 DSH 后由 DSH 把关）；「工具权限」设置只作用于 agent 自己的工具，默认「自动批准」，可选「拒绝」。
 - **自带工具策略（`nativeToolPolicy`）**：ACP 无法在协议层卸载 agent 的内置 shell/文件工具。默认 `allow`：模型一旦使用自带工具，对话里出现一条可见记录（工具名 + 参数），本轮继续；`cancel` 保留旧的严格行为，遇到即报 `ACP_NATIVE_TOOLS_UNSUPPORTED` 并取消整轮。
 - **模型与思考档位**：目录来自实时 ACP `session/new`（`models.availableModels` 的档位 id 与 `configOptions[model].options` 的基名归一），思考档位走 DSH 的 reasoning effort → ACP `thought_level`；模型不接受的档位被丢弃而不是让整轮失败。
-- **会话复用（跨轮）**：以 DSH 会话为键**停放**刚结束的 ACP 会话（连同跑它的进程与 MCP 桥，默认 2 个、闲置 5 分钟回收）；下一条用户消息若「前缀指纹未变 + 工具目录未变 + 进程存活」就只发送增量 prompt，换模型/思考档位用 `session/set_config_option` 在同一 conversation 内切。历史被压缩或改写、工具集变化、进程死亡、重配置被拒时一律新建会话冷重放，且重放 prompt 末尾追加 history-boundary 锚点（当前任务=最后一条用户消息、不重跑已完成请求）。会话标题与压缩这类辅助请求用同一个 `sessionId` 但历史独立，不消费也不覆盖停放的会话。
-- **子代理形态**：同时注册 `antigravity-acp` 子代理后端（`ctx.get('subagents')` 存在时才注册）；子代理子进程使用官方 Agent 自己的工具集，这是与主模型形态的已知不对称。
+- **会话复用（跨轮）**：以 DSH 会话为键**停放**刚结束的 ACP 会话（连同跑它的进程与 MCP 桥，默认 2 个、闲置 5 分钟回收）；下一条用户消息若「前缀指纹未变 + 工具目录未变 + 进程存活」就只发送增量 prompt，换模型/思考档位用 `session/set_config_option` 在同一 conversation 内切。历史被压缩或改写、工具集变化、进程死亡、重配置被拒时一律新建会话冷重放，且重放 prompt 末尾追加 history-boundary 锚点（当前任务=最后一条用户消息、不重跑已完成请求）。会话标题与压缩这类辅助请求用同一个 `sessionId` 但历史独立，不消费也不覆盖停放的会话，**也不碰正在流式生成的主回合**：它们不注册 live 条目、不关闭用户正在读的那一轮（首次提问时标题请求与主回答是并发发出的）。复用同一进程时，`session/update` 按 `sessionId` 过滤，旧会话的尾帧不会混进新回答。
+- **子代理形态**：同时注册 `antigravity-acp` 子代理后端（`ctx.get('subagents')` 存在时才注册）；子代理子进程使用官方 Agent 自己的工具集，这是与主模型形态的已知不对称。后端声明了 `agentOptions` 能力：调用方选的模型与思考档位会以 `session/set_config_option` 下发到子会话（模型被拒即让该次委派失败，档位被拒则按官方默认继续），`maxTokens` 因 ACP 无法表达被丢弃。委派有**独立的并发预算**（默认 4），超出返回 `ACP_SESSION_LIMIT`，不与主对话的 `maxActiveTurns` 争抢。
 - **明确的能力边界**：ACP 没有独立 system 提示槽位，也没有 `temperature` / `stop`（显式拒绝为 `ACP_UNSUPPORTED_OPTION`）；`maxTokens` 会被丢弃而不是拒绝，因为标题生成等辅助调用固定带一个上限。官方服务端**不公布剩余额度**，因此设置卡与额度胶囊只显示套餐档位与真实返回的 token 用量，不显示任何百分比或余额。
 
 ### 宿主路由（`/antigravity-acp/api`）
 
 `GET /status` · `GET|POST /settings`（等同 `/models`）· `POST /login/start` · `GET /login/status` · `POST /logout` · `GET|POST /usage` · `POST /refresh`
+
+`GET /status` 与 `GET /settings` 是**被动读取**：不下载、不强制探活、不重建缓存（登录状态缓存 10 分钟，可执行文件解析缓存 5 分钟）。`POST /refresh`、`GET /login/status` 与 `POST /settings` 是显式动作，会强制重读并允许下载——登录、登出与换路径之后立刻就能看到新状态（登录状态是 GET：它是「再问一次」，不是状态变更）。

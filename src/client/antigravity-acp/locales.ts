@@ -29,7 +29,6 @@ export const zh = {
   signInAgain: '重新登录',
   signInStarting: '正在启动…',
   signInSuccess: '已发起登录：浏览器由 Antigravity CLI 打开，完成授权后状态会自动变为「已登录」。',
-  signInAlready: '当前已是登录状态，无需重复登录。',
   signInHintSummary: '登录是怎么完成的？',
   signInHint: '登录由 Antigravity CLI 自己完成：点击后它会打开浏览器，完成后回到这里刷新状态。本插件不读取、不保存你的 Google 凭据。',
   signInHeadless: '无界面环境请在终端执行 agy acp --login，然后回到此页刷新。',
@@ -88,7 +87,7 @@ export const zh = {
   scopeHintSummary: '展开看这四条限制',
   scopeHint: '这些是 ACP 与官方 Agent 的客观限制，本线路不做绕过：',
   scopePrompt: 'ACP 没有独立的 system 提示槽位：DSH 的系统提示会作为提示首段随会话发送，官方 Agent 自身的系统提示无法移除。',
-  scopeHistory: '每轮对话按 DSH 的完整历史重建 ACP 会话；历史被压缩或改写时会重新建立会话，而不是复用可能已与 DSH 不一致的旧会话。',
+  scopeHistory: '正常结束后会话随进程一起停放供下次复用：下一条消息若前缀指纹与工具目录未变，只发送增量；历史被压缩或改写、工具集变化或进程死亡时才重建会话并重放带锚点的历史。',
   scopeTools: '作为主模型时工具由 DSH 执行并把关；作为子代理时子进程使用官方 Agent 自己的工具集。',
   scopeQuota: '官方服务端不公布剩余额度，因此本卡片不显示任何百分比或余额。',
 
@@ -133,7 +132,6 @@ export const en = {
   signInAgain: 'Sign in again',
   signInStarting: 'Starting...',
   signInSuccess: 'Sign-in started: the Antigravity CLI opens the browser, and the status here turns to signed in once you approve it.',
-  signInAlready: 'This line is already signed in; there is nothing to do.',
   signInHintSummary: 'How does sign-in work?',
   signInHint: 'The Antigravity CLI performs the sign-in itself: it opens the browser, and you come back here to refresh the state. This plugin never reads or stores your Google credentials.',
   signInHeadless: 'On a headless host run agy acp --login in a terminal, then refresh here.',
@@ -192,7 +190,7 @@ export const en = {
   scopeHintSummary: 'Show the four limits',
   scopeHint: 'These are objective ACP and official-agent limits; this line does not work around them:',
   scopePrompt: "ACP has no separate system-prompt slot: the DSH system prompt travels as the head of the prompt, and the official agent's own system prompt cannot be removed.",
-  scopeHistory: 'Every turn rebuilds the ACP session from the complete DSH history; when that history is compacted or rewritten a new session is created instead of resuming one that may no longer match.',
+  scopeHistory: 'After a normal finish the session parks with its process for reuse: the next message sends only the increment if the prefix fingerprint and tool catalogue are unchanged, and only a compacted or rewritten history, a changed tool set, or a dead process triggers a rebuild with an anchored replay.',
   scopeTools: "As a main model its tool calls are executed and gated by DSH; as a subagent the child runs the official agent's own tools.",
   scopeQuota: 'The official server publishes no remaining quota, so this card shows no percentage and no balance.',
 

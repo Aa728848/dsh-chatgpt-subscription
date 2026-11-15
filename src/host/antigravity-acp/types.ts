@@ -52,6 +52,27 @@ export function isEffort(value: string): value is AntigravityAcpEffort {
   return (EFFORT_ORDER as readonly string[]).includes(value)
 }
 
+/**
+ * Which sign-in method to hand the agent when it asks for one.
+ *
+ * The server publishes whatever method list the installed CLI supports, and the
+ * order below is the line's preference: the personal OAuth flow first, then the
+ * terminal flow, then a business account, then the API-key forms. This lives
+ * here - not beside one call site - because two call sites ask the same question:
+ * a main-model session (`adapter.openSession`) and the catalogue read
+ * (`catalog.readCatalogFrom`). They used to disagree, one of them hard-coding
+ * `oauth-personal` and getting a method the server never offered.
+ *
+ * @param authMethods - The ids the server announced in `initialize`.
+ * @returns The method id to request.
+ */
+export function preferAuthMethod(authMethods: readonly string[]): string {
+  for (const candidate of ['oauth-personal', 'terminal-login', 'oauth-business', 'gemini-api-key', 'agent-platform']) {
+    if (authMethods.includes(candidate)) return candidate
+  }
+  return authMethods[0] ?? 'oauth-personal'
+}
+
 /** One model as the ACP server announced it, before collapsing. */
 export interface AcpAvailableModel {
   modelId: string
