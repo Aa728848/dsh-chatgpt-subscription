@@ -232,10 +232,12 @@ describe('ACP session reuse across turns', () => {
       expect(harness.events.of('session/new')).toHaveLength(2)
       const replay = promptTexts(harness.events)[1] ?? ''
       expect(replay).toContain('[summary] earlier work')
-      // A replayed transcript ends with the boundary sentence, so the agent reads
-      // it as history rather than as a fresh queue of requests.
+      // A replayed transcript ends with the boundary sentence and a verbatim copy
+      // of the request, so the agent reads it as history rather than as a fresh
+      // queue of requests - and does not have to pick the request out of it.
       expect(replay).toContain('[history boundary]')
-      expect(replay).toContain('The current request is the LAST user message')
+      expect(replay).toContain('[current human request]')
+      expect(replay.trimEnd().endsWith('carry on')).toBe(true)
     } finally {
       await harness.adapter.dispose()
       harness.dispose()

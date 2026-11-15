@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **[antigravity-acp / 修复 #110] 冷重放不再对着「最后一条 user 消息」猜当前请求：引用真人请求 + 单份指令 + 有界纯文本档案**
+  - **问题**：0.74.1 的重放兜底把「当前任务」写成「history 里的最后一条 user 消息」。DSH 会在真人输入之后追加 `source.kind !== 'user'` 的合成消息（插件召回、时间快照、进度提醒），照字面执行时锚点选中的是 `Time sampled while preparing turn 2: ...` 而不是用户那句「A。记得把改进建议也写进 README。」；同一次重放还把每轮带回来的 `system` 快照与全部工具流原样倾倒——报告方真机实测 183 条消息的会话累计 11 份 system（1,237,345 字符）、单次冷重放 1,451,598 字符，几十个字符的最新指令被前文淹没。只看报告的话要记住：只修行 ① 的 v1 在真机长会话里仍复现，两处一起修才恢复。
+  - **改法**（只动 `fromMessage === 0` 的冷重放路径；增量路径与 `coveredMessages`/`fingerprint` 一字未改，会话复用门禁不变）：① 用 `source.kind === 'user'` 从后往前定位真人请求（旧代际消息没有 source 时按真人处理，宁可选错也不把真人请求当合成上下文），把它**逐字引用**两次——`[active request for this turn]` 紧跟指令、`[current human request]` 在 `[history boundary]` 之后，并把锚点文案里的「LAST user message」改成「合成上下文不是请求」；② 每个角色只重放最新一份 `system`/`developer`；③ 估算超过 `REPLAY_COMPACT_TRIGGER_CHARS`（200,000）时改走存档：只保留真人 user 与 assistant 的纯文本，近→远、总预算 60,000、单条上限 12,000，工具调用/结果/推理/旧图片与合成上下文全部剔除并给出保留/省略计数；当轮请求自己的图片与文件附件改追加在请求之后，否则档案模式会把唯一相关的那张图一并丢掉。
+  - **附带修复**：`canonicalBlock()` 遇到**没有 attachment 引用**的内联图片（`data`/`base64` 形态）会在算前缀指纹时抛 `Cannot read properties of undefined`，整次 prompt 构建直接失败；现在读不到 attachment id 时降级为空串。
+  - **测试**：`antigravity-acp-history.test.ts` 新增 5 例（合成 user 劫持末尾锚点、无 source 视为真人、重复 system 只留一份、超预算存档保留最新 assistant 且长度受控、请求自带图片跟到末尾）；`antigravity-acp-session-reuse.test.ts` 原先断言的旧锚点文案改为新契约（`[history boundary]` + `[current human request]` + prompt 以请求结尾）。
+  - **验证**：`npm run typecheck` 三工程全绿；全量 Vitest **381 文件通过 / 3 跳过（6854 例通过 / 10 跳过 / 0 失败）**；`npm run build` 通过。真机 `agy` 回归（探针指令零工具误调、跨轮引用「方案 A」）是报告方环境的结果，本仓库这一轮只有离线单测证据。
+
 - **[kimi-code / 缓存卡片] 「缓存写入」不再把「上游没上报」画成 0：区分「报了 0」与「从未上报」**
   - **问题**：设置页缓存卡片中，「本次输入」那行诚实写着「缓存写 未报告」，而下面「缓存写入」行把同一个事实渲染成 `0`。一个累计 170 条请求、47 万命中 token 的会话里，这张卡自相矛盾，读起来就是「统计没取到」。
   - **证据（真实探测，非推断）**：用本机凭据对 `api.kimi.com` 冷/热各发两次并打印原始 `usage` 与全部响应头——chat-completions 的热请求只有 `prompt_tokens_details.cached_tokens`（冷请求连 `prompt_tokens_details` 都没有），Anthropic 面则显式给 `cache_creation_input_tokens: 0`；两条线路都没有任何 `Msh-Usage-Cache-Write-Tokens-*` 头。即：mapper 没有丢字段，这条线路的前缀缓存自动生效，读侧有数、写侧上游根本不报。本机 durable 记录里 170 条请求的 `cacheWriteTokens` 也全是 `null`。

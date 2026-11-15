@@ -170,7 +170,7 @@ ACP 里没有「当前任务」的锚点：模型拿到的是一份 90+ 条的 t
 | --- | --- | --- |
 | 1 | **跨轮停放会话**：正常结束的 turn 连同 `{client, bridge, acpSessionId, covered, fingerprint, tools}` 进 dormant 表；下一条消息若前缀指纹未变、工具目录未变、进程存活，则只发 `buildPrompt(from=covered)` 的增量 | `antigravity-acp-session-reuse.test.ts`（同一会话、只发增量、进程不重启） |
 | 2 | **换模型/档位用 `session/set_config_option`** 在同一 conversation 内切（issue 已实测 carbon→hydrogen→carbon 保上下文）；失败即回落冷启动 | 同上（模型切换仍只有一次 `session/new`） |
-| 3 | **重放兜底**：`buildPrompt(start=0)` 且历史含 assistant 消息时，末尾追加 `REPLAY_ANCHOR_INSTRUCTION`（history boundary + 当前任务=最后一条用户消息 + 不重跑已完成请求 + 短指代对照紧邻 assistant） | `antigravity-acp-history.test.ts`（重放带锚点、首轮与增量不带） |
+| 3 | **重放兜底**：`buildPrompt(start=0)` 且历史含 assistant 消息时，不再用「history 里的最后一条 user 消息」指代当前任务（合成消息会劫持它），改为**逐字引用**真人请求（`source.kind === 'user'`）两处——`[active request for this turn]` 紧跟指令、`[current human request]` 在 `[history boundary]` 之后；每个角色只留最新一份 `system`/`developer`，估算超 200,000 字符时旧历史收成 60,000 字符纯文本档案（#110） | `antigravity-acp-history.test.ts`（锚点选真人请求、旧代际无 source 视为真人、指令去重、超预算存档、请求自带图片跟到末尾、首轮与增量不带锚点） |
 | 4 | **中止路径**：先发 `session/cancel`（ACP 通知，不等待），再把进程放回 idle 池而不是 `dispose`；顺带删掉遗留的空 `if (turn.awaitingHarness) {}` | 同上（abort 后只 spawn 一次） |
 | 5 | **catalog TTL 60s → 15min**（与 `codex-catalog.ts` 同值；卡片/路由的 `refresh` 仍 `force: true` 立即拉取） | — |
 
