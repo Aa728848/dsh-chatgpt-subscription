@@ -208,7 +208,7 @@ ACP 里没有「当前任务」的锚点：模型拿到的是一份 90+ 条的 t
 | `ACP_UNSUPPORTED_OPTION` | 请求带了 ACP 表达不了的采样参数（`temperature` / `maxTokens` / `stop`） | 去掉这些参数；用模型档位而非 token 上限控制输出 |
 | `ACP_TEARDOWN_FAILED` | 进程清理无法确认 | 重启 DSH profile |
 
-### 6.8 第二轮审查修复（未发布）
+### 6.8 第二轮审查修复（0.75.2）
 
 同一份外部审查又指出了六处问题，逐条核对后全部成立并已修复；其中第一条比报告描述得更严重。
 
@@ -219,7 +219,7 @@ ACP 里没有「当前任务」的锚点：模型拿到的是一份 90+ 条的 t
 5. **同一进程复用时会串音。** `session/cancel` 是通知而非屏障，`closeTurn` 不等待旧 prompt 结算就把进程放回池；两处 `onSessionUpdate` 都忽略 `sessionId`，旧会话的尾帧可能被追加到新回答里。现在按 `sessionId` 过滤（帧里没带 id 时保持旧行为），并在 `antigravity-acp-adapter.test.ts` 用会先发一帧旧会话内容的脚本服务端守住。
 6. **被动读取在静默下载并每分钟冷启动。** `GET /status` 在启用状态下会 `resolveBinary()`（找不到就下载归档）并探活（TTL 60 s，卡片+总览+胶囊各轮询一次）。现在：解析结果进 `AcpBinaryCache`（5 分钟）且被动读取 `download: false`；登录探测缓存 10 分钟；`/refresh`、`/login/status`、`POST /settings` 才是强制路径。另外 `catalog` 与主会话共用 `preferAuthMethod()`（原来 catalog 硬编码 `oauth-personal`），`mcp-bridge` 死状态 `withdrawn` 删除，`sendPrompt` 只解析一次 usage，子代理补上模型下发与独立并发预算。
 
-### 6.9 复查补刀（同一轮，未发布）
+### 6.9 复查补刀（同一轮，0.75.2）
 
 外部复查在 6.8 的改动上又找到五处缝隙，逐条核对后全部成立：
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.75.2 - 2026-11-15
+
 - **[antigravity-acp / 第二轮审查] 辅助请求不再杀掉正在读的主回合、登录命令修正且失败可见、配额与风控拒绝不再重试**
   - **辅助请求误杀主回合（最严重）**：harness 在 `request/header` 落盘后立刻并发发出会话标题请求，与主回答共用同一个 `sessionId`；`run()` 里「是否辅助请求」的判断原本排在 live 查询之后，于是只有一条消息的标题历史必然 `canContinue === false`，直接 `closeTurn` 掉用户正在读的主回合。另一个分支同样致命：两个请求都在 `live` 为空时通过判断，后写者覆盖前者，前者结束时 `live.get(id) === turn` 为假，既不 park 也不 release —— 进程、MCP 桥与 `activeTurns` 一起泄漏，四次新会话后整条线开始报 `RATE_LIMIT`。改法：辅助判定前置，辅助回合不注册 live 条目，所有结束路径统一走幂等的 `finishTurn()`（`closed` 标记保证只结算一次；丢了 live 归属的回合改为 release 而不是 park）。
   - **登录命令拼错且失败静默**：`launch.args` 已含 `acp`，旧实现 `slice(0, -1)` 再补 `'acp', '--login'`，实际送出 `acp acp --login`；stderr 被 `resume()` 丢掉、退出码无人观察，被 CLI 拒绝时仍返回 `started: true`。现在改为 `[...launch.args, '--login']`，并用 `LOGIN_FAILURE_WINDOW_MS`（1 s）观察 spawn 错误与非零退出，把 CLI 自己的句子带进 `error`；超过窗口即视为已脱离，`LOGIN_LAUNCH_BUDGET_MS` 之后停止监听。`startLogin` 因此变成 async（路由本来就 `await`）。
