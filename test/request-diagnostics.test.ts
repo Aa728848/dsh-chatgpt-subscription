@@ -222,7 +222,11 @@ describe('request-diagnostics', () => {
 
     const rec = records[0]
     expect(rec.outcome).toBe('completed')
-    expect(rec.firstByteMs).toBeGreaterThanOrEqual(10)
+    // firstByteMs measures elapsed wall time; no lower bound belongs here. The
+    // fixture's 15 ms tick can land at 9 ms on a loaded Linux runner, and the
+    // behaviour under test is that the timestamp is recorded at all, in [0,
+    // duration]. A floor of 10 made this test flake on CI only.
+    expect(rec.firstByteMs).toBeGreaterThanOrEqual(0)
     expect(rec.ttftMs).toBeNull()
     expect(rec.durationMs).toBeGreaterThanOrEqual(rec.firstByteMs!)
     // Verified merged usage from message_start AND message_delta

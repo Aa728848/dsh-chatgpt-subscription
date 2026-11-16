@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.76.1 - 2026-11-16
+
+- **[antigravity-acp / 修复 #112] 独立 ACP server 的登录与模型发现不再被 CLI 专属参数打断**
+  - **问题**：ACP 注册表随包提供的是独立 `agy_acp_server`，它本身已通过 stdio 讲 ACP，并不接受完整 `agy` CLI 的 `acp`、`--disable-telemetry`、`--login` 参数。旧启动逻辑把这些参数一律带上，下载的服务端在返回模型列表之前就被拒绝；登录按钮还可能在实际启动失败时报告"已开始登录"。
+  - **修复**：按可执行文件解析启动参数——独立 ACP server（含用户配置路径）不再附加额外参数，完整 `agy` CLI 仍保留 `agy acp --disable-telemetry`；协议登录改用服务端声明的 `authenticate` 方法发起，`terminal-login` 回退时才使用 `agy acp --login`。
+  - **测试**：新增独立 server 参数、OAuth authenticate、浏览器授权 pending、终端回退与进程早期失败的回归覆盖（16 例）；合并后本地全量 typecheck 0 错误、Vitest 383 文件 / 6883 例通过 0 失败。
+  - **顺带修复 CI flake**：`test/request-diagnostics.test.ts` 曾把 `firstByteMs >= 10` 写死，Linux runner 偶发记录到 9ms 导致 CI 的 `Run tests` 失败（本地连跑 5 次均通过）；改为语义正确的 `>= 0` 且不超过 duration 的边界断言。
+  - **说明**：0.76.0 的 CI 发布实际成功（registry 传播延迟导致一度查不到），但其构建点早于本修复，因此以 0.76.1 补发，确保 npm latest 包含 #112。
+
 ## 0.76.0 - 2026-11-16
 
 - **[网络代理] 代理设置改为按线路隔离：13 条线路各配各的，全局代理块从 ChatGPT 卡片撤掉**
