@@ -622,7 +622,7 @@ describe('WorkBuddy model selection', () => {
     // an id no catalog describes must answer `no rate published` rather than throw
     // or invent one.
     expect(workBuddyModelCredits('deepseek-v4.1-flash')).toEqual({ cn: '0.11', intl: '0.00' })
-    expect(workBuddyModelCredits('hy3')).toEqual({ cn: '0.00', intl: '0.00' })
+    expect(workBuddyModelCredits('hy3')).toEqual({ intl: '0.00' })
     expect(workBuddyModelCredits('default-model')).toEqual({})
     expect(workBuddyModelCredits('never-heard-of-it')).toEqual({})
   })
@@ -644,14 +644,14 @@ describe('WorkBuddy catalog credit invariants', () => {
   it('ships a rate for every model the gateway rated, per the measured table', () => {
     // The counts below are the transcription's own audit: 48 of the 49 shipped
     // rows carry a rate (`default-model` publishes an empty string), and exactly
-    // seven are rated by BOTH regions.
+    // six are rated by BOTH regions (`hy3` lost its cn rate when cn dropped it
+    // on the 2026-11-16 read).
     const rated = FALLBACK_MODELS.filter((model) => model.credits !== undefined)
     const bothRegions = rated.filter((model) => Object.keys(model.credits!).length === 2)
     expect(rated).toHaveLength(48)
     expect(bothRegions.map((model) => model.id)).toEqual([
       'deepseek-v4.1-flash',
       'glm-5.3-flash',
-      'hy3',
       'glm-5.3',
       'glm-5.2',
       'minimax-m3.1-flash',

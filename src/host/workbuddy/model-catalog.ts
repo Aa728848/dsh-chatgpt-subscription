@@ -29,20 +29,30 @@
  * conversation earlier than needed or hides an option, and every figure stays
  * overridable per model from the settings card.
  *
- * Measured disagreements reconciled that way on the 2026-11-04 read:
+ * Measured disagreements reconciled that way on the 2026-11-16 read:
  * `glm-5.3-flash` 300000/32000 on intl against 1000000/131072 on cn;
  * `glm-5.3` and `glm-5.2` cap output at 48000 on intl against 64000 on cn;
  * `deepseek-v4.1-flash`, `minimax-m3.1-flash` and `kimi-k3.1-pro` serve 300000
  * by default on intl against 1000000 on cn; `glm-5.3`, `glm-5.3-flash` and
- * `glm-5.2` accept switching thinking off on intl but not on cn; and the two
- * `glm-5.2` ladders share only `high`.
+ * `glm-5.2` accept switching thinking off on intl but not on cn, while
+ * `deepseek-v4.1-flash` accepts it on cn but not on intl; the two `glm-5.2`
+ * ladders (`high`/`xhigh` on intl, `low`/`high`/`max` on cn) share only `high`;
+ * and `glm-5.3` declares `max` as its default rung on cn against `high` on
+ * intl, so the merged entry keeps the conservative `high` both regions accept.
+ *
+ * Display-only fields are not merged conservatively, because they are never
+ * sent: `description` follows the refreshed cn copy when the regions disagree
+ * (the 2026-11-16 read prefixed vendor names there), while `name` keeps the
+ * shipped spelling unless both regions move, so sibling rows stay consistent.
  *
  * The regions also do not serve the same ids. intl keeps the `gpt-6*` and
- * `gpt-5*` families, `grok-4.7`, `gemini-3.8-flash`, `kimi-k3`, `hy4-preview`
- * and the `*-model` aliases to itself; cn keeps Hunyuan 4 proper (`hy4std`,
- * `hy4free`), `hy4-preview-x`, `hunyuan-chat`, `space-bunny`, `step-5-preview`,
- * `mimo-v2.6-pro` and its own `-1`/`-x` variants. Seven ids are served by
- * both; a catalog refresh that moves the boundary must move `regions` with it.
+ * `gpt-5*` families, `grok-4.7`, `gemini-3.8-flash`, `kimi-k3`, `hy4-preview`,
+ * `hy3` and the `*-model` aliases to itself; cn keeps Hunyuan 4 proper
+ * (`hy4std`, `hy4flash`, `hy4flash-free`), `hy4-preview-x`, `hunyuan-chat`,
+ * `space-bunny`, `step-5-preview`, `mimo-v2.6-pro` and its own `-1`/`-x`
+ * variants. The 2026-11-16 read retired `hy3-x` and `hy4free` outright and
+ * dropped `hy3` from cn. Six ids are served by both; a catalog refresh that
+ * moves the boundary must move `regions` with it.
  *
  * `regions` is a routing fact, not a preference: asking a region for a model it
  * does not serve answers 400 `code 11102`.
@@ -132,7 +142,7 @@ export interface WorkBuddyModelEntry {
  * with that list — so a row living only in the fallback would drop out of the
  * picker the moment the catalog loaded.
  *
- * The list is empty as of the 2026-11-04 read: all three ids are published now,
+ * The list is empty as of the 2026-11-16 read: all three ids are published now,
  * with figures measured on the wire, and their rows therefore live in
  * {@link FALLBACK_MODELS} like any other. The seam stays rather than being
  * deleted because the gap it covers belongs to the gateway, not to those three
@@ -144,7 +154,7 @@ export const UNPUBLISHED_MODELS: readonly WorkBuddyModelEntry[] = []
 /**
  * Offline fallback catalog, transcribed from a live `/v3/config` read.
  *
- * Last transcribed 2026-11-04 from both backends. Used when the gateway cannot
+ * Last transcribed 2026-11-16 from both backends. Used when the gateway cannot
  * be reached (first run before sign-in, or a network failure); a reachable
  * gateway always wins.
  */
@@ -205,7 +215,9 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     description: '高质量输出，胜任复杂任务',
   },
     // intl serves 300000 by default and allows 1M; cn serves 1M outright, so
-    // the smaller served default is the window both regions honour.
+    // the smaller served default is the window both regions honour. cn allows
+    // switching thinking off here since the 2026-11-16 read but intl does not,
+    // so the merged flag stays false.
   {
     id: 'deepseek-v4.1-flash',
     name: 'Deepseek-V4.1-Flash',
@@ -218,7 +230,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: 'DeepSeek 旗舰模型，支持 1M 上下文窗口，原生多模态',
+    description: 'DeepSeek · 修订版 1017 · 原生多模态模型，支持 1M 上下文',
   },
   {
     id: 'deepseek-v4.1-flash-sg',
@@ -248,7 +260,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '原生多模态模型，擅长视觉理解与专业任务',
+    description: 'Z.ai · 原生多模态模型，擅长视觉理解与专业任务',
   },
   {
     id: 'gpt-6-astra',
@@ -264,8 +276,9 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     canDisableThinking: true,
     description: 'OpenAI 旗舰模型，擅长复杂推理与长程任务',
   },
-    // The preview build. cn replaced it with `hy4std`/`hy4free`; intl keeps
-    // serving it, so this row is now intl-only and must not be offered to cn.
+    // The preview build. cn replaced it with `hy4std` and the `hy4flash` pair;
+    // intl keeps serving it, so this row is intl-only and must not be offered
+    // to cn.
   {
     id: 'hy4-preview',
     name: 'Hy4 Preview',
@@ -280,14 +293,16 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     canDisableThinking: false,
     description: '混元思考模型，具有增强的推理能力',
   },
+    // cn dropped `hy3` on the 2026-11-16 read (together with `hy3-x` and
+    // `hy4free`); intl still serves it, so the row survives as intl-only.
   {
     id: 'hy3',
     name: 'Hy3',
     contextWindow: 192000,
     maxContextWindow: 192000,
     maxTokens: 64000,
-    regions: ['intl', 'cn'],
-    credits: { cn: '0.00', intl: '0.00' },
+    regions: ['intl'],
+    credits: { intl: '0.00' },
     supportsImage: true,
     reasoningEfforts: ['low', 'high'],
     defaultReasoningEffort: 'high',
@@ -365,7 +380,9 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     description: 'OpenAI 旗舰编码模型，擅长长程任务',
   },
     // intl caps output at 48000 where cn allows 64000, and only intl lets the
-    // trace be switched off.
+    // trace be switched off. cn declares `max` as the default rung since the
+    // 2026-11-16 read; the merged entry keeps `high`, the conservative rung
+    // both regions declare and accept.
   {
     id: 'glm-5.3',
     name: 'GLM-5.3',
@@ -378,10 +395,11 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '能力均衡，适合日常使用',
+    description: 'Z.ai · 旗舰模型，擅长复杂软件工程与长程智能体任务',
   },
     // intl caps output at 48000 where cn allows 64000, and the two region
-    // ladders share exactly the `high` rung.
+    // ladders (`high`/`xhigh` on intl, `low`/`high`/`max` on cn since the
+    // 2026-11-16 read) still share exactly the `high` rung.
   {
     id: 'glm-5.2',
     name: 'GLM-5.2',
@@ -394,7 +412,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['high'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '1M 上下文，擅长长程任务',
+    description: 'Z.ai · 支持 1M 上下文，擅长长程任务',
   },
     // intl serves 300000 by default and allows 1M; cn serves 1M outright.
   {
@@ -409,7 +427,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'max',
     canDisableThinking: false,
-    description: '原生多模态，擅长office、agentic、编程任务，推理速度优异',
+    description: 'MiniMax · 原生多模态，擅长办公、智能体与编程任务，推理速度优异',
   },
     // intl serves 300000 by default and allows 1M; cn serves 1M outright.
   {
@@ -424,7 +442,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: 'Kimi 全新旗舰模型，3万亿级参数。办公、代码、3D 创作与长程 Agent 能力全面升级。',
+    description: 'Moonshot AI · 新一代旗舰，办公、编程、3D 创作、金融研究与建模及长程智能体任务',
   },
   {
     id: 'kimi-k3.1-pro-highspeed',
@@ -552,7 +570,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '',
+    description: 'DeepSeek · 旗舰模型，支持 1M 上下文',
   },
   {
     id: 'deepseek-v4-flash',
@@ -608,7 +626,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '',
+    description: 'MiniMax · 软件工程与办公工作流，涵盖调试与重构',
   },
   {
     id: 'glm-5.0',
@@ -692,7 +710,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'high', 'max'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '擅长处理复杂的长程自主任务，前端开发能力突出，同时在知识工作与科研推理上表现出色。',
+    description: 'Moonshot AI · 擅长大型代码库开发与复杂长程自主任务，前端开发、知识工作与科研推理突出（前代模型）',
   },
   {
     id: 'kimi-k2.8-preview',
@@ -737,20 +755,6 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     description: '',
   },
   {
-    id: 'hy3-x',
-    name: 'Hy3',
-    contextWindow: 192000,
-    maxContextWindow: 192000,
-    maxTokens: 64000,
-    regions: ['cn'],
-    credits: { cn: '0.05' },
-    supportsImage: true,
-    reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'high',
-    canDisableThinking: false,
-    description: '混元思考模型，具有增强的推理能力',
-  },
-  {
     id: 'hy4-preview-x',
     name: 'Hy4 preview',
     contextWindow: 1000000,
@@ -790,7 +794,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultReasoningEffort: 'max',
     canDisableThinking: false,
-    description: '推理速度极快，编码能力强劲，并支持原生多模态输入的匿名大模型',
+    description: '匿名模型 · 推理速度极快，编码能力强劲，支持原生多模态输入',
   },
   {
     id: 'step-5-preview',
@@ -804,7 +808,7 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['low', 'medium', 'high'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '阶跃 StepFun 面向真实任务的新一代旗舰基模',
+    description: 'StepFun · 新一代旗舰，编程、专业知识工作与多步骤智能体任务，支持 1M 上下文',
   },
   {
     id: 'mimo-v2.6-pro',
@@ -820,24 +824,8 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     canDisableThinking: false,
     description: 'Xiaomi · 旗舰推理模型，面向专业、复杂长程工作流，兼顾高阶科研与网络安全',
   },
-    // Hunyuan 4 proper, cn-only. Both GA ids are spelled `Hy4` on the wire and
-    // share one shape (1M context, 64K output, image input, a lone `high` rung);
-    // they differ only in what they cost, so the free tier's label spells that
-    // out — two rows reading `Hy4` would be indistinguishable in the card.
-  {
-    id: 'hy4free',
-    name: 'Hy4 Free',
-    contextWindow: 1000000,
-    maxContextWindow: 1000000,
-    maxTokens: 64000,
-    regions: ['cn'],
-    credits: { cn: '0.00' },
-    supportsImage: true,
-    reasoningEfforts: ['high'],
-    defaultReasoningEffort: 'high',
-    canDisableThinking: false,
-    description: '最新旗舰模型，Agent与多模专长',
-  },
+    // Hunyuan 4 proper, cn-only. The 2026-11-16 read retired `hy4free` and
+    // added the lightweight `hy4flash` pair below; the copy is the refreshed one.
   {
     id: 'hy4std',
     name: 'Hy4',
@@ -850,7 +838,40 @@ export const FALLBACK_MODELS: readonly WorkBuddyModelEntry[] = [
     reasoningEfforts: ['high'],
     defaultReasoningEffort: 'high',
     canDisableThinking: false,
-    description: '最新旗舰模型，Agent与多模专长',
+    description: 'Tencent · 最新旗舰模型，擅长智能体任务与多模态理解，最大输入 960K',
+  },
+    // The lightweight Hunyuan 4 tier, cn-only, added on the 2026-11-16 read.
+    // Both ids are spelled `Hy4 flash` on the wire and share one shape (1M
+    // context, 64K output, image input, a lone `high` rung); they differ only
+    // in what they cost, so the free tier's label spells that out — two rows
+    // reading `Hy4 flash` would be indistinguishable in the card.
+  {
+    id: 'hy4flash-free',
+    name: 'Hy4 Flash Free',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 64000,
+    regions: ['cn'],
+    credits: { cn: '0.00' },
+    supportsImage: true,
+    reasoningEfforts: ['high'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '更轻量、更高效的日常主力模型。适合日常办公等高频、规模化场景',
+  },
+  {
+    id: 'hy4flash',
+    name: 'Hy4 Flash',
+    contextWindow: 1000000,
+    maxContextWindow: 1000000,
+    maxTokens: 64000,
+    regions: ['cn'],
+    credits: { cn: '0.03' },
+    supportsImage: true,
+    reasoningEfforts: ['high'],
+    defaultReasoningEffort: 'high',
+    canDisableThinking: false,
+    description: '更轻量、更高效的日常主力模型。适合日常办公等高频、规模化场景',
   },
 ]
 
@@ -996,7 +1017,7 @@ const WORKBUDDY_VENDOR_RULES: ReadonlyArray<{ re: RegExp; family: string }> = [
   { re: /^glm-/, family: 'zhipu' },
   { re: /^kimi-/, family: 'moonshot' },
   { re: /^deepseek-/, family: 'deepseek' },
-  // Tencent's own family: `hy3`/`hy4std`/`hy4free` are Hunyuan (`hy` is the
+  // Tencent's own family: `hy3`/`hy4std`/`hy4flash` are Hunyuan (`hy` is the
   // vendor's own short spelling) and `hunyuan-chat` is the same vendor spelled
   // out, so both must land in one group.
   { re: /^hy[0-9]/, family: 'tencent' },

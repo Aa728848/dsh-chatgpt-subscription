@@ -7,8 +7,9 @@
  * It also answers the question the published list cannot: `/v3/config` is not
  * the set of models the gateway serves. Measured 2026-10-09, `gpt-6-sol`,
  * `gpt-6-luna` and `gemini-3.8-flash` answered a normal streaming completion
- * with 200 while being absent from it; the 2026-11-04 read publishes all three,
- * so UNPUBLISHED_MODELS is empty and nothing is merged today. An id that answers
+ * with 200 while being absent from it; the 2026-11-04 read publishes all three
+ * (re-verified 2026-11-16), so UNPUBLISHED_MODELS is empty and nothing is merged
+ * today. An id that answers
  * live while never appearing in this report is the shape the next unlisted row
  * arrives in.
  *

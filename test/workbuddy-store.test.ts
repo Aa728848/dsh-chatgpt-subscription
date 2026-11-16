@@ -570,7 +570,7 @@ describe('WorkBuddy fallback catalog', () => {
       .filter((model) => model.defaultReasoningEffort !== null
         && !model.reasoningEfforts.includes(model.defaultReasoningEffort))
     expect(violations).toEqual([])
-    // The 2026-11-04 transcription needs no convergence at all — every published
+    // The 2026-11-16 transcription needs no convergence at all — every published
     // default is already a rung of its own ladder — so the rule is exercised on
     // the shape the live catalog can still produce: the gateway names `medium`
     // for a model that exposes only low/high/max.
@@ -595,6 +595,15 @@ describe('WorkBuddy fallback catalog', () => {
     expect(intl).not.toContain('hy4std')
     expect(intl).toContain('hy4-preview')
     expect(cn).not.toContain('hy4-preview')
+    // The 2026-11-16 read retired `hy3-x`/`hy4free` outright, moved `hy3` to
+    // intl-only, and added the cn-only `hy4flash` pair.
+    expect(intl).toContain('hy3')
+    expect(cn).not.toContain('hy3')
+    expect(cn).not.toContain('hy3-x')
+    expect(cn).not.toContain('hy4free')
+    expect(cn).toContain('hy4flash')
+    expect(cn).toContain('hy4flash-free')
+    expect(intl).not.toContain('hy4flash')
     // Both regions serve GLM-5.3-Flash; asking a region for a model it dropped
     // is the 400 `code 11102` this filter exists to avoid.
     expect(intl).toContain('glm-5.3-flash')
@@ -621,6 +630,13 @@ describe('WorkBuddy fallback catalog', () => {
     expect(resolveWorkBuddyModel('minimax-m3.1-flash').maxContextWindow).toBe(1000000)
     expect(resolveWorkBuddyModel('kimi-k3.1-pro').contextWindow).toBe(300000)
     expect(resolveWorkBuddyModel('kimi-k3.1-pro').maxContextWindow).toBe(1000000)
+    // The 2026-11-16 read widened both `glm-5.2` ladders (intl `high`/`xhigh`,
+    // cn `low`/`high`/`max`) but their intersection is still the lone `high`;
+    // cn's new `max` default for `glm-5.3` likewise stays `high` in the merge,
+    // and `deepseek-v4.1-flash` may switch thinking off on cn but not on intl.
+    expect(resolveWorkBuddyModel('glm-5.2').reasoningEfforts).toEqual(['high'])
+    expect(resolveWorkBuddyModel('glm-5.3').defaultReasoningEffort).toBe('high')
+    expect(resolveWorkBuddyModel('deepseek-v4.1-flash').canDisableThinking).toBe(false)
   })
 
   it('groups the picker by vendor, since the gateway interleaves them', () => {

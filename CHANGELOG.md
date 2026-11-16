@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.76.0 - 2026-11-16
+
 - **[网络代理] 代理设置改为按线路隔离：13 条线路各配各的，全局代理块从 ChatGPT 卡片撤掉**
   - **问题**：上一版虽然补上了「不使用代理的主机」入口，但代理仍是**一份全局设置**，UI 又挂在 ChatGPT 卡片里。国内混合网络的真实需求是「国外线路走 Clash、`copilot.tencent.com` 这类国内端点直连」——全局三选一做不到，只能来回切；而切到 `direct` 还会让包装裸 `fetch` 的中间件重新生效，同一份配置在不同线路上的行为并不一致。
   - **改法（契约）**：新增 `LineProxyConfigDto` 与 `LINE_PROXY_PROVIDER_IDS`（13 个真实 route id，含 `claude-subscription` 与模型控制表里 `claude` 别名的映射）；`SubscriptionPreferencesDto.lineProxies` 按线路存 `{ mode, customProxyUrl }`；`normalizeLineProxyConfig` / `mergeLineProxies` 负责 trim、URL 规范化、丢弃非 custom 模式下的陈旧地址、拒绝未知线路 id。
@@ -18,6 +20,13 @@
   - **改法（客户端）**：「网络代理」区块新增「不使用代理的主机」输入框与保存按钮（回车亦可保存），保存后用宿主返回的规范形式回填；中 / 英 / 俄三份词条同步补齐，提示文案写明与 `NO_PROXY` 合并的语义。
   - **文档**：`docs/configuration.md` 与 README 的代理段落改为「两个来源、合并生效」。
   - **测试**：新增偏好规范化（逗号/空白、去重、清空、非法值拒绝）、代理合并（卡片主机命中、读取器抛错时保留卡片列表、偏好抛错时保留部署列表）、路由规范化断言，以及设置页用例（输入框存在、保存 POST `{ noProxy }` 并回填）。`npm run typecheck` 三工程全绿；相关 4 个 Vitest 文件 100 例通过。
+
+- **[workbuddy] 同步 2026-11-16 随包模型目录：cn 上新 Hy4 Flash、下线 hy3-x/hy4free，hy3 改为 intl 独有**
+  - 按国区与国际区实时 `/v3/config` 刷新 `src/host/workbuddy/model-catalog.ts` 离线兜底表：cn 新增 `hy4flash`/`hy4flash-free`（线上同名 "Hy4 flash"、仅倍率 0.03/0.00 不同，免费档标签写明 Free，避免卡片里两行无法区分）；`hy3-x`、`hy4free` 正式下线；`hy3` 改为 intl 独有。两区共有模型从 7 个变为 6 个；默认勾选集合不变，无需迁移；`UNPUBLISHED_MODELS` 复核仍为空。
+  - 跨区合并沿用保守规则，发送值全部不变：cn 把 `deepseek-v4.1-flash`、`glm-5.3-flash`、`minimax-m3.1-flash`、`kimi-k3.1-pro` 的默认服务窗口提到 1M、GLM 输出上限提到 64K/131072，但 intl 未变，合并仍取小值；`glm-5.2` 两区档位（intl high/xhigh、cn low/high/max）交集仍只有 `high`；`deepseek-v4.1-flash` cn 允许关思考而 intl 不允许，合并开关保持关；`glm-5.3` cn 默认档位改为 `max`，合并条目保留两区都接受的 `high`。倍率数值全部未变。
+  - 描述文案跟随 cn 最新副本（带厂商前缀）；显示名保持随包拼写（cn 侧 `DeepSeek-V4.1-Flash` 的大小写变化不采纳，与 -sg 兄弟行一致）。显示字段的合并惯例已写入表头注释。
+  - **测试**：更新倍率审计（48/49 行带倍率、双区共有 6 行）、`hy3` 倍率访问器、区域边界断言（hy4flash pair 上新、hy3-x/hy4free 下线、hy3 归属）与跨区合并断言（glm-5.2 档位交集、glm-5.3 默认档位、deepseek-v4.1-flash 关思考开关）。
+  - **验证**：catalog 探针双区复跑，无遗漏新模型、无未下线旧模型，剩余差异均为有意的保守合并与显示字段惯例；`npm run typecheck` 0 错误；全量 Vitest **383 文件通过 / 3 跳过，6880 例通过 / 10 跳过，0 失败**（与基线一致）；`npm run build` 通过。
 
 ## 0.75.2 - 2026-11-15
 
