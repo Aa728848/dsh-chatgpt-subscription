@@ -15,6 +15,7 @@ import { deflateRawSync } from 'node:zlib'
 import {
   ACP_BINARY_RELEASES,
   AcpBinaryCache,
+  acpLaunchArgs,
   cachedExecutablePath,
   downloadRelease,
   localCliCandidates,
@@ -108,6 +109,17 @@ describe('candidate discovery', () => {
     } finally {
       space.dispose()
     }
+  })
+})
+
+describe('acpLaunchArgs', () => {
+  it('uses no CLI flags for the standalone ACP server', () => {
+    expect(acpLaunchArgs({ path: 'C:/cache/agy_acp_server.exe', kind: 'downloaded' })).toEqual([])
+    expect(acpLaunchArgs({ path: '/opt/agy_acp_server.par', kind: 'configured' })).toEqual([])
+  })
+
+  it('preserves the full agy CLI arguments', () => {
+    expect(acpLaunchArgs({ path: '/home/a/.gemini/bin/agy', kind: 'local-cli' })).toEqual(['acp', '--disable-telemetry'])
   })
 })
 

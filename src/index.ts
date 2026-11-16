@@ -65,7 +65,7 @@ import { AntigravityAcpAdapter } from './host/antigravity-acp/adapter.ts'
 import { AntigravityAcpSettingsStore } from './host/antigravity-acp/settings.ts'
 import { AcpCatalog } from './host/antigravity-acp/catalog.ts'
 import { AcpClient } from './host/antigravity-acp/acp-client.ts'
-import { AcpBinaryCache, resolveAcpBinary } from './host/antigravity-acp/binary.ts'
+import { AcpBinaryCache, acpLaunchArgs, resolveAcpBinary } from './host/antigravity-acp/binary.ts'
 import { probeAuth, startLogin } from './host/antigravity-acp/login.ts'
 import { registerAntigravityAcpRoutes } from './host/antigravity-acp/routes.ts'
 import { AcpAuthCache } from './host/antigravity-acp/auth-cache.ts'
@@ -1149,7 +1149,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       if (resolved.binary === undefined) {
         throw new Error(resolved.diagnostics.error ?? 'No usable Antigravity CLI (agy) was found.')
       }
-      return { command: resolved.binary.path, args: ['acp', '--disable-telemetry'], version: resolved.binary.version }
+      return { command: resolved.binary.path, args: acpLaunchArgs(resolved.binary), version: resolved.binary.version }
     }
     const antigravityAcpCatalog = new AcpCatalog(
       resolveAntigravityLaunch,
@@ -1185,7 +1185,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       }
       return {
         command: resolved.binary.path,
-        args: ['acp', '--disable-telemetry'],
+        args: acpLaunchArgs(resolved.binary),
         version: resolved.binary.version,
       }
     }))

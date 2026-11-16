@@ -7,10 +7,9 @@
  *
  * Two consequences follow, and they are the whole design:
  *
- * - **The browser is opened exactly once.** `agy acp --login` opens it. A host
- *   that also opened the authorize URL would show two identical Google pages for
- *   one click - the bug this repository has already paid for once on three other
- *   lines. So nothing here calls `openBrowser`.
+ * - **The browser is opened exactly once.** ACP authenticate opens it for
+ *   protocol-driven methods; only a server that exclusively offers terminal
+ *   login falls back to agy acp --login. Nothing here calls openBrowser.
  * - **"Signed in" is a probe, not a flag.** There is no local state to read: the
  *   only truthful answer comes from asking the agent to create a session, which
  *   is what {@link probeAuth} does. A failed probe is reported as "not signed in",
@@ -20,8 +19,9 @@
  */
 
 import { spawn } from 'node:child_process'
-import type { AcpClient } from './acp-client.ts'
+import { AcpClient } from './acp-client.ts'
 import type { AcpLaunch } from './adapter.ts'
+import { preferAuthMethod } from './types.ts'
 import type { AntigravityAcpAuthDto } from '../../shared/antigravity-acp-contracts.ts'
 
 /** How long the login launcher may run before it is considered detached. */
@@ -54,22 +54,59 @@ export interface LoginStartResult {
 /**
  * Start the official sign-in.
  *
- * The process is spawned detached: on a desktop it opens the browser and exits
- * once the callback lands, on a headless host it prints the URL it would have
- * opened. Either way this call never waits for the user.
- *
- * What it *does* wait for is the failure that happens before the CLI gets going.
- * The command line is `agy acp --login`, and a rejected command line, a
- * misconfigured path or a binary that cannot be spawned all exit (or error)
- * within milliseconds - and the previous version reported "sign-in started" for
- * every one of them while discarding the only sentence that explained it. The
- * launcher is therefore watched for {@link LOGIN_FAILURE_WINDOW_MS}: a spawn
- * error, or a non-zero exit that left stderr behind, is returned as the reason.
+ * Protocol-driven methods run through ACP authenticate. A server that only
+ * offers terminal-login keeps the detached agy acp --login fallback. Both paths
+ * return after the start-up window instead of waiting for the browser callback,
+ * and both surface an early process or protocol failure instead of claiming
+ * that sign-in started.
  *
  * @param launch - The resolved executable.
  * @returns whether a process was started, and why it was not.
  */
-export function startLogin(launch: AcpLaunch): Promise<LoginStartResult> {
+export async function startLogin(launch: AcpLaunch): Promise<LoginStartResult> {
+  let client: AcpClient | undefined
+  try {
+    client = new AcpClient({ command: launch.command, args: launch.args, cwd: process.cwd() })
+    const init = asRecord(await client.request('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      clientInfo: { name: 'dsh-chatgpt-subscription', version: '1.0.0' },
+    }))
+    const authMethods = Array.isArray(init?.authMethods)
+      ? init.authMethods.map((entry) => String((entry as Record<string, unknown>).id ?? '')).filter((id) => id !== '')
+      : []
+    if (authMethods.length === 0) throw new Error('The Antigravity ACP server advertised no authentication methods.')
+    const methodId = preferAuthMethod(authMethods)
+    if (methodId === 'terminal-login') {
+      await client.dispose().catch(() => undefined)
+      return startTerminalLogin(launch)
+    }
+    return await startProtocolLogin(client, methodId)
+  } catch (error) {
+    if (client !== undefined) await client.dispose().catch(() => undefined)
+    return { started: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+async function startProtocolLogin(client: AcpClient, methodId: string): Promise<LoginStartResult> {
+  const completion: Promise<LoginStartResult> = client.request('authenticate', { methodId }).then(
+    () => ({ started: true }),
+    (error) => ({ started: false, error: error instanceof Error ? error.message : String(error) }),
+  )
+  void completion.then(() => client.dispose().catch(() => undefined))
+  let timer: NodeJS.Timeout | undefined
+  const detached = new Promise<LoginStartResult>((resolve) => {
+    timer = setTimeout(() => resolve({ started: true }), LOGIN_FAILURE_WINDOW_MS)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([completion, detached])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+function startTerminalLogin(launch: AcpLaunch): Promise<LoginStartResult> {
   let child: ReturnType<typeof spawn>
   try {
     // `launch.args` already selects ACP stdio mode (`acp`, plus any flags), and
