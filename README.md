@@ -63,7 +63,7 @@
 - **桌面与无头服务器双存储模式**：默认使用系统加密密钥环（`keyring`：Windows DPAPI / macOS Keychain / Linux Secret Service）；无桌面环境的 Linux 服务器可一键切换至 DSH 标准凭据库（`credentials`：`$DSH_HOME/.credentials.yaml`，强制 `0600` 权限），告别安装 `gnome-keyring` 的繁琐配置。
 
 ### 2. 全共享网络代理与智能网页抓取
-- **一处配置、全线生效**：在 ChatGPT 设置卡配置的 **网络代理**（系统代理自动检测 / 自定义代理 / 直连）同时作用于全部 13 条线路的对话、OAuth 登录续期、额度查询与目录拉取，自动绕行回环地址与 `NO_PROXY` 主机。
+- **一处配置、全线生效**：在 ChatGPT 设置卡配置的 **网络代理**（系统代理自动检测 / 自定义代理 / 直连）同时作用于全部 13 条线路的对话、OAuth 登录续期、额度查询与目录拉取；回环地址永远直连，**「不使用代理的主机」**输入框与 `NO_PROXY`（进程环境 / `$DSH_HOME/.env`）里的主机同样自动绕过代理，两处列表合并生效。
 - **Codex 搜索与 `fake-ip` 友好的 `web_fetch`**：支持将 DSH 搜索切换为 ChatGPT 订阅侧 Codex 搜索；在 Clash / Mihomo 等开启 `fake-ip`（`198.18.0.0/15`）的代理环境下，`fetchProvider: auto` 会自动用插件抓取器接管 `web_fetch`，交由远端代理解析域名，解决内置抓取器因本地 DNS 固定报错 `WEB_BLOCKED_URL` 的痛点。
 
 ### 3. 精细上下文预算、独立压缩路由与前缀缓存保护

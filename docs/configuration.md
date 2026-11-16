@@ -150,7 +150,7 @@ promptCacheOverrides:
 - **系统代理（自动检测）**：Windows 读取注册表 `ProxyEnable` / `ProxyServer`；macOS 读取 `scutil --proxy`；Linux 读取 GNOME `gsettings`（不支持 PAC 脚本）；若均未命中，自动回退读取进程环境变量或 `$DSH_HOME/.env` 中的 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`；
 - **自定义代理**：显式指定代理 URL；
 - **直连**：不经过 HTTP 代理（适合无代理环境或纯虚拟网卡 TUN 全局接管场景）；
-- **自动绕行规则**：回环地址（`127.0.0.0/8`、`::1`、`localhost`）以及 `NO_PROXY` / `no_proxy`（进程环境优先，其次 `$DSH_HOME/.env`）匹配的主机始终直连。
+- **自动绕行规则**：回环地址（`127.0.0.0/8`、`::1`、`localhost`）以及 `NO_PROXY` / `no_proxy` 匹配的主机始终直连。旁路列表有两个来源，**合并生效、互不覆盖**：设置页「不使用代理的主机」输入框（逗号或空格分隔，保存时统一为逗号分隔并去重，存在插件偏好文档里，5 秒内生效），以及进程环境优先、其次 `$DSH_HOME/.env` 的部署级列表。任一来源读取失败只丢弃该来源，不会把代理从所有线路上摘掉。
 
 ### 搜索后端与 `web_fetch` 抓取接管
 

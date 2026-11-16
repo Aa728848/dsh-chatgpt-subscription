@@ -2,7 +2,7 @@
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CodexSubscriptionSection, FetchProviderStatusCard } from '../src/client/CodexSubscriptionSection.tsx'
 import { zh } from '../src/client/locales.ts'
 
@@ -154,6 +154,7 @@ async function mountSection(status: Record<string, unknown>): Promise<{ containe
       contextWindowOverrides: {},
       proxyMode: 'auto',
       customProxyUrl: null,
+      noProxy: null,
       writable: true,
     },
     ...status,
@@ -172,6 +173,53 @@ async function mountSection(status: Record<string, unknown>): Promise<{ containe
     },
   }
 }
+
+describe('proxy bypass card', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('offers the bypass list in the proxy section and saves the typed list', async () => {
+    const harness = await mountSection({})
+    try {
+      const { container } = harness
+      const input = container.querySelector('#dsh-codex-no-proxy') as HTMLInputElement | null
+      expect(input).not.toBeNull()
+      expect(input!.getAttribute('aria-label')).toBe(zh.noProxy)
+      expect(input!.getAttribute('placeholder')).toBe(zh.noProxyPlaceholder)
+      expect(container.textContent).toContain(zh.noProxyHint)
+
+      // Saving posts the raw draft; the host canonicalizes and the answer is
+      // what the field then shows.
+      const calls: Array<{ url: string; body: unknown }> = []
+      const answering = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(input), body: init?.body === undefined ? undefined : JSON.parse(String(init.body)) })
+        return Response.json({ ok: true, value: {
+          quickQuotaVisible: false, fastMode: false, outputVerbosity: null, reasoningSummary: null,
+          visibleModelIds: ['gpt-5.6-sol'], searchProvider: 'dsh', contextWindowOverrides: {},
+          proxyMode: 'auto', customProxyUrl: null, noProxy: 'copilot.tencent.com', writable: true,
+        } })
+      })
+      vi.stubGlobal('fetch', answering)
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+        setter.call(input, ' copilot.tencent.com ')
+        input!.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      const save = container.querySelector('[aria-label="' + zh.saveNoProxy + '"]') as HTMLButtonElement | null
+      expect(save).not.toBeNull()
+      await act(async () => {
+        save!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      const posted = calls.find((call) => call.url.endsWith('/preferences/update'))
+      expect(posted?.body).toEqual({ noProxy: 'copilot.tencent.com' })
+      const field = container.querySelector('#dsh-codex-no-proxy') as HTMLInputElement
+      expect(field.value).toBe('copilot.tencent.com')
+    } finally {
+      await harness.teardown()
+    }
+  })
+})
 
 describe('fetch status in the settings tab', () => {
   it('renders below the search source selector when the host reports the blocks', async () => {

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[网络代理 / 修复 #111] 设置页有了「不使用代理的主机」入口：卡片列表与 `NO_PROXY` 部署列表合并生效，不再只能全局切 `direct`**
+  - **问题**：域名级旁路（`shouldBypassProxy` / `ProxyManager.getNoProxyList`）早已实现并有 22 例测试，但它只能从进程环境或 `$DSH_HOME/.env` 的 `NO_PROXY` 到达；设置页「网络代理」只有系统代理 / 自定义 / 直连三档，于是国内混合网络（国外线路走代理、`copilot.tencent.com` 这类国内线路必须直连）只能在两档之间反复全切，而切到 `direct` 还会让包装裸 `fetch` 的压缩中间件重新生效、行为与 `auto` 不一致却看不出区别。
+  - **改法（契约）**：`SubscriptionPreferencesDto` / `SubscriptionPreferencesUpdateDto` 新增 `noProxy?: string | null`；`normalizeNoProxyList()` 把逗号或空白分隔的条目去重（大小写不敏感、保留首次拼写与顺序）并统一为逗号分隔；`null` 或只有分隔符表示清除。偏好 schema 默认 `null`。
+  - **改法（宿主）**：`POST /preferences/update` 校验 `noProxy` 必须是字符串或 `null`，并按规范形式落库；`ProxyManager.getNoProxyList()` 现在合并「设置卡列表」与「`noProxyReader()` 部署列表」，任一来源抛错只丢弃该来源（此前把整个列表读成空）。
+  - **改法（客户端）**：「网络代理」区块新增「不使用代理的主机」输入框与保存按钮（回车亦可保存），保存后用宿主返回的规范形式回填；中 / 英 / 俄三份词条同步补齐，提示文案写明与 `NO_PROXY` 合并的语义。
+  - **文档**：`docs/configuration.md` 与 README 的代理段落改为「两个来源、合并生效」。
+  - **测试**：新增偏好规范化（逗号/空白、去重、清空、非法值拒绝）、代理合并（卡片主机命中、读取器抛错时保留卡片列表、偏好抛错时保留部署列表）、路由规范化断言，以及设置页用例（输入框存在、保存 POST `{ noProxy }` 并回填）。`npm run typecheck` 三工程全绿；相关 4 个 Vitest 文件 100 例通过。
+
 ## 0.75.2 - 2026-11-15
 
 - **[antigravity-acp / 第二轮审查] 辅助请求不再杀掉正在读的主回合、登录命令修正且失败可见、配额与风控拒绝不再重试**

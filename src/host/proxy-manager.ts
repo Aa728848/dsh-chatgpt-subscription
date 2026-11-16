@@ -7,6 +7,7 @@ import os from 'node:os'
 import tls from 'node:tls'
 import { Agent, ProxyAgent, buildConnector, fetch as undiciFetch } from 'undici'
 import type { ProxyMode, SubscriptionPreferencesDto } from '../shared/contracts.ts'
+import { normalizeNoProxyList } from '../shared/preferences.ts'
 
 export type FetchLike = typeof fetch
 
@@ -547,13 +548,18 @@ function isDestroyedClientError(error: unknown): boolean {
 export type SystemProxyListener = (proxyUrl: string) => void
 
 export interface ProxyFetchOptions {
-  getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl'>
+  getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl' | 'noProxy'>
   baseFetch?: FetchLike
   systemProxyDetector?: () => string | null
   /**
    * The `NO_PROXY` list, read per request (subject to the same TTL as the system
    * proxy) so an edit takes effect without a restart. A test injects this rather
    * than inheriting the machine's own bypass list.
+   *
+   * This is the DEPLOYMENT list (process environment, then `$DSH_HOME/.env`).
+   * The settings card's own list is read from `getPreferences().noProxy` and
+   * merged with it, so a user who types hosts in the card does not have to
+   * abandon the file, and the file does not silently replace the card.
    */
   noProxyReader?: () => string
   logger?: Pick<Console, 'info' | 'warn' | 'error'>
@@ -565,7 +571,7 @@ export interface ProxyFetchOptions {
 }
 
 export class ProxyManager {
-  private readonly getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl'>
+  private readonly getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl' | 'noProxy'>
   private readonly baseFetch: FetchLike
   private readonly proxyFetchFn: FetchLike
   private readonly systemProxyDetector: () => string | null
@@ -624,20 +630,38 @@ export class ProxyManager {
   /**
    * The active `NO_PROXY` list, re-read at most once per TTL.
    *
+   * Two sources, one answer: the deployment list from {@link ProxyFetchOptions.noProxyReader}
+   * and the list the settings card stores in `getPreferences().noProxy`. Neither
+   * replaces the other, because the card is the discoverable place and the
+   * environment file is the deployment-level place.
+   *
    * A reader that throws (an unreadable `$DSH_HOME/.env`) reads as "no bypass
    * list", never as "bypass everything": the wrong guess in that direction would
-   * take an active proxy away from every line at once.
+   * take an active proxy away from every line at once. The same applies to one
+   * source failing: the other source still answers.
    */
   getNoProxyList(force = false): string {
     const now = Date.now()
     if (!force && now - this.lastNoProxyCheck < SYSTEM_PROXY_CACHE_TTL_MS) return this.cachedNoProxy
     this.lastNoProxyCheck = now
-    try {
-      this.cachedNoProxy = this.noProxyReader().trim()
-    } catch {
-      this.cachedNoProxy = ''
-    }
+    this.cachedNoProxy = this.readNoProxyList()
     return this.cachedNoProxy
+  }
+
+  /** Both bypass sources, canonicalized and concatenated; each failure reads as empty. */
+  private readNoProxyList(): string {
+    const parts: string[] = []
+    try {
+      parts.push(this.noProxyReader())
+    } catch {
+      // An unreadable deployment list never removes the card's own list.
+    }
+    try {
+      parts.push(this.getPreferences().noProxy ?? '')
+    } catch {
+      // A preferences read that fails leaves the deployment list in force.
+    }
+    return normalizeNoProxyList(parts.join(','))
   }
 
   /**

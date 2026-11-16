@@ -209,6 +209,15 @@ export interface SubscriptionPreferencesDto {
   proxyMode: ProxyMode
   customProxyUrl: string | null
   /**
+   * Hosts that bypass the proxy, written as a standard `NO_PROXY` list.
+   *
+   * Kept beside `proxyMode` rather than only in `$DSH_HOME/.env` because the
+   * settings card is the one place a user can discover it. The host merges this
+   * list with the environment/file list, so neither source silently replaces
+   * the other. `null` means the card has never set one.
+   */
+  noProxy?: string | null
+  /**
    * Where an automatic compaction summary is computed. `null` keeps the
    * conversation's own model, which is what every deployment does until an
    * operator opts in: the summary then costs that line's quota.
@@ -236,6 +245,8 @@ export interface SubscriptionPreferencesUpdateDto {
   contextWindowOverrides?: CodexContextWindowOverridesUpdateDto
   proxyMode?: ProxyMode
   customProxyUrl?: string | null
+  /** Replace the bypass list; `null` (or an empty string) clears it. */
+  noProxy?: string | null
   /** Set a target, or `null` to route compaction back to the conversation's model. */
   compactionRoute?: CompactionRouteTarget | null
   /** Replace the fallback route list wholesale. */

@@ -95,6 +95,7 @@ describe('host routes', () => {
         contextWindowOverrides: { ...overrides },
         proxyMode: 'auto',
         customProxyUrl: null,
+        noProxy: null,
         writable: true,
       }),
       update: async (patch) => {
@@ -114,6 +115,7 @@ describe('host routes', () => {
           contextWindowOverrides: { ...overrides },
           proxyMode: patch.proxyMode !== undefined ? patch.proxyMode : 'auto',
           customProxyUrl: patch.customProxyUrl !== undefined ? patch.customProxyUrl : null,
+          noProxy: patch.noProxy !== undefined ? patch.noProxy : null,
           writable: true,
         }
       },
@@ -159,6 +161,7 @@ describe('host routes', () => {
         contextWindowOverrides: { 'gpt-6-astra': 872_000, 'gpt-5.6-sol': 1_000_000 },
         proxyMode: 'custom',
         customProxyUrl: 'http://127.0.0.1:8888',
+        noProxy: ' copilot.tencent.com ,corp.example',
       }),
     })
     expect(updatedPreferences.status).toBe(200)
@@ -172,6 +175,7 @@ describe('host routes', () => {
         contextWindowOverrides: { 'gpt-6-astra': 872_000, 'gpt-5.6-sol': 1_000_000 },
         proxyMode: 'custom',
         customProxyUrl: 'http://127.0.0.1:8888',
+        noProxy: 'copilot.tencent.com, corp.example',
       },
     })
 

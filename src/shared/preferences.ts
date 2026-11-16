@@ -25,6 +25,9 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   contextWindowOverrides: {},
   proxyMode: 'auto',
   customProxyUrl: null,
+  // No card-managed bypass list until the user types one; the host still
+  // honours the environment/file NO_PROXY list on its own.
+  noProxy: null,
   // Off by default: every deployment summarizes on the model that built the
   // conversation until an operator picks another route.
   compactionRoute: null,
@@ -53,6 +56,31 @@ export function isCodexReasoningSummary(value: unknown): value is CodexReasoning
 
 export function isProxyMode(value: unknown): value is ProxyMode {
   return value === 'auto' || value === 'custom' || value === 'direct'
+}
+
+/**
+ * Canonical form of one `NO_PROXY`-style bypass list.
+ *
+ * Entries may be separated by commas or whitespace, because a list pasted from
+ * a README or a shell export is usually one or the other. Each entry is trimmed
+ * and the list is deduplicated case-insensitively on first spelling and order:
+ * the card shows the user's own arrangement back to them, while a host named
+ * twice can never produce two matcher entries.
+ * @param value - Raw list from the card, the environment, or a document.
+ * @returns the canonical comma-separated list; an empty string when none.
+ */
+export function normalizeNoProxyList(value: string): string {
+  const entries: string[] = []
+  const seen = new Set<string>()
+  for (const raw of value.split(/[,\s]+/)) {
+    const entry = raw.trim()
+    if (entry.length === 0) continue
+    const key = entry.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    entries.push(entry)
+  }
+  return entries.join(', ')
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

@@ -98,6 +98,8 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [customProxyDraft, setCustomProxyDraft] = useState<string | null>(null)
+  /** The bypass list as typed; null means "not edited, show the stored value". */
+  const [noProxyDraft, setNoProxyDraft] = useState<string | null>(null)
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
@@ -371,6 +373,19 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     const draft = customProxyDraft?.trim()
     await updatePreferences({ customProxyUrl: draft ? draft : null })
     setCustomProxyDraft(null)
+  }
+
+  /**
+   * Save the bypass list.
+   *
+   * The host canonicalizes it (comma-or-whitespace separated, trimmed,
+   * deduplicated) and answers with the stored form, so the card shows exactly
+   * what the matcher will read rather than the raw keystrokes.
+   */
+  const updateNoProxyList = async (): Promise<void> => {
+    const draft = noProxyDraft?.trim()
+    await updatePreferences({ noProxy: draft ? draft : null })
+    setNoProxyDraft(null)
   }
 
   /**
@@ -780,6 +795,44 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         </div> : null}
 
         {preferences?.proxyMode === 'direct' ? <p className="dsha-muted" style={{ margin: '8px 0 0' }}>{t('proxyDirectHint')}</p> : null}
+
+        {/* One row without the context editor's row class: that class is the
+            per-model context window row the tests and the stylesheet count. */}
+        <div className="dsha-context-settings" data-proxy-bypass>
+          <div>
+            <strong>{t('noProxy')}</strong>
+            <p className="dsha-muted">{t('noProxyHint')}</p>
+          </div>
+          <div>
+            <span className="dsh-codex-proxy-control">
+              <input
+                id="dsh-codex-no-proxy"
+                type="text"
+                placeholder={t('noProxyPlaceholder')}
+                value={noProxyDraft ?? (preferences?.noProxy ?? '')}
+                disabled={busy !== null}
+                aria-label={t('noProxy')}
+                onChange={(event) => {
+                  setNoProxyDraft(event.currentTarget.value)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter') return
+                  event.preventDefault()
+                  void updateNoProxyList()
+                }}
+              />
+              <button
+                className="dsha-context-save"
+                type="button"
+                aria-label={t('saveNoProxy')}
+                disabled={busy !== null || noProxyDraft === null}
+                onClick={() => void updateNoProxyList()}
+              >
+                {t('save')}
+              </button>
+            </span>
+          </div>
+        </div>
 
         {preferences?.proxyMode === 'custom' ? <div className="dsha-context-settings">
           <div>

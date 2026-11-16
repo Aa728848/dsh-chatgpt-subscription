@@ -19,6 +19,7 @@ import {
   isCompactionRouteTarget,
   mergeSubagentAllowParentForkByMainModel,
   mergeSubagentModelsByMainModel,
+  normalizeNoProxyList,
   normalizeSubagentModelRoutes,
 } from '../shared/preferences.ts'
 import type { CompactionCandidatesDto } from '../shared/contracts.ts'
@@ -589,6 +590,15 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
       throw new PreferenceError('proxyMode must be auto, custom, or direct.')
     }
     patch.proxyMode = value.proxyMode
+  }
+  if ('noProxy' in value) {
+    if (value.noProxy !== null && typeof value.noProxy !== 'string') {
+      throw new PreferenceError('noProxy must be a string or null.')
+    }
+    // Store the canonical form, not the raw body: the card and the matcher
+    // must read the same list, and a body of only separators clears it.
+    patch.noProxy = value.noProxy === null ? null : normalizeNoProxyList(value.noProxy)
+    if (patch.noProxy === '') patch.noProxy = null
   }
   if ('customProxyUrl' in value) {
     if (value.customProxyUrl !== null && typeof value.customProxyUrl !== 'string') {

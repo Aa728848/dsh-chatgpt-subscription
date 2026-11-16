@@ -13,6 +13,7 @@ import {
   isCodexReasoningSummary,
   isProxyMode,
   isSearchProviderPreference,
+  normalizeNoProxyList,
   isCompactionRouteTarget,
   mergeSubagentAllowParentForkByMainModel,
   mergeSubagentModelsByMainModel,
@@ -73,6 +74,9 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
     contextWindowOverrides,
     proxyMode: z.union([z.const('auto'), z.const('custom'), z.const('direct')]).default(DEFAULT_PREFERENCES.proxyMode),
     customProxyUrl: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.customProxyUrl),
+    // Canonical on the way in, so a document the schema accepts is also one
+    // the matcher can read without a second parse.
+    noProxy: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.noProxy ?? null),
     // Stored as an object rather than two sibling strings so "no target" is one
     // absent value instead of two that can disagree with each other.
     compactionRoute: z.union([
@@ -188,6 +192,11 @@ class SettingsPreferenceStore implements PreferenceStoreHandle {
       )
       if (merged === null) throw new PreferenceError('Unsupported subagentAllowParentForkByMainModel preference.')
       normalized.subagentAllowParentForkByMainModel = merged
+    }
+    if (patch.noProxy !== undefined) {
+      if (patch.noProxy !== null && typeof patch.noProxy !== 'string') throw new PreferenceError('Unsupported noProxy preference.')
+      const normalizedList = patch.noProxy === null ? '' : normalizeNoProxyList(patch.noProxy)
+      normalized.noProxy = normalizedList.length === 0 ? null : normalizedList
     }
     if (patch.customProxyUrl !== undefined) {
       if (patch.customProxyUrl !== null) {

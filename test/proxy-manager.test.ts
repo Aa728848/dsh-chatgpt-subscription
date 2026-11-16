@@ -635,6 +635,38 @@ describe('ProxyManager bypass path', () => {
     manager.dispose()
   })
 
+  it('merges the settings-card list with the deployment list instead of replacing either', async () => {
+    const baseFetch = vi.fn(async () => new Response('direct', { status: 200 }))
+    const manager = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'custom', customProxyUrl: 'http://127.0.0.1:1', noProxy: 'copilot.tencent.com' }),
+      baseFetch: baseFetch as any,
+      noProxyReader: () => 'corp.example',
+    })
+    expect(manager.getNoProxyList()).toBe('corp.example, copilot.tencent.com')
+    // The card's host bypasses even though the deployment list never named it.
+    expect(await (await manager.createFetch()('https://copilot.tencent.com/v2/chat/completions')).text()).toBe('direct')
+    expect(baseFetch).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('keeps the card list when the deployment reader throws, and the deployment list when preferences do', () => {
+    const throwingReader = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null, noProxy: 'copilot.tencent.com' }),
+      systemProxyDetector: () => 'http://127.0.0.1:7890',
+      noProxyReader: () => { throw new Error('unreadable') },
+    })
+    expect(throwingReader.getNoProxyList()).toBe('copilot.tencent.com')
+    throwingReader.dispose()
+
+    const throwingPreferences = new ProxyManager({
+      getPreferences: () => { throw new Error('no preferences yet') },
+      systemProxyDetector: () => 'http://127.0.0.1:7890',
+      noProxyReader: () => 'corp.example',
+    })
+    expect(throwingPreferences.getNoProxyList()).toBe('corp.example')
+    throwingPreferences.dispose()
+  })
+
   it('re-reads the list after the TTL and treats a throwing reader as empty', () => {
     let list = 'corp.example'
     const manager = new ProxyManager({

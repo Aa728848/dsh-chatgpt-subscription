@@ -136,6 +136,24 @@ describe('subscription preferences', () => {
       .rejects.toThrow('Unsupported subagentModelsByMainModel preference.')
   })
 
+  it('canonicalizes the proxy bypass list, and clears it with null or separators only', async () => {
+    const store = createPreferenceStore({})
+    // Never set means "only the deployment list applies".
+    expect(store.status().noProxy ?? null).toBeNull()
+    // Comma- and whitespace-separated entries are both accepted, trimmed, and
+    // deduplicated case-insensitively on first spelling.
+    expect(await store.update({ noProxy: ' copilot.tencent.com ,gateway.lan:8080\n Corp.Example,COPILOT.tencent.com ' }))
+      .toMatchObject({ noProxy: 'copilot.tencent.com, gateway.lan:8080, Corp.Example' })
+    // Only separators is not a list: it clears rather than storing punctuation.
+    expect(await store.update({ noProxy: ' , , ' })).toMatchObject({ noProxy: null })
+    expect(await store.update({ noProxy: 'a.example' })).toMatchObject({ noProxy: 'a.example' })
+    expect(await store.update({ noProxy: null })).toMatchObject({ noProxy: null })
+    // A hand-edited value the schema refuses is rejected as a whole, never
+    // half-trusted: the caller (file store or settings scope) keeps its last
+    // good document instead.
+    expect(() => createPreferenceStore({ noProxy: 42 as never })).toThrow()
+  })
+
   it('clears one override back to the absent state a restored default leaves behind', async () => {
     const store = createPreferenceStore({ contextWindowOverrides: { 'gpt-6-astra': 512_000 } })
     expect(store.status().contextWindowOverrides['gpt-6-astra']).toBe(512_000)
