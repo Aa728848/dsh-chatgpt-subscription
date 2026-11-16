@@ -36,6 +36,7 @@ import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate, formatReset } from '../common/format.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 import { useWorkBuddySection, type WorkBuddySectionProps } from './useWorkBuddySection.ts'
 import { NS_WORKBUDDY, zh } from './locales.ts'
 
@@ -748,6 +749,8 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
           </div>
         )}
       </section>
+
+      <LineProxySection line="workbuddy-subscription" />
 
       {error && (
         <div className="dsha-error">

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CodexReasoningSummary, DeviceLoginDto, PluginStatusDto, PoolStorageDto, PoolStorageMode, QuotaBucketDto, QuotaWindowDto, SearchProviderPreference, SubscriptionPreferencesUpdateDto } from '../shared/contracts.ts'
 import { CODEX_MODEL_CATALOG, DEFAULT_VISIBLE_CODEX_MODEL_IDS, GPT_56_MAX_CONTEXT_WINDOW, contextWindowLimitForModel, resolveCodexCatalogEntry } from '../shared/model-catalog.ts'
 import type { CodexModelId } from '../shared/model-catalog.ts'
 import { SubscriptionApi, parseLoginEvent } from './api.ts'
+import { LineProxySection, type LineProxySnapshot } from './common/LineProxySection.tsx'
 import { AccountPoolSection, type AccountPoolLabels } from './common/AccountPoolSection.tsx'
 import { formatPoolLabel } from './common/account-pool-labels.ts'
 import { ModelChecklist } from './common/ModelChecklist.tsx'
@@ -97,9 +98,6 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const [resetCreditNotice, setResetCreditNotice] = useState<string | null>(null)
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
-  const [customProxyDraft, setCustomProxyDraft] = useState<string | null>(null)
-  /** The bypass list as typed; null means "not edited, show the stored value". */
-  const [noProxyDraft, setNoProxyDraft] = useState<string | null>(null)
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setError(null)
@@ -369,24 +367,29 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     setContextDrafts({})
   }
 
-  const updateCustomProxyUrl = async (): Promise<void> => {
-    const draft = customProxyDraft?.trim()
-    await updatePreferences({ customProxyUrl: draft ? draft : null })
-    setCustomProxyDraft(null)
-  }
-
   /**
-   * Save the bypass list.
+   * Read this card's proxy snapshot.
    *
-   * The host canonicalizes it (comma-or-whitespace separated, trimmed,
-   * deduplicated) and answers with the stored form, so the card shows exactly
-   * what the matcher will read rather than the raw keystrokes.
+   * Kept beside the tab's own status because the shared section renders from
+   * `GET /proxy`, the same route every other line card reads: one document, one
+   * meaning, and saving on any card is visible to the rest.
    */
-  const updateNoProxyList = async (): Promise<void> => {
-    const draft = noProxyDraft?.trim()
-    await updatePreferences({ noProxy: draft ? draft : null })
-    setNoProxyDraft(null)
-  }
+  /**
+   * This card's proxy snapshot, taken from the status it already reads.
+   *
+   * The shared section can read `/proxy` on its own, but this tab answers from
+   * one status document; a second request per render would double the polling
+   * for data the status already carries.
+   */
+  const proxySnapshot = useMemo<LineProxySnapshot | null>(() => {
+    if (status === null) return null
+    return {
+      lineProxies: status.preferences.lineProxies ?? {},
+      noProxy: status.preferences.noProxy ?? null,
+      detectedProxy: status.detectedProxy ?? null,
+      activeProxies: status.activeProxies ?? {},
+    }
+  }, [status])
 
   /**
    * The shared card takes a label object while this tab translates by key, so
@@ -763,113 +766,16 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
         </div>
       </Section>
 
-      <Section title={t('proxySettings')}>
-        <div className="dsha-pref-row">
-          <div>
-            <strong>{t('proxyMode')}</strong>
-            <p className="dsha-muted">{t('proxyModeHint')}</p>
-          </div>
-          <select
-            className="dsha-select"
-            aria-label={t('proxyMode')}
-            value={preferences?.proxyMode ?? 'auto'}
-            disabled={busy !== null}
-            onChange={(event) => {
-              const mode = event.currentTarget.value as 'auto' | 'custom' | 'direct'
-              setStatus(current => current ? { ...current, preferences: { ...current.preferences, proxyMode: mode } } : current)
-              void updatePreferences({ proxyMode: mode })
-            }}
-          >
-            <option value="auto">{t('proxyModeAuto')}</option>
-            <option value="custom">{t('proxyModeCustom')}</option>
-            <option value="direct">{t('proxyModeDirect')}</option>
-          </select>
-        </div>
+      {/* The ChatGPT line's own proxy choice. The shared setting this card used
+          to own is gone: every line now carries its own, and the bypass list is
+          the one piece that stays global (the card says so). */}
+      <LineProxySection
+        line="codex-chatgpt"
+        idPrefix="codex-chatgpt"
+        snapshot={proxySnapshot}
+        onSave={async (patch) => { await updatePreferences(patch) }}
+      />
 
-        {(preferences?.proxyMode ?? 'auto') === 'auto' ? <div className="dsh-codex-proxy-status">
-          {status?.detectedProxy ? <>
-            <span>{t('proxyDetected')}:</span>
-            <code className="dsh-codex-proxy-tag">{status.detectedProxy}</code>
-            <span className="dsh-codex-success">{t('proxyDetectedEffective')}</span>
-          </> : <span className="dsha-muted">{t('proxyNoneDetected')}</span>}
-        </div> : null}
-
-        {preferences?.proxyMode === 'direct' ? <p className="dsha-muted" style={{ margin: '8px 0 0' }}>{t('proxyDirectHint')}</p> : null}
-
-        {/* One row without the context editor's row class: that class is the
-            per-model context window row the tests and the stylesheet count. */}
-        <div className="dsha-context-settings" data-proxy-bypass>
-          <div>
-            <strong>{t('noProxy')}</strong>
-            <p className="dsha-muted">{t('noProxyHint')}</p>
-          </div>
-          <div>
-            <span className="dsh-codex-proxy-control">
-              <input
-                id="dsh-codex-no-proxy"
-                type="text"
-                placeholder={t('noProxyPlaceholder')}
-                value={noProxyDraft ?? (preferences?.noProxy ?? '')}
-                disabled={busy !== null}
-                aria-label={t('noProxy')}
-                onChange={(event) => {
-                  setNoProxyDraft(event.currentTarget.value)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter') return
-                  event.preventDefault()
-                  void updateNoProxyList()
-                }}
-              />
-              <button
-                className="dsha-context-save"
-                type="button"
-                aria-label={t('saveNoProxy')}
-                disabled={busy !== null || noProxyDraft === null}
-                onClick={() => void updateNoProxyList()}
-              >
-                {t('save')}
-              </button>
-            </span>
-          </div>
-        </div>
-
-        {preferences?.proxyMode === 'custom' ? <div className="dsha-context-settings">
-          <div>
-            <strong>{t('customProxyUrl')}</strong>
-            <p className="dsha-muted">{t('customProxyUrlHint')}</p>
-          </div>
-          <div className="dsha-context-row">
-            <span className="dsh-codex-proxy-control">
-              <input
-                id="dsh-codex-custom-proxy"
-                type="text"
-                placeholder={t('customProxyUrlPlaceholder')}
-                value={customProxyDraft ?? (preferences?.customProxyUrl ?? '')}
-                disabled={busy !== null}
-                aria-label={t('customProxyUrl')}
-                onChange={(event) => {
-                  setCustomProxyDraft(event.currentTarget.value)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter') return
-                  event.preventDefault()
-                  void updateCustomProxyUrl()
-                }}
-              />
-              <button
-                className="dsha-context-save"
-                type="button"
-                aria-label={t('saveProxyUrl')}
-                disabled={busy !== null || customProxyDraft === null}
-                onClick={() => void updateCustomProxyUrl()}
-              >
-                {t('save')}
-              </button>
-            </span>
-          </div>
-        </div> : null}
-      </Section>
 
       <Section title={t('enhancements')}>
         <div className="dsha-pref-row">

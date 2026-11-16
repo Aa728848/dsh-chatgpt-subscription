@@ -6,8 +6,8 @@ import path from 'node:path'
 import os from 'node:os'
 import tls from 'node:tls'
 import { Agent, ProxyAgent, buildConnector, fetch as undiciFetch } from 'undici'
-import type { ProxyMode, SubscriptionPreferencesDto } from '../shared/contracts.ts'
-import { normalizeNoProxyList } from '../shared/preferences.ts'
+import type { LineProxyConfigDto, LineProxyProviderId, ProxyMode, SubscriptionPreferencesDto } from '../shared/contracts.ts'
+import { DEFAULT_LINE_PROXY, normalizeNoProxyList } from '../shared/preferences.ts'
 
 export type FetchLike = typeof fetch
 
@@ -52,8 +52,12 @@ export function proxyAgentOptions(
 }
 
 /** One pool per (proxy, protocol policy, credential): neither policy nor identity may be shared. */
-function agentCacheKey(proxyUrl: string, allowH2?: boolean, poolKey?: string, headersTimeoutMs?: number): string {
-  return `${poolKey ?? 'shared'}:${allowH2 === false ? 'h1' : 'auto'}:${headersTimeoutMs ?? 'default'}:${proxyUrl}`
+function agentCacheKey(proxyUrl: string, allowH2?: boolean, poolKey?: string, headersTimeoutMs?: number, line?: string): string {
+  // The line is part of the identity, not just the proxy URL: the same proxy
+  // configured for two lines may still differ in the protocol policy a caller
+  // pins, and sharing the pool would let the first caller's choice answer the
+  // second one's request.
+  return `${line ?? 'shared'}:${poolKey ?? 'shared'}:${allowH2 === false ? 'h1' : 'auto'}:${headersTimeoutMs ?? 'default'}:${proxyUrl}`
 }
 
 /** The key of the dispatcher that serves one credential's unproxied traffic. */
@@ -548,7 +552,7 @@ function isDestroyedClientError(error: unknown): boolean {
 export type SystemProxyListener = (proxyUrl: string) => void
 
 export interface ProxyFetchOptions {
-  getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl' | 'noProxy'>
+  getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl' | 'noProxy' | 'lineProxies'>
   baseFetch?: FetchLike
   systemProxyDetector?: () => string | null
   /**
@@ -571,7 +575,7 @@ export interface ProxyFetchOptions {
 }
 
 export class ProxyManager {
-  private readonly getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl' | 'noProxy'>
+  private readonly getPreferences: () => Pick<SubscriptionPreferencesDto, 'proxyMode' | 'customProxyUrl' | 'noProxy' | 'lineProxies'>
   private readonly baseFetch: FetchLike
   private readonly proxyFetchFn: FetchLike
   private readonly systemProxyDetector: () => string | null
@@ -679,24 +683,41 @@ export class ProxyManager {
     return () => { this.proxyListeners.delete(listener) }
   }
 
-  resolveActiveProxyUrl(): string | null {
+  /**
+   * The proxy one provider line actually uses.
+   *
+   * With a `line`, that line's own entry decides: an absent entry is the
+   * shipped `auto` default, so a fresh install keeps following the machine and
+   * a line a user never opened is not silently forced direct. Without a
+   * `line`, the retired shared pair answers — kept only so an older caller (or
+   * a deployment pinning the old field) still resolves to what it always did.
+   *
+   * @param line - Provider id whose entry should decide, or undefined for the
+   *   legacy shared setting.
+   * @returns the proxy URL in force, or null for a direct connection.
+   */
+  resolveActiveProxyUrl(line?: string): string | null {
     const prefs = this.getPreferences()
-    const mode: ProxyMode = prefs.proxyMode ?? 'auto'
+    const entry: LineProxyConfigDto | undefined = line === undefined
+      ? undefined
+      : (prefs.lineProxies ?? {})[line as LineProxyProviderId]
+    const mode: ProxyMode = entry?.mode ?? (line === undefined ? (prefs.proxyMode ?? 'auto') : DEFAULT_LINE_PROXY.mode)
+    const customUrl = line === undefined ? prefs.customProxyUrl : (entry?.customProxyUrl ?? null)
 
     if (mode === 'direct') {
       return null
     }
 
     if (mode === 'custom') {
-      return prefs.customProxyUrl ? normalizeProxyUrl(prefs.customProxyUrl) : null
+      return customUrl ? normalizeProxyUrl(customUrl) : null
     }
 
     // Auto mode
     return this.getSystemProxy()
   }
 
-  private getOrCreateAgent(proxyUrl: string, allowH2?: boolean, poolKey?: string, headersTimeoutMs?: number): ProxyAgent {
-    const key = agentCacheKey(proxyUrl, allowH2, poolKey, headersTimeoutMs)
+  private getOrCreateAgent(proxyUrl: string, allowH2?: boolean, poolKey?: string, headersTimeoutMs?: number, line?: string): ProxyAgent {
+    const key = agentCacheKey(proxyUrl, allowH2, poolKey, headersTimeoutMs, line)
     const existing = this.agents.get(key)
     if (existing instanceof ProxyAgent) return existing
     // The options-object form, and deliberately not `new ProxyAgent(url, options)`:
@@ -771,6 +792,14 @@ export class ProxyManager {
    * visible as one connection carrying several identities.
    */
   createFetch(overrides?: {
+    /**
+     * The provider line this fetch speaks for.
+     *
+     * It decides BOTH the proxy in force and the dispatcher cache key: two
+     * lines configured with different proxies must never share one `ProxyAgent`,
+     * or the second line silently borrows the first one's tunnel.
+     */
+    line?: string
     allowH2?: boolean
     credentialPools?: boolean
     /** Header names to drop before the request is written; see {@link stripDispatchHeaders}. */
@@ -791,7 +820,7 @@ export class ProxyManager {
     }
     return async (input: Parameters<FetchLike>[0], init?: Parameters<FetchLike>[1]): Promise<Response> => {
       const poolKey = overrides?.credentialPools === true ? credentialPoolKey(init) : undefined
-      const activeProxy = this.resolveActiveProxyUrl()
+      const activeProxy = this.resolveActiveProxyUrl(overrides?.line)
 
       if (!activeProxy) {
         return poolKey === undefined && overrides?.headersTimeoutMs === undefined
@@ -816,12 +845,12 @@ export class ProxyManager {
       // recovered answer and a line that stays broken until the process restarts.
       for (let attempt = 0; ; attempt += 1) {
         try {
-          const agent = shape(this.getOrCreateAgent(activeProxy, overrides?.allowH2, poolKey, overrides?.headersTimeoutMs))
+          const agent = shape(this.getOrCreateAgent(activeProxy, overrides?.allowH2, poolKey, overrides?.headersTimeoutMs, overrides?.line))
           // undiciFetch supports dispatcher option
           return await this.dispatchWith(input, init, agent)
         } catch (error) {
           if (attempt === 0 && isDestroyedClientError(error)) {
-            this.agents.delete(agentCacheKey(activeProxy, overrides?.allowH2, poolKey, overrides?.headersTimeoutMs))
+            this.agents.delete(agentCacheKey(activeProxy, overrides?.allowH2, poolKey, overrides?.headersTimeoutMs, overrides?.line))
             continue
           }
           throw error

@@ -26,6 +26,7 @@ import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor, contextDraftsFor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { createLineApi } from '../common/line-api.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 import { formatCapacity, formatDate, parsePositiveCapacity } from '../common/format.ts'
 import type { AccountRotationStrategy } from '../../shared/account-pool-contracts.ts'
 import { zh, NS_COMMAND_CODE } from './locales.ts'
@@ -599,6 +600,8 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
           </div>
         )}
       </section>
+
+      <LineProxySection line="command-code" />
 
       {error && (
         <div className="dsha-error">

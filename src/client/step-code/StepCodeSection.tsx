@@ -41,6 +41,7 @@ import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate } from '../common/format.ts'
 import { adoptReasonText, profileText, quotaCredentialSourceText, quotaKindText, quotaWindowKeyText, zh, type StepCodeLocaleKey, NS_STEP_CODE } from './locales.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 import {
   CACHE_WRITE_NOTE,
   useStepCodeSection,
@@ -848,6 +849,8 @@ export function StepCodeSection({ onModelChange }: StepCodeSectionProps = {}): R
             而不是某一个操作块——放在最下面，不夹在两个输入块中间。 */}
         <p className="dsha-muted">{t.quotaCredentialFoot}</p>
       </section>
+
+      <LineProxySection line="step-code" />
 
       {error !== null && (
         <div className="dsha-error">

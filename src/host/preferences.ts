@@ -5,7 +5,9 @@ import { mergeContextWindowOverrides } from './common/context-window-overrides.t
 import { hasRegister, resolveSettingsNamespace, type SettingsScope } from './common/settings-compat.ts'
 import { CODEX_MODEL_CATALOG, contextWindowLimitForModel, isCodexModelId } from '../shared/model-catalog.ts'
 import {
+  DEFAULT_LINE_PROXY,
   DEFAULT_PREFERENCES,
+  LINE_PROXY_PROVIDER_IDS,
   PREFERENCES_NAMESPACE,
   SEARCH_PROVIDER_CODEX,
   SEARCH_PROVIDER_DSH,
@@ -14,6 +16,8 @@ import {
   isProxyMode,
   isSearchProviderPreference,
   normalizeNoProxyList,
+  normalizeLineProxyUrl,
+  mergeLineProxies,
   isCompactionRouteTarget,
   mergeSubagentAllowParentForkByMainModel,
   mergeSubagentModelsByMainModel,
@@ -77,6 +81,12 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
     // Canonical on the way in, so a document the schema accepts is also one
     // the matcher can read without a second parse.
     noProxy: z.union([z.string(), z.const(null)]).default(DEFAULT_PREFERENCES.noProxy ?? null),
+    // One proxy choice per provider line. An absent key reads as `auto`, which
+    // is what a fresh install and a never-touched line both mean.
+    lineProxies: z.dict(z.object({
+      mode: z.union([z.const('auto'), z.const('custom'), z.const('direct')]),
+      customProxyUrl: z.union([z.string(), z.const(null)]),
+    })).default(DEFAULT_PREFERENCES.lineProxies ?? {}),
     // Stored as an object rather than two sibling strings so "no target" is one
     // absent value instead of two that can disagree with each other.
     compactionRoute: z.union([
@@ -108,6 +118,18 @@ export function registerPreferenceStore(settings?: unknown): PreferenceStoreHand
 }
 
 class SettingsPreferenceStore implements PreferenceStoreHandle {
+  /** One-shot load plus the one-time per-line proxy migration it triggers. */
+  private hydrated: Promise<void> | undefined
+  /**
+   * True while the one-time migration writes.
+   *
+   * That write is bookkeeping, not a user change: waking the preference
+   * watchers with it would restart the web provider selection during the
+   * profile composition window, which is exactly the startup race those
+   * watchers' deferral exists to avoid.
+   */
+  private migrating = false
+
   /**
    * @param scope - Namespace scope, or the plugin-owned file store standing in for one.
    * @param load - One-shot load of that file store; absent for a settings scope.
@@ -118,7 +140,43 @@ class SettingsPreferenceStore implements PreferenceStoreHandle {
   ) {}
 
   hydrate(): Promise<void> {
-    return this.load()
+    this.hydrated ??= this.load().then(() => this.migrateLineProxies())
+    return this.hydrated
+  }
+
+  /**
+   * Copy the retired shared proxy setting onto every provider line, once.
+   *
+   * Before per-line proxies there was one `proxyMode`/`customProxyUrl` pair that
+   * every line shared. Leaving those values where they are would be a silent
+   * behaviour change at upgrade: the fields stay for export compatibility, but
+   * nothing reads them any more, so every line would quietly fall back to
+   * `auto`. The migration makes each line state the value it was already using.
+   *
+   * Idempotent by construction: a document that carries ANY per-line entry has
+   * already been migrated (or has been edited since), and is never touched —
+   * re-running this on a user's own choices would silently undo them.
+   */
+  private async migrateLineProxies(): Promise<void> {
+    const current = this.scope.get()
+    if (Object.keys(current.lineProxies ?? {}).length > 0) return
+    const legacy = {
+      mode: current.proxyMode ?? DEFAULT_LINE_PROXY.mode,
+      customProxyUrl: normalizeLineProxyUrl(current.customProxyUrl),
+    }
+    const lineProxies = Object.fromEntries(LINE_PROXY_PROVIDER_IDS.map((line) => [
+      line,
+      { mode: legacy.mode, customProxyUrl: legacy.mode === 'custom' ? legacy.customProxyUrl : null },
+    ])) as PreferenceSettings['lineProxies']
+    this.migrating = true
+    try {
+      await this.scope.update({ lineProxies })
+    } catch {
+      // A store that refuses the write leaves the lines on the shipped default;
+      // the legacy pair still answers for any caller that omits a line.
+    } finally {
+      this.migrating = false
+    }
   }
 
   status(): SubscriptionPreferencesDto {
@@ -193,6 +251,11 @@ class SettingsPreferenceStore implements PreferenceStoreHandle {
       if (merged === null) throw new PreferenceError('Unsupported subagentAllowParentForkByMainModel preference.')
       normalized.subagentAllowParentForkByMainModel = merged
     }
+    if (patch.lineProxies !== undefined) {
+      const merged = mergeLineProxies(this.scope.get().lineProxies, patch.lineProxies)
+      if (merged === null) throw new PreferenceError('Unsupported lineProxies preference.')
+      normalized.lineProxies = merged
+    }
     if (patch.noProxy !== undefined) {
       if (patch.noProxy !== null && typeof patch.noProxy !== 'string') throw new PreferenceError('Unsupported noProxy preference.')
       const normalizedList = patch.noProxy === null ? '' : normalizeNoProxyList(patch.noProxy)
@@ -215,7 +278,11 @@ class SettingsPreferenceStore implements PreferenceStoreHandle {
   }
 
   watch(callback: (next: SubscriptionPreferencesDto, prev: SubscriptionPreferencesDto) => void | Promise<void>): () => void {
-    return this.scope.watch((next, prev) => callback(withWritable(next), withWritable(prev)))
+    return this.scope.watch((next, prev) => {
+      // The migration is not a user edit; see {@link migrating}.
+      if (this.migrating) return undefined
+      return callback(withWritable(next), withWritable(prev))
+    })
   }
 }
 

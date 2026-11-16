@@ -18,6 +18,7 @@ import {
 import { ClinePassApi, quotaRefreshingOf, type ClinePassCatalogSearchItem } from './api.ts'
 import { zh, NS_CLINE_PASS } from './locales.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 
 const API = new ClinePassApi()
 
@@ -928,6 +929,8 @@ function ModelTestPanel(props: ModelTestPanelProps): React.ReactElement {
           {result.test.warnings.map((warning) => <p className="dshcp-warning" key={warning}>{warning}</p>)}
         </div>
       )}
+      <LineProxySection line="cline-pass" />
+
       {result.error !== undefined && <p className="dshcp-warning">{result.error}</p>}
     </div>
   )

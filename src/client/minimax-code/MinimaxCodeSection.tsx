@@ -16,6 +16,7 @@ import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate } from '../common/format.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 import {
   fallbackTranslate,
   useMinimaxCodeSection,
@@ -546,6 +547,8 @@ export function MinimaxCodeSection({ onModelChange }: MinimaxCodeSectionProps): 
         onSave={saveVideoDefaults}
       />
       <VideoHistorySection t={t} />
+
+      <LineProxySection line="minimax-code" />
 
       {error !== null && (
         <div className="dsha-error">

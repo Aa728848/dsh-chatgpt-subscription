@@ -635,6 +635,70 @@ describe('ProxyManager bypass path', () => {
     manager.dispose()
   })
 
+  it('resolves a different proxy per provider line, and falls back to auto for an unset line', () => {
+    const manager = new ProxyManager({
+      getPreferences: () => ({
+        proxyMode: 'auto',
+        customProxyUrl: null,
+        noProxy: null,
+        lineProxies: {
+          'codex-chatgpt': { mode: 'custom', customProxyUrl: 'http://127.0.0.1:7001' },
+          'kimi-code': { mode: 'direct', customProxyUrl: null },
+          'claude-subscription': { mode: 'custom', customProxyUrl: '127.0.0.1:7002' },
+        },
+      }),
+      systemProxyDetector: () => 'http://127.0.0.1:7890',
+    })
+
+    // Two lines behind two different proxies, one direct, one untouched (auto).
+    expect(manager.resolveActiveProxyUrl('codex-chatgpt')).toBe('http://127.0.0.1:7001')
+    expect(manager.resolveActiveProxyUrl('claude-subscription')).toBe('http://127.0.0.1:7002')
+    expect(manager.resolveActiveProxyUrl('kimi-code')).toBeNull()
+    expect(manager.resolveActiveProxyUrl('ollama')).toBe('http://127.0.0.1:7890')
+
+    // A custom line with no address is a direct connection, like the old setting.
+    const incomplete = new ProxyManager({
+      getPreferences: () => ({ proxyMode: 'auto', customProxyUrl: null, noProxy: null, lineProxies: { ollama: { mode: 'custom', customProxyUrl: null } } }),
+      systemProxyDetector: () => 'http://127.0.0.1:7890',
+    })
+    expect(incomplete.resolveActiveProxyUrl('ollama')).toBeNull()
+
+    manager.dispose()
+    incomplete.dispose()
+  })
+
+  it('keeps one dispatcher per line so two proxies never share a pool', async () => {
+    const dispatchers: unknown[] = []
+    const proxyFetchFn = vi.fn(async (_input: unknown, init?: { dispatcher?: unknown }) => {
+      dispatchers.push(init?.dispatcher)
+      return new Response('ok', { status: 200 })
+    })
+    const manager = new ProxyManager({
+      getPreferences: () => ({
+        proxyMode: 'auto',
+        customProxyUrl: null,
+        noProxy: null,
+        lineProxies: {
+          'codex-chatgpt': { mode: 'custom', customProxyUrl: 'http://127.0.0.1:7001' },
+          'kimi-code': { mode: 'custom', customProxyUrl: 'http://127.0.0.1:7002' },
+        },
+      }),
+      baseFetch: (async () => new Response('direct', { status: 200 })) as never,
+      proxyFetchFn: proxyFetchFn as never,
+      noProxyReader: () => '',
+    })
+
+    await manager.createFetch({ line: 'codex-chatgpt' })('https://api.example.com/v1')
+    await manager.createFetch({ line: 'kimi-code' })('https://api.example.com/v1')
+    // Same line, same pool: the dispatcher identity is stable across fetches.
+    await manager.createFetch({ line: 'codex-chatgpt' })('https://api.example.com/v1')
+    expect(dispatchers).toHaveLength(3)
+    expect(dispatchers[0]).not.toBe(dispatchers[1])
+    expect(dispatchers[0]).toBe(dispatchers[2])
+
+    manager.dispose()
+  })
+
   it('merges the settings-card list with the deployment list instead of replacing either', async () => {
     const baseFetch = vi.fn(async () => new Response('direct', { status: 200 }))
     const manager = new ProxyManager({

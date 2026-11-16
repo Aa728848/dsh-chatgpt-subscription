@@ -362,7 +362,8 @@ describe('WorkBuddy settings card', () => {
     expect(promote).toBeDefined()
     await act(async () => promote!.click())
 
-    expect(calls[1]).toEqual({
+    // By URL, not by position: the card also reads the shared proxy snapshot.
+    expect(calls.find((call) => call.url === '/workbuddy/api/accounts/action')).toEqual({
       url: '/workbuddy/api/accounts/action',
       body: { action: 'set-primary', accountId: 'cn:u2' },
     })

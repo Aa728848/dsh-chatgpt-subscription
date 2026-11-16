@@ -25,6 +25,7 @@ import { formatCapacity, formatDate } from '../common/format.ts'
 import { adoptReasonText, allowanceKindText, zh, NS_GLM_CODING_PLAN } from './locales.ts'
 import { useGlmCodingPlanSection, type GlmCodingPlanSectionProps } from './useGlmCodingPlanSection.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 
 /** 区域的人类可读名，登录与 adopt 两条入口的结果都要说清楚落在哪一区。 */
 function regionLabel(region: GlmRegion, t: typeof zh): string {
@@ -447,6 +448,8 @@ export function GlmCodingPlanSection({ onModelChange }: GlmCodingPlanSectionProp
           </div>
         )}
       </section>
+
+      <LineProxySection line="glm-coding-plan" />
 
       {error !== null && (
         <div className="dsha-error">

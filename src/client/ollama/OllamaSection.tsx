@@ -10,6 +10,7 @@ import {
 import { OllamaApi } from './api.ts'
 import { zh, NS_OLLAMA } from './locales.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 
 const API = new OllamaApi()
 
@@ -333,6 +334,8 @@ export function OllamaSection(props: Props): React.ReactElement {
           <li>{t.limitUsage}</li>
         </ul>
       </div>
+
+      <LineProxySection line="ollama" />
     </div>
   )
 }

@@ -32,6 +32,8 @@ import { StepCodeSection } from '../src/client/step-code/StepCodeSection.tsx'
 import { zh } from '../src/client/step-code/locales.ts'
 
 const PREFIX = STEP_CODE_ROUTE_PREFIX
+/** The plugin-level proxy snapshot every line card reads beside its own routes. */
+const PROXY_ROUTE = '/api/dsh-chatgpt-subscription/proxy'
 
 const DAY = 24 * 3_600_000
 
@@ -150,6 +152,9 @@ async function mountSection(payload: StepCodeStatusDto): Promise<{
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     calls.push({ url, method: init?.method ?? 'GET' })
+    if (url === PROXY_ROUTE) {
+      return Response.json({ ok: true, value: { lineProxies: {}, noProxy: null, detectedProxy: null, activeProxies: {} } })
+    }
     if (!url.startsWith(PREFIX)) throw new Error(`unexpected request outside ${PREFIX}: ${url}`)
     return Response.json({ ok: true, value: payload })
   }) as typeof fetch
@@ -206,7 +211,8 @@ describe('Step Code 设置卡片', () => {
 
     // 一个网络包都不许发到本线路的前缀之外。
     expect(calls.length).toBeGreaterThan(0)
-    expect(calls.every((call) => call.url.startsWith(PREFIX))).toBe(true)
+    // Every call is either this line's own route or the shared proxy snapshot.
+    expect(calls.every((call) => call.url.startsWith(PREFIX) || call.url === PROXY_ROUTE)).toBe(true)
   })
 
   it('账号区与 Claude / GLM 同一形态：登录入口全在标题行，下面没有独立的「登录授权」区', async () => {

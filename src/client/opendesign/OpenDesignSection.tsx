@@ -17,6 +17,7 @@ import {
 import { OpenDesignApi } from './api.ts'
 import { zh, NS_OPENDESIGN } from './locales.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 
 const API = new OpenDesignApi()
 
@@ -956,6 +957,8 @@ const refreshUsage = useCallback(() => {
               {busy === 'settings' ? t.savingSettings : t.saveSettings}
             </button>
           </div>
+      <LineProxySection line="opendesign" />
+
         </section>
       )}
     </div>

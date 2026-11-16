@@ -13,6 +13,9 @@ import { selectClinePassFacts } from '../src/client/cline-pass/ClinePassComposer
 import { zh } from '../src/client/cline-pass/locales.ts'
 import type { ClinePassWebStatus } from '../src/shared/cline-pass-contracts.ts'
 
+/** The plugin-level proxy snapshot every line card reads beside its own routes. */
+const PROXY_ROUTE = '/api/dsh-chatgpt-subscription/proxy'
+
 const STATUS: ClinePassWebStatus = {
   enabled: true,
   providerId: 'cline-pass',
@@ -96,6 +99,9 @@ async function render(overrides: Partial<ClinePassWebStatus> = {}, onPost?: (url
     const url = String(input)
     const body = init?.body === undefined ? undefined : JSON.parse(String(init.body)) as unknown
     if (init?.method === 'POST') onPost?.(url, body)
+    if (url === PROXY_ROUTE) {
+      return Response.json({ ok: true, value: { lineProxies: {}, noProxy: null, detectedProxy: null, activeProxies: {} } })
+    }
     if (url.includes('/cline-pass/api/catalog/search')) {
       return Response.json({
         ok: true,
@@ -188,8 +194,14 @@ describe('ClinePassSection', () => {
     })
     const panel = el.querySelector('.dshcp-body')!
     expect(panel.textContent).toContain(zh.anonymousChannel)
-    expect(panel.querySelector('input')).toBeNull()
-    expect([...panel.querySelectorAll('button')].map((button) => button.textContent)).toEqual([zh.testModel])
+    // "Without pin controls" is about the ANONYMOUS ROUTING panel: its own rows
+    // carry no model picker. The per-line proxy card can be nested under the
+    // same body element, so the check names the panel's rows instead of "any
+    // descendant control".
+    expect(panel.querySelector('.dshcp-anon-pin, .dshcp-model-picker')).toBeNull()
+    // Only the panel's own action row counts: the per-line proxy card has its
+    // own save buttons lower on the page.
+    expect([...panel.querySelectorAll('.dshcp-actions button')].map((button) => button.textContent)).toEqual([zh.testModel])
   })
 
   it('adds a subscription hit in one click and a marketplace hit only after acknowledging credits', async () => {

@@ -1066,17 +1066,32 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       getPreferences: () => preferences.status(),
       logger: ctx.logger,
     })
-    const proxyFetch = proxyManager.createFetch()
-    // Kimi's 360 s first-chunk budget must precede its transport safety net;
-    // undici's default 300 s header deadline would otherwise surface a
-    // retryable TRANSPORT failure before the application can reject the retry.
-    const kimiCodeProxyFetch = proxyManager.createFetch({
-      headersTimeoutMs: KIMI_CODE_TRANSPORT_HEADERS_TIMEOUT_MS,
-    })
+    // One proxy chain per provider line. The manager resolves each line's own
+    // stored choice, so two lines can sit behind different proxies (or one
+    // direct) at the same time; the cached wrapper keeps the object identity
+    // stable for consumers that compare it.
+    const lineProxyFetches = new Map<string, ReturnType<ProxyManager['createFetch']>>()
+    const proxyFetchFor = (line: string): ReturnType<ProxyManager['createFetch']> => {
+      let fetchForLine = lineProxyFetches.get(line)
+      if (fetchForLine === undefined) {
+        // Kimi's 360 s first-chunk budget must precede its transport safety
+        // net; undici's default 300 s header deadline would otherwise surface a
+        // retryable TRANSPORT failure before the application can reject the retry.
+        fetchForLine = proxyManager.createFetch({
+          line,
+          ...(line === 'kimi-code' ? { headersTimeoutMs: KIMI_CODE_TRANSPORT_HEADERS_TIMEOUT_MS } : {}),
+        })
+        lineProxyFetches.set(line, fetchForLine)
+      }
+      return fetchForLine
+    }
+    // Plugin-owned requests that belong to no single provider line (web fetch
+    // takeover, search, update check, media tools) follow the ChatGPT line:
+    // they are the ChatGPT subscription's own capabilities, and a deployment
+    // that routes ChatGPT through the local proxy needs them to go with it.
+    const proxyFetch = proxyFetchFor('codex-chatgpt')
     const providerLimits = readModelRequestLimits()
-    const baseFetchFor = (provider: ControlledProvider) => (
-      provider === 'kimi-code' ? kimiCodeProxyFetch : proxyFetch
-    )
+    const baseFetchFor = (provider: ControlledProvider) => proxyFetchFor(provider === 'claude' ? 'claude-subscription' : provider)
     const modelFetch = Object.fromEntries(CONTROLLED_PROVIDERS.map(provider => [
       provider, createControlledModelFetch(createDiagnosticFetch(baseFetchFor(provider), {
         provider,
@@ -1089,7 +1104,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       commandCodeModelSettings,
       commandCodePreferences,
       {
-        fetchFn: proxyFetch,
+        fetchFn: proxyFetchFor('command-code'),
         serving: () => commandCodeClaim.serving(),
         conflict: () => commandCodeClaim.conflict(),
       },
@@ -1218,7 +1233,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const disposeOllamaRoutes = registerOllamaRoutes(ctx, {
       accountPool: ollamaAccountPool,
       modelSettings: ollamaModelSettings,
-      fetchFn: proxyFetch,
+      fetchFn: proxyFetchFor('ollama'),
     })
 
     const antigravityAcpClaim = claimProviderRoute(ctx, {
@@ -1289,7 +1304,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       kimiCodeModelSettings,
       kimiCodePreferences,
       {
-        fetchFn: proxyFetch,
+        fetchFn: proxyFetchFor('kimi-code'),
         serving: () => kimiCodeClaim.serving(),
         conflict: () => kimiCodeClaim.conflict(),
       },
@@ -1318,7 +1333,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       ctx,
       glmCodingPlanSettingsSource(glmCodingPlanPreferences, glmCodingPlanModelSettings),
       {
-        fetchFn: proxyFetch,
+        fetchFn: proxyFetchFor('glm-coding-plan'),
         serving: () => glmCodingPlanClaim.serving(),
         conflict: () => glmCodingPlanClaim.conflict(),
         accountPool: glmCodingPlanAccountPool,
@@ -1349,7 +1364,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       minimaxCodeAppVersion = undefined
     }
     const minimaxCodeCheckin = new MinimaxCodeCheckinService(minimaxCodeAccountPool, {
-      fetchFn: proxyFetch,
+      fetchFn: proxyFetchFor('minimax-code'),
       settings: () => minimaxCodePreferences.status().checkin ?? { enabled: true },
       // The preference store may still be warming up on a harness without the
       // register seam; without this the startup pass reads shipped defaults and
@@ -1367,7 +1382,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     minimaxCodeCheckinTick()
 
     const disposeMinimaxCodeRoutes = registerMinimaxCodeRoutes(ctx, minimaxCodeStore, {
-      fetchFn: proxyFetch,
+      fetchFn: proxyFetchFor('minimax-code'),
       serving: () => minimaxCodeClaim.serving(),
       conflict: () => minimaxCodeClaim.conflict(),
       accountPool: minimaxCodeAccountPool,
@@ -1396,7 +1411,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       claudeModelSettings,
       claudePreferences,
       {
-        fetchFn: proxyFetch,
+        fetchFn: proxyFetchFor('claude-subscription'),
         serving: () => claudeClaim.serving(),
         conflict: () => claudeClaim.conflict(),
         accountPool: claudeAccountPool,
@@ -1426,7 +1441,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       ctx,
       stepCodeSettingsSource(stepCodePreferences, stepCodeModelSettings),
       {
-        fetchFn: proxyFetch,
+        fetchFn: proxyFetchFor('step-code'),
         serving: () => stepCodeClaim.serving(),
         conflict: () => stepCodeClaim.conflict(),
         accountPool: stepCodeAccountPool,
@@ -1438,7 +1453,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // adapter and settings routes are assembled inside the line module; this
     // wiring only registers the claim and keeps the disposers together.
     const clinePassLine = createClinePassLine(ctx, {
-      fetchFn: proxyFetch,
+      fetchFn: proxyFetchFor('cline-pass'),
       modelFetchFn: modelFetch['cline-pass'],
       attachments: ctx.attachments,
     })
@@ -1465,7 +1480,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       ctx,
       qoderSettingsSource(qoderPreferences, qoderModelSettings),
       {
-        fetchFn: proxyFetch,
+        fetchFn: proxyFetchFor('qoder'),
         serving: () => qoderClaim.serving(),
         conflict: () => qoderClaim.conflict(),
         accountPool: qoderAccountPool,
@@ -1485,7 +1500,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // 装载挂在一条可降级的网络请求上——离线、上游抽风都会变成「插件装不上」，而这条
     // 线路在没有目录时本来就有一张随包兜底表可用。所以：不等待，失败一律吞掉。
     void warmQoderCatalogOnStartup(ctx, {
-      fetchFn: proxyFetch,
+      fetchFn: proxyFetchFor('qoder'),
       accountPool: qoderAccountPool,
     }).catch(() => undefined)
 
@@ -1495,7 +1510,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // synced entries persist in the line's own settings document, so a restart
     // rehydrates them from a local read with no network in the path.
     const openDesignLine = createOpenDesignLine(ctx, {
-      fetchFn: proxyFetch,
+      fetchFn: proxyFetchFor('opendesign'),
       modelFetchFn: modelFetch['opendesign'],
       attachments: ctx.attachments,
     })
@@ -1517,7 +1532,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       adapter: workBuddyAdapter,
     })
     const workBuddyCheckin = new WorkBuddyCheckinService(workBuddyStore, {
-      fetchFn: proxyFetch,
+      fetchFn: proxyFetchFor('workbuddy-subscription'),
       settings: () => workBuddyPreferences.status().checkin,
       ready: () => workBuddyPreferences.ready(),
       logger: ctx.logger,
@@ -1535,7 +1550,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       workBuddyModelSettings,
       workBuddyPreferences,
       {
-        fetchFn: proxyFetch,
+        fetchFn: proxyFetchFor('workbuddy-subscription'),
         serving: () => workBuddyClaim.serving(),
         conflict: () => workBuddyClaim.conflict(),
         accountPool: workBuddyAccountPool,
@@ -2035,7 +2050,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // needs the plugin context to resolve the calling session's route before it
     // agrees to attach anything.
     const disposeVideoTool = mediaToolsEnabled
-      ? ctx.tools.register(createKimiVideoTool(ctx, { fetchFn: proxyFetch }))
+      ? ctx.tools.register(createKimiVideoTool(ctx, { fetchFn: proxyFetchFor('kimi-code') }))
       : () => undefined
     // The two media tools for the MiniMax Code route. They ride the Matrix
     // gateway beside the Messages route (host/minimax-code/matrix-client.ts)
@@ -2058,12 +2073,12 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const minimaxMediaToolsEnabled = mediaToolsEnabled && minimaxCodePreferences.status().enabled
     const disposeMinimaxUnderstandVideoTool = minimaxMediaToolsEnabled
       ? ctx.tools.register(
-        createMinimaxUnderstandVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),
+        createMinimaxUnderstandVideoTool(ctx, { fetchFn: proxyFetchFor('minimax-code'), pool: minimaxCodeAccountPool }),
       )
       : () => undefined
     const disposeMinimaxGenerateVideoTool = minimaxMediaToolsEnabled
       ? ctx.tools.register(
-        createMinimaxGenerateVideoTool(ctx, { fetchFn: proxyFetch, pool: minimaxCodeAccountPool }),
+        createMinimaxGenerateVideoTool(ctx, { fetchFn: proxyFetchFor('minimax-code'), pool: minimaxCodeAccountPool }),
       )
       : () => undefined
 

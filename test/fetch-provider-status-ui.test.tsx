@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CodexSubscriptionSection, FetchProviderStatusCard } from '../src/client/CodexSubscriptionSection.tsx'
+import { LineProxySection } from '../src/client/common/LineProxySection.tsx'
 import { zh } from '../src/client/locales.ts'
 
 declare global {
@@ -155,6 +156,7 @@ async function mountSection(status: Record<string, unknown>): Promise<{ containe
       proxyMode: 'auto',
       customProxyUrl: null,
       noProxy: null,
+      lineProxies: {},
       writable: true,
     },
     ...status,
@@ -174,6 +176,69 @@ async function mountSection(status: Record<string, unknown>): Promise<{ containe
   }
 }
 
+describe('per-line proxy card', () => {
+  it('renders the three modes and saves only the line it belongs to', async () => {
+    const snapshot = {
+      lineProxies: { 'codex-chatgpt': { mode: 'direct' as const, customProxyUrl: null } },
+      noProxy: 'corp.example',
+      detectedProxy: 'http://127.0.0.1:7890',
+      activeProxies: { 'codex-chatgpt': null },
+    }
+    const saved: unknown[] = []
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    await act(async () => {
+      root.render(createElement(LineProxySection, {
+        line: 'codex-chatgpt',
+        snapshot: snapshot as never,
+        onSave: async (patch: unknown) => { saved.push(patch) },
+      } as never))
+    })
+    const select = host.querySelector('select[aria-label="' + zh.proxyMode + '"]') as HTMLSelectElement
+    expect(select.value).toBe('direct')
+    // The bypass list is the shared one, shown on this card too.
+    expect((host.querySelector('#codex-chatgpt-no-proxy') as HTMLInputElement).value).toBe('corp.example')
+    expect(host.textContent).toContain(zh.proxyDirectActive)
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')!.set!
+      setter.call(select, 'auto')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(saved).toEqual([{ lineProxies: { 'codex-chatgpt': { mode: 'auto', customProxyUrl: null } } }])
+    await act(async () => root.unmount())
+    host.remove()
+  })
+
+  it('saves the shared bypass list from any line card', async () => {
+    const saved: unknown[] = []
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    await act(async () => {
+      root.render(createElement(LineProxySection, {
+        line: 'kimi-code',
+        snapshot: { lineProxies: {}, noProxy: null, detectedProxy: null, activeProxies: { 'kimi-code': 'http://127.0.0.1:7890' } } as never,
+        onSave: async (patch: unknown) => { saved.push(patch) },
+      } as never))
+    })
+    const input = host.querySelector('#kimi-code-no-proxy') as HTMLInputElement
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, ' copilot.tencent.com ')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const save = host.querySelector('[aria-label="' + zh.saveNoProxy + '"]') as HTMLButtonElement
+    await act(async () => { save.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(saved).toEqual([{ noProxy: 'copilot.tencent.com' }])
+    await act(async () => root.unmount())
+    host.remove()
+  })
+})
+
 describe('proxy bypass card', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -183,7 +248,7 @@ describe('proxy bypass card', () => {
     const harness = await mountSection({})
     try {
       const { container } = harness
-      const input = container.querySelector('#dsh-codex-no-proxy') as HTMLInputElement | null
+      const input = container.querySelector('#codex-chatgpt-no-proxy') as HTMLInputElement | null
       expect(input).not.toBeNull()
       expect(input!.getAttribute('aria-label')).toBe(zh.noProxy)
       expect(input!.getAttribute('placeholder')).toBe(zh.noProxyPlaceholder)
@@ -197,7 +262,7 @@ describe('proxy bypass card', () => {
         return Response.json({ ok: true, value: {
           quickQuotaVisible: false, fastMode: false, outputVerbosity: null, reasoningSummary: null,
           visibleModelIds: ['gpt-5.6-sol'], searchProvider: 'dsh', contextWindowOverrides: {},
-          proxyMode: 'auto', customProxyUrl: null, noProxy: 'copilot.tencent.com', writable: true,
+          proxyMode: 'auto', customProxyUrl: null, noProxy: 'copilot.tencent.com', lineProxies: {}, writable: true,
         } })
       })
       vi.stubGlobal('fetch', answering)
@@ -213,7 +278,7 @@ describe('proxy bypass card', () => {
       })
       const posted = calls.find((call) => call.url.endsWith('/preferences/update'))
       expect(posted?.body).toEqual({ noProxy: 'copilot.tencent.com' })
-      const field = container.querySelector('#dsh-codex-no-proxy') as HTMLInputElement
+      const field = container.querySelector('#codex-chatgpt-no-proxy') as HTMLInputElement
       expect(field.value).toBe('copilot.tencent.com')
     } finally {
       await harness.teardown()

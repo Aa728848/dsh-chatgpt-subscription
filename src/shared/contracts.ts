@@ -144,6 +144,14 @@ export interface PluginStatusDto {
   codexCliSignInPath?: string
   detectedProxy?: string | null
   activeProxy?: string | null
+  /**
+   * The proxy each provider line resolves to right now, keyed by provider id.
+   *
+   * Credentials are stripped: a custom proxy URL may carry `user:pass@`, and the
+   * card only needs to name the proxy that answered. Absent when the host has no
+   * proxy manager wired.
+   */
+  activeProxies?: Partial<Record<LineProxyProviderId, string | null>>
   error?: PublicErrorDto
 }
 
@@ -160,6 +168,43 @@ export type CodexContextWindowOverridesDto = Record<string, number>
 export type CodexContextWindowOverridesUpdateDto = Record<string, number | null>
 
 export type ProxyMode = 'auto' | 'custom' | 'direct'
+
+/** One line's proxy choice: the same three modes the plugin always had, per provider. */
+export interface LineProxyConfigDto {
+  mode: ProxyMode
+  /** Used only when `mode` is `custom`; null otherwise. */
+  customProxyUrl: string | null
+}
+
+/**
+ * Every provider line a proxy choice can be stored for.
+ *
+ * The ids are the LLM route ids this plugin registers, not the shorthand some
+ * host tables use: model request control spells the Claude line `claude` while
+ * its route id is `claude-subscription`, and it never lists `opendesign` or
+ * `workbuddy-subscription` under those names. Keeping one list here means the
+ * card, the store and the fetch wiring cannot drift apart.
+ */
+export const LINE_PROXY_PROVIDER_IDS = [
+  'codex-chatgpt',
+  'claude-subscription',
+  'kimi-code',
+  'minimax-code',
+  'command-code',
+  'ollama',
+  'glm-coding-plan',
+  'step-code',
+  'cline-pass',
+  'qoder',
+  'opendesign',
+  'workbuddy-subscription',
+  'antigravity-acp',
+] as const
+
+export type LineProxyProviderId = typeof LINE_PROXY_PROVIDER_IDS[number]
+
+/** One line's proxy choice as stored in the preferences document, keyed by provider id. */
+export type LineProxiesDto = Partial<Record<LineProxyProviderId, LineProxyConfigDto>>
 
 /** One exact `provider/model` route a subagent may be pointed at. */
 export interface SubagentModelRouteDto {
@@ -218,6 +263,14 @@ export interface SubscriptionPreferencesDto {
    */
   noProxy?: string | null
   /**
+   * The proxy each provider line uses on its own.
+   *
+   * A missing entry means "the shipped default", which is `auto` (system proxy):
+   * a fresh install behaves exactly like the old shared setting did, and a line
+   * a user never touched keeps following the machine.
+   */
+  lineProxies?: LineProxiesDto
+  /**
    * Where an automatic compaction summary is computed. `null` keeps the
    * conversation's own model, which is what every deployment does until an
    * operator opts in: the summary then costs that line's quota.
@@ -247,6 +300,13 @@ export interface SubscriptionPreferencesUpdateDto {
   customProxyUrl?: string | null
   /** Replace the bypass list; `null` (or an empty string) clears it. */
   noProxy?: string | null
+  /**
+   * Merge one line's proxy choice; `null` clears that line back to `auto`.
+   *
+   * A merge rather than a replace, so saving one card never rewrites the other
+   * twelve, and `null` is how a line returns to the shipped default.
+   */
+  lineProxies?: Partial<Record<LineProxyProviderId, Partial<LineProxyConfigDto> | null>>
   /** Set a target, or `null` to route compaction back to the conversation's model. */
   compactionRoute?: CompactionRouteTarget | null
   /** Replace the fallback route list wholesale. */

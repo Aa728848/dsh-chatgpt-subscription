@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **[网络代理] 代理设置改为按线路隔离：13 条线路各配各的，全局代理块从 ChatGPT 卡片撤掉**
+  - **问题**：上一版虽然补上了「不使用代理的主机」入口，但代理仍是**一份全局设置**，UI 又挂在 ChatGPT 卡片里。国内混合网络的真实需求是「国外线路走 Clash、`copilot.tencent.com` 这类国内端点直连」——全局三选一做不到，只能来回切；而切到 `direct` 还会让包装裸 `fetch` 的中间件重新生效，同一份配置在不同线路上的行为并不一致。
+  - **改法（契约）**：新增 `LineProxyConfigDto` 与 `LINE_PROXY_PROVIDER_IDS`（13 个真实 route id，含 `claude-subscription` 与模型控制表里 `claude` 别名的映射）；`SubscriptionPreferencesDto.lineProxies` 按线路存 `{ mode, customProxyUrl }`；`normalizeLineProxyConfig` / `mergeLineProxies` 负责 trim、URL 规范化、丢弃非 custom 模式下的陈旧地址、拒绝未知线路 id。
+  - **改法（宿主）**：`ProxyManager.resolveActiveProxyUrl(line)` 与 `createFetch({ line })` 按线路解析；`agentCacheKey` 加入线路 id，使不同代理的线路不会共用同一个 `ProxyAgent`；`src/index.ts` 的 25 处 `fetchFn: proxyFetch` 拆成 `proxyFetchFor('<line>')`（含 OAuth、目录、配额、签到与媒体工具），公共请求固定跟随 ChatGPT；`GET /proxy` 提供卡片读取的快照，`GET /status` 附带按线路的 `activeProxies`（凭据已遮蔽）。
+  - **改法（迁移）**：偏好 hydrate 时把旧的全局 `proxyMode`/`customProxyUrl` **一次性复制到全部 13 条线路**，幂等且不覆盖已有线路设置；迁移那次写不唤醒偏好 watcher（否则会在 profile 组装窗口里重启 web provider，正是 #18 的启动竞态）。
+  - **改法（客户端）**：新增共享组件 `LineProxySection`（三选一 + 自定义地址 + 全局共用直连列表 + 当前生效代理），接入 12 张线路卡；ChatGPT 卡撤掉全局代理块、改用同一组件并复用自身 status 快照；Antigravity 卡以一句边界说明代替开关。
+  - **文档**：`docs/configuration.md` 与 README 的代理段落改写为「按线路隔离 + 直连列表全局共用 + 公共请求跟随 ChatGPT + 升级迁移」。
+  - **测试**：新增按线路解析（两条线路不同代理、未设置回落 auto、custom 空地址即直连）、dispatcher 按线路隔离、`lineProxies` 合并/清空/非法拒绝、一次性迁移与幂等、路由校验与回显、组件渲染与保存。全量 Vitest **383 文件通过 / 3 跳过，6880 例通过 / 10 跳过，0 失败**；`npx tsc -b --force` 三工程与 `npm run build` 均通过。
+
 - **[网络代理 / 修复 #111] 设置页有了「不使用代理的主机」入口：卡片列表与 `NO_PROXY` 部署列表合并生效，不再只能全局切 `direct`**
   - **问题**：域名级旁路（`shouldBypassProxy` / `ProxyManager.getNoProxyList`）早已实现并有 22 例测试，但它只能从进程环境或 `$DSH_HOME/.env` 的 `NO_PROXY` 到达；设置页「网络代理」只有系统代理 / 自定义 / 直连三档，于是国内混合网络（国外线路走代理、`copilot.tencent.com` 这类国内线路必须直连）只能在两档之间反复全切，而切到 `direct` 还会让包装裸 `fetch` 的压缩中间件重新生效、行为与 `auto` 不一致却看不出区别。
   - **改法（契约）**：`SubscriptionPreferencesDto` / `SubscriptionPreferencesUpdateDto` 新增 `noProxy?: string | null`；`normalizeNoProxyList()` 把逗号或空白分隔的条目去重（大小写不敏感、保留首次拼写与顺序）并统一为逗号分隔；`null` 或只有分隔符表示清除。偏好 schema 默认 `null`。

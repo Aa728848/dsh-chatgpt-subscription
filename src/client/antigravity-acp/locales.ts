@@ -90,6 +90,7 @@ export const zh = {
   scopeHistory: '正常结束后会话随进程一起停放供下次复用：下一条消息若前缀指纹与工具目录未变，只发送增量；历史被压缩或改写、工具集变化或进程死亡时才重建会话并重放带锚点的历史。',
   scopeTools: '作为主模型时工具由 DSH 执行并把关；作为子代理时子进程使用官方 Agent 自己的工具集。',
   scopeQuota: '官方服务端不公布剩余额度，因此本卡片不显示任何百分比或余额。',
+  scopeNetwork: '本线路的网络请求由官方 CLI（agy）自己管理，插件无法为它单独指定代理；这里的代理设置也不会作用于它。',
 
   error: '操作失败：{detail}',
 
@@ -193,6 +194,7 @@ export const en = {
   scopeHistory: 'After a normal finish the session parks with its process for reuse: the next message sends only the increment if the prefix fingerprint and tool catalogue are unchanged, and only a compacted or rewritten history, a changed tool set, or a dead process triggers a rebuild with an anchored replay.',
   scopeTools: "As a main model its tool calls are executed and gated by DSH; as a subagent the child runs the official agent's own tools.",
   scopeQuota: 'The official server publishes no remaining quota, so this card shows no percentage and no balance.',
+  scopeNetwork: 'This line\'s network requests are managed by the official CLI (agy) itself; the plugin cannot give it a separate proxy, and the proxy settings elsewhere do not apply to it.',
 
   error: 'Action failed: {detail}',
 

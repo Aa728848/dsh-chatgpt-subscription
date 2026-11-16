@@ -1,7 +1,11 @@
 import { DEFAULT_VISIBLE_CODEX_MODEL_IDS } from './model-catalog.ts'
+import { LINE_PROXY_PROVIDER_IDS } from './contracts.ts'
 import type {
   CodexOutputVerbosity,
   CodexReasoningSummary,
+  LineProxyConfigDto,
+  LineProxiesDto,
+  LineProxyProviderId,
   ProxyMode,
   SearchProviderPreference,
   SubagentAllowParentForkByMainModelDto,
@@ -9,6 +13,9 @@ import type {
   SubagentModelsByMainModelDto,
   SubscriptionPreferencesDto,
 } from './contracts.ts'
+
+export { LINE_PROXY_PROVIDER_IDS } from './contracts.ts'
+export type { LineProxiesDto, LineProxyConfigDto, LineProxyProviderId } from './contracts.ts'
 
 export const PREFERENCES_NAMESPACE = 'dsh-chatgpt-subscription'
 
@@ -28,6 +35,9 @@ export const DEFAULT_PREFERENCES: Omit<SubscriptionPreferencesDto, 'writable'> =
   // No card-managed bypass list until the user types one; the host still
   // honours the environment/file NO_PROXY list on its own.
   noProxy: null,
+  // No per-line choice until one is made: an absent entry reads as `auto` so a
+  // fresh install keeps following the machine's system proxy.
+  lineProxies: {},
   // Off by default: every deployment summarizes on the model that built the
   // conversation until an operator picks another route.
   compactionRoute: null,
@@ -56,6 +66,82 @@ export function isCodexReasoningSummary(value: unknown): value is CodexReasoning
 
 export function isProxyMode(value: unknown): value is ProxyMode {
   return value === 'auto' || value === 'custom' || value === 'direct'
+}
+
+/** The shipped per-line proxy: system proxy, exactly like the old shared setting. */
+export const DEFAULT_LINE_PROXY: LineProxyConfigDto = { mode: 'auto', customProxyUrl: null }
+
+/**
+ * One custom proxy URL in the shape the transport accepts.
+ *
+ * Mirrors the shared preference store's own normalization: a bare `host:port`
+ * gains `http://`, and a blank URL is `null` (which makes a `custom` line fall
+ * back to a direct connection, the same reading the global setting had).
+ * @param value - Raw URL from a card or a stored document.
+ * @returns the normalized URL, or null when there is none.
+ */
+export function normalizeLineProxyUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  if (/^https?:\/\//i.test(trimmed) || /^socks5?:\/\//i.test(trimmed)) return trimmed
+  return `http://${trimmed}`
+}
+
+/**
+ * Normalize one line's proxy entry.
+ * @param value - Candidate entry from a card or a stored document.
+ * @returns the normalized entry, or null when the value is not a usable one.
+ */
+export function normalizeLineProxyConfig(value: unknown): LineProxyConfigDto | null {
+  const record = asRecord(value)
+  if (record === undefined) return null
+  const mode = record['mode']
+  if (!isProxyMode(mode)) return null
+  const customProxyUrl = normalizeLineProxyUrl(record['customProxyUrl'])
+  // A `custom` line without an address is a direct connection, which is a
+  // legal state (the card can be saved before the URL is known); every other
+  // mode drops the address so a stale one cannot resurface when it is picked
+  // again.
+  return { mode, customProxyUrl: mode === 'custom' ? customProxyUrl : null }
+}
+
+/**
+ * Merge a per-line proxy patch into the stored map.
+ *
+ * A merge, not a replace: saving one card must not rewrite the other twelve,
+ * and `null` is how one line returns to the shipped `auto` default. Unknown
+ * provider ids are refused rather than stored, because a typo would otherwise
+ * look like a saved setting that never takes effect.
+ * @param current - Map already stored in the preferences document.
+ * @param patch - Incoming patch from a settings card or a route body.
+ * @returns the merged map, or null when any key or value is malformed.
+ */
+export function mergeLineProxies(current: LineProxiesDto | undefined, patch: unknown): LineProxiesDto | null {
+  const record = asRecord(patch)
+  if (record === undefined) return null
+  const merged: LineProxiesDto = { ...current }
+  for (const [rawKey, rawValue] of Object.entries(record)) {
+    const key = rawKey.trim()
+    if (!isLineProxyProviderId(key)) return null
+    if (rawValue === null) {
+      delete merged[key]
+      continue
+    }
+    const normalized = normalizeLineProxyConfig(rawValue)
+    if (normalized === null) return null
+    merged[key] = normalized
+  }
+  return merged
+}
+
+/**
+ * Whether one id names a provider line a proxy can be stored for.
+ * @param value - Candidate provider id.
+ * @returns whether the id is in {@link LINE_PROXY_PROVIDER_IDS}.
+ */
+export function isLineProxyProviderId(value: unknown): value is LineProxyProviderId {
+  return typeof value === 'string' && (LINE_PROXY_PROVIDER_IDS as readonly string[]).includes(value)
 }
 
 /**

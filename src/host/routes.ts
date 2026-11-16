@@ -14,12 +14,14 @@ import type {
   SubscriptionPreferencesUpdateDto,
 } from '../shared/contracts.ts'
 import { contextWindowLimitForModel, isCodexModelId } from '../shared/model-catalog.ts'
+import { LINE_PROXY_PROVIDER_IDS } from '../shared/contracts.ts'
 import {
   isCodexReasoningSummary,
   isCompactionRouteTarget,
   mergeSubagentAllowParentForkByMainModel,
   mergeSubagentModelsByMainModel,
   normalizeNoProxyList,
+  mergeLineProxies,
   normalizeSubagentModelRoutes,
 } from '../shared/preferences.ts'
 import type { CompactionCandidatesDto } from '../shared/contracts.ts'
@@ -105,8 +107,26 @@ export function registerRoutes(
         codexCliSignInPath,
         detectedProxy: proxyManager?.getSystemProxy() ?? null,
         activeProxy: proxyManager?.resolveActiveProxyUrl() ?? null,
+        activeProxies: proxyManager === undefined
+          ? undefined
+          : Object.fromEntries(LINE_PROXY_PROVIDER_IDS.map((line) => [line, maskProxyUrl(proxyManager.resolveActiveProxyUrl(line))])),
         switcher: searchSwitcher?.status() ?? null,
         fetchConfiguration,
+      } })
+      return
+    }
+    // The proxy card every provider page renders asks for this instead of the
+    // full status: it needs three fields, and twelve cards polling the status
+    // route would drag OAuth, quota and the account pool along with them.
+    if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/proxy`) {
+      const prefs = preferences.status()
+      json(response, { ok: true, value: {
+        lineProxies: prefs.lineProxies ?? {},
+        noProxy: prefs.noProxy ?? null,
+        detectedProxy: proxyManager?.getSystemProxy() ?? null,
+        activeProxies: proxyManager === undefined
+          ? {}
+          : Object.fromEntries(LINE_PROXY_PROVIDER_IDS.map((line) => [line, maskProxyUrl(proxyManager.resolveActiveProxyUrl(line))])),
       } })
       return
     }
@@ -499,6 +519,29 @@ interface CompactionDirectory {
   }>>
 }
 
+/**
+ * A proxy URL with any credential half removed.
+ *
+ * The status route reports which proxy a line uses, and a custom proxy may carry
+ * `user:pass@`. The card only needs to say WHICH proxy answered, so the user
+ * half never travels: a settings page is not a place to re-display a secret
+ * that was typed once.
+ * @param value - Resolved proxy URL, or null for a direct connection.
+ * @returns the URL without credentials, or null.
+ */
+function maskProxyUrl(value: string | null): string | null {
+  if (value === null) return null
+  try {
+    const url = new URL(value)
+    if (url.username === '' && url.password === '') return value
+    url.username = ''
+    url.password = ''
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -590,6 +633,15 @@ function readPreferencesUpdate(value: Record<string, unknown>, current: ReturnTy
       throw new PreferenceError('proxyMode must be auto, custom, or direct.')
     }
     patch.proxyMode = value.proxyMode
+  }
+  if ('lineProxies' in value) {
+    // Validated against the LIVE document for a precise 400, but forwarded as
+    // the raw patch: the store merges against the live map, and merging twice
+    // would resurrect a line this body asked to clear.
+    if (mergeLineProxies(current.lineProxies, value.lineProxies) === null) {
+      throw new PreferenceError('lineProxies must map known provider ids to { mode, customProxyUrl }, or null to clear one.')
+    }
+    patch.lineProxies = value.lineProxies as SubscriptionPreferencesUpdateDto['lineProxies']
   }
   if ('noProxy' in value) {
     if (value.noProxy !== null && typeof value.noProxy !== 'string') {

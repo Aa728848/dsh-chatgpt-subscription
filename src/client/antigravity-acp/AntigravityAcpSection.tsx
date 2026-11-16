@@ -445,6 +445,7 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
             <li>{t.scopeHistory}</li>
             <li>{t.scopeTools}</li>
             <li>{t.scopeQuota}</li>
+            <li>{t.scopeNetwork}</li>
           </ul>
         </details>
       </div>

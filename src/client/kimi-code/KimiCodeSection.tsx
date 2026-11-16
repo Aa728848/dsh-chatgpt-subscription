@@ -21,6 +21,7 @@ import { effortLabel, effortOptions, thinkingOnlyModels, wireLabel } from './lab
 import { KimiModelCapabilities } from './KimiModelCapabilities.tsx'
 import { KimiQuotaCard } from './KimiQuotaCard.tsx'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 
 const API = '/kimi-code/api'
 const api = createLineApi(API, 'Kimi Code')
@@ -918,6 +919,8 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
           onResetAll={() => void handleResetAllContextWindows()}
         />
       </section>
+
+      <LineProxySection line="kimi-code" />
 
       {error && (
         <div className="dsha-error">

@@ -27,6 +27,8 @@ import { QoderSection } from '../src/client/qoder/QoderSection.tsx'
 import { zh } from '../src/client/qoder/locales.ts'
 
 const PREFIX = QODER_ROUTE_PREFIX
+/** The plugin-level proxy snapshot every line card reads beside its own routes. */
+const PROXY_ROUTE = '/api/dsh-chatgpt-subscription/proxy'
 
 /** 一个池内账号。区域是凭据的属性。 */
 function account(overrides: Partial<QoderAccountSummaryDto> = {}): QoderAccountSummaryDto {
@@ -134,6 +136,11 @@ async function mountSection(payload: QoderStatusDto, options: {
       method,
       ...(typeof init?.body === 'string' ? { body: JSON.parse(init.body) as unknown } : {}),
     })
+    // The per-line proxy card reads the plugin-level snapshot; it is the one
+    // request this tab makes outside its own prefix, and it is deliberate.
+    if (url === PROXY_ROUTE) {
+      return Response.json({ ok: true, value: { lineProxies: {}, noProxy: null, detectedProxy: null, activeProxies: {} } })
+    }
     if (!url.startsWith(PREFIX)) throw new Error('unexpected request outside ' + PREFIX + ': ' + url)
     const value = options.answered?.({ url, method }) ?? payload
     return Response.json({ ok: true, value })
@@ -190,7 +197,8 @@ describe('Qoder 设置卡片', () => {
 
     // 一个网络包都不许发到本线路的前缀之外。
     expect(calls.length).toBeGreaterThan(0)
-    expect(calls.every((call) => call.url.startsWith(PREFIX))).toBe(true)
+    // Every call is either this line's own route or the shared proxy snapshot.
+    expect(calls.every((call) => call.url.startsWith(PREFIX) || call.url === PROXY_ROUTE)).toBe(true)
   })
 
   it('上游说额度已用尽时，额度区先说这件事，并给出上游给的升级页', async () => {

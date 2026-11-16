@@ -37,6 +37,7 @@ import { formatCapacity, formatDate, formatTokenCount } from '../common/format.t
 import { adoptReasonText, quotaBucketText, regionText, zh, type QoderLocaleKey, NS_QODER } from './locales.ts'
 import { useQoderSection, type QoderSectionProps } from './useQoderSection.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 
 /** 百分比，最多一位小数；调用方已经排除了非有限值。 */
 function percentText(ratio: number): string {
@@ -589,6 +590,8 @@ export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.J
         )}
         {moreNotes(t.moreNotes, [t.quotaDesc])}
       </section>
+
+      <LineProxySection line="qoder" />
 
       {error !== null && (
         <div className="dsha-error">

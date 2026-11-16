@@ -21,6 +21,7 @@ import { formatCapacity, formatDate } from '../common/format.ts'
 import { useClaudeSection, type ClaudeSectionProps } from './useClaudeSection.ts'
 import { zh, NS_CLAUDE } from './locales.ts'
 import { useLineDict } from '../common/line-locale.ts'
+import { LineProxySection } from '../common/LineProxySection.tsx'
 
 /**
  * Display label per thinking level.
@@ -459,6 +460,8 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
           </div>
         )}
       </section>
+
+      <LineProxySection line="claude-subscription" />
 
       {error && (
         <div className="dsha-error">

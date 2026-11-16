@@ -136,6 +136,42 @@ describe('subscription preferences', () => {
       .rejects.toThrow('Unsupported subagentModelsByMainModel preference.')
   })
 
+  it('merges one line\'s proxy choice, leaves the other twelve alone, and clears one back to auto', async () => {
+    const store = createPreferenceStore({})
+    expect(await store.update({ lineProxies: { 'codex-chatgpt': { mode: 'custom', customProxyUrl: '127.0.0.1:7890' } } }))
+      .toMatchObject({ lineProxies: { 'codex-chatgpt': { mode: 'custom', customProxyUrl: 'http://127.0.0.1:7890' } } })
+    const both = await store.update({ lineProxies: { 'kimi-code': { mode: 'direct', customProxyUrl: 'http://ignored:1' } } })
+    expect(both.lineProxies).toEqual({
+      'codex-chatgpt': { mode: 'custom', customProxyUrl: 'http://127.0.0.1:7890' },
+      // A non-custom mode drops the address so a stale one cannot resurface.
+      'kimi-code': { mode: 'direct', customProxyUrl: null },
+    })
+    const cleared = await store.update({ lineProxies: { 'codex-chatgpt': null } })
+    expect(cleared.lineProxies).toEqual({ 'kimi-code': { mode: 'direct', customProxyUrl: null } })
+    // Unknown ids and malformed modes are refused rather than stored.
+    await expect(store.update({ lineProxies: { 'not-a-line': { mode: 'auto', customProxyUrl: null } } as never }))
+      .rejects.toThrow('Unsupported lineProxies preference.')
+    await expect(store.update({ lineProxies: { 'kimi-code': { mode: 'sneaky' } } as never }))
+      .rejects.toThrow('Unsupported lineProxies preference.')
+  })
+
+  it('copies the retired shared proxy setting onto every line exactly once', async () => {
+    const migrated = registerPreferenceStore(undefined)
+    await fsp.mkdir(path.dirname(preferencesPath()), { recursive: true })
+    await fsp.writeFile(preferencesPath(), JSON.stringify({ proxyMode: 'direct', customProxyUrl: null }), 'utf8')
+    await migrated.hydrate()
+    const lines = migrated.status().lineProxies ?? {}
+    expect(Object.keys(lines)).toHaveLength(13)
+    expect(Object.values(lines).every((entry) => entry.mode === 'direct')).toBe(true)
+
+    // A later per-line edit survives a restart; the migration never runs again.
+    await migrated.update({ lineProxies: { ollama: { mode: 'custom', customProxyUrl: 'http://127.0.0.1:1' } } })
+    const restarted = registerPreferenceStore(undefined)
+    await restarted.hydrate()
+    expect(restarted.status().lineProxies?.ollama).toEqual({ mode: 'custom', customProxyUrl: 'http://127.0.0.1:1' })
+    expect(restarted.status().lineProxies?.['codex-chatgpt']).toEqual({ mode: 'direct', customProxyUrl: null })
+  })
+
   it('canonicalizes the proxy bypass list, and clears it with null or separators only', async () => {
     const store = createPreferenceStore({})
     // Never set means "only the deployment list applies".

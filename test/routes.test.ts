@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { mergeLineProxies } from '../src/shared/preferences.ts'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -84,6 +85,9 @@ describe('host routes', () => {
       'gpt-5.6-terra': 272_000,
       'gpt-5.6-luna': 272_000,
     }
+    // The real store keeps the patched document; this double remembers the one
+    // field the assertions below read back.
+    let storedLineProxies: Record<string, unknown> = {}
     const preferences: SubscriptionPreferenceStore = {
       status: () => ({
         quickQuotaVisible: false,
@@ -96,9 +100,13 @@ describe('host routes', () => {
         proxyMode: 'auto',
         customProxyUrl: null,
         noProxy: null,
+        lineProxies: storedLineProxies,
         writable: true,
       }),
       update: async (patch) => {
+        if (patch.lineProxies !== undefined) {
+          storedLineProxies = mergeLineProxies(storedLineProxies, patch.lineProxies) ?? storedLineProxies
+        }
         if (patch.contextWindowOverrides !== undefined) {
           for (const [model, value] of Object.entries(patch.contextWindowOverrides)) {
             if (value === null) delete overrides[model]
@@ -116,6 +124,9 @@ describe('host routes', () => {
           proxyMode: patch.proxyMode !== undefined ? patch.proxyMode : 'auto',
           customProxyUrl: patch.customProxyUrl !== undefined ? patch.customProxyUrl : null,
           noProxy: patch.noProxy !== undefined ? patch.noProxy : null,
+          // The REAL store normalizes; this double answers what the store would,
+          // so the route's raw forward stays observable here.
+          lineProxies: patch.lineProxies !== undefined ? (mergeLineProxies(storedLineProxies, patch.lineProxies) ?? {}) : storedLineProxies,
           writable: true,
         }
       },
@@ -188,6 +199,29 @@ describe('host routes', () => {
     })
     expect(unrelatedPreferences.status).toBe(200)
     expect(emit).not.toHaveBeenCalled()
+
+    const lineProxyPatch = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ lineProxies: { 'kimi-code': { mode: 'custom', customProxyUrl: '127.0.0.1:7002' } } }),
+    })
+    expect(lineProxyPatch.status).toBe(200)
+    expect((await lineProxyPatch.json()).value.lineProxies).toEqual({
+      'kimi-code': { mode: 'custom', customProxyUrl: 'http://127.0.0.1:7002' },
+    })
+    const rejectedLineProxy = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ lineProxies: { 'not-a-provider': { mode: 'auto', customProxyUrl: null } } }),
+    })
+    expect(rejectedLineProxy.status).toBe(400)
+
+    // This suite wires no ProxyManager, so the host reports no per-line summary
+    // at all rather than inventing "direct" for every line (see the proxy suite
+    // for the resolved values themselves).
+    const statusAgain = await fetch(`${origin}${ROUTE_PREFIX}/status`)
+    const statusValue = (await statusAgain.json()).value
+    expect(statusValue.preferences.lineProxies).toEqual({ 'kimi-code': { mode: 'custom', customProxyUrl: 'http://127.0.0.1:7002' } })
 
     const rejectedReasoningSummary = await fetch(`${origin}${ROUTE_PREFIX}/preferences/update`, {
       method: 'POST',
