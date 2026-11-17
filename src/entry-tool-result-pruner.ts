@@ -53,6 +53,7 @@ export const DEFAULTS: ResolvedConfig = deepFreeze({
 export const DEFAULT_SKIP_PROVIDERS: readonly string[] = deepFreeze([
   'kimi-code',
   'minimax-code',
+  'qianwen-token-plan',
 ])
 
 // ── 配置 ───────────────────────────────────────────────────────────────────

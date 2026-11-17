@@ -27,6 +27,7 @@ import { NS_PROGRESS_UPDATES } from '../progress-updates/locales.ts'
 import { NS_QODER } from '../qoder/locales.ts'
 import { NS_STEP_CODE } from '../step-code/locales.ts'
 import { NS_WORKBUDDY } from '../workbuddy/locales.ts'
+import { NS_QIANWEN } from '../qianwen-token-plan/locales.ts'
 import { NS } from '../locales.ts'
 import { dictionary as claude } from './claude.ts'
 import { dictionary as clinePass } from './cline-pass.ts'
@@ -43,6 +44,7 @@ import { dictionary as progressUpdates } from './progress-updates.ts'
 import { dictionary as qoder } from './qoder.ts'
 import { dictionary as stepCode } from './step-code.ts'
 import { dictionary as workbuddy } from './workbuddy.ts'
+import { dictionary as qianwen } from './qianwen-token-plan.ts'
 
 /** Language id of this pack: the value stored as `locale.preference`. */
 export const RU_LOCALE = 'ru'
@@ -96,6 +98,7 @@ export function installRussianLocale(ctx: ClientContext): void {
     [NS_DISPATCH_LEDGER, dispatchLedger],
     // Antigravity（ACP）：追加在末尾，既有命名空间的注册顺序一律不动。
     [NS_ANTIGRAVITY_ACP, antigravityAcp],
+    [NS_QIANWEN, qianwen],
   ]
 
   for (const [ns, dictionary] of dictionaries) {

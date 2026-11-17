@@ -76,6 +76,11 @@ export const PROMPT_CACHE_POLICIES: Readonly<Record<string, PromptCachePolicy>> 
   opendesign: policy({ ...DISABLED, mode: 'automatic' }),
   'workbuddy-subscription': policy({ ...DISABLED, mode: 'automatic' }),
   ollama: DISABLED,
+  'qianwen-token-plan': policy({
+    mode: 'explicit', scope: 'account', ttlMs: 5 * MINUTE_MS,
+    staticPrefix: true, coldStart: 'warm', stickyImages: true,
+    affinity: false, waitWarmup: false, hint: true,
+  }),
 })
 
 const OVERRIDE_KEYS = new Set([

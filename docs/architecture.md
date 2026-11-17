@@ -21,7 +21,7 @@
 ```text
 .
 ├── src/
-│   ├── index.ts                     # 核心宿主入口（13 条线路接线、工具注册、全局守卫）
+│   ├── index.ts                     # 核心宿主入口（14 条线路接线、工具注册、全局守卫）
 │   ├── entry-progress-updates.ts    # 子入口：./progress-updates（进展汇报独立组件）
 │   ├── entry-plan-mode-pipeline.ts  # 子入口：./plan-mode-pipeline（enter/leave_plan_mode）
 │   ├── entry-plan-mode.ts           # 子入口：./plan-mode（尾部一次性投递的计划模式服务）
@@ -42,6 +42,7 @@
 │   │   ├── qoder/                   # Qoder 线路
 │   │   ├── step-code/               # Step Code 线路
 │   │   ├── workbuddy/               # WorkBuddy 线路
+│   │   ├── qianwen-token-plan/      # Qwen Token Plan：单 Key、Qwen4 显式缓存与密文思考回放
 │   │   ├── cache-warmup/            # 受控线路大结果投影与 ref:// 补读子包
 │   │   ├── codemode/                # Code Mode 工具发现、常驻 REPL 传输与恒定说明段
 │   │   ├── dispatch-ledger/         # 调度模式 Mandate v2 账本与血缘守卫
@@ -55,10 +56,11 @@
 │   │   ├── hub/                     # 订阅服务总览页与一键更新检查
 │   │   ├── common/                  # 共享号池卡片、模型勾选表、语言镜像与样式
 │   │   ├── antigravity-acp/         # Antigravity（ACP）设置卡、API 封装与输入框胶囊
+│   │   ├── qianwen-token-plan/      # Qwen Token Plan 设置卡、TTL/推理/视觉配置与缓存胶囊
 │   │   ├── codemode/                # code_run 工具调用视图与样式
 │   │   ├── dispatch-ledger/         # Mandate v2 账本工具调用视图
 │   │   ├── subagent/                # 增强版「子智能体」模型白名单设置卡
-│   │   ├── locales-ru/              # 俄语语言包（16 个命名空间）
+│   │   ├── locales-ru/              # 俄语语言包（17 个命名空间）
 │   │   ├── mermaid/                 # 对话流 Mermaid 图表监听与安全渲染
 │   │   └── <line>/                  # 各线路独立设置页、API 封装与输入框额度胶囊
 │   └── shared/                      # Host 与 Client 共享的无副作用纯类型与 DTO 契约
@@ -142,12 +144,12 @@
 
 客户端入口 `src/client/index.tsx` 挂载以下界面能力：
 
-- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 13 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
-- **输入框额度胶囊（`conversation.input.right`）**：按当前会话选中的模型自动展示对应线路最紧迫窗口的剩余额度或余额。
+- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 14 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
+- **输入框额度胶囊（`conversation.input.right`）**：按当前会话选中的模型自动展示对应线路的剩余额度、余额或真实缓存指标；无公开数据时保持隐藏，不伪造百分比。
 - **多媒体工具视图与命令**：`codex_image_generate` 生图预览卡，`minimax_generate_video` 视频卡片、右侧栏文档预览器及 `/video` 斜杠命令参数表单。
 - **进展更新面板**与 **Mermaid 图表观察器**（自动将代码块安全渲染为交互图表）。
 - **全栈三语国际化（`zh` / `en` / `ru`）**：
-  - 客户端共 16 个强类型 `LocaleNamespaceMap` 命名空间；
+  - 客户端共 17 个强类型 `LocaleNamespaceMap` 命名空间；
   - 客户端通过 `installHostLocaleMirror` 将当前激活语言同步至宿主 `POST /api/dsh-chatgpt-subscription/i18n/locale`，使宿主侧的 `providerInfo()` 显示名、号池报错、登录引导与限流文案同步支持中文、英文与俄文（`en.ts` 与 `ru.ts` 由 TypeScript 编译期强制对齐 `zh.ts` 的全部键集合）。
 
 ---

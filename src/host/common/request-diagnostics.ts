@@ -42,6 +42,7 @@ export const DIAGNOSTIC_PROVIDERS = [
   // Antigravity（ACP）：同样是注册点——不写在这里，本线路就静默失去
   // [provider-diagnostics] 日志。
   'antigravity-acp',
+  'qianwen-token-plan',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

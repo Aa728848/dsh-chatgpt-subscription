@@ -164,4 +164,8 @@ export const en: Record<HostLocaleKey, string> = {
   'antigravityAcp.notSignedIn': 'Antigravity is not signed in. Start the sign-in from this card, or run agy acp --login in a terminal.',
   'antigravityAcp.noBinary': 'No usable Antigravity CLI (agy) was found and the official ACP server has not been downloaded.',
   'antigravityAcp.nativeTool': '[Antigravity ran its own tool outside DSH permissions: {call}]\n',
+  'provider.qianwen-token-plan': 'Qwen Token Plan',
+  'qwen.notConfigured': 'Configure a Qwen Token Plan API key in settings first.',
+  'qwen.invalidApiKey': 'The Qwen Token Plan API key is empty or too long.',
+  'qwen.responseMissingChoices': 'The Qianwen response is missing choices.',
 }

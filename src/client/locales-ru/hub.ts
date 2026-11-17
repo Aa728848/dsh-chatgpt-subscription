@@ -234,6 +234,7 @@ export const dictionary: Record<LocaleKey, string> = {
   'cardName.opendesign': 'OpenDesign',
   'cardName.workbuddy': 'WorkBuddy',
   'cardName.antigravity-acp': 'Antigravity (ACP)',
+  'cardName.qianwen-token-plan': 'Qwen Token Plan',
   modelChecklistCount: 'Включено {count}/{total}',
   codeRunTitle: 'Код',
   codeRunOutput: 'Вывод',

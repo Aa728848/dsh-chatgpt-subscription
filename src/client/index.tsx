@@ -64,6 +64,9 @@ import { dictionaries as progressUpdatesDicts, NS_PROGRESS_UPDATES, type Progres
 import { WorkBuddyComposerQuota } from './workbuddy/WorkBuddyComposerQuota.tsx'
 import { dictionaries as workBuddyDicts, NS_WORKBUDDY, type WorkBuddyLocaleKey } from './workbuddy/locales.ts'
 import { installWorkBuddyStyles } from './workbuddy/styles.ts'
+import { QianwenComposerQuota } from './qianwen-token-plan/QianwenComposerQuota.tsx'
+import { dictionaries as qianwenDicts, NS_QIANWEN, type QianwenLocaleKey } from './qianwen-token-plan/locales.ts'
+import { installQianwenStyles } from './qianwen-token-plan/styles.ts'
 import { installSubagentSettingsCard } from './subagent/index.ts'
 import { installSubagentStyles } from './subagent/styles.ts'
 import { dictionaries as subagentDicts, NS_SUBAGENT, type SubagentLocaleKey } from './subagent/locales.ts'
@@ -100,6 +103,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-workbuddy': WorkBuddyLocaleKey
     'dsh-subagent-settings': SubagentLocaleKey
     'dsh-dispatch-ledger': DispatchLedgerLocaleKey
+    'dsh-qianwen-token-plan': QianwenLocaleKey
   }
 }
 
@@ -188,6 +192,11 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     installWorkBuddyStyles()
     return () => {}
   }, 'dsh-workbuddy: styles')
+  ctx.effect(() => ctx.locale.register(NS_QIANWEN, qianwenDicts), 'dsh-qianwen-token-plan: dictionaries')
+  ctx.effect(() => {
+    installQianwenStyles()
+    return () => {}
+  }, 'dsh-qianwen-token-plan: styles')
   // 「子智能体」设置卡：遮蔽宿主同名卡（同 id、priority -10），并在宿主的授权清单
   // 之外再记一份「全局默认 + 按主代理模型」的两级列表。样式表无条件安装，
   // 注册本身在 installSubagentSettingsCard 里按服务是否就绪决定。
@@ -299,6 +308,10 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     name: 'conversation.input.right', id: 'antigravity-acp-quota', order: 48, locale: NS_ANTIGRAVITY_ACP,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, AntigravityAcpComposerBadge))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'qianwen-token-plan-quota', order: 49, locale: NS_QIANWEN,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, QianwenComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

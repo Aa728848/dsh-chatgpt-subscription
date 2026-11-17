@@ -1,6 +1,6 @@
 # 供应线路完整指南与接口参考
 
-本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **13 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
+本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **14 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
 
 > 跨线路共用的号池调度、存储后端（`poolStorage`）、统一网络代理与环境变量详见 [部署配置与安全参考](configuration.md)。
 
@@ -23,12 +23,13 @@
 13. [WorkBuddy（CodeBuddy 订阅）：`workbuddy-subscription`](#13-workbuddycodebuddy-订阅workbuddy-subscription)
 14. [Ollama：`ollama`](#14-ollamaollama)
 15. [Antigravity（ACP）：`antigravity-acp`](#15-antigravityacpantigravity-acp)
+16. [Qwen Token Plan（千问）：`qianwen-token-plan`](#16-qwen-token-plan千问qianwen-token-plan)
 
 ---
 
 ## 1. 线路总览与合规提示
 
-每条线路独立注册 DSH `LlmAdapter`、独立维护账号池与模型偏好、独立挂载宿主路由与输入框额度胶囊；单条线路的登录异常、额度耗尽或上游故障**不会**波及其余线路。
+每条线路独立注册 DSH `LlmAdapter`、独立维护凭据/账号池（按线路能力）与模型偏好、独立挂载宿主路由与输入框胶囊；单条线路的登录异常、额度耗尽或上游故障**不会**波及其余线路。
 
 | Provider ID | 界面名称（中文） | 上游协议 | 登录 / 凭据方式 | 模型目录来源 | 路由前缀 |
 | --- | --- | --- | --- | --- | --- |
@@ -45,6 +46,7 @@
 | `workbuddy-subscription` | WorkBuddy（CodeBuddy 订阅） | OpenAI `/v2/chat/completions`；国区 Claude 走 `/v1/messages` | 浏览器轮询授权 / 只读采纳 CodeBuddy 桌面端登录态 | 实时 `/v3/config` + 本地快照与随包兜底 | `/workbuddy/api` |
 | `ollama` | Ollama | Ollama Native `/api/chat` + OpenAI `/v1/chat/completions` | 粘贴 Ollama Cloud API Key | 实时 `/api/tags` + `/api/show` 按模型元数据探测 | `/ollama/api` |
 | `antigravity-acp` | Antigravity（ACP） | ACP v1 / stdio JSON-RPC（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 | `/antigravity-acp/api` |
+| `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个 Token Plan 专属 API Key，系统加密存储；无账号池 | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 | `/qianwen-token-plan/api` |
 
 > **合规与风险声明**：
 > - `claude-subscription` 使用订阅 OAuth 凭据模拟客户端身份转发请求，与 Anthropic 现行服务条款冲突，未获官方授权，存在账号受限或封禁风险。
@@ -107,7 +109,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/status` | 账号（脱敏）、连接状态、额度、抓取后端状态及本机 Codex CLI 文件存在性 |
-| `GET` | `/hub/overview` | 订阅中心首页 13 条线路的聚合只读摘要 |
+| `GET` | `/hub/overview` | 订阅中心首页 14 条线路的聚合只读摘要 |
 | `GET` / `POST` | `/update`（检测 / 应用） | 检查 npm 新版本并在支持的部署上一键升级插件 |
 | `POST` | `/i18n/locale` | 客户端向宿主同步当前界面语言（`zh` / `en` / `ru`） |
 | `POST` | `/login/start` | 启动浏览器回调 OAuth 登录 |
@@ -343,3 +345,18 @@
 `GET /status` · `GET|POST /settings`（等同 `/models`）· `POST /login/start` · `GET /login/status` · `POST /logout` · `GET|POST /usage` · `POST /refresh`
 
 `GET /status` 与 `GET /settings` 是**被动读取**：不下载、不强制探活、不重建缓存（登录状态缓存 10 分钟，可执行文件解析缓存 5 分钟）。`POST /refresh`、`GET /login/status` 与 `POST /settings` 是显式动作，会强制重读并允许下载——登录、登出与换路径之后立刻就能看到新状态（登录状态是 GET：它是「再问一次」，不是状态变更）。
+
+---
+
+## 16. Qwen Token Plan（千问）：`qianwen-token-plan`
+
+- **官方公开接入**：Token Plan 专属 API Key + `https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1`，OpenAI Chat Completions。单 Key、无 OAuth、无账号池；Key 只存于 Windows DPAPI / macOS Keychain / Linux Secret Service，状态 DTO 不回传。
+- **模型**：个人版/团队版共 23 个文本与视觉理解条目：Qwen4、Qwen3.8/3.7/3.6、DeepSeek V4、GLM 5.x、团队版 Kimi K2 与 MiniMax-M2.5，以及 Auto 动态路由；图像/语音/视频生成专用模型不混入 Chat Completions。stable Qwen4 输出上限 262,144，preview 采用官方 DSH 指南的保守 131,072。旧三模型默认选择经版本化迁移扩展到全目录，显式用户选择不变。
+- **思考与缓存**：七档 `none/minimal/low/medium/high/xhigh/max` 原样透传，绝不自动降档或同时发送 `thinking_budget`；`max_completion_tokens` 限制思考与回答总量。Qwen4-Max 默认启用 CoT 摘要和 encrypted_content 同模型回放，跨模型不复用密文。
+- **显式缓存**：自动断点加最多三个手动 `prompt_cache_breakpoint`，用户选 5m/1h；不混用 `cache_control`。冷启动 singleflight、静态前缀、PTC/Timeline 冻结、历史修剪跳过和动态 TTL 结果投影全部接入。
+- **视觉与统计**：图片 `detail=low/auto/high` 和可选 `max_pixels`；展示本机缓存读、未命中、5m/1h 写、思考 Token 和密文回放诊断。没有公开可验证的剩余 Credits API，所以不显示余额、金额或伪造的 0%。
+- **边界**：主链路不使用 Responses 服务端历史，不挂载上游内置工具、Batch 或 Prime；个人版真实 Key 已完成 28 次生成调用验收：个人版通用模型、5m/1h 缓存、CoT 密文回放、工具、视觉和实际 Adapter 均通过；团队版模型与自然 TTL 到期仍未实测。decision-model-preview 经 HTTP 400 证实不属于通用 Chat Completions，已排除。详见 [实机验收记录](qianwen-token-plan-live-acceptance.md)。
+
+### 宿主路由（`/qianwen-token-plan/api`）
+
+`GET /status` · `PUT|POST /credentials` · `DELETE /credentials` · `GET|POST|PATCH /settings` · `POST /connection`（别名 `/connection/test`）· `POST /cache/reset`。所有写操作校验 Origin + Host 同源。

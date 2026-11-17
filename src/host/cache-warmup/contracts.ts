@@ -92,6 +92,10 @@ export interface CacheWarmupUsage {
   at: number
   /** 非空表示这次观测到缓存漂移（前缀被改、工具集变化等），连续命中计数随之清零。 */
   driftCause?: string
+  /** Provider-measured TTL for this observation; absent keeps the historical Kimi default. */
+  cacheTtlMs?: number
+  /** False disables Kimi block-continuation heuristics for other cache semantics. */
+  blockAlignedContinuation?: boolean
 }
 
 /** 结果内容的「块」形状，与宿主工具结果的文本块对齐。 */

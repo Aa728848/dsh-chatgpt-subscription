@@ -153,7 +153,7 @@ promptCacheOverrides:
 - **自动绕行规则**：回环地址（`127.0.0.0/8`、`::1`、`localhost`）以及 `NO_PROXY` / `no_proxy` 匹配的主机始终直连。旁路列表**全局共用一份**，每条线路卡片都能查看和编辑：逗号或空格分隔，保存时统一为逗号分隔并去重，存在插件偏好文档里，5 秒内生效；它与进程环境优先、其次 `$DSH_HOME/.env` 的部署级列表**合并生效、互不覆盖**。任一来源读取失败只丢弃该来源，不会把代理从所有线路上摘掉。
 - **不属于任何线路的插件请求**（web 抓取接管、搜索、更新检查、Codex 图片工具）跟随 **ChatGPT 线路**的代理设置；Kimi / MiniMax 的视频工具跟随各自线路。
 - **Antigravity（ACP）不提供代理设置**：该线路的协议与网络由官方 `agy` CLI 自己管理，插件无法为它单独指定代理，卡片上会说明这一点。
-- **从旧版本升级**：原来那份全局代理设置会**一次性复制到全部 13 条线路**，升级后行为不变；此后每条线路各自独立。
+- **从旧版本升级**：原来那份全局代理设置会**一次性复制到全部 14 条线路**，升级后行为不变；此后每条线路各自独立。
 
 ### 搜索后端与 `web_fetch` 抓取接管
 
@@ -180,7 +180,7 @@ promptCacheOverrides:
 $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queueTimeoutMs":120000}'
 ```
 
-- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`、`antigravity-acp`。
+- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`、`antigravity-acp`、`qianwen-token-plan`。
 - `0` 或缺省表示不限制；非法 JSON 或未知字段会在启动时直接报错拒绝（fail-closed）。
 
 ### 脱敏请求诊断日志（`DSH_PROVIDER_DIAGNOSTICS`）

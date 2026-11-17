@@ -35,6 +35,8 @@ import { QODER_PROVIDER_NAME, QODER_ROUTE_PREFIX } from '../../shared/qoder-cont
 import { OpenDesignSection } from '../opendesign/OpenDesignSection.tsx'
 import { OPENDESIGN_PROVIDER_NAME, OPENDESIGN_ROUTE_PREFIX } from '../../shared/opendesign-contracts.ts'
 import { WorkBuddySection } from '../workbuddy/WorkBuddySection.tsx'
+import { QianwenTokenPlanSection } from '../qianwen-token-plan/QianwenTokenPlanSection.tsx'
+import { QIANWEN_TOKEN_PLAN_PROVIDER_NAME, QIANWEN_TOKEN_PLAN_ROUTE_PREFIX } from '../../shared/qianwen-token-plan-contracts.ts'
 import type { HubProviderId } from './brand-icons.tsx'
 
 /** What the detail page hands to a mounted section. */
@@ -199,6 +201,11 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: 'Antigravity (ACP)',
     setEnabled: (enabled) => postLineSettings('/antigravity-acp/api', { enabled }),
     renderDetail: ({ onModelChange }) => <AntigravityAcpSection onModelChange={onModelChange} />,
+  },
+  {
+    id: 'qianwen-token-plan', name: QIANWEN_TOKEN_PLAN_PROVIDER_NAME,
+    setEnabled: (enabled) => postLineSettings(QIANWEN_TOKEN_PLAN_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <QianwenTokenPlanSection onModelChange={onModelChange} />,
   },
 ]
 

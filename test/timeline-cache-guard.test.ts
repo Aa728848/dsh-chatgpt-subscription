@@ -111,8 +111,8 @@ describe('resolveTimelineCacheGuardEnabled', () => {
     expect(resolveTimelineCacheGuardEnabled({ timelineCacheGuard: false })).toBe(false)
   })
 
-  it('protects both lines that bill for prefix cache', () => {
-    expect([...DEFAULT_TIMELINE_CACHE_PROVIDERS]).toEqual(['kimi-code', 'minimax-code'])
+  it('protects every line that bills for prefix cache', () => {
+    expect([...DEFAULT_TIMELINE_CACHE_PROVIDERS]).toEqual(['kimi-code', 'minimax-code', 'qianwen-token-plan'])
   })
 })
 

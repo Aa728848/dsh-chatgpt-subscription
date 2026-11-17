@@ -115,6 +115,7 @@ export function isWarmupHitReport(
   previous?: CacheWarmupUsage,
 ): boolean {
   if (cacheWarmupHitRatio(report) >= CACHE_WARMUP_DEFAULTS.hitRatioThreshold) return true
+  if (report.blockAlignedContinuation === false) return false
   if (previous === undefined || previous === null) return false
   const prevDrift = previous.driftCause
   if (typeof prevDrift === 'string' && prevDrift.trim() !== '' && !BENIGN_LIFECYCLE_CAUSES.has(prevDrift)) {
@@ -174,6 +175,8 @@ function normalizeUsage(input: CacheWarmupUsage | null | undefined): CacheWarmup
     at,
   }
   if (driftCause !== undefined) normalized.driftCause = driftCause
+  if (typeof input.cacheTtlMs === 'number' && Number.isFinite(input.cacheTtlMs) && input.cacheTtlMs > 0) normalized.cacheTtlMs = input.cacheTtlMs
+  if (typeof input.blockAlignedContinuation === 'boolean') normalized.blockAlignedContinuation = input.blockAlignedContinuation
   return normalized
 }
 

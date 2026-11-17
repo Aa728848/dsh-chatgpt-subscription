@@ -264,6 +264,11 @@ import {
 import { WorkBuddyUsageLedger } from './host/workbuddy/guardrails.ts'
 import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
 import { CHECKIN_TICK_MS as WORKBUDDY_CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
+import { QianwenTokenPlanAdapter } from './host/qianwen-token-plan/adapter.ts'
+import { registerQianwenTokenPlanRoutes } from './host/qianwen-token-plan/routes.ts'
+import { QianwenCredentialStore, QianwenSettingsStore } from './host/qianwen-token-plan/token-store.ts'
+import { QIANWEN_MODEL_CATALOG, catalogModelOptions as qianwenCatalogModelOptions } from './host/qianwen-token-plan/model-catalog.ts'
+import { PROVIDER_ID as QIANWEN_PROVIDER_ID, PROVIDER_NAME as QIANWEN_PROVIDER_NAME } from './host/qianwen-token-plan/types.ts'
 
 interface Volatile<T> {
   get(): T
@@ -1560,6 +1565,24 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     )
     void workBuddyAccountPool.syncDesktopAccounts().catch(() => undefined)
 
+    // Qwen Token Plan: one encrypted API key, a static official Qwen4 catalog,
+    // explicit prefix caching and native encrypted-thinking replay. No pool.
+    const qianwenStore = new QianwenCredentialStore()
+    const qianwenSettings = new QianwenSettingsStore()
+    const qianwenAdapter = new QianwenTokenPlanAdapter(qianwenStore, qianwenSettings, {
+      fetchFn: modelFetch[QIANWEN_PROVIDER_ID],
+      attachments: ctx.attachments,
+      promptCache: promptCacheOverrides[QIANWEN_PROVIDER_ID],
+    })
+    const qianwenClaim = claimProviderRoute(ctx, {
+      providerId: QIANWEN_PROVIDER_ID, label: QIANWEN_PROVIDER_NAME, adapter: qianwenAdapter,
+    })
+    const disposeQianwenRoutes = registerQianwenTokenPlanRoutes(ctx, qianwenStore, qianwenSettings, {
+      fetchFn: proxyFetchFor(QIANWEN_PROVIDER_ID),
+      serving: () => qianwenClaim.serving(),
+      conflict: () => qianwenClaim.conflict(),
+    })
+
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as
     // the primary account and nothing has to be migrated up front.
@@ -2030,6 +2053,19 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           }
         },
       },
+      {
+        id: 'qianwen-token-plan', providerId: QIANWEN_PROVIDER_ID, canToggle: true,
+        read: async () => {
+          const [current, credentials] = await Promise.all([qianwenSettings.read(), qianwenStore.read()])
+          return {
+            enabled: current.enabled,
+            accountCount: credentials === null ? 0 : 1,
+            authenticated: credentials !== null,
+            enabledModelCount: qianwenCatalogModelOptions(current).filter(model => model.enabled).length,
+            totalModelCount: QIANWEN_MODEL_CATALOG.length,
+          }
+        },
+      },
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     // 概览页右端的「检测更新 / 更新插件」。注册在这里而不是 routes.ts：它不属于任何
@@ -2169,6 +2205,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeWorkBuddyRoutes()
       workBuddyClaim.dispose()
       clearInterval(workBuddyCheckinTimer)
+      disposeQianwenRoutes()
+      qianwenClaim.dispose()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -3023,3 +3061,8 @@ export {
   resolveWorkBuddyModel,
   modelsForRegion as workBuddyModelsForRegion,
 } from './host/workbuddy/model-catalog.ts'
+export { QianwenTokenPlanAdapter, readQianwenCacheHint } from './host/qianwen-token-plan/adapter.ts'
+export { registerQianwenTokenPlanRoutes, getQianwenTokenPlanWebStatus } from './host/qianwen-token-plan/routes.ts'
+export { QianwenCredentialStore, QianwenSettingsStore } from './host/qianwen-token-plan/token-store.ts'
+export { QIANWEN_MODEL_CATALOG } from './host/qianwen-token-plan/model-catalog.ts'
+export * from './shared/qianwen-token-plan-contracts.ts'

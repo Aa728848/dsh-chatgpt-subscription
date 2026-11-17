@@ -28,6 +28,7 @@ import { dictionaries as progressUpdatesDicts, NS_PROGRESS_UPDATES } from '../sr
 import { dictionaries as qoderDicts, NS_QODER } from '../src/client/qoder/locales.ts'
 import { dictionaries as stepCodeDicts, NS_STEP_CODE } from '../src/client/step-code/locales.ts'
 import { dictionaries as workbuddyDicts, NS_WORKBUDDY } from '../src/client/workbuddy/locales.ts'
+import { dictionaries as qianwenDicts, NS_QIANWEN } from '../src/client/qianwen-token-plan/locales.ts'
 import { dictionaries as hubDicts, NS } from '../src/client/locales.ts'
 import { ClaudeSection } from '../src/client/claude/ClaudeSection.tsx'
 import { installLineLocale } from '../src/client/common/line-locale.ts'
@@ -47,6 +48,7 @@ import { dictionary as progressUpdatesRu } from '../src/client/locales-ru/progre
 import { dictionary as qoderRu } from '../src/client/locales-ru/qoder.ts'
 import { dictionary as stepCodeRu } from '../src/client/locales-ru/step-code.ts'
 import { dictionary as workbuddyRu } from '../src/client/locales-ru/workbuddy.ts'
+import { dictionary as qianwenRu } from '../src/client/locales-ru/qianwen-token-plan.ts'
 
 /** Every namespace this pack covers, with all three dictionaries beside each other. */
 const NAMESPACES = [
@@ -68,6 +70,7 @@ const NAMESPACES = [
   { ns: NS_DISPATCH_LEDGER, zh: dispatchLedgerDicts.zh as Record<string, string>, en: dispatchLedgerDicts.en as Record<string, string>, ru: dispatchLedgerRu },
   // Antigravity（ACP）：同样追加在末尾，既有命名空间的顺序一律不动。
   { ns: NS_ANTIGRAVITY_ACP, zh: antigravityAcpDicts.zh as Record<string, string>, en: antigravityAcpDicts.en as Record<string, string>, ru: antigravityAcpRu },
+  { ns: NS_QIANWEN, zh: qianwenDicts.zh as Record<string, string>, en: qianwenDicts.en as Record<string, string>, ru: qianwenRu },
 ]
 
 /** `{name}` placeholders in a template, in the order they appear. */

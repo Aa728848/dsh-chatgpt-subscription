@@ -64,6 +64,7 @@ export const TIMELINE_TASK_TOOL = 'timeline_tasks'
 export const DEFAULT_TIMELINE_CACHE_PROVIDERS: readonly string[] = Object.freeze([
   KIMI_CODE_PROVIDER,
   MINIMAX_CODE_PROVIDER,
+  'qianwen-token-plan',
 ])
 
 /** 尾部通知的来源 kind（本包自有）。 */

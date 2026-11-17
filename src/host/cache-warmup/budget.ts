@@ -87,12 +87,15 @@ export function cacheWarmupBudget(
     }
     const last = reports[reports.length - 1]
     const hitRatio = last === undefined ? 0 : cacheWarmupHitRatio(last)
+    const observedTtl = last?.cacheTtlMs
+    const effectiveTtl = typeof observedTtl === 'number' && Number.isFinite(observedTtl) && observedTtl > 0
+      ? observedTtl : CACHE_WARMUP_DEFAULTS.cacheTtlMs
     const expired =
       last !== undefined &&
       typeof last.at === 'number' &&
       Number.isFinite(last.at) &&
       Number.isFinite(now) &&
-      now - last.at > CACHE_WARMUP_DEFAULTS.cacheTtlMs
+      now - last.at > effectiveTtl
     const consecutiveHits = expired ? 0 : consecutiveWarmupHits(reports)
     const warmup = consecutiveHits < CACHE_WARMUP_DEFAULTS.consecutiveHitsRequired
     return {

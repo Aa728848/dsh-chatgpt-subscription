@@ -47,6 +47,7 @@ export const MINIMAX_CODE_PROVIDER = 'minimax-code'
 export const DEFAULT_PTC_SDK_CACHE_PROVIDERS: readonly string[] = Object.freeze([
   KIMI_CODE_PROVIDER,
   MINIMAX_CODE_PROVIDER,
+  'qianwen-token-plan',
 ])
 
 /** PTC 生成的 SDK 段名。 */
