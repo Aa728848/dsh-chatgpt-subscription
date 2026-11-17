@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.77.0 - 2026-11-17
+
+- **[qianwen-token-plan] 新增第 14 条线路：Qwen4 Token Plan 单 Key 接入、原生显式缓存与密文思考回放**
+  - 官方 Token Plan OpenAI Chat Completions 端点；Token Plan 个人版/团队版 23 个文本与视觉理解模型（含 Qwen4、Qwen3、DeepSeek、GLM、团队版 Kimi/MiniMax 与 Auto）；系统加密凭据、模型勾选、上下文覆盖、连接测试、独立代理和三语言设置卡。
+  - 用户可选 5m/1h TTL、全部七档推理原样透传、CoT 摘要与 encrypted_content 同模型回放、视觉 detail/max_pixels、缓存读写与思考 Token 统计；无自动降档、无账号池、无虚构 Credits。
+  - 接入冷启动协调、动态 TTL 预热预算、PTC/Timeline 稳定和历史修剪保护；主机适配器、同源路由、生产设置写入、UI、回放隔离和截断流均有离线回归。
+  - Batch、Prime、Responses 内置工具及余额查询不在本线路声明范围。个人版真实 Key 已完成 28 次生成调用验收：16 个个人版通用模型（含别名）、5m/1h 缓存读写、真实 Adapter 的 CoT 密文回放、工具与视觉通过；Decision Preview 的专用接口返回 HTTP 400 后已从通用目录排除。团队版与自然 TTL 到期仍未实测。详见 `docs/qianwen-token-plan-live-acceptance.md`。
+  - **验证**：强制 Host/Client/Test/Scripts 类型检查、构建与 npm 打包通过；Qwen 专项 33 例通过；全量 Vitest **387 文件通过 / 3 跳过，6,920 例通过 / 10 跳过，0 失败**。Key 与视觉预算设置行完成同场景 Before/After 几何与截图验收。
+
 ## 0.76.1 - 2026-11-16
 
 - **[antigravity-acp / 修复 #112] 独立 ACP server 的登录与模型发现不再被 CLI 专属参数打断**
