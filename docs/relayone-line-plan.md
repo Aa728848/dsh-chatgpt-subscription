@@ -55,10 +55,17 @@ Responses 请求不携带 ChatGPT 的 originator、Responses Lite、turn-state �
 
 只有 HTTP 400/404/405/422 且正文明确表示端点/协议不支持时才回退；`model_not_found`、工具参数、上下文、鉴权和额度错误不回退。回退发生在任何模型流输出之前，按 Key + model + 主协议缓存；流开始后不重放。
 
+### Claude Messages 思考参数
+
+- RelayOne 的公开价格目录列出的 Opus 5.5、Fable 5 / 5.1 / 5.2 均使用自适应思考。新版 Claude 使用 `{ type: 'adaptive', display: 'summarized' }`，显式选档时才发送 `output_config.effort`；支持的档位按模型发布。没有指定档位时保留上游默认（例如 Opus 5.5、Haiku 5.5 是 `medium`），不会强制 `high`。旧版 Claude 保留 `budget_tokens`。
+- 与自有 Claude 订阅线路一致，主动请求可见的思考摘要，并原样回放工具调用所需的已签名思考块；禁止自定义温度的模型即使未选档也不发送 `temperature`。不把订阅线路的 Claude Code 鉴权、版本门槛或 beta 字段复制到中转请求。
+- [思考块前缀绑定](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking/prefix-checks)的自动丢弃需要上游透传指定 beta header 和 `block_binding`；RelayOne 未公开保证该支持，本线路不主动发送。模型参数依据 Anthropic 的[思考模式](https://platform.claude.com/docs/en/build-with-claude/thinking)、[档位](https://platform.claude.com/docs/en/build-with-claude/effort)与 [Opus 5.5 迁移指南](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide)，RelayOne 上下文与输出上限继续使用本地保守值。
+
 ## 会话粘性与前缀缓存
 
 - [New API 的渠道亲和规则模板](https://github.com/QuantumNous/new-api/blob/main/web/src/features/system-settings/general/channel-affinity/constants.ts) 从 GPT Responses 请求的 `prompt_cache_key`、Claude Messages 的 `metadata.user_id` 取键。按 DSH 会话、模型、凭据作用域派生匿名稳定值；重试、工具回合、压缩或重启不改变它，换会话或 Key 则隔离。缺少会话 ID 或已标记辅助用途时不发送主会话键。
 - GPT 回退到 OpenAI Chat 时沿用同一标准字段；普通第三方 Chat 不注入未声明参数。可通过 `promptCacheOverrides.relayone.mode: none` 关闭插件侧提示。不假定网关启用了模板，不设置未经证实的 TTL，不发预热流量。
+- GPT 6.2 及之后的 Responses 模型把顶层 `instructions` 放在可缓存输入之后。RelayOne 将基础系统指令、开头的 system/developer 消息和共用工具指引放入第一条 `developer` 输入；历史开始后出现的额外指令仍放在顶层。旧 GPT 和 Chat 回退的请求形状不变。
 - 渠道亲和不是模型 KV 命中；[OpenAI 前缀缓存文档](https://developers.openai.com/api/docs/guides/prompt-caching) 也区分路由与计量。仅当上游报告缓存读取时才记入 DSH；即使键相同，前缀变化、缓存淘汰或网关换渠道都可能未命中。
 
 ## 媒体

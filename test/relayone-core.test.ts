@@ -105,6 +105,12 @@ describe('RelayOne live catalog and protocol policy', () => {
     expect(isRelayOneProtocolUnsupported(400, 'invalid tool arguments')).toBe(false)
     expect(fallbackRelayOneProtocol(entry('gpt-6-astra'), 'openai-responses')).toBe('openai-chat')
   })
+  it('recomputes Claude effort capabilities on old snapshots without changing the wire id', () => {
+    const old = { ...persistedRelayOneModelRecord(entry('claude-opus-5-5')), reasoningEfforts: ['low', 'medium', 'high'] }
+    expect(parsePersistedRelayOneModelEntries([old])?.[0]).toMatchObject({
+      id: 'claude-opus-5-5', reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })
+  })
   it('round-trips the production snapshot writer and parser as a pair', async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'relayone-catalog-'))
     vi.stubEnv('DSH_HOME', home)
@@ -127,6 +133,34 @@ describe('RelayOne OpenAI request mapping', () => {
     expect(body).toMatchObject({ model: 'gpt-6-astra', stream: true, instructions: 'system\n\n' + GPT_TOOL_GUIDANCE, store: false, reasoning: { effort: 'high' } })
     expect(JSON.stringify(body)).not.toMatch(/responses-lite|originator|x-codex|additional_tools|reasoning.encrypted_content/)
     expect(body.tools).toEqual([{ type: 'function', name: 'lookup', description: 'lookup', strict: false, parameters: { type: 'object' } }])
+  })
+  it.each(['gpt-6.2-sol', 'gpt-6.2-astra'])('keeps the stable prefix of %s cacheable across tool steps', model => {
+    const [gpt] = mergeRelayOneCatalog({ data: [{ id: model, supported_endpoint_types: ['openai'] }] })
+    const messages = [
+      { role: 'system', content: [{ type: 'text', text: 'boot instructions' }] },
+      { role: 'developer', content: [{ type: 'text', text: 'boot developer' }] },
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ] as Message[]
+    const tools = [{ name: 'lookup', description: 'lookup', parameters: { type: 'object' } }] as NonNullable<GenerateOptions['tools']>
+    const mapping = (history: Message[]) => buildRelayOneResponsesRequest(
+      options({ model, system: 'base', messages: history, tools }), NO_RESOLVED_IMAGES, gpt!, defaultRelayOneSettings(),
+    )
+    const first = mapping(messages)
+    const next = mapping([...messages,
+      { role: 'assistant', content: [{ type: 'tool-call', id: 'call_a', name: 'lookup', arguments: '{}' }] } as Message,
+      { role: 'user', content: [{ type: 'tool-result', toolCallId: 'call_a', content: [{ type: 'text', text: 'ok' }] }] } as Message,
+      { role: 'developer', content: [{ type: 'text', text: 'current instruction' }] } as Message,
+    ])
+    expect(first).not.toHaveProperty('instructions')
+    expect(first.input).toEqual([
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'base\n\nboot instructions\n\nboot developer\n\n' + GPT_TOOL_GUIDANCE }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+    ])
+    expect(next.input).toEqual([...(first.input as unknown[]),
+      { type: 'function_call', call_id: 'call_a', name: 'lookup', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_a', output: 'ok' },
+    ])
+    expect(next.instructions).toBe('current instruction')
   })
   it('replays function calls and keeps orphan outputs as text', () => {
     const assistant = { role: 'assistant', content: [{ type: 'tool-call', id: 'call_a', name: 'lookup', arguments: '{"x":1}' }] } as Message
@@ -205,33 +239,83 @@ describe('RelayOne Chat streaming tools', () => {
 })
 
 describe('RelayOne Anthropic tools and replay', () => {
-  it('builds native tools, max_tokens and thinking budget', () => {
+  const claudeRequest = (model: string, overrides: Partial<GenerateOptions> = {}, defaultEffort: 'high' | null = null) => {
+    const [modelEntry] = mergeRelayOneCatalog({ data: [{ id: model, supported_endpoint_types: ['anthropic'] }] })
+    return buildRelayOneAnthropicRequest(options({ model, ...overrides }), NO_RESOLVED_IMAGES, modelEntry!, {
+      ...defaultRelayOneSettings(), defaultReasoningEffort: defaultEffort,
+    })
+  }
+
+  it.each(['claude-opus-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-fable-5-2'])('sends documented adaptive effort and native tools for %s', model => {
     const tools = [{ name: 'lookup', description: 'lookup', parameters: { type: 'object' } }] as NonNullable<GenerateOptions['tools']>
-    const body = buildRelayOneAnthropicRequest(options({ model: 'claude-opus-5-5', tools, reasoningEffort: effort('medium') }), NO_RESOLVED_IMAGES, entry('claude-opus-5-5'), defaultRelayOneSettings())
-    expect(body).toMatchObject({ max_tokens: 16384, tool_choice: { type: 'auto' }, thinking: { type: 'enabled', budget_tokens: 8192 } })
+    const body = claudeRequest(model, { tools, reasoningEffort: effort('xhigh'), maxTokens: 4096, temperature: 0.3 }, 'high')
+    expect(body).toMatchObject({ model, max_tokens: 4096, tool_choice: { type: 'auto' }, output_config: { effort: 'xhigh' } })
+    expect(body.thinking).toEqual({ type: 'adaptive', display: 'summarized' })
+    expect(body).not.toHaveProperty('temperature')
     expect(JSON.stringify(body.tools)).toContain('"input_schema"')
   })
-  it('streams tool_use and replays it with its tool_result', () => {
+
+  it.each([undefined, 'none', 'minimal'])('keeps Opus 5.5 at the upstream default for effort %s', requested => {
+    const body = claudeRequest('claude-opus-5-5', {
+      temperature: 0.3, ...(requested === undefined ? {} : { reasoningEffort: effort(requested) }),
+    })
+    expect(body.thinking).toEqual({ type: 'adaptive', display: 'summarized' })
+    expect(body).not.toHaveProperty('output_config')
+    expect(body).not.toHaveProperty('temperature')
+  })
+
+  it('applies the line default and only disables thinking where documented', () => {
+    expect(claudeRequest('claude-opus-5-5', {}, 'high').output_config).toEqual({ effort: 'high' })
+    const body = claudeRequest('claude-haiku-5-5', { reasoningEffort: effort('none'), temperature: 0.2 }, 'high')
+    expect(body.thinking).toEqual({ type: 'disabled' })
+    expect(body).not.toHaveProperty('output_config')
+    expect(body).not.toHaveProperty('temperature')
+  })
+
+  it('keeps fixed budgets on legacy Claude and uses the narrower 4.6 effort ladder', () => {
+    const legacy = claudeRequest('claude-sonnet-4-5-20250929', { reasoningEffort: effort('medium'), maxTokens: 4096 })
+    expect(legacy).toMatchObject({ max_tokens: 12288, thinking: { type: 'enabled', budget_tokens: 8192 } })
+    expect(legacy).not.toHaveProperty('output_config')
+    const adaptive = claudeRequest('claude-sonnet-4-6', { reasoningEffort: effort('max') })
+    expect(adaptive).toMatchObject({ output_config: { effort: 'max' }, thinking: { type: 'adaptive' } })
+    const unsupported = claudeRequest('claude-sonnet-4-6', { reasoningEffort: effort('xhigh'), temperature: 0.25 })
+    expect(unsupported.temperature).toBe(0.25)
+    expect(unsupported).not.toHaveProperty('thinking')
+    expect(unsupported).not.toHaveProperty('output_config')
+    const offByDefault = claudeRequest('claude-opus-4-8', { temperature: 0.25 })
+    expect(offByDefault).not.toHaveProperty('thinking')
+    expect(offByDefault).not.toHaveProperty('temperature')
+  })
+  it('replays signed adaptive thinking unchanged with tool_use and tool_result', () => {
     const state = createRelayOneAnthropicStreamState()
     const lines = [
       { type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 1 } } },
-      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call_a', name: 'lookup', input: {} } },
-      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"x":' } },
-      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '1}' } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Checking.' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'signature-fixture' } },
       { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call_a', name: 'lookup', input: {} } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"x":' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '1}' } },
+      { type: 'content_block_stop', index: 1 },
       { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 4 } },
       { type: 'message_stop' },
     ]
     const chunks = lines.flatMap(event => processRelayOneAnthropicLine('data: ' + JSON.stringify(event), state))
-    expect(chunks).toContainEqual({ type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } })
+    expect(chunks).toContainEqual({ type: 'reasoning-delta', index: 0, text: 'Checking.' })
+    expect(chunks).toContainEqual({ type: 'usage', usage: { inputTokens: 10, outputTokens: 4, reasoningTokens: 3 } })
     const finish = finishOf(chunks)
     expect(finish).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
     const replayState = finish?.type === 'finish' ? finish.replayState : undefined
     const assistant = { role: 'assistant', content: [{ type: 'tool-call', id: 'call_a', name: 'lookup', arguments: '{"x":1}' }], source: { kind: 'model', replayState } } as Message
     const result = { role: 'user', content: [{ type: 'tool-result', toolCallId: 'call_a', content: [{ type: 'text', text: 'ok' }] }] } as Message
     const next = buildRelayOneAnthropicRequest(options({ model: 'claude-opus-5-5', messages: [assistant, result] }), NO_RESOLVED_IMAGES, entry('claude-opus-5-5'), defaultRelayOneSettings())
-    expect(JSON.stringify(next.messages)).toContain('"tool_use"')
-    expect(JSON.stringify(next.messages)).toContain('"tool_result"')
-    expect(JSON.stringify(next.messages)).toContain('"tool_use_id":"call_a"')
+    expect(next.messages).toEqual([
+      { role: 'assistant', content: [
+        { type: 'thinking', thinking: 'Checking.', signature: 'signature-fixture' },
+        { type: 'tool_use', id: 'call_a', name: 'lookup', input: { x: 1 } },
+      ] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_a', content: 'ok' }] },
+    ])
   })
 })

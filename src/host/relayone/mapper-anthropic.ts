@@ -3,7 +3,7 @@ import { LlmError } from '../common/llm-compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
 import { stripMetaSchema } from '../common/tool-schema.ts'
 import type { ResolvedRequestImages } from '../common/request-images.ts'
-import type { RelayOneModelEntry } from './model-catalog.ts'
+import { relayOneClaudeAdaptiveThinking, type RelayOneModelEntry } from './model-catalog.ts'
 import type { RelayOneSettings } from './token-store.ts'
 import {
   isRelayOneRecord,
@@ -81,11 +81,20 @@ export function buildRelayOneAnthropicRequest(
   const tools = (options.tools ?? []).map(tool => ({
     name: tool.name, description: tool.description, input_schema: stripMetaSchema(tool.parameters),
   }))
-  const effort = relayOneEffort(options, settings.defaultReasoningEffort, entry.reasoningEfforts)
+  const adaptive = relayOneClaudeAdaptiveThinking(entry.id)
+  const effort = relayOneEffort(options, settings.defaultReasoningEffort, adaptive?.efforts ?? entry.reasoningEfforts)
+  const enabled = effort !== 'none' && (effort !== undefined || adaptive?.enabledByDefault === true)
   const budgets: Record<string, number> = { minimal: 2048, low: 4096, medium: 8192, high: 16_384, xhigh: 24_576, max: 32_768 }
-  const budget = effort === undefined ? 0 : budgets[effort] ?? 8192
+  const budget = adaptive === undefined && enabled && effort !== undefined ? budgets[effort] ?? 8192 : 0
   const baseMax = options.maxTokens ?? Math.min(entry.maxOutputTokens, 16_384)
   const maxTokens = Math.max(1024, Math.min(entry.maxOutputTokens, budget > 0 ? Math.max(baseMax, budget + 4096) : baseMax))
+  const thinking = adaptive !== undefined
+    ? effort === 'none' ? { type: 'disabled' } : enabled ? { type: 'adaptive', display: 'summarized' } : undefined
+    : budget > 0 && maxTokens > budget ? { type: 'enabled', budget_tokens: budget } : undefined
+  // Opus 5.5 and Haiku 5.5 default to medium, unlike many other models. Omitting
+  // output_config when no supported effort was selected preserves each vendor default.
+  const outputConfig = adaptive !== undefined && effort !== undefined && effort !== 'none' ? { effort } : undefined
+  const allowTemperature = !enabled && (adaptive?.allowsTemperatureWhenOff ?? true)
   const system = relayOneSystemText(options)
   return {
     model: options.model,
@@ -94,8 +103,9 @@ export function buildRelayOneAnthropicRequest(
     max_tokens: maxTokens,
     ...(system === '' ? {} : { system }),
     ...(tools.length > 0 ? { tools, tool_choice: { type: 'auto' } } : {}),
-    ...(budget > 0 && maxTokens > budget ? { thinking: { type: 'enabled', budget_tokens: budget } } : {}),
-    ...(options.temperature === undefined || budget > 0 ? {} : { temperature: options.temperature }),
+    ...(thinking === undefined ? {} : { thinking }),
+    ...(outputConfig === undefined ? {} : { output_config: outputConfig }),
+    ...(options.temperature === undefined || !allowTemperature ? {} : { temperature: options.temperature }),
     ...(options.stop !== undefined && options.stop.length > 0 ? { stop_sequences: options.stop } : {}),
   }
 }

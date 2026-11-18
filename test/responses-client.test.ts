@@ -3,9 +3,41 @@ import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL, PLUGIN_VERSION } from '../src/compat.ts'
 import { CodexChatGptAdapter } from '../src/host/adapter.ts'
+import { PrefixRequestCoordinator } from '../src/host/common/prefix-request-coordinator.ts'
 import { OAuthService } from '../src/host/oauth-service.ts'
 import { ResponsesClient, parseResponsesStream } from '../src/host/responses-client.ts'
 import { MemoryTokenStore } from '../src/host/token-store.ts'
+
+describe('Codex cold prefix coordination', () => {
+  it('groups the actual developer prefix without session ids, including Lite tool declarations', async () => {
+    const store = new MemoryTokenStore()
+    await store.save({ accessToken: 'test-token', refreshToken: 'refresh', expiresAt: Date.now() + 3_600_000 })
+    const fetchFn = vi.fn<typeof fetch>(async () => sse([{ type: 'response.completed', response: {} }]))
+    const client = new ResponsesClient(new OAuthService(store), { readImage: async () => { throw new Error('unused') } }, { fetchFn })
+    const acquire = vi.spyOn(PrefixRequestCoordinator.prototype, 'acquire')
+    const key = async (sessionId: string, useResponsesLite: boolean, toolName = 'lookup', system = 'base instructions') => {
+      await collect(client.stream({
+        provider: 'codex-chatgpt', model: 'gpt-6.2-sol', system, sessionId,
+        messages: [{ role: 'user', content: [{ type: 'text', text: sessionId }] }],
+        tools: [{ name: toolName, description: 'Look up details', parameters: { type: 'object' } }],
+      } as unknown as GenerateOptions, () => ({ useResponsesLite })))
+      return acquire.mock.lastCall?.[0]
+    }
+    try {
+      const standard = await key('standard-a', false)
+      expect(standard).toEqual(expect.any(String))
+      expect(await key('standard-b', false)).toBe(standard)
+      expect(await key('standard-c', false, 'lookup', 'different base')).not.toBe(standard)
+      const lite = await key('lite-a', true)
+      expect(lite).toEqual(expect.any(String))
+      expect(lite).not.toBe(standard)
+      expect(await key('lite-b', true)).toBe(lite)
+      expect(await key('lite-c', true, 'other_tool')).not.toBe(lite)
+    } finally {
+      acquire.mockRestore()
+    }
+  })
+})
 
 describe('user-agent version', () => {
   it('reports the version package.json ships', () => {

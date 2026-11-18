@@ -548,6 +548,8 @@ function toolRemovalNotice(names: readonly string[]): string {
     : `[The tools ${list} are no longer available. Do not call them again: any call will fail.]`
 }
 
+export const CODEX_BASE_INSTRUCTIONS_KIND = 'model.base_instructions'
+
 /**
  * The base instructions as a developer message.
  *
@@ -567,7 +569,7 @@ function developerMessageItem(
     role: 'developer',
     content: [{ type: 'input_text', text }],
     internal_chat_message_metadata_passthrough: {
-      content_item_kinds: ['model.base_instructions'],
+      content_item_kinds: [CODEX_BASE_INSTRUCTIONS_KIND],
       ...(useResponsesLite
         ? { content_item_metadata: [{ provenance: { type: 'harness', hook: false } }] }
         : {}),

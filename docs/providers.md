@@ -95,7 +95,7 @@
   - 额度：`https://chatgpt.com/backend-api/wham/usage`（含 Codex、Code Review 窗口、Credits 与 Reset Credits）
 - **协议与参数对齐官方 Codex CLI**：
   - 支持标准 Responses 与 `Responses Lite`（按模型目录声明自动切换 `additional_tools` 等请求形状）；
-  - 多轮会话携带稳定的 `prompt_cache_key`，并在上游下发 `x-codex-turn-state` 时回传续接；
+  - 多轮会话携带稳定的 `prompt_cache_key`，并在上游下发 `x-codex-turn-state` 时回传续接；基础指令是 `input` 内的 developer 消息，标准和 Lite 请求均按实际基础指令与工具声明协调并发冷前缀；
   - 推理摘要默认省略（避免无感消耗计费生成 token），显式选择 `auto` / `concise` / `detailed` 时才发送；
   - 输出详细程度默认按目录声明发 `low`（仅对声明 `supportsOutputVerbosity` 的模型发送）；
   - **不发送 `max_output_tokens`**（订阅端点在多款模型上对显式 `max_output_tokens` 返回 400）；模型最大输出（GPT-6 系列 128K，其余 32,768）仅在本地作为 DSH 上下文压缩的输出预留（`defaultMaxTokens`）；

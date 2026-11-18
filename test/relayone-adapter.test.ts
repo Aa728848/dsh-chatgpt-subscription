@@ -178,6 +178,29 @@ describe('RelayOne adapter protocol integration', () => {
     await collect(disabled.stream(normal))
     expect(bodies.at(-1)).not.toHaveProperty('prompt_cache_key')
   })
+  it('sends Opus 5.5 effort through Messages without a legacy budget or fallback', async () => {
+    const generation = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      if (url !== RELAYONE_MESSAGES_URL || body.thinking?.type !== 'adaptive'
+        || 'budget_tokens' in body.thinking || body.output_config?.effort !== 'max' || 'temperature' in body) {
+        return new Response(JSON.stringify({ error: {
+          message: 'claude-opus-5-5 requires adaptive thinking; omit thinking or use thinking.type=adaptive and output_config.effort',
+        } }), { status: 400 })
+      }
+      return new Response('data: {"type":"message_stop"}\n\n')
+    })
+    const stores = fakeStores()
+    const fetchFn = catalogFetch(generation)
+    const catalog = new RelayOneCatalogManager(stores.store, { fetchFn })
+    await catalog.refresh(true)
+    const adapter = new RelayOneAdapter(stores.store, stores.settingsStore, catalog, { fetchFn })
+    const model = 'claude-opus-5-5'
+    const resolved = await adapter.resolveModel(RELAYONE_PROVIDER_ID, model)
+    expect(resolved.reasoning?.efforts.map(item => item.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    const chunks = await collect(adapter.stream({ ...options(model), temperature: 0.3, reasoningEffort: 'max' } as GenerateOptions))
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(generation).toHaveBeenCalledTimes(1)
+  })
   it('uses native Anthropic headers and Chat for DeepSeek', async () => {
     const seen: Array<{ url: string; init?: RequestInit }> = []
     const fetchFn = catalogFetch(async (url, init) => {

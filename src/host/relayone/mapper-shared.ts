@@ -38,11 +38,14 @@ export function relayOneTextOf(content: unknown): string {
 export function relayOneToolResult(message: Message): ContentBlock & { type: 'tool-result' } | undefined {
   return message.content.find((block): block is ContentBlock & { type: 'tool-result' } => block.type === 'tool-result')
 }
+export function relayOneInstructionText(message: Message): string {
+  return relayOneTextOf(message.content.filter(block => block.type !== 'tool-addition' && block.type !== 'tool-removal')).trim()
+}
 export function relayOneSystemText(options: GenerateOptions): string {
   const parts = [typeof options.system === 'string' ? options.system.trim() : '']
   for (const message of options.messages) {
     if (message.role !== 'system' && message.role !== 'developer') continue
-    const text = relayOneTextOf(message.content.filter(block => block.type !== 'tool-addition' && block.type !== 'tool-removal')).trim()
+    const text = relayOneInstructionText(message)
     if (text !== '') parts.push(text)
   }
   return parts.filter(Boolean).join('\n\n')

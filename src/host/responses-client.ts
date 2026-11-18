@@ -16,7 +16,7 @@ import { codexModelUsesResponsesLite, resolveCodexFallbackModel, type CodexWireC
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from './common/idle-watchdog.ts'
 import { chatGPTConcurrency, type CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
-import { buildResponsesPayload, withoutCodexToolChanges, type LocalRawImageOptions } from './responses-mapper.ts'
+import { buildResponsesPayload, CODEX_BASE_INSTRUCTIONS_KIND, withoutCodexToolChanges, type LocalRawImageOptions } from './responses-mapper.ts'
 import { disableCodexToolUpdate } from './model-catalog.ts'
 import { LlmError, normalizeGenerateOptions } from './common/llm-compat.ts'
 import { withStaticPrefixOrdering } from './common/prefix-stability.ts'
@@ -90,13 +90,18 @@ function codexColdGroupKey(
   payload: Record<string, unknown>,
   credentials: Awaited<ReturnType<OAuthService['credentials']>>,
 ): string | undefined {
-  const instructions = typeof payload.instructions === 'string' ? payload.instructions : ''
-  if (instructions === '') return undefined
-  const digest = createHash('sha256')
-    .update(instructions)
-    .update('\0')
-    .update(JSON.stringify(Array.isArray(payload.tools) ? payload.tools : []))
-    .digest('hex')
+  const input = Array.isArray(payload.input) ? payload.input : []
+  const head = record(input[0])
+  const liteTools = head?.type === 'additional_tools' ? head.tools : undefined
+  const instructions = liteTools === undefined ? head : record(input[1])
+  const kinds = record(instructions?.internal_chat_message_metadata_passthrough)?.content_item_kinds
+  if (instructions?.role !== 'developer' || !Array.isArray(kinds)
+    || !kinds.includes(CODEX_BASE_INSTRUCTIONS_KIND)) return undefined
+  // Hash only the shared wire prefix; item ids are scoped to individual sessions.
+  const digest = createHash('sha256').update(JSON.stringify([
+    instructions.content, liteTools, payload.tools, payload.tool_choice,
+    payload.parallel_tool_calls, payload.reasoning, payload.text, payload.service_tier,
+  ])).digest('hex')
   return `${String(payload.model ?? '')}:${digest}:${authOwnerKey(credentials)}`
 }
 

@@ -11,6 +11,7 @@ import {
   relayOneArgsText,
   relayOneEffort,
   relayOneImageParts,
+  relayOneInstructionText,
   relayOneNumber,
   relayOneReplayOutputItems,
   relayOneSafeJson,
@@ -25,6 +26,33 @@ function relayOneGptSystemText(options: GenerateOptions, entry: RelayOneModelEnt
   const system = relayOneSystemText(options)
   if (!/^gpt-/i.test(entry.id)) return system
   return appendGptEngineeringGuidance(system, options.tools)
+}
+
+// GPT 6.2+ places top-level instructions AFTER the cacheable input, even on hits.
+// https://developers.openai.com/api/docs/guides/prompt-caching#how-prefix-matching-works
+function usesCacheableDeveloperPrefix(id: string): boolean {
+  const version = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/i.exec(id)
+  const major = Number(version?.[1])
+  return major > 6 || (major === 6 && Number(version?.[2] ?? 0) >= 2)
+}
+
+function relayOneResponsesInstructions(options: GenerateOptions, entry: RelayOneModelEntry): { base: string; current: string } {
+  if (!usesCacheableDeveloperPrefix(entry.id)) return { base: '', current: relayOneGptSystemText(options, entry) }
+  const base = [options.system?.trim() ?? '']
+  const current: string[] = []
+  let pastPrefix = false
+  for (const message of options.messages) {
+    if (message.role !== 'system' && message.role !== 'developer') {
+      pastPrefix = true
+      continue
+    }
+    const text = relayOneInstructionText(message)
+    if (text !== '') (pastPrefix ? current : base).push(text)
+  }
+  return {
+    base: appendGptEngineeringGuidance(base.filter(Boolean).join('\n\n'), options.tools),
+    current: current.join('\n\n'),
+  }
 }
 
 function responseMessageContent(
@@ -53,7 +81,8 @@ export function buildRelayOneResponsesRequest(
 ): Record<string, unknown> {
   const input: Record<string, unknown>[] = []
   const knownCalls = new Set<string>()
-  const instructions = relayOneGptSystemText(options, entry)
+  const { base, current } = relayOneResponsesInstructions(options, entry)
+  if (base !== '') input.push({ type: 'message', role: 'developer', content: [{ type: 'input_text', text: base }] })
   for (const message of options.messages) {
     if (message.role === 'system' || message.role === 'developer') continue
     const toolResult = relayOneToolResult(message)
@@ -91,7 +120,7 @@ export function buildRelayOneResponsesRequest(
   return {
     model: options.model,
     stream: true,
-    ...(instructions === '' ? {} : { instructions }),
+    ...(current === '' ? {} : { instructions: current }),
     input,
     ...(tools.length > 0 ? { tools, tool_choice: 'auto', parallel_tool_calls: true } : {}),
     ...(options.maxTokens === undefined ? {} : { max_output_tokens: options.maxTokens }),

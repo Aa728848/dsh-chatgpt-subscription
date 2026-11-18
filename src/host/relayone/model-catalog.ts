@@ -98,14 +98,50 @@ export function parseRelayOnePricing(payload: unknown): PricingCatalog {
 }
 
 const DEFAULT_REASONING: readonly RelayOneReasoningEffort[] = ['low', 'medium', 'high']
-function modelFacts(id: string): Pick<RelayOneModelEntry, 'contextWindow' | 'maxOutputTokens' | 'supportsImages' | 'reasoningEfforts'> {
+const ADAPTIVE_REASONING: readonly RelayOneReasoningEffort[] = [...DEFAULT_REASONING, 'xhigh', 'max']
+const DISABLEABLE_ADAPTIVE_REASONING: readonly RelayOneReasoningEffort[] = ['none', ...ADAPTIVE_REASONING]
+
+interface AdaptiveThinkingPolicy {
+  efforts: readonly RelayOneReasoningEffort[]
+  enabledByDefault: boolean
+  allowsTemperatureWhenOff: boolean
+}
+
+/**
+ * Public Messages capabilities, not the Claude Code subscription's OAuth/betas.
+ * https://platform.claude.com/docs/en/build-with-claude/thinking#when-thinking-turns-on
+ * https://platform.claude.com/docs/en/build-with-claude/effort#effort-levels
+ */
+export function relayOneClaudeAdaptiveThinking(id: string): AdaptiveThinkingPolicy | undefined {
+  // Match known models (including dated ids), not arbitrary gateway suffixes like -fast.
+  const model = id.toLowerCase().replace(/-\d{8}$/, '')
+  if (/^claude-(?:opus|sonnet)-4-6$/.test(model)) {
+    return { efforts: [...DEFAULT_REASONING, 'max'], enabledByDefault: false, allowsTemperatureWhenOff: true }
+  }
+  if (/^claude-opus-4-[78]$/.test(model)) {
+    return { efforts: ADAPTIVE_REASONING, enabledByDefault: false, allowsTemperatureWhenOff: false }
+  }
+  if (/^claude-(?:(?:opus|sonnet)-5|haiku-5-5)$/.test(model)) {
+    return { efforts: DISABLEABLE_ADAPTIVE_REASONING, enabledByDefault: true, allowsTemperatureWhenOff: false }
+  }
+  if (/^claude-(?:(?:opus|sonnet)-5-5|(?:fable|mythos)-5(?:-[12])?)$/.test(model)) {
+    return { efforts: ADAPTIVE_REASONING, enabledByDefault: true, allowsTemperatureWhenOff: false }
+  }
+  if (model === 'claude-mythos-preview') {
+    return { efforts: [...DEFAULT_REASONING, 'max'], enabledByDefault: true, allowsTemperatureWhenOff: false }
+  }
+  return undefined
+}
+
+function modelFacts(id: string, protocol: RelayOneProtocol | null): Pick<RelayOneModelEntry, 'contextWindow' | 'maxOutputTokens' | 'supportsImages' | 'reasoningEfforts'> {
   const normalized = id.toLowerCase()
   // Conservative local budgets; users can override context windows in the line settings.
   if (/^(gpt-|o[134](?:-|$)|codex)/.test(normalized)) {
     return { contextWindow: 272_000, maxOutputTokens: 128_000, supportsImages: true, reasoningEfforts: RELAYONE_REASONING_EFFORTS }
   }
   if (normalized.startsWith('claude-')) {
-    return { contextWindow: 200_000, maxOutputTokens: 32_768, supportsImages: true, reasoningEfforts: DEFAULT_REASONING }
+    const adaptive = protocol === 'anthropic' ? relayOneClaudeAdaptiveThinking(normalized) : undefined
+    return { contextWindow: 200_000, maxOutputTokens: 32_768, supportsImages: true, reasoningEfforts: adaptive?.efforts ?? DEFAULT_REASONING }
   }
   if (normalized.includes('gemini') || normalized.includes('banana')) {
     return { contextWindow: 1_000_000, maxOutputTokens: 32_768, supportsImages: true, reasoningEfforts: DEFAULT_REASONING }
@@ -170,7 +206,7 @@ export function mergeRelayOneCatalog(listingPayload: unknown, pricingPayload?: u
       vendor,
       description: row?.description ?? null,
       parameterSchema: row?.parameterSchema ?? null,
-      ...modelFacts(model.id),
+      ...modelFacts(model.id, protocol),
     }]
   })
 }
@@ -267,7 +303,7 @@ export function parsePersistedRelayOneModelEntries(value: unknown): RelayOneMode
       groups: strings(raw.groups), endpoints: strings(raw.endpoints), protocol: protocol as RelayOneProtocol | null,
       vendor: text(raw.vendor), description: text(raw.description),
       // Local capability policy is recomputed on upgrades instead of freezing an old ladder.
-      ...modelFacts(id),
+      ...modelFacts(id, protocol as RelayOneProtocol | null),
       parameterSchema: isRecord(raw.parameterSchema) ? structuredClone(raw.parameterSchema) : null,
     }
     result.push(entry)
