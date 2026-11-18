@@ -124,6 +124,44 @@ describe('RelayOne adapter protocol integration', () => {
     expect(resolved.reasoning?.efforts.map(item => item.id)).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
     expect(resolved.context).toEqual({ contextWindow: 272000 })
   })
+  it.each([false, true])('streams and replays one progress sentence alongside a tool call (native message: %s)', async nativeMessage => {
+    const update = 'The two checks passed; the contract is consistent.'
+    const content = [{ type: 'output_text', text: update }]
+    const progress = { type: 'message', role: 'assistant', phase: 'commentary', content }
+    const call = { type: 'function_call', id: 'item_a', call_id: 'call_a', name: 'lookup', arguments: '{}' }
+    const frames = [
+      { type: 'response.output_text.delta', delta: update },
+      { type: 'response.output_item.added', item: call },
+      { type: 'response.completed', response: { output: nativeMessage ? [progress, call] : [call] } },
+    ]
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchFn = catalogFetch(async (url, init) => {
+      expect(url).toBe(RELAYONE_RESPONSES_URL)
+      bodies.push(JSON.parse(String(init?.body)))
+      const events = bodies.length === 1 ? frames : [{ type: 'response.completed', response: { output: [] } }]
+      return new Response(events.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''))
+    })
+    const stores = fakeStores()
+    const catalog = new RelayOneCatalogManager(stores.store, { fetchFn })
+    await catalog.refresh(true)
+    const adapter = new RelayOneAdapter(stores.store, stores.settingsStore, catalog, { fetchFn })
+    const turn = options('gpt-6-astra', true)
+    const chunks = await collect(adapter.stream(turn))
+    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: update }])
+    const finish = chunks.find(chunk => chunk.type === 'finish')
+    expect(finish?.reason.kind).toBe('tool-calls')
+    const assistant = { role: 'assistant', source: { kind: 'model', replayState: finish?.replayState },
+      content: chunks.flatMap(chunk => chunk.type === 'block-end' ? [chunk.block] : []),
+    }
+    const result = { role: 'user', content: [{ type: 'tool-result', toolCallId: 'call_a', content: [{ type: 'text', text: 'ok' }] }] }
+    await collect(adapter.stream({ ...turn, messages: [...turn.messages, assistant, result] } as GenerateOptions))
+    expect(bodies[1]?.input).toEqual([
+      { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+      nativeMessage ? progress : { role: 'assistant', content },
+      call,
+      { type: 'function_call_output', call_id: 'call_a', output: 'ok' },
+    ])
+  })
   it('uses standard Responses and parses a complete function call', async () => {
     const generation = vi.fn(async (url: string, _init?: RequestInit) => {
       expect(url).toBe(RELAYONE_RESPONSES_URL)

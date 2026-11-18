@@ -22,10 +22,15 @@ import {
   relayOneValidArguments,
 } from './mapper-shared.ts'
 
+const RELAYONE_GPT_TOOL_BATCH_GUIDANCE = 'After a batch of related tool results gives you a meaningful finding or completes a stage, send one short, user-visible assistant text update before the next batch of tool calls, then continue working in the same turn. Say what the results established, not just what you intend to do. Put the update in assistant text, not hidden reasoning or a tool argument. Skip routine batches with nothing new to report, and do not repeat an update already delivered through progress_update. Leave the full recap for the final answer.'
+
+function relayOneGptGuidance(base: string, options: GenerateOptions, entry: RelayOneModelEntry): string {
+  if (!/^gpt-/i.test(entry.id) || !options.tools?.length) return base
+  return appendGptEngineeringGuidance(base, options.tools) + '\n\n' + RELAYONE_GPT_TOOL_BATCH_GUIDANCE
+}
+
 function relayOneGptSystemText(options: GenerateOptions, entry: RelayOneModelEntry): string {
-  const system = relayOneSystemText(options)
-  if (!/^gpt-/i.test(entry.id)) return system
-  return appendGptEngineeringGuidance(system, options.tools)
+  return relayOneGptGuidance(relayOneSystemText(options), options, entry)
 }
 
 // GPT 6.2+ places top-level instructions AFTER the cacheable input, even on hits.
@@ -50,7 +55,7 @@ function relayOneResponsesInstructions(options: GenerateOptions, entry: RelayOne
     if (text !== '') (pastPrefix ? current : base).push(text)
   }
   return {
-    base: appendGptEngineeringGuidance(base.filter(Boolean).join('\n\n'), options.tools),
+    base: relayOneGptGuidance(base.filter(Boolean).join('\n\n'), options, entry),
     current: current.join('\n\n'),
   }
 }
@@ -93,20 +98,29 @@ export function buildRelayOneResponsesRequest(
       else input.push({ role: 'user', content: [{ type: 'input_text', text: 'Tool result for unavailable call ' + callId + ':\n' + output }] })
       continue
     }
-    if (message.role === 'assistant') {
-      const replay = relayOneReplayOutputItems(message)
-      if (replay !== null) {
-        input.push(...replay)
-        for (const item of replay) if (item.type === 'function_call' && typeof item.call_id === 'string') knownCalls.add(item.call_id)
-        continue
-      }
-    }
+    const replay = message.role === 'assistant' ? relayOneReplayOutputItems(message) : null
     const content = responseMessageContent(message, images, entry.supportsImages)
-    if (content.length > 0) input.push({ role: message.role, content })
+    const hasReplayText = replay?.some(item => item.type === 'message' && Array.isArray(item.content) && item.content.some(part => {
+      if (!isRelayOneRecord(part)) return false
+      const text = part.type === 'output_text' ? relayOneString(part.text)
+        : part.type === 'refusal' ? relayOneString(part.refusal) : undefined
+      return Boolean(text?.trim())
+    }))
+    if (replay !== null) {
+      // Some gateways stream visible text but send only function calls in the
+      // completed output. Keep the observed text without duplicating native items.
+      const firstCall = replay.findIndex(item => item.type === 'function_call')
+      if (!hasReplayText && content.length > 0) {
+        replay.splice(firstCall === -1 ? replay.length : firstCall, 0, { role: 'assistant', content })
+      }
+      input.push(...replay)
+      for (const item of replay) if (item.type === 'function_call' && typeof item.call_id === 'string') knownCalls.add(item.call_id)
+    } else if (content.length > 0) input.push({ role: message.role, content })
     if (message.role === 'assistant') {
       for (const block of message.content) {
         if (block.type !== 'tool-call') continue
         const callId = String(block.id)
+        if (knownCalls.has(callId)) continue
         knownCalls.add(callId)
         input.push({ type: 'function_call', call_id: callId, name: block.name, arguments: relayOneArgsText(block.arguments) })
       }

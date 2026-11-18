@@ -130,7 +130,9 @@ describe('RelayOne OpenAI request mapping', () => {
   it('builds standard Responses without Codex private fields', () => {
     const tools = [{ name: 'lookup', description: 'lookup', parameters: { type: 'object' } }] as NonNullable<GenerateOptions['tools']>
     const body = buildRelayOneResponsesRequest(options({ system: 'system', tools, reasoningEffort: effort('high') }), NO_RESOLVED_IMAGES, entry('gpt-6-astra'), defaultRelayOneSettings())
-    expect(body).toMatchObject({ model: 'gpt-6-astra', stream: true, instructions: 'system\n\n' + GPT_TOOL_GUIDANCE, store: false, reasoning: { effort: 'high' } })
+    expect(body).toMatchObject({ model: 'gpt-6-astra', stream: true, store: false, reasoning: { effort: 'high' } })
+    expect(body.instructions).toContain('system\n\n' + GPT_TOOL_GUIDANCE)
+    expect(body.instructions).toContain('send one short, user-visible assistant text update before the next batch')
     expect(JSON.stringify(body)).not.toMatch(/responses-lite|originator|x-codex|additional_tools|reasoning.encrypted_content/)
     expect(body.tools).toEqual([{ type: 'function', name: 'lookup', description: 'lookup', strict: false, parameters: { type: 'object' } }])
   })
@@ -153,7 +155,7 @@ describe('RelayOne OpenAI request mapping', () => {
     ])
     expect(first).not.toHaveProperty('instructions')
     expect(first.input).toEqual([
-      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'base\n\nboot instructions\n\nboot developer\n\n' + GPT_TOOL_GUIDANCE }] },
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: expect.stringContaining('base\n\nboot instructions\n\nboot developer\n\n' + GPT_TOOL_GUIDANCE) }] },
       { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
     ])
     expect(next.input).toEqual([...(first.input as unknown[]),
@@ -161,6 +163,7 @@ describe('RelayOne OpenAI request mapping', () => {
       { type: 'function_call_output', call_id: 'call_a', output: 'ok' },
     ])
     expect(next.instructions).toBe('current instruction')
+    expect(JSON.stringify(next.input)).toContain('send one short, user-visible assistant text update before the next batch')
   })
   it('replays function calls and keeps orphan outputs as text', () => {
     const assistant = { role: 'assistant', content: [{ type: 'tool-call', id: 'call_a', name: 'lookup', arguments: '{"x":1}' }] } as Message
@@ -189,7 +192,9 @@ describe('RelayOne OpenAI request mapping', () => {
       defaultRelayOneSettings(),
     )
     const messages = body.messages as Record<string, unknown>[]
-    expect(messages[0]).toEqual({ role: 'system', content: 'system\n\n' + GPT_TOOL_GUIDANCE })
+    expect(messages[0]).toEqual({ role: 'system', content: expect.stringContaining('system\n\n' + GPT_TOOL_GUIDANCE) })
+    expect(messages[0]?.content).toContain('Skip routine batches with nothing new to report')
+    expect(messages[0]?.content).toContain('do not repeat an update already delivered through progress_update')
     expect(GPT_TOOL_GUIDANCE).toContain('Verify proportionally')
     expect(GPT_TOOL_GUIDANCE).toContain('meaningful stage transitions')
     expect(GPT_TOOL_GUIDANCE).not.toContain('before each tool call')

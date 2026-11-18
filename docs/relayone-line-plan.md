@@ -53,6 +53,8 @@
 
 Responses 请求不携带 ChatGPT 的 originator、Responses Lite、turn-state 或加密思考私有字段。流解析复用本包已验证的 Responses parser，保留 function_call/output 回放、多工具、usage、incomplete 与无效 JSON 防护。
 
+RelayOne GPT 有工具时提示模型在一批相关工具得出新证据或完成阶段时输出一条可见正文再继续，不要求每个工具都播报，也不重复已通过进度工具发送的小卡。Responses 续轮若只有调用回放项，则补回已经显示的正文；完整回放中的原生正文不重复发送。是否产生小结仍取决于上游模型与网关返回内容。
+
 只有 HTTP 400/404/405/422 且正文明确表示端点/协议不支持时才回退；`model_not_found`、工具参数、上下文、鉴权和额度错误不回退。回退发生在任何模型流输出之前，按 Key + model + 主协议缓存；流开始后不重放。
 
 ### Claude Messages 思考参数
