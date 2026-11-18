@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.80.1 - 2026-11-18
+
+- **[relayone] 修复新版 Claude 的 adaptive thinking 请求**
+  - 为 Opus 5.5、Fable 5.x 等新版模型按型号发送自适应思考和有效档位，保留上游默认值。旧版保留固定预算，工具续轮保留签名思考块。
+- **[relayone / codex-chatgpt] 修复 GPT 缓存前缀**
+  - RelayOne 的 GPT 6.2 Responses 把稳定指令放入可缓存的 developer 输入。ChatGPT 的标准 Responses 和 Lite 按实际基础指令和工具声明恢复并发冷前缀协调。
+- **[relayone] 工具批次后的小结与回放**
+  - 明确要求模型在有新结论时先输出一条可见小结再继续。工具续轮会保留上游已发送的小结，避免丢失或重复。
+- **[claude] 修复图片被粘性淘汰误删（[#116](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/116)）**
+  - 粘性路径使用 Claude 的 8 MiB Base64 总预算。旧会话会重新评估误删的图片，超出单图上限的图片不会挤占总预算。
+
 ## 0.80.0 - 2026-11-18
 
 - **[codex-chatgpt / relayone] GPT 工程行为与阶段文本治理**
