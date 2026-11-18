@@ -112,6 +112,8 @@ describe('client registration', () => {
     ['gpt-6.1-terra', '6.1 Terra'],
     ['gpt-6-sol', '6 Sol'],
     ['gpt-6-luna', '6 Luna'],
+    ['gpt-6.2-astra', '6.2 Astra'],
+    ['gpt-6.2-sol', '6.2 Sol'],
   ] as const)('keeps %s context options rendered while typing a numeric draft', async (model, modelName) => {
     const harness = await mountCodexSection({ visibleModelIds: CODEX_MODEL_CATALOG.map((entry) => entry.id) })
     try {

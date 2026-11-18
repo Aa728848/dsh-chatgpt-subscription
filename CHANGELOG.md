@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **[codex-chatgpt] 随包兜底目录新增 GPT-6.2 Astra / Sol（`gpt-6.2-astra`、`gpt-6.2-sol`）**
+  - 官方 2026-11-17 发布，ChatGPT Work / Codex 同步上线。规格照抄官方 Codex 目录 `codex-rs/models-manager/models.json`（2026-11-18 抓取）：Astra 默认窗口 272K、Sol 500K，`max_context_window` 均 872K；文本+图片输入，输出预留 128K，默认思考档位 `low`，档位梯子 `low`/`medium`/`high`/`xhigh`/`max`（历史 `none`/`minimal` 折算 `low`），verbosity 默认 `low`，Responses Lite。
+  - 两模型默认可见；实时 `/backend-api/codex/models` 发现与快照链路不变，适配器目录、偏好上下文覆盖槽与设置卡均按表动态派生。官方目录另列 `ultra`（自动任务编排）档，本线路沿用 GPT-6 家族策略仅暴露 Responses 档位，未改共享档位词表。
+  - **验证**：`npm run typecheck` 0 错误；全量 Vitest **387 文件通过 / 3 跳过，6,924 例通过 / 10 跳过，0 失败**。
+
+- **[qianwen-token-plan] 整理 Key 行间距并移除冗余的本地统计块**
+  - 精简设置卡样式与三语言文案，删除重复的本地统计展示，并同步更新离线回归（24e4b11）。
+
 ## 0.77.0 - 2026-11-17
 
 - **[qianwen-token-plan] 新增第 14 条线路：Qwen4 Token Plan 单 Key 接入、原生显式缓存与密文思考回放**

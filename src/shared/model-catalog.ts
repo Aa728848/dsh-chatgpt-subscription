@@ -213,6 +213,41 @@ export const CODEX_MODEL_CATALOG = [
     reasoningProfile: 'standard',
     supportsReasoningSummary: false,
   },
+  // GPT-6.2, released 2026-11-17 in ChatGPT Work and Codex. Every wire fact
+  // below is the official Codex catalog's own declaration
+  // (codex-rs/models-manager/models.json, fetched 2026-11-18): Astra 272K /
+  // Sol 500K default window, both max_context_window 872K,
+  // default_reasoning_level "low", use_responses_lite true, support_verbosity
+  // true / default_verbosity "low", text+image input. The catalog also lists an
+  // `ultra` level (automatic task delegation); like the rest of the GPT-6
+  // family this line exposes only the Responses efforts, not that orchestration
+  // tier (see GPT_6_REASONING_EFFORTS).
+  {
+    id: 'gpt-6.2-astra',
+    name: '6.2 Astra',
+    contextWindow: 272_000,
+    inputModalities: ['text', 'image'],
+    defaultReasoningEffort: 'low',
+    reasoningProfile: 'gpt-6',
+    supportsReasoningSummary: true,
+    maxTokens: GPT_6_MAX_TOKENS,
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
+  },
+  {
+    id: 'gpt-6.2-sol',
+    name: '6.2 Sol',
+    contextWindow: 500_000,
+    inputModalities: ['text', 'image'],
+    defaultReasoningEffort: 'low',
+    reasoningProfile: 'gpt-6',
+    supportsReasoningSummary: true,
+    maxTokens: GPT_6_MAX_TOKENS,
+    supportsOutputVerbosity: true,
+    defaultOutputVerbosity: 'low',
+    useResponsesLite: true,
+  },
 ] as const satisfies readonly CodexModelCatalogEntry[]
 
 export type CodexModelId = typeof CODEX_MODEL_CATALOG[number]['id']
@@ -226,6 +261,8 @@ export const DEFAULT_VISIBLE_CODEX_MODEL_IDS = [
   'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
+  'gpt-6.2-astra',
+  'gpt-6.2-sol',
 ] as const satisfies readonly CodexModelId[]
 
 export const DEFAULT_CODEX_MODEL = CODEX_MODEL_CATALOG[0]

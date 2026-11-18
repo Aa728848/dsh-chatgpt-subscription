@@ -94,6 +94,8 @@ describe('official Codex request defaults', () => {
       ['gpt-6.1-terra', 500_000, 'low'],
       ['gpt-6-sol', 272_000, 'medium'],
       ['gpt-6-luna', 272_000, 'medium'],
+      ['gpt-6.2-astra', 272_000, 'low'],
+      ['gpt-6.2-sol', 500_000, 'low'],
       ['gpt-5.6-sol', 272_000, 'low'],
     ] as const) {
       const entry = CODEX_MODEL_CATALOG.find(candidate => candidate.id === model)
@@ -107,7 +109,7 @@ describe('official Codex request defaults', () => {
   it('marks the Lite models the official catalog marks, and only those', () => {
     // Every model the official 0.166.0 catalog lists but 5.5 speaks the Lite
     // protocol.
-    for (const model of ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    for (const model of ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6.2-astra', 'gpt-6.2-sol']) {
       expect(codexModelUsesResponsesLite(model), model).toBe(true)
     }
     expect(codexModelUsesResponsesLite('gpt-5.5')).toBe(false)

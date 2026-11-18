@@ -100,7 +100,7 @@
   - 单次请求图片内联负载默认上限 **2 MiB**（可通过 `DSH_CODEX_MAX_IMAGE_BYTES` 覆盖），超限按最旧优先替换为可见文字占位；
   - 生图工具支持可选尺寸、质量、透明背景、GIF 帧参数及最多 5 张本地 PNG/JPEG/WebP 参考图；新参数仅在显式提供时发送，上游拒绝时明确报错，不静默降级。
 - **随包兜底模型表**：
-  - GPT-6 家族：`gpt-6.1-sol`、`gpt-6.1-terra`（默认窗口 500K）、`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`（默认窗口 272K，最高可覆盖至 **872K**；档位 `low`/`medium`/`high`/`xhigh`/`max`，历史 `none`/`minimal` 自动折算为 `low`）；
+  - GPT-6 家族：`gpt-6.2-astra`（默认窗口 272K）、`gpt-6.2-sol`（默认窗口 500K）、`gpt-6.1-sol`、`gpt-6.1-terra`（默认窗口 500K）、`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`（默认窗口 272K，最高可覆盖至 **872K**；档位 `low`/`medium`/`high`/`xhigh`/`max`，历史 `none`/`minimal` 自动折算为 `low`）；
   - GPT-5.6 及更早家族：`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex-spark`（最高可覆盖至 **1M**）；
   - 实际可选模型以账号实时 `/backend-api/codex/models` 返回清单为准，本地持久化目录快照加速冷启动。
 

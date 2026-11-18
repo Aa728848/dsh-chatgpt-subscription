@@ -19,6 +19,8 @@ describe('CodexChatGptAdapter', () => {
       { id: 'gpt-5.4', name: '5.4', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.4-mini', name: '5.4 Mini', inputModalities: ['text', 'image'] },
       { id: 'gpt-5.3-codex-spark', name: '5.3 Codex Spark', inputModalities: ['text'] },
+      { id: 'gpt-6.2-astra', name: '6.2 Astra', inputModalities: ['text', 'image'] },
+      { id: 'gpt-6.2-sol', name: '6.2 Sol', inputModalities: ['text', 'image'] },
     ])
     // The windows and the default reasoning levels are the official 0.166.0
     // catalog's, not this line's guesses: 5.6 Sol starts at `low` while its
@@ -105,14 +107,16 @@ describe('CodexChatGptAdapter', () => {
       status: () => preferences,
     } as never)
     // The GPT-6 family windows and default levels come from the official
-    // 0.166.0 catalog: 6.1 Terra carries 500K while Astra and the 6.x Sol/Luna
-    // models carry 272K, and the default level is `low` for Astra and 6.1
-    // Terra but `medium` for 6 Sol and 6 Luna.
+    // catalog: 6.1 Terra and 6.2 Sol carry 500K while Astra and the 6.x Sol/Luna
+    // models carry 272K, and the default level is `low` for Astra, 6.1 Terra
+    // and both 6.2 models but `medium` for 6 Sol and 6 Luna.
     for (const [model, name, contextWindow, defaultEffort] of [
       ['gpt-6-astra', '6 Astra', 272_000, 'low'],
       ['gpt-6.1-terra', '6.1 Terra', 500_000, 'low'],
       ['gpt-6-sol', '6 Sol', 272_000, 'medium'],
       ['gpt-6-luna', '6 Luna', 272_000, 'medium'],
+      ['gpt-6.2-astra', '6.2 Astra', 272_000, 'low'],
+      ['gpt-6.2-sol', '6.2 Sol', 500_000, 'low'],
     ] as const) {
       expect(await adapter.listModels()).toContainEqual({
         provider: PROVIDER_ID, id: model, name, inputModalities: ['text', 'image'],
