@@ -19,8 +19,8 @@
  *
  * WHAT CHANGED WHEN THE TABLE OUTGREW THE SNAPSHOT.
  *
- * The shipped table may carry rows the snapshot predates — today three,
- * `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`. Making the lock
+ * The shipped table may carry rows the snapshot predates — today four,
+ * `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`. Making the lock
  * "at least these rows" would have been the cheap fix and it would have been a
  * lie: a table
  * that had silently dropped a transcribed row, or replaced one with an invented
@@ -154,6 +154,7 @@ const REFERENCE_ENTRY_COUNT = 17
  * The deliberate exceptions are explained where they are declared, below.
  */
 const LOCALLY_CURATED_MODEL_IDS: readonly string[] = [
+  'claude-fable-5-2',
   'claude-haiku-5-5',
   'claude-opus-5-5',
 ]
@@ -634,6 +635,27 @@ describe('claude model catalog / locally curated rows', () => {
   // and they are written from the vendor's published documentation for the
   // model. Anything asserted here that is not in that documentation is marked as
   // an inference in the comment above it.
+
+  it('carries Claude Fable 5.2 with the official catalog 5102 capabilities', () => {
+    const row = resolveClaudeModel('claude-fable-5-2')
+    expect(row.name).toBe('Claude Fable 5.2')
+    expect(row.contextWindow).toBe(1_000_000)
+    expect(row.maxTokens).toBe(128_000)
+    expect(row.reasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(row.canDisableThinking).toBe(false)
+    // The official default is MEDIUM: adaptive preserves it, whereas mid-convo
+    // would force high when the caller names no effort. per_turn_effort still
+    // requires the preserved-thinking prefix binding on the adaptive form.
+    expect(row.thinkingMode).toBe('adaptive')
+    expect(row.bindsThinkingToPrefix).toBe(true)
+    expect(CLAUDE_MODEL_IDS).toContain('claude-fable-5-2')
+    expect(FALLBACK_MODELS).toContain(row)
+    expect(defaultContextWindowFor('claude-fable-5-2')).toBe(1_000_000)
+    expect(maxOutputTokensFor('claude-fable-5-2')).toBe(128_000)
+    expect(claudeReasoningEfforts('claude-fable-5-2')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(claudeModelCanDisableThinking('claude-fable-5-2')).toBe(false)
+    expect(claudeSupportsMidConversationSystemMessages('claude-fable-5-2')).toBe(true)
+  })
 
   it('carries Claude Opus 5.5 as a curated row with the documented values', () => {
     const row = CLAUDE_MODELS.find((model) => model.id === 'claude-opus-5-5')
@@ -1125,10 +1147,11 @@ describe('claude model catalog / lookups', () => {
 describe('claude model catalog / mid-conversation system messages', () => {
   it('names exactly the models the vendor documents as accepting one', () => {
     // TRANSCRIBED from the vendor's own "Mid-conversation system messages and
-    // tool changes" page, whose supported-model list names these ten models.
+    // tool changes" page, whose supported-model list names these eleven models.
     expect([...CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS].sort()).toEqual([
       'claude-fable-5',
       'claude-fable-5-1',
+      'claude-fable-5-2',
       'claude-haiku-5-5',
       'claude-mythos-5',
       'claude-mythos-5-1',

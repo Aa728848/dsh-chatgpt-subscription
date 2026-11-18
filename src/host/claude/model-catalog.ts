@@ -208,7 +208,12 @@
  *    'mid-convo' would force `high` — and it runs the preserved-thinking prefix
  *    check, so `bindsThinkingToPrefix` is set even though the form is adaptive.
  *
- * All three must be changed together with the mirror list in the test. An
+ * 4. `claude-fable-5-2` comes from the official model catalog 5102: a 1M
+ *    input window, 128K output, all five efforts, a MEDIUM default, and
+ *    `rejects_disabled_thinking` plus `per_turn_effort`. It therefore stays
+ *    adaptive (mid-convo would force HIGH) and carries the prefix binding.
+ *
+ * All four must be changed together with the mirror list in the test. An
  * invented row that mimics the format of a checked one is worse than a missing
  * row: it is unverifiable and it looks verified. So each row is marked at the
  * row itself, the test asserts the id is on the curated list, and the test
@@ -338,8 +343,8 @@ export interface ClaudeModelEntry {
 }
 
 /**
- * Seventeen rows: the snapshot's own 15, in the snapshot's own declaration order,
- * followed by the two rows the snapshot still predates (see LOCAL ADDITIONS above).
+ * Eighteen rows: the snapshot's own seventeen, plus Fable 5.2 from official
+ * catalog 5102 (see LOCAL ADDITIONS above).
  *
  * The order matters and is not cosmetic. The test asserts the snapshot's ids
  * appear in the table as a SUBSEQUENCE, so a curated row may be appended or
@@ -388,6 +393,20 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     thinkingMode: 'mid-convo',
     reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     canDisableThinking: false,
+  },
+  // Official model catalog 5102. The default effort is MEDIUM, so adaptive
+  // preserves the vendor default; per_turn_effort still gets prefix binding.
+  {
+    id: 'claude-fable-5-2',
+    name: 'Claude Fable 5.2',
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    supportsImage: true,
+    supportsTemperature: false,
+    thinkingMode: 'adaptive',
+    reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    canDisableThinking: false,
+    bindsThinkingToPrefix: true,
   },
   {
     id: 'claude-haiku-4-5',
@@ -802,8 +821,8 @@ export function resolveClaudeModel(modelId: string, catalog: readonly ClaudeMode
  * the conversation where the instruction starts to apply.
  *
  * TRANSCRIBED from the vendor's own "Mid-conversation system messages and tool
- * changes" page, whose supported-model list names exactly these ten models:
- * Claude Fable 5.1, Claude Mythos 5.1, Claude Fable 5, Claude Mythos 5, Claude
+ * changes" page, whose supported-model list names exactly these eleven models:
+ * Claude Fable 5.2, Claude Fable 5.1, Claude Mythos 5.1, Claude Fable 5, Claude Mythos 5, Claude
  * Mythos Preview, Claude Opus 5.5, Claude Opus 4.8, Claude Opus 5, Claude Sonnet
  * 5.5 and Claude Haiku 5.5. No beta header is required for the feature.
  *
@@ -820,6 +839,7 @@ export function resolveClaudeModel(modelId: string, catalog: readonly ClaudeMode
  * as before.
  */
 export const CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS: readonly string[] = Object.freeze([
+  'claude-fable-5-2',
   'claude-fable-5-1',
   'claude-mythos-5-1',
   'claude-fable-5',

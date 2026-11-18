@@ -46,6 +46,12 @@ describe('parseAntigravityAcpSettings', () => {
     expect(parseAntigravityAcpSettings({}).nativeToolPolicy).toBe('allow')
   })
 
+  it('uses the default for a missing enabled field but keeps a corrupt document off', () => {
+    expect(parseAntigravityAcpSettings({}).enabled).toBe(defaultAntigravityAcpSettings().enabled)
+    expect(parseAntigravityAcpSettings({ enabled: false }).enabled).toBe(false)
+    expect(parseAntigravityAcpSettings({ enabled: 'yes' }).enabled).toBe(false)
+  })
+
   it('falls back to the defaults for a payload that is not an object', () => {
     expect(parseAntigravityAcpSettings(null)).toEqual(defaultAntigravityAcpSettings())
     expect(parseAntigravityAcpSettings([])).toEqual(defaultAntigravityAcpSettings())

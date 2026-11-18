@@ -475,10 +475,10 @@ export interface CatalogLoadOptions {
  * because the harness resolves EVERY model of EVERY provider when it builds the
  * picker — without both, one picker build is one network round trip per model.
  *
- * A failure is cached too, deliberately. The fallback table is the full shipped
- * snapshot, so serving it for the cache window costs the user nothing but a
- * slightly wider picker, while NOT caching the failure would put a dead
- * endpoint behind fourteen sequential 20-second timeouts on every picker build.
+ * A failure is cached too, deliberately. The last successful live listing stays
+ * in place when one exists; only a first failure uses the shipped table. NOT
+ * caching the failure would put a dead endpoint behind fourteen sequential
+ * 20-second timeouts on every picker build.
  * {@link clearCachedCatalog} is the escape hatch: the sign-in path calls it so a
  * user who just authenticated does not sit behind a failure recorded before
  * they did.
@@ -522,6 +522,9 @@ async function performCatalogLoad(
   options: CatalogLoadOptions,
 ): Promise<readonly ClaudeModelEntry[]> {
   const key = accountKeyFor(credentials)
+  // Capture before awaiting: another account may replace the singleton while
+  // this request is in flight, but it must not erase THIS account's last success.
+  const previous = catalogCache
   const fetchFn = options.fetchFn ?? fetch
   let models: readonly ClaudeModelEntry[]
   let live = false
@@ -558,7 +561,9 @@ async function performCatalogLoad(
     models = merged
     live = true
   } catch {
-    models = FALLBACK_MODELS
+    const lastLive = previous?.key === key && previous.live ? previous.models : undefined
+    models = lastLive ?? FALLBACK_MODELS
+    live = lastLive !== undefined
   }
   catalogCache = { at: now(), models, key, live }
   return models

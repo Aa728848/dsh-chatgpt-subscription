@@ -7,11 +7,11 @@
  * an error anywhere - it just produces models with an empty thinking ladder,
  * which is exactly the failure this test pins.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readCatalogFrom } from '../src/host/antigravity-acp/catalog.ts'
+import { AcpCatalog, readCatalogFrom } from '../src/host/antigravity-acp/catalog.ts'
 import { AcpClient } from '../src/host/antigravity-acp/acp-client.ts'
 
 const SERVER = `
@@ -69,5 +69,43 @@ describe('readCatalogFrom', () => {
       await client.dispose()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('never starts interactive authentication from a passive catalogue read', async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === 'initialize') return { protocolVersion: 1, authMethods: [{ id: 'google' }] }
+      if (method === 'session/new') throw new Error('authentication required')
+      return {}
+    })
+    const client = { request } as unknown as AcpClient
+
+    await expect(readCatalogFrom(client)).rejects.toThrow('authentication required')
+    expect(request.mock.calls.map(([method]) => method)).toEqual(['initialize', 'session/new'])
+  })
+
+  it('negative-caches a failed read while allowing an explicit refresh', async () => {
+    let now = 1_000
+    const resolveLaunch = vi.fn(async () => ({ command: 'agy', args: [], version: '1.5.0' }))
+    const client = {
+      request: vi.fn(async () => { throw new Error('authentication required') }),
+      dispose: vi.fn(async () => undefined),
+    } as unknown as AcpClient
+    const catalog = new AcpCatalog(
+      resolveLaunch,
+      () => client,
+      `offline-negative-cache-${Date.now()}-${Math.random()}`,
+      () => now,
+    )
+
+    await expect(catalog.read()).resolves.toBeUndefined()
+    now += 1_000
+    await expect(catalog.read()).resolves.toBeUndefined()
+    expect(resolveLaunch).toHaveBeenCalledTimes(1)
+
+    now += 300_001
+    await catalog.read()
+    expect(resolveLaunch).toHaveBeenCalledTimes(2)
+    await catalog.read({ force: true })
+    expect(resolveLaunch).toHaveBeenCalledTimes(3)
   })
 })

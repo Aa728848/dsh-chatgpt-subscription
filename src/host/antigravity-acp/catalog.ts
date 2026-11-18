@@ -22,7 +22,7 @@
 
 import type { AcpClient } from './acp-client.ts'
 import { AcpClient as Client } from './acp-client.ts'
-import { collapseModels, preferAuthMethod, type AcpAvailableModel, type AcpModelOption } from './types.ts'
+import { collapseModels, type AcpAvailableModel, type AcpModelOption } from './types.ts'
 import {
   catalogSnapshotName,
   readCatalogSnapshot,
@@ -44,6 +44,9 @@ import { CATALOG_SNAPSHOT_NAME } from './types.ts'
  */
 export const CATALOG_TTL_MS = 15 * 60_000
 
+/** A failed cold read is retried at most once per window unless explicitly forced. */
+export const CATALOG_FAILURE_TTL_MS = 5 * 60_000
+
 /** Budget for one catalogue read; a hung agent must not hold the picker. */
 export const CATALOG_TIMEOUT_MS = 20_000
 
@@ -61,6 +64,7 @@ export interface AcpCatalogRead {
 /** The reader, with the cache it maintains. */
 export class AcpCatalog {
   private cached: AcpCatalogRead | undefined
+  private failedAt: number | undefined
   private inflight: Promise<AcpCatalogRead | undefined> | undefined
   private readonly snapshotName: string
 
@@ -96,12 +100,16 @@ export class AcpCatalog {
    */
   async read(options: { force?: boolean; signal?: AbortSignal } = {}): Promise<AcpCatalogRead | undefined> {
     const current = this.cached ?? await this.rehydrate()
-    if (!options.force && current !== undefined && this.now() - current.fetchedAt < CATALOG_TTL_MS) {
-      return current
+    if (!options.force) {
+      if (current !== undefined && this.now() - current.fetchedAt < CATALOG_TTL_MS) return current
+      if (this.failedAt !== undefined && this.now() - this.failedAt < CATALOG_FAILURE_TTL_MS) return current
     }
     if (this.inflight !== undefined) return this.inflight
     this.inflight = this.refresh(options.signal)
-      .catch(() => current)
+      .catch(() => {
+        this.failedAt = this.now()
+        return current
+      })
       .finally(() => {
         this.inflight = undefined
       })
@@ -111,6 +119,7 @@ export class AcpCatalog {
   /** Discard the in-memory listing; the next read rehydrates from disk. */
   invalidate(): void {
     this.cached = undefined
+    this.failedAt = undefined
   }
 
   private async refresh(signal?: AbortSignal): Promise<AcpCatalogRead | undefined> {
@@ -125,6 +134,7 @@ export class AcpCatalog {
         fetchedAt: this.now(),
       }
       this.cached = read
+      this.failedAt = undefined
       await writeCatalogSnapshot(this.snapshotName, read.models, read.fetchedAt).catch(() => undefined)
       return read
     } finally {
@@ -149,30 +159,15 @@ export async function readCatalogFrom(
   client: AcpClient,
   signal?: AbortSignal,
 ): Promise<{ models: AntigravityAcpModelDto[]; tier?: { id: string; name: string } }> {
-  const init = asRecord(await client.request('initialize', {
+  await client.request('initialize', {
     protocolVersion: 1,
     clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
     clientInfo: { name: 'dsh-chatgpt-subscription', version: '1.0.0' },
-  }, signal))
-  const authMethods = Array.isArray(init?.authMethods)
-    ? init.authMethods.map((entry) => String((entry as Record<string, unknown>).id ?? '')).filter((id) => id !== '')
-    : []
-  const create = async (): Promise<Record<string, unknown>> => {
-    const value = asRecord(await client.request('session/new', { cwd: process.cwd(), mcpServers: [] }, signal))
-    if (value === undefined) throw new Error('Antigravity ACP did not return a session.')
-    return value
-  }
-  let session: Record<string, unknown>
-  try {
-    session = await create()
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (!/authentication required/i.test(message) || authMethods.length === 0) throw error
-    // Same preference the main-model session uses; a hard-coded method was a
-    // method the server might not have offered at all.
-    await client.request('authenticate', { methodId: preferAuthMethod(authMethods) }, signal)
-    session = await create()
-  }
+  }, signal)
+  // This is a passive read. An authentication wall is a failed read, never a
+  // reason to start OAuth or open the user's browser; explicit login owns that.
+  const session = asRecord(await client.request('session/new', { cwd: process.cwd(), mcpServers: [] }, signal))
+  if (session === undefined) throw new Error('Antigravity ACP did not return a session.')
   // The server nests the tier list under `models.availableModels`; an older
   // shape published it at the top level. Both are read, because the cost of
   // reading one wrong is a silently empty thinking ladder on every model.

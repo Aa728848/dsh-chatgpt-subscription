@@ -451,6 +451,29 @@ describe('model listing', () => {
     expect(fetchStub.mock).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps the last successful live listing when the next refresh fails', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+    let fail = false
+    const fetchStub = recordingFetch(() => fail
+      ? new Response('nope', { status: 503 })
+      : jsonResponse({ data: [
+        { id: 'claude-fable-5-2', context_window: 1_000_000 },
+        { id: 'claude-opus-5-5', context_window: 900_000 },
+      ] }))
+
+    const live = await loadCatalog(CREDENTIALS, { fetchFn: fetchStub.fn })
+    expect(live.map((model) => model.id)).toEqual(['claude-fable-5-2', 'claude-opus-5-5'])
+    fail = true
+    vi.setSystemTime(new Date(Date.now() + CATALOG_CACHE_TTL_MS + 1))
+    const degraded = await loadCatalog(CREDENTIALS, { fetchFn: fetchStub.fn })
+
+    expect(degraded).toBe(live)
+    expect(getCachedCatalog()).toBe(live)
+    expect(isCatalogFallback()).toBe(false)
+    expect(degraded.map((model) => model.id)).toContain('claude-fable-5-2')
+  })
+
   it('collapses concurrent loads into one request', async () => {
     const fetchStub = recordingFetch(async () => {
       await new Promise((resolve) => setTimeout(resolve, 1))

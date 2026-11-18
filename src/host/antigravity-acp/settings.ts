@@ -110,9 +110,11 @@ export function parseAntigravityAcpSettings(value: unknown): AntigravityAcpSetti
       ? record.enabledModelIds.filter((id): id is string => typeof id === 'string')
       : defaults.enabledModelIds
   return {
-    // A flag that is present but unreadable is treated as OFF, never as the
-    // default: a corrupt document must not silently switch a line on.
-    enabled: typeof record.enabled === 'boolean' ? record.enabled : false,
+    // An absent field has the same meaning as a missing document. A present
+    // but unreadable flag stays OFF: corruption must not switch a line on.
+    enabled: typeof record.enabled === 'boolean'
+      ? record.enabled
+      : record.enabled === undefined ? defaults.enabled : false,
     enabledModelIds,
     defaultReasoningEffort: typeof record.defaultReasoningEffort === 'string'
       ? record.defaultReasoningEffort

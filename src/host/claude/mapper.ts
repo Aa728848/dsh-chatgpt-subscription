@@ -1526,7 +1526,14 @@ function markClaudeCacheBreakpoints(body: Record<string, unknown>, ttl: ClaudeCa
 
   const tools = body.tools
   if (Array.isArray(tools) && tools.length > 0) {
-    const last = tools[tools.length - 1] as AnthropicBlock | undefined
+    // A deferred declaration stays out of the cached prefix, so a marker on it
+    // is a 400 upstream and would not cover the declarations before it. Mark
+    // the LAST non-deferred declaration instead; if every declaration is
+    // deferred there is no tool breakpoint to place (the system and message
+    // breakpoints stay untouched).
+    const last = [...tools].reverse().find(
+      (entry) => isRecord(entry) && entry['defer_loading'] !== true,
+    ) as AnthropicBlock | undefined
     if (last !== undefined) {
       last.cache_control = { ...marker }
       marked += 1

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { GenerateOptions } from '../src/host/common/llm-compat.ts'
-import { buildClaudeRequestBody, claudeBodyHasToolChanges } from '../src/host/claude/mapper.ts'
+import { buildClaudeRequestBody, claudeBodyHasToolChanges, countClaudeCacheBreakpoints } from '../src/host/claude/mapper.ts'
 import { claudeBetas } from '../src/host/claude/client.ts'
 import { INLINE_TOOLS_BETA } from '../src/host/claude/types.ts'
 import { toolUpdateMode } from '../src/host/claude/adapter.ts'
@@ -66,8 +66,11 @@ describe('claude tool changes ride the history, not the head', () => {
     expect(claudeBodyHasToolChanges(body)).toBe(true)
 
     // The declaration itself stays in the request and stays out of the prefix.
-    const added = wireTools(body).find((entry) => entry['name'] === 'added')
+    const tools = wireTools(body)
+    const added = tools.find((entry) => entry['name'] === 'added')
     expect(added?.['defer_loading']).toBe(true)
+    expect(added?.['cache_control']).toBeUndefined()
+    expect(tools.find((entry) => entry['name'] === 'base')?.['cache_control']).toEqual({ type: 'ephemeral', ttl: '5m' })
   })
 
   it('keeps a withdrawn tool declared and states the removal', () => {
@@ -115,7 +118,25 @@ describe('claude tool changes ride the history, not the head', () => {
     })
 
     // The vendor refuses a tool change on a request with no active declaration.
-    expect(wireTools(body)[0]?.['name']).toBe('tool_update_placeholder')
-    expect(wireTools(body)).toHaveLength(2)
+    const tools = wireTools(body)
+    expect(tools[0]?.['name']).toBe('tool_update_placeholder')
+    expect(tools).toHaveLength(2)
+    expect(tools[0]?.['cache_control']).toEqual({ type: 'ephemeral', ttl: '5m' })
+    expect(tools[1]?.['defer_loading']).toBe(true)
+    expect(tools[1]?.['cache_control']).toBeUndefined()
+  })
+
+  it('omits the tool breakpoint when every declaration is deferred', () => {
+    const body = bodyFor({
+      messages: [user('first')],
+      tools: [tool('one', { deferLoading: true }), tool('two', { deferLoading: true })],
+    })
+
+    const tools = wireTools(body)
+    expect(tools).toHaveLength(2)
+    expect(tools.every((entry) => entry['defer_loading'] === true)).toBe(true)
+    expect(tools.every((entry) => entry['cache_control'] === undefined)).toBe(true)
+    // The system and last-user breakpoints are independent of the tool list.
+    expect(countClaudeCacheBreakpoints(body)).toBe(2)
   })
 })
