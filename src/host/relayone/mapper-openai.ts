@@ -20,6 +20,16 @@ import {
   relayOneValidArguments,
 } from './mapper-shared.ts'
 
+// Keep this user-facing behaviour aligned with responses-mapper.ts: GPT tool
+// turns should expose brief progress before acting, not stay silent until the end.
+const GPT_PROGRESS_RULE = 'Progress and tool execution rule: when executing multi-step tasks or invoking tools, output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call. Keep progress text brief, professional, and factual. Only present the comprehensive final answer and summary in the final turn after all tool operations are completed.'
+
+function relayOneGptSystemText(options: GenerateOptions, entry: RelayOneModelEntry): string {
+  const system = relayOneSystemText(options)
+  if (!/^gpt-/i.test(entry.id) || !options.tools?.length) return system
+  return system === '' ? GPT_PROGRESS_RULE : system + '\n\n' + GPT_PROGRESS_RULE
+}
+
 function responseMessageContent(
   message: Message,
   images: ResolvedRequestImages,
@@ -46,7 +56,7 @@ export function buildRelayOneResponsesRequest(
 ): Record<string, unknown> {
   const input: Record<string, unknown>[] = []
   const knownCalls = new Set<string>()
-  const instructions = relayOneSystemText(options)
+  const instructions = relayOneGptSystemText(options, entry)
   for (const message of options.messages) {
     if (message.role === 'system' || message.role === 'developer') continue
     const toolResult = relayOneToolResult(message)
@@ -118,7 +128,7 @@ export function buildRelayOneChatRequest(
   settings: RelayOneSettings,
 ): Record<string, unknown> {
   const messages: Record<string, unknown>[] = []
-  const system = relayOneSystemText(options)
+  const system = relayOneGptSystemText(options, entry)
   if (system !== '') messages.push({ role: 'system', content: system })
   const knownCalls = new Set<string>()
   for (const message of options.messages) {
