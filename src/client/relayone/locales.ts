@@ -1,0 +1,41 @@
+export const NS_RELAYONE = 'dsh-relayone'
+export const zh = {
+  title: 'RelayOne', pageDesc: '一个 API Key，动态接入当前分组可用的对话与媒体模型。',
+  enabled: '启用 RelayOne', keySection: 'API Key', keyPlaceholder: 'sk-…', saveKey: '保存密钥', savingKey: '保存中…', removeKey: '移除密钥', removingKey: '移除中…',
+  keyConfigured: '密钥已安全保存；不会显示在页面或日志中。', keyMissing: '尚未配置 API Key。请在 RelayOne 控制台创建令牌后粘贴到这里。',
+  storagePath: '加密存储', testConnection: '测试连接', testingConnection: '测试中…', refreshCatalog: '刷新目录', refreshingCatalog: '刷新中…',
+  connectionOk: '连接正常', connectionFailed: '连接失败', latency: '{ms} ms', modelCount: '{count} 个对话模型',
+  routeOwned: 'provider 路由由本插件接管。', routeConflict: 'provider 路由冲突：{detail}',
+  modelsSection: '对话模型', modelsHint: '目录来自当前 Key 的 /v1/models；分组与协议来自实时元数据。新 Key 不会继承旧 Key 的目录。',
+  selectionHint: '未逐项选择时自动启用当前全部分组模型；清空列表则表示全部关闭。', selectAll: '全选', clearAll: '清空',
+  catalogEmpty: '配置 Key 后自动发现模型。', catalogLoading: '正在读取当前分组…', catalogError: '目录同步失败', catalogStale: '显示上次成功目录；后台刷新失败。',
+  contextSection: '上下文窗口', contextHint: '上游未公布精确窗口时使用保守预算；可在这里按实际模型调整。', tokens: 'tokens', save: '保存', saving: '保存中…', reset: '重置', resetAll: '全部重置', contextEmpty: '没有已启用的对话模型。',
+  reasoningSection: '推理', defaultEffort: '默认推理等级', effortHint: '仅向声明支持推理的模型发送；单次会话的选择优先。', effortDefault: '跟随上游', effortNone: '关闭', effortMinimal: '最低', effortLow: '低', effortMedium: '中', effortHigh: '高', effortXhigh: '更高', effortMax: '最高',
+  mediaSection: '媒体生成', mediaHint: '生图与视频使用同一个 Key，并受插件“媒体工具”总开关控制；修改开关后重载插件生效。',
+  imageModel: '默认生图模型', videoModel: '默认视频模型', mediaAuto: '自动选择第一个可用模型', mediaEmpty: '当前 Key 没有可用媒体模型。',
+  moreNotes: '协议与接入说明', protocolNote: 'OpenAI 优先 Responses，Claude 优先 Anthropic Messages，其余模型使用 Chat Completions。只有上游明确拒绝协议时才回退。',
+  mediaNote: '支持 URL/base64 生图、参考图编辑及异步任务；视频轮询可取消，失败不会重复提交任务。', docs: 'RelayOne 文档', dashboard: '打开控制台',
+  composerLabel: '额度', quotaLabel: '当前 Key 剩余额度', quotaAvailable: '剩余', quotaUsed: '已用', quotaGranted: '授予', quotaUnlimited: '当前 Key 为无限额度', quotaStale: '额度数据可能已过期', composerTooltip: '{count} 个当前可用对话模型{groups}', composerGroups: ' · 分组：', unknownGroup: '自动分组',
+  invalidCapacity: '上下文窗口必须是正整数。', errorGeneric: 'RelayOne 操作失败。',
+} as const
+export type RelayOneLocaleKey = keyof typeof zh
+export const en: Record<RelayOneLocaleKey, string> = {
+  title: 'RelayOne', pageDesc: 'One API key for the chat and media models visible to its current upstream group.',
+  enabled: 'Enable RelayOne', keySection: 'API Key', keyPlaceholder: 'sk-…', saveKey: 'Save key', savingKey: 'Saving…', removeKey: 'Remove key', removingKey: 'Removing…',
+  keyConfigured: 'The key is stored securely and never rendered or logged.', keyMissing: 'No API key is configured. Create a token in the RelayOne console and paste it here.',
+  storagePath: 'Encrypted storage', testConnection: 'Test connection', testingConnection: 'Testing…', refreshCatalog: 'Refresh catalog', refreshingCatalog: 'Refreshing…',
+  connectionOk: 'Connected', connectionFailed: 'Connection failed', latency: '{ms} ms', modelCount: '{count} chat models',
+  routeOwned: 'This plugin owns the provider route.', routeConflict: 'Provider route conflict: {detail}',
+  modelsSection: 'Chat models', modelsHint: 'Models come from this key\'s /v1/models; live metadata supplies groups and protocols. A new key never inherits the old key\'s catalog.',
+  selectionHint: 'With no explicit selection, every currently accessible chat model is enabled. An empty list explicitly disables all.', selectAll: 'Select all', clearAll: 'Clear all',
+  catalogEmpty: 'Configure a key to discover its models.', catalogLoading: 'Reading the current groups…', catalogError: 'Catalog sync failed', catalogStale: 'Showing the last good catalog; background refresh failed.',
+  contextSection: 'Context windows', contextHint: 'A conservative local budget is used when upstream publishes no exact window; adjust it for the actual model here.', tokens: 'tokens', save: 'Save', saving: 'Saving…', reset: 'Reset', resetAll: 'Reset all', contextEmpty: 'No chat models are enabled.',
+  reasoningSection: 'Reasoning', defaultEffort: 'Default reasoning effort', effortHint: 'Sent only to models that declare reasoning support; a per-session choice wins.', effortDefault: 'Upstream default', effortNone: 'Off', effortMinimal: 'Minimal', effortLow: 'Low', effortMedium: 'Medium', effortHigh: 'High', effortXhigh: 'Extra high', effortMax: 'Maximum',
+  mediaSection: 'Media generation', mediaHint: 'Images and video use the same key and obey the plugin\'s Media tools switch; reload the plugin after changing that switch.',
+  imageModel: 'Default image model', videoModel: 'Default video model', mediaAuto: 'First available model', mediaEmpty: 'This key has no accessible media models.',
+  moreNotes: 'Protocol and integration notes', protocolNote: 'OpenAI prefers Responses, Claude prefers Anthropic Messages, and other models use Chat Completions. Fallback occurs only after an explicit protocol refusal.',
+  mediaNote: 'URL/base64 images, reference-image edits and asynchronous tasks are supported. Video polling is cancellable and failures never resubmit a task.', docs: 'RelayOne documentation', dashboard: 'Open console',
+  composerLabel: 'Quota', quotaLabel: 'Effective quota remaining on this key', quotaAvailable: 'Available', quotaUsed: 'Used', quotaGranted: 'Granted', quotaUnlimited: 'This key has unlimited quota', quotaStale: 'Quota data may be stale', composerTooltip: '{count} accessible chat models{groups}', composerGroups: ' · Groups: ', unknownGroup: 'Automatic group',
+  invalidCapacity: 'Context window must be a positive integer.', errorGeneric: 'RelayOne operation failed.',
+}
+export const dictionaries = { zh, en }

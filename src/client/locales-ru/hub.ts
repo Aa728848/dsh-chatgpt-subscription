@@ -235,6 +235,7 @@ export const dictionary: Record<LocaleKey, string> = {
   'cardName.workbuddy': 'WorkBuddy',
   'cardName.antigravity-acp': 'Antigravity (ACP)',
   'cardName.qianwen-token-plan': 'Qwen Token Plan',
+  'cardName.relayone': 'RelayOne',
   modelChecklistCount: 'Включено {count}/{total}',
   codeRunTitle: 'Код',
   codeRunOutput: 'Вывод',

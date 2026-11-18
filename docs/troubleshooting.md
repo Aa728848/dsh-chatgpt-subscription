@@ -84,3 +84,14 @@
 | **调用 `subagent_fork` 被拒** | `subagent_fork` 强制继承当前父会话路由，而当前主代理所用的模型既不在子代理白名单内、也未开启允许父路由 Fork 自继承 | 在 **Plugins → 子智能体** 设置卡中开启「允许 `subagent_fork` 继承主模型」（全局或针对当前主模型），或将当前主模型勾选进白名单，或改用显式指定白名单内模型的 `subagent` |
 | **在 0.2.1-rc.2 之前的 harness 上用 `dispatch` 预设，派出去的子代理联系不上** | 旧代 Agent Teams 运行时会注册 `spawn_teammate` 并用 team 作用域顶替 `send_message` / `list_agents` / `interrupt_agent`；该代已被 harness 移除，调度模式自 0.2.1-rc.2 起不再按代检测（原 `R0.5` 闸门已删除），因此对更早的 harness 不做兼容承诺 | 把 harness 升级到 ≥ 0.2.1-rc.2；或改用不带子代理编排的会话由主代理直接执行 |
 | **`dispatch` 会话里子代理调用 `ask_user_question` / `enter_plan_mode` 或执行纯 `sleep` 被拦截** | `dispatchExecutionGuard`（默认开启）在执行期保护编排纪律：主控工具只归主代理，等待子代理应结束本轮靠通知唤醒而非 `sleep` 空转 | 属正常护栏行为；子代理应按拒绝提示将未决问题通过报告带回主代理处理 |
+
+## RelayOne
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 401 / Invalid token | Key 无效、禁用或过期 | 在 RelayOne 控制台重建 Key，移除后重新保存 |
+| `model_not_found` 或目录为空 | Key 分组无权访问该模型 | 点击“刷新目录”，只使用当前列表中的模型；不要手工填公开全站模型 id |
+| 保存 Key 后仍显示旧模型 | 正常实现不会跨 Key 复用目录；可能是旧构建未刷新 | 重载插件并刷新页面，再检查目录时间与分组提示 |
+| Responses 明确不被支持 | 当前上游分组只提供 Chat | 插件会在流输出前自动回退并缓存；普通工具参数 400 不会触发回退 |
+| 图像/视频任务超时 | 上游任务超出本地预算 | 稍后重试或使用其他模型；插件不会重复提交原任务 |
+| 媒体工具不存在 | 全局 `mediaTools` 关闭或 RelayOne 未配置 | 开启媒体工具后重载插件，并检查当前 Key 是否有媒体模型 |

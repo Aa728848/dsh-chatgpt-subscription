@@ -37,6 +37,8 @@ import { OPENDESIGN_PROVIDER_NAME, OPENDESIGN_ROUTE_PREFIX } from '../../shared/
 import { WorkBuddySection } from '../workbuddy/WorkBuddySection.tsx'
 import { QianwenTokenPlanSection } from '../qianwen-token-plan/QianwenTokenPlanSection.tsx'
 import { QIANWEN_TOKEN_PLAN_PROVIDER_NAME, QIANWEN_TOKEN_PLAN_ROUTE_PREFIX } from '../../shared/qianwen-token-plan-contracts.ts'
+import { RelayOneSection } from '../relayone/RelayOneSection.tsx'
+import { RELAYONE_PROVIDER_NAME, RELAYONE_ROUTE_PREFIX } from '../../shared/relayone-contracts.ts'
 import type { HubProviderId } from './brand-icons.tsx'
 
 /** What the detail page hands to a mounted section. */
@@ -206,6 +208,11 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     id: 'qianwen-token-plan', name: QIANWEN_TOKEN_PLAN_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(QIANWEN_TOKEN_PLAN_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <QianwenTokenPlanSection onModelChange={onModelChange} />,
+  },
+  {
+    id: 'relayone', name: RELAYONE_PROVIDER_NAME,
+    setEnabled: (enabled) => postLineSettings(RELAYONE_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <RelayOneSection onModelChange={onModelChange} />,
   },
 ]
 

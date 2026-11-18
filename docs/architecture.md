@@ -43,6 +43,7 @@
 │   │   ├── step-code/               # Step Code 线路
 │   │   ├── workbuddy/               # WorkBuddy 线路
 │   │   ├── qianwen-token-plan/      # Qwen Token Plan：单 Key、Qwen4 显式缓存与密文思考回放
+│   │   ├── relayone/                # RelayOne：动态分组、三协议、单 Key 与媒体任务
 │   │   ├── cache-warmup/            # 受控线路大结果投影与 ref:// 补读子包
 │   │   ├── codemode/                # Code Mode 工具发现、常驻 REPL 传输与恒定说明段
 │   │   ├── dispatch-ledger/         # 调度模式 Mandate v2 账本与血缘守卫
@@ -57,6 +58,7 @@
 │   │   ├── common/                  # 共享号池卡片、模型勾选表、语言镜像与样式
 │   │   ├── antigravity-acp/         # Antigravity（ACP）设置卡、API 封装与输入框胶囊
 │   │   ├── qianwen-token-plan/      # Qwen Token Plan 设置卡、TTL/推理/视觉配置与缓存胶囊
+│   │   ├── relayone/                # RelayOne 设置卡、目录徽章与三语
 │   │   ├── codemode/                # code_run 工具调用视图与样式
 │   │   ├── dispatch-ledger/         # Mandate v2 账本工具调用视图
 │   │   ├── subagent/                # 增强版「子智能体」模型白名单设置卡
@@ -144,7 +146,7 @@
 
 客户端入口 `src/client/index.tsx` 挂载以下界面能力：
 
-- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 14 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
+- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 15 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
 - **输入框额度胶囊（`conversation.input.right`）**：按当前会话选中的模型自动展示对应线路的剩余额度、余额或真实缓存指标；无公开数据时保持隐藏，不伪造百分比。
 - **多媒体工具视图与命令**：`codex_image_generate` 生图预览卡，`minimax_generate_video` 视频卡片、右侧栏文档预览器及 `/video` 斜杠命令参数表单。
 - **进展更新面板**与 **Mermaid 图表观察器**（自动将代码块安全渲染为交互图表）。
@@ -197,3 +199,7 @@ npm pack --dry-run
 - **并发与超时配置**：`vitest.config.ts` 将 `maxWorkers` 设为 `4`、`testTimeout` 设为 `60s`，因为 Windows DPAPI 存储用例会真实拉起 `powershell.exe` 子进程，盲目调高并发或压低超时会导致跨用例假阳性失败。
 - **严禁 UTF-8 BOM**：`test/package-integrity.test.ts` 会扫描 `package.json`、源码与核心文档，确保不含 UTF-8 BOM 字节头，且校验 `devDependencies` 中的 `@deepseek-ai/*` 版本落在 `peerDependencies` 声明范围内。
 - **发版前清理陈旧产物**：`tsc -b` 与 `tsdown` 默认增量输出到 `lib/`，已删除源码遗留的 `.d.ts` 可能会残留在 `lib/` 中。正式发布前请遵循 `.dsh/skills/release-plugin/SKILL.md` 执行干净构建核对，严禁对可能含目录联接（junction/symlink）的树执行盲目递归删除。
+
+### RelayOne 动态目录
+
+`src/host/relayone/catalog-manager.ts` 将本地快照恢复与网络刷新分离。快照名含 Key 的 SHA-256 指纹；`model-catalog.ts` 合并 live 可用性和公开协议/分组元数据，并把媒体模型从对话目录分离。adapter 在 `prepareCall` 绑定同一次目录解析出的模型与协议，避免选择器和请求使用不同目录。

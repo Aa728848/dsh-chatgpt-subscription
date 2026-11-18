@@ -269,6 +269,15 @@ import { registerQianwenTokenPlanRoutes } from './host/qianwen-token-plan/routes
 import { QianwenCredentialStore, QianwenSettingsStore } from './host/qianwen-token-plan/token-store.ts'
 import { QIANWEN_MODEL_CATALOG, catalogModelOptions as qianwenCatalogModelOptions } from './host/qianwen-token-plan/model-catalog.ts'
 import { PROVIDER_ID as QIANWEN_PROVIDER_ID, PROVIDER_NAME as QIANWEN_PROVIDER_NAME } from './host/qianwen-token-plan/types.ts'
+import { RelayOneAdapter } from './host/relayone/adapter.ts'
+import { registerRelayOneRoutes, warmRelayOneCatalogOnStartup } from './host/relayone/routes.ts'
+import { RelayOneCredentialStore, RelayOneSettingsStore } from './host/relayone/token-store.ts'
+import { RelayOneCatalogManager } from './host/relayone/catalog-manager.ts'
+import { relayOneModelOptions } from './host/relayone/model-catalog.ts'
+import { PROVIDER_ID as RELAYONE_PROVIDER_ID, PROVIDER_NAME as RELAYONE_PROVIDER_NAME } from './host/relayone/types.ts'
+import { createRelayOneImageTool } from './host/relayone/image-tool.ts'
+import { createRelayOneVideoTool } from './host/relayone/video-tool.ts'
+import { RelayOneQuotaReader } from './host/relayone/quota.ts'
 
 interface Volatile<T> {
   get(): T
@@ -1583,6 +1592,29 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       conflict: () => qianwenClaim.conflict(),
     })
 
+    // RelayOne: one encrypted key, credential-scoped live groups and three wire protocols. No pool.
+    const relayOneStore = new RelayOneCredentialStore()
+    const relayOneSettings = new RelayOneSettingsStore()
+    const relayOneCatalog = new RelayOneCatalogManager(relayOneStore, {
+      fetchFn: proxyFetchFor(RELAYONE_PROVIDER_ID),
+      onChanged: () => ctx.emit?.('llm/adapters-updated'),
+    })
+    const relayOneQuota = new RelayOneQuotaReader(relayOneStore, { fetchFn: proxyFetchFor(RELAYONE_PROVIDER_ID) })
+    const relayOneAdapter = new RelayOneAdapter(relayOneStore, relayOneSettings, relayOneCatalog, {
+      fetchFn: modelFetch[RELAYONE_PROVIDER_ID],
+      attachments: ctx.attachments,
+      promptCache: promptCacheOverrides[RELAYONE_PROVIDER_ID],
+    })
+    const relayOneClaim = claimProviderRoute(ctx, {
+      providerId: RELAYONE_PROVIDER_ID, label: RELAYONE_PROVIDER_NAME, adapter: relayOneAdapter,
+    })
+    const disposeRelayOneRoutes = registerRelayOneRoutes(ctx, relayOneStore, relayOneSettings, relayOneCatalog, {
+      quota: relayOneQuota,
+      serving: () => relayOneClaim.serving(),
+      conflict: () => relayOneClaim.conflict(),
+    })
+    void warmRelayOneCatalogOnStartup(relayOneCatalog).catch(() => undefined)
+
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as
     // the primary account and nothing has to be migrated up front.
@@ -2066,6 +2098,21 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           }
         },
       },
+      {
+        id: 'relayone', providerId: RELAYONE_PROVIDER_ID, canToggle: true,
+        read: async () => {
+          const [current, credentials] = await Promise.all([relayOneSettings.read(), relayOneStore.read(), relayOneCatalog.warm()])
+          const models = relayOneModelOptions(relayOneCatalog.snapshot().entries, current).filter(model => model.kind === 'chat')
+          const total = catalogTotal(models.length)
+          return {
+            enabled: current.enabled,
+            accountCount: credentials === null ? 0 : 1,
+            authenticated: credentials !== null,
+            enabledModelCount: credentials === null ? null : models.filter(model => model.enabled).length,
+            totalModelCount: credentials === null ? null : total,
+          }
+        },
+      },
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     // 概览页右端的「检测更新 / 更新插件」。注册在这里而不是 routes.ts：它不属于任何
@@ -2116,6 +2163,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       ? ctx.tools.register(
         createMinimaxGenerateVideoTool(ctx, { fetchFn: proxyFetchFor('minimax-code'), pool: minimaxCodeAccountPool }),
       )
+      : () => undefined
+    // RelayOne media follows the SAME global mediaTools gate as Codex/Kimi/MiniMax.
+    // The line's enabled flag and key are checked again at execution time.
+    const relayOneMediaStores = { store: relayOneStore, settingsStore: relayOneSettings, catalog: relayOneCatalog }
+    const disposeRelayOneImageTool = mediaToolsEnabled
+      ? ctx.tools.register(createRelayOneImageTool(ctx.attachments, relayOneMediaStores, { fetchFn: proxyFetchFor(RELAYONE_PROVIDER_ID) }))
+      : () => undefined
+    const disposeRelayOneVideoTool = mediaToolsEnabled
+      ? ctx.tools.register(createRelayOneVideoTool(ctx, relayOneMediaStores, { fetchFn: proxyFetchFor(RELAYONE_PROVIDER_ID) }))
       : () => undefined
 
     // Rebind providers when web reloads    // Rebind providers when web reloads without resetting the saved default provider selection.
@@ -2207,6 +2263,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       clearInterval(workBuddyCheckinTimer)
       disposeQianwenRoutes()
       qianwenClaim.dispose()
+      disposeRelayOneRoutes()
+      relayOneClaim.dispose()
+      disposeRelayOneImageTool()
+      disposeRelayOneVideoTool()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -3066,3 +3126,11 @@ export { registerQianwenTokenPlanRoutes, getQianwenTokenPlanWebStatus } from './
 export { QianwenCredentialStore, QianwenSettingsStore } from './host/qianwen-token-plan/token-store.ts'
 export { QIANWEN_MODEL_CATALOG } from './host/qianwen-token-plan/model-catalog.ts'
 export * from './shared/qianwen-token-plan-contracts.ts'
+export { RelayOneAdapter } from './host/relayone/adapter.ts'
+export { registerRelayOneRoutes, getRelayOneWebStatus, warmRelayOneCatalogOnStartup } from './host/relayone/routes.ts'
+export { RelayOneCredentialStore, RelayOneSettingsStore } from './host/relayone/token-store.ts'
+export { RelayOneCatalogManager } from './host/relayone/catalog-manager.ts'
+export { RelayOneQuotaReader } from './host/relayone/quota.ts'
+export * from './shared/relayone-contracts.ts'
+export { createRelayOneImageTool } from './host/relayone/image-tool.ts'
+export { createRelayOneVideoTool } from './host/relayone/video-tool.ts'

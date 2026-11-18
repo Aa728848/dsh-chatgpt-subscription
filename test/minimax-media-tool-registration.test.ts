@@ -24,6 +24,8 @@ const MEDIA_TOOLS = [
   'kimi_attach_video',
   'minimax_understand_video',
   'minimax_generate_video',
+  'relayone_generate_image',
+  'relayone_generate_video',
 ] as const
 
 const disposers: Array<() => void> = []
@@ -136,7 +138,7 @@ describe('MiniMax media tools follow the line switch', () => {
     expect(tools).toContain('dispatch_ledger')
   })
 
-  it('registers none of the five media tools when the global switch is off', () => {
+  it('registers none of the media tools when the global switch is off', () => {
     const disabled = mountPlugin({ enabled: true }, { mediaTools: { get: () => false } })
     for (const name of MEDIA_TOOLS) expect(disabled).not.toContain(name)
     expect(disabled).toContain('dispatch_ledger')

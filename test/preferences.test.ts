@@ -161,7 +161,7 @@ describe('subscription preferences', () => {
     await fsp.writeFile(preferencesPath(), JSON.stringify({ proxyMode: 'direct', customProxyUrl: null }), 'utf8')
     await migrated.hydrate()
     const lines = migrated.status().lineProxies ?? {}
-    expect(Object.keys(lines)).toHaveLength(14)
+    expect(Object.keys(lines)).toHaveLength(15)
     expect(Object.values(lines).every((entry) => entry.mode === 'direct')).toBe(true)
 
     // A later per-line edit survives a restart; the migration never runs again.

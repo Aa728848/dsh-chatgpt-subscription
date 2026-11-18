@@ -43,6 +43,7 @@ export const DIAGNOSTIC_PROVIDERS = [
   // [provider-diagnostics] 日志。
   'antigravity-acp',
   'qianwen-token-plan',
+  'relayone',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

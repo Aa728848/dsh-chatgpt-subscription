@@ -52,7 +52,7 @@
     teamPolicyCacheGuard: true            # 摘除 Agent Teams team:policy 系统段并改为尾部投递（热生效）
     timelineCacheGuard: true              # 冻结 Timeline 规划段与任务工具描述，变更改为尾部投递（热生效）
     toolRunawayGuard: true                # 工具重复调用/同族报错/无变化轮询分级提醒；Kimi 保留强停（热生效）
-    mediaTools: true                      # 注册四个图片/视频工具（重载插件或重启后生效）
+    mediaTools: true                      # 注册六个图片/视频工具（重载插件或重启后生效）
     cacheWarmup: true                     # 受控线路的大结果 ref:// 预览（热生效）
     cacheWarmupRetrieval: true            # 受控线路的导航检索大纲投影（热生效）
     cacheWaitWarmup: true                 # 默认 Kimi 的等待续热；其他线路需显式策略（热生效）
@@ -84,7 +84,7 @@
 | `teamPolicyCacheGuard` | `boolean` | `true` | **热生效（volatile）** | 把内置 Agent Teams 的 `team:policy` 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作刷掉整段前缀缓存 |
 | `timelineCacheGuard` | `boolean` | `true` | **热生效（volatile）** | 冻结实验性 Timeline 插件的 `timeline:planning` 系统段与 `timeline_tasks` 工具描述，变更改为尾部用户消息投递一次；避免中途改显示语言/写作提示词时刷掉 Kimi/MiniMax 的整段前缀缓存。未安装 Timeline 时静默 |
 | `toolRunawayGuard` | `boolean` | `true` | **热生效（volatile）** | 各线路重复工具调用分级提醒；只有 Kimi 保留第 12 次强停，MiniMax 保留自己的官方失控规则 |
-| `mediaTools` | `boolean` | `true` | **重载插件 / 重启** | 统一注册 Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解；`false` 时四个工具均不进入 schema，MiniMax 仍叠加自己的线路开关；Kimi 既有会话在工具表变化后重建一次前缀缓存 |
+| `mediaTools` | `boolean` | `true` | **重载插件 / 重启** | 统一注册 Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解、RelayOne 生图/编辑与视频生成；`false` 时六个工具均不进入 schema，MiniMax 仍叠加自己的线路开关；Kimi 既有会话在工具表变化后重建一次前缀缓存 |
 | `cacheWarmup` | `boolean` | `true` | **热生效（volatile）** | 受控线路的命令/日志大结果 `ref://` 预览与 `cache_warmup_result` 补读 |
 | `cacheWarmupProviders` | `string[]` | 全部 controlled providers | **热生效（volatile）** | 允许产生新预览的线路；`[]` 关闭所有新投影，已有 ref 不受影响 |
 | `cacheWarmupRetrieval` | `boolean` | `true` | **热生效（volatile）** | 受控线路明确导航意图下的文件/网页检索结果大纲投影 |
@@ -180,7 +180,7 @@ promptCacheOverrides:
 $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queueTimeoutMs":120000}'
 ```
 
-- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`、`antigravity-acp`、`qianwen-token-plan`。
+- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`、`antigravity-acp`、`qianwen-token-plan`、`relayone`。
 - `0` 或缺省表示不限制；非法 JSON 或未知字段会在启动时直接报错拒绝（fail-closed）。
 
 ### 脱敏请求诊断日志（`DSH_PROVIDER_DIAGNOSTICS`）
@@ -253,3 +253,9 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 3. **本机凭据只读隔离**：所有 `adopt`（导入本机 CLI / 桌面端登录态）模块在点击导入前仅做 `stat` 探测，导入后从不创建、修改或删除第三方客户端文件，也不跨进程抢刷单次轮换令牌。
 4. **多模态本地文件获取仅限回环**：工具结果中的本地图片链接（`/describe-image/raw/...`）与工作区视频仅通过受控的回环/宿主附件通道读取，拒绝任意外部私网探测。
 5. **写入后回读校验与原子替换**：凭据与偏好落盘均采用临时文件原子替换或加密后立刻回读校验，校验不通过立即抛错，绝不破坏既有有效凭据。
+
+## RelayOne
+
+RelayOne 在设置卡粘贴单个 API Key。保存后自动读取该 Key 当前分组可用的模型；无需手工填写分组或协议。可配置对话模型勾选、上下文窗口覆盖、默认推理等级、默认生图/视频模型和独立代理。
+
+`mediaTools: false` 会同时关闭 RelayOne 生图与视频工具；线路自身的启用开关在执行时仍会再次检查。目录快照只用于同一 Key 的冷启动，不会跨 Key 复用。

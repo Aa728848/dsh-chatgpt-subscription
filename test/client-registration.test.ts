@@ -336,8 +336,13 @@ describe('client registration', () => {
       'conversation.input.right',
       // Qwen Token Plan：order 49。
       'conversation.input.right',
+      // RelayOne：order 50。
+      'conversation.input.right',
       'tool.call.toolview',
       // MiniMax 生成视频：第二个媒体工具卡片，同一个 keyed 槽，按工具名再注册一次。
+      'tool.call.toolview',
+      // RelayOne 生图与视频复用既有媒体卡片。
+      'tool.call.toolview',
       'tool.call.toolview',
       // Code Mode 的 code_run 源码卡片，接在 MiniMax 视频卡片之后。
       'tool.call.toolview',
@@ -380,6 +385,7 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'workbuddy-quota', order: 47 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'antigravity-acp-quota', order: 48 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'qianwen-token-plan-quota', order: 49 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'relayone-quota', order: 50 }),
     ])
     // 视频参数弹窗的那一格：与设置卡片同一种「插件自己的一格」写法，插在输入框
     // 浮层里、排在那条反馈弹窗（order 2）之后。
@@ -389,6 +395,8 @@ describe('client registration', () => {
     expect(registrations.filter((registration) => registration.name === 'tool.call.toolview')).toEqual([
       expect.objectContaining({ key: CODEX_IMAGE_TOOL_NAME }),
       expect.objectContaining({ key: 'minimax_generate_video' }),
+      expect.objectContaining({ key: 'relayone_generate_image' }),
+      expect.objectContaining({ key: 'relayone_generate_video' }),
       expect.objectContaining({ key: CODE_RUN_TOOL_NAME }),
       // 派发卡片：按工具名占用整行，把 mandate 头拆成结构并留住拒绝码。
       expect.objectContaining({ key: 'subagent' }),
@@ -408,7 +416,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan'] as const
+    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -574,13 +582,13 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
       // no enable switch on the host, renders none. Step Code joins the toggleable
       // side (it posts enabled to its own /settings like every other line).
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(13)
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(14)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.

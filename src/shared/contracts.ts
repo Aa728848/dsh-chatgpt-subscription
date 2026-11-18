@@ -200,6 +200,7 @@ export const LINE_PROXY_PROVIDER_IDS = [
   'workbuddy-subscription',
   'antigravity-acp',
   'qianwen-token-plan',
+  'relayone',
 ] as const
 
 export type LineProxyProviderId = typeof LINE_PROXY_PROVIDER_IDS[number]

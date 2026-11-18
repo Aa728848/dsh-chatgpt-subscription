@@ -1,6 +1,6 @@
 # 供应线路完整指南与接口参考
 
-本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **14 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
+本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **15 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
 
 > 跨线路共用的号池调度、存储后端（`poolStorage`）、统一网络代理与环境变量详见 [部署配置与安全参考](configuration.md)。
 
@@ -24,6 +24,7 @@
 14. [Ollama：`ollama`](#14-ollamaollama)
 15. [Antigravity（ACP）：`antigravity-acp`](#15-antigravityacpantigravity-acp)
 16. [Qwen Token Plan（千问）：`qianwen-token-plan`](#16-qwen-token-plan千问qianwen-token-plan)
+17. [RelayOne：`relayone`](#17-relayonerelayone)
 
 ---
 
@@ -47,6 +48,7 @@
 | `ollama` | Ollama | Ollama Native `/api/chat` + OpenAI `/v1/chat/completions` | 粘贴 Ollama Cloud API Key | 实时 `/api/tags` + `/api/show` 按模型元数据探测 | `/ollama/api` |
 | `antigravity-acp` | Antigravity（ACP） | ACP v1 / stdio JSON-RPC（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 | `/antigravity-acp/api` |
 | `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个 Token Plan 专属 API Key，系统加密存储；无账号池 | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 | `/qianwen-token-plan/api` |
+| `relayone` | RelayOne | Responses / Chat / Anthropic Messages | 单个 API Key，系统加密存储；无账号池 | 当前 Key live listing + 分组/端点元数据 + 凭据隔离快照 | `/relayone/api` |
 
 > **合规与风险声明**：
 > - `claude-subscription` 使用订阅 OAuth 凭据模拟客户端身份转发请求，与 Anthropic 现行服务条款冲突，未获官方授权，存在账号受限或封禁风险。
@@ -109,7 +111,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/status` | 账号（脱敏）、连接状态、额度、抓取后端状态及本机 Codex CLI 文件存在性 |
-| `GET` | `/hub/overview` | 订阅中心首页 14 条线路的聚合只读摘要 |
+| `GET` | `/hub/overview` | 订阅中心首页 15 条线路的聚合只读摘要 |
 | `GET` / `POST` | `/update`（检测 / 应用） | 检查 npm 新版本并在支持的部署上一键升级插件 |
 | `POST` | `/i18n/locale` | 客户端向宿主同步当前界面语言（`zh` / `en` / `ru`） |
 | `POST` | `/login/start` | 启动浏览器回调 OAuth 登录 |
@@ -360,3 +362,15 @@
 ### 宿主路由（`/qianwen-token-plan/api`）
 
 `GET /status` · `PUT|POST /credentials` · `DELETE /credentials` · `GET|POST|PATCH /settings` · `POST /connection`（别名 `/connection/test`）· `POST /cache/reset`。所有写操作校验 Origin + Host 同源。
+
+## 17. RelayOne：`relayone`
+
+- **鉴权**：一个 RelayOne `sk-` API Key，Bearer 鉴权；Windows DPAPI / macOS Keychain / Linux Secret Service，无账号池。
+- **目录**：当前 Key 的 `GET /v1/models` 决定可用 id；公开 `/api/pricing` 只补充分组、端点、vendor 与媒体元数据。快照按 Key 指纹隔离，后台 TTL 刷新，内容变化才通知模型选择器。
+- **协议**：OpenAI 优先 `/v1/responses`，Claude 优先 `/v1/messages`，其他对话模型使用 `/v1/chat/completions`。仅明确协议不支持且在流输出前回退。
+- **额度**：通过官方 `GET /api/usage/token` 读取当前 Key 的授予/已用/剩余额度，结合 `/api/status` 的 `quota_per_unit` 显示百分比与美元；无限令牌与有限账户余额并存时取有效较小值。
+- **会话粘性**：同一 Key、模型和 DSH 会话使用稳定的匿名标识：Responses 及 GPT 的 Chat 回退发送 `prompt_cache_key`，Anthropic Messages 发送 `metadata.user_id`。身份不明或辅助请求不共用主会话键。是否复用渠道取决于网关配置；缓存读取量以实际 `usage` 为准。
+- **GPT 本地策略**：默认上下文 272K，可覆盖 500K；完整推理档位原值透传，覆盖值作为独立元数据显示，不改变模型名。
+- **媒体**：`relayone_generate_image` 支持生图、参考图编辑与异步任务；`relayone_generate_video` 支持提交、轮询、下载和工作区播放。二者受全局 `mediaTools` 控制。
+- **路由**：`GET status`、`PUT/DELETE credentials`、`GET/PATCH settings`、`POST catalog/refresh`、`POST connection/test`；写操作全部同源校验。
+- **验证边界**：公开契约与离线 mock 已验证；没有真实 Key 时不声称付费生成成功。详见 [线路设计与证据](relayone-line-plan.md)。

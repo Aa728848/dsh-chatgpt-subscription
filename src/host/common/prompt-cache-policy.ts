@@ -81,6 +81,8 @@ export const PROMPT_CACHE_POLICIES: Readonly<Record<string, PromptCachePolicy>> 
     staticPrefix: true, coldStart: 'warm', stickyImages: true,
     affinity: false, waitWarmup: false, hint: true,
   }),
+  // Gateway routing hints are not a local account pool, a measured TTL, or a reason to prewarm.
+  relayone: policy({ ...DISABLED, mode: 'automatic', staticPrefix: true }),
 })
 
 const OVERRIDE_KEYS = new Set([

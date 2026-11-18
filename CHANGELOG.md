@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **[relayone] 新增第 15 条线路：RelayOne 单 Key 动态分组、三协议对话与媒体工具**
+  - 当前 Key `/v1/models` 与公开分组/端点元数据合并，按凭据隔离快照；OpenAI 优先 Responses、Claude 优先 Anthropic、其余走 Chat，并只在明确协议拒绝时安全回退。
+  - 完整设置卡、三语、模型/上下文配置、代理、额度徽章、官方品牌；新增生图/编辑与异步视频工具，和既有媒体工具共同受 `mediaTools` 总开关控制。
+  - 新增动态目录、生产快照、三协议工具流、媒体任务、同源路由与 UI 离线回归；真实付费上游调用边界记录于 `docs/relayone-line-plan.md`。
+  - 真实 GUI 已验证目录、当前 Key 的无限额度、全宽 Key 行与 500K 标签。未发起付费生成或测量线上缓存命中率。
+
+- **[relayone] 真实 Key 额度与 GPT 推理/上下文修正**
+  - 接入 New API 官方 `GET /api/usage/token` 与 `quota_per_unit`，设置页显示有效剩余额度，composer 显示真实剩余百分比/进度条；支持无限额度、账户较小值、stale 与换 Key 竞态保护。
+  - GPT 默认上下文改为 272K，可覆盖 500K；完整推理档位（含 `xhigh`/`max`）原值透传，旧快照读取时重算本地能力。500K 覆盖值改为独立元数据，不再与模型名粘连。
+
+- **[relayone] 会话粘性与重载兼容**
+  - Responses 和 GPT Chat 回退传稳定的 `prompt_cache_key`，Anthropic 使用 `metadata.user_id`；匿名标识按 Key、模型、会话隔离。不把辅助请求、预热或本地路由命中冒充上游缓存读取。
+  - 兼容尚未返回 `quota` 的旧 host，避免重载时设置页空白。额度接口短暂失败时保留上次读数并标明过期；上游错误回显的 Key 不进入额度或目录状态。
+
 ## 0.78.0 - 2026-11-18
 
 - **[codex-chatgpt] 随包兜底目录新增 GPT-6.2 Astra / Sol（`gpt-6.2-astra`、`gpt-6.2-sol`）**

@@ -67,6 +67,9 @@ import { installWorkBuddyStyles } from './workbuddy/styles.ts'
 import { QianwenComposerQuota } from './qianwen-token-plan/QianwenComposerQuota.tsx'
 import { dictionaries as qianwenDicts, NS_QIANWEN, type QianwenLocaleKey } from './qianwen-token-plan/locales.ts'
 import { installQianwenStyles } from './qianwen-token-plan/styles.ts'
+import { RelayOneComposerQuota } from './relayone/RelayOneComposerQuota.tsx'
+import { dictionaries as relayOneDicts, NS_RELAYONE, type RelayOneLocaleKey } from './relayone/locales.ts'
+import { installRelayOneStyles } from './relayone/styles.ts'
 import { installSubagentSettingsCard } from './subagent/index.ts'
 import { installSubagentStyles } from './subagent/styles.ts'
 import { dictionaries as subagentDicts, NS_SUBAGENT, type SubagentLocaleKey } from './subagent/locales.ts'
@@ -76,6 +79,7 @@ import { dictionaries as dispatchLedgerDicts, NS_DISPATCH_LEDGER, type DispatchL
 import { CodeRunToolView } from './codemode/CodeRunToolView.tsx'
 import { installCodemodeStyles } from './codemode/styles.ts'
 import { CODE_RUN_TOOL_NAME } from './codemode/tool-name.ts'
+import { RELAYONE_IMAGE_TOOL_NAME, RELAYONE_VIDEO_TOOL_NAME } from '../shared/relayone-contracts.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   /**
@@ -104,6 +108,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-subagent-settings': SubagentLocaleKey
     'dsh-dispatch-ledger': DispatchLedgerLocaleKey
     'dsh-qianwen-token-plan': QianwenLocaleKey
+    'dsh-relayone': RelayOneLocaleKey
   }
 }
 
@@ -197,6 +202,11 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     installQianwenStyles()
     return () => {}
   }, 'dsh-qianwen-token-plan: styles')
+  ctx.effect(() => ctx.locale.register(NS_RELAYONE, relayOneDicts), 'dsh-relayone: dictionaries')
+  ctx.effect(() => {
+    installRelayOneStyles()
+    return () => {}
+  }, 'dsh-relayone: styles')
   // 「子智能体」设置卡：遮蔽宿主同名卡（同 id、priority -10），并在宿主的授权清单
   // 之外再记一份「全局默认 + 按主代理模型」的两级列表。样式表无条件安装，
   // 注册本身在 installSubagentSettingsCard 里按服务是否就绪决定。
@@ -312,6 +322,10 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     name: 'conversation.input.right', id: 'qianwen-token-plan-quota', order: 49, locale: NS_QIANWEN,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, QianwenComposerQuota))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'relayone-quota', order: 50, locale: NS_RELAYONE,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, RelayOneComposerQuota))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,
@@ -331,6 +345,15 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
       sessionId,
       readVideo: videoBytesLoader(ctx),
     }),
+  }, MinimaxVideoToolView))
+  // RelayOne reuses the existing media anatomy and durable attachment/workspace contracts.
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+    name: 'tool.call.toolview', key: RELAYONE_IMAGE_TOOL_NAME, locale: NS,
+    inject: (sessionId) => ({ loadImage: imageLoader(ctx, sessionId) }),
+  }, CodexImageToolView))
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+    name: 'tool.call.toolview', key: RELAYONE_VIDEO_TOOL_NAME, locale: NS_MINIMAX_CODE,
+    inject: (sessionId) => ({ sessionId, readVideo: videoBytesLoader(ctx) }),
   }, MinimaxVideoToolView))
   // Code Mode `code_run`：与宿主内置 `run_code` 对齐的折叠行 + 语法高亮源码卡片 + 独立输出区。
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({

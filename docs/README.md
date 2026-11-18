@@ -52,3 +52,4 @@
 - **OpenDesign**：[OpenDesign 线路方案（opendesign-line-plan.md）](opendesign-line-plan.md)
 - **Qwen Token Plan**：[实现记录](qianwen-token-plan-line-plan.md) · [个人版真实 Key 验收](qianwen-token-plan-live-acceptance.md)
 - **WorkBuddy**：[WorkBuddy 线路方案](workbuddy-line-plan.md) · [上游风控加固记录](workbuddy-upstream-hardening.md)
+- [RelayOne 线路设计与证据](relayone-line-plan.md)：动态分组、三协议工具链、媒体任务与未验证边界。

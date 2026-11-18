@@ -1,0 +1,20 @@
+import type { RelayOneLocaleKey } from '../relayone/locales.ts'
+export const dictionary: Record<RelayOneLocaleKey, string> = {
+  title: 'RelayOne', pageDesc: 'Один API-ключ для диалоговых и медиамоделей, доступных в его текущей группе.',
+  enabled: 'Включить RelayOne', keySection: 'API-ключ', keyPlaceholder: 'sk-…', saveKey: 'Сохранить ключ', savingKey: 'Сохранение…', removeKey: 'Удалить ключ', removingKey: 'Удаление…',
+  keyConfigured: 'Ключ хранится в зашифрованном виде и не показывается на странице или в журналах.', keyMissing: 'API-ключ не настроен. Создайте токен в консоли RelayOne и вставьте его здесь.',
+  storagePath: 'Зашифрованное хранилище', testConnection: 'Проверить соединение', testingConnection: 'Проверка…', refreshCatalog: 'Обновить каталог', refreshingCatalog: 'Обновление…',
+  connectionOk: 'Соединение работает', connectionFailed: 'Ошибка соединения', latency: '{ms} мс', modelCount: 'Диалоговых моделей: {count}',
+  routeOwned: 'Маршрутом провайдера управляет этот плагин.', routeConflict: 'Конфликт маршрута провайдера: {detail}',
+  modelsSection: 'Диалоговые модели', modelsHint: 'Модели берутся из /v1/models текущего ключа; группы и протоколы — из актуальных метаданных. Новый ключ не наследует старый каталог.',
+  selectionHint: 'Без явного выбора включены все доступные модели. Пустой список явно отключает все.', selectAll: 'Выбрать все', clearAll: 'Очистить',
+  catalogEmpty: 'Настройте ключ для обнаружения моделей.', catalogLoading: 'Чтение текущих групп…', catalogError: 'Ошибка синхронизации каталога', catalogStale: 'Показан последний успешный каталог; фоновое обновление не удалось.',
+  contextSection: 'Контекстные окна', contextHint: 'Если upstream не публикует точное окно, используется консервативный локальный бюджет; здесь его можно изменить.', tokens: 'токенов', save: 'Сохранить', saving: 'Сохранение…', reset: 'Сбросить', resetAll: 'Сбросить все', contextEmpty: 'Нет включённых диалоговых моделей.',
+  reasoningSection: 'Рассуждение', defaultEffort: 'Уровень рассуждения по умолчанию', effortHint: 'Передаётся только моделям с поддержкой рассуждения; выбор в текущей сессии имеет приоритет.', effortDefault: 'По умолчанию upstream', effortNone: 'Выкл.', effortMinimal: 'Минимальный', effortLow: 'Низкий', effortMedium: 'Средний', effortHigh: 'Высокий', effortXhigh: 'Очень высокий', effortMax: 'Максимальный',
+  mediaSection: 'Генерация медиа', mediaHint: 'Изображения и видео используют тот же ключ и подчиняются общему переключателю «Медиаинструменты»; после его изменения перезагрузите плагин.',
+  imageModel: 'Модель изображений по умолчанию', videoModel: 'Модель видео по умолчанию', mediaAuto: 'Первая доступная модель', mediaEmpty: 'Этому ключу недоступны медиамодели.',
+  moreNotes: 'Протоколы и интеграция', protocolNote: 'OpenAI предпочитает Responses, Claude — Anthropic Messages, остальные модели — Chat Completions. Откат выполняется только после явного отказа протокола.',
+  mediaNote: 'Поддерживаются изображения URL/base64, редактирование по референсам и асинхронные задачи. Опрос видео можно отменить; ошибка не приводит к повторной отправке задачи.', docs: 'Документация RelayOne', dashboard: 'Открыть консоль',
+  composerLabel: 'Квота', quotaLabel: 'Доступная квота ключа', quotaAvailable: 'Доступно', quotaUsed: 'Использовано', quotaGranted: 'Выделено', quotaUnlimited: 'Для этого ключа установлена безлимитная квота', quotaStale: 'Данные квоты могут быть устаревшими', composerTooltip: 'Доступных диалоговых моделей: {count}{groups}', composerGroups: ' · Группы: ', unknownGroup: 'Автоматическая группа',
+  invalidCapacity: 'Контекстное окно должно быть положительным целым числом.', errorGeneric: 'Операция RelayOne не удалась.',
+}

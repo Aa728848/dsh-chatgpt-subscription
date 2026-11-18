@@ -166,6 +166,7 @@ export const ru: Record<HostLocaleKey, string> = {
   'antigravityAcp.noBinary': 'Рабочий Antigravity CLI (agy) не найден, и официальный ACP-сервер ещё не загружен.',
   'antigravityAcp.nativeTool': '[Antigravity использовал собственный инструмент в обход разрешений DSH: {call}]\n',
   'provider.qianwen-token-plan': 'Qwen Token Plan',
+  'provider.relayone': 'RelayOne',
   'qwen.notConfigured': 'Сначала укажите API-ключ Qwen Token Plan в настройках.',
   'qwen.invalidApiKey': 'API-ключ Qwen Token Plan пуст или слишком длинный.',
   'qwen.responseMissingChoices': 'В ответе Qianwen отсутствует choices.',
