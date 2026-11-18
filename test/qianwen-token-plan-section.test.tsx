@@ -98,13 +98,15 @@ describe('Qwen Token Plan settings UI', () => {
     expect(JSON.parse(String(call?.[1]?.body))).toEqual({ enabledModelIds: [] })
     expect(container.querySelectorAll('.dsh-mcl-option[aria-checked="true"]')).toHaveLength(0)
   })
-  it('shows a placeholder rather than 0% for a zero cache denominator and no composer badge', async () => {
+  it('renders no local stats block for a zero cache denominator and no composer badge', async () => {
     current.cacheStats = { requests: 1, missedInputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite5mTokens: 0, cacheWrite1hTokens: 0, outputTokens: 0, reasoningTokens: 0, encryptedReplays: 0, missingEncryptedContent: 0 }
     expect(qianwenCacheHitRatio(current.cacheStats)).toBeNull()
     expect(selectQianwenBadgeFacts(current)).toBeNull()
     await render()
-    expect(container.querySelector('.dshqw-cache')?.textContent).toContain('—')
+    expect(container.querySelector('.dshqw-stats')).toBeNull()
+    expect(container.querySelector('.dshqw-cache .dsha-grouphead button')).toBeNull()
     expect(container.querySelector('.dshqw-cache')?.textContent).not.toContain('0%')
+    expect(container.querySelector('.dshqw-cache')?.textContent).not.toContain('缓存命中率')
   })
   it('uses the official Qianwen image and no monogram', () => {
     const markup = renderToStaticMarkup(<BrandTile id="qianwen-token-plan" />)

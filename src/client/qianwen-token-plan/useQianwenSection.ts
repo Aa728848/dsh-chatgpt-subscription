@@ -118,14 +118,11 @@ export function useQianwenSection({ onModelChange }: QianwenSectionProps = {}) {
   }, [pixelsDraft, update])
   return {
     status, loading, busy, error, connection, keyValue, contextDrafts, savingModel, pixelsDraft,
-    cache: status?.cacheStats ?? null,
-    cacheHitRatio: qianwenCacheHitRatio(status?.cacheStats ?? null),
     setKeyValue, setPixelsDraft,
     setContextDraft: (id: string, draft: string) => setContextDrafts(current => ({ ...current, [id]: draft })),
     saveKey, removeKey, testConnection, update, toggleModel, setAllModels,
     saveContextWindow, resetContextWindow, resetAllContextWindows, savePixels,
     setDefaultEffort: (defaultReasoningEffort: QianwenReasoningEffort | null) => update({ defaultReasoningEffort }, 'effort'),
     setImageDetail: (imageDetail: QianwenImageDetail) => update({ imageDetail }, 'vision'),
-    clearCache: () => post<QianwenStatusDto>('/cache/reset', {}).then(adopt),
   }
 }

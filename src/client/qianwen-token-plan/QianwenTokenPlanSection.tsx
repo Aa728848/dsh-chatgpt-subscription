@@ -6,7 +6,6 @@ import {
   isQianwenCacheTtl,
   isQianwenImageDetail,
   isQianwenReasoningEffort,
-  type QianwenCacheStatsDto,
   type QianwenReasoningEffort,
 } from '../../shared/qianwen-token-plan-contracts.ts'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
@@ -21,13 +20,8 @@ const EFFORT_KEYS: Record<QianwenReasoningEffort, QianwenLocaleKey> = {
   none: 'effortNone', minimal: 'effortMinimal', low: 'effortLow', medium: 'effortMedium',
   high: 'effortHigh', xhigh: 'effortXhigh', max: 'effortMax',
 }
-const tokenText = (value: number): string => { try { return new Intl.NumberFormat().format(value) } catch { return String(value) } }
-const percentText = (value: number): string => (Math.round(value * 1000) / 10) + '%'
 function more(title: string, lines: string[]): React.JSX.Element {
   return <details className="dshqw-details"><summary>{title}</summary>{lines.map(line => <p key={line}>{line}</p>)}</details>
-}
-function stat(label: string, value: number): React.JSX.Element {
-  return <div className="dshqw-stat"><span>{label}</span><span>{tokenText(value)}</span></div>
 }
 
 export function QianwenTokenPlanSection(props: QianwenSectionProps = {}): React.JSX.Element {
@@ -37,7 +31,6 @@ export function QianwenTokenPlanSection(props: QianwenSectionProps = {}): React.
   if (view.loading && status === null) return <div className="dsha-empty">{t.loading}</div>
   const models = status?.models ?? []
   const enabledModels = models.filter(model => model.enabled)
-  const cache: QianwenCacheStatsDto | null = view.cache
   return <div className="dsha-page dshqw-page" data-provider="qianwen-token-plan">
     <section className="dsha-group dshqw-account">
       <div className="dsha-grouphead"><h3>{t.title}</h3><div className="dsha-actions">
@@ -57,22 +50,13 @@ export function QianwenTokenPlanSection(props: QianwenSectionProps = {}): React.
     </section>
 
     <section className="dsha-group dshqw-cache">
-      <div className="dsha-grouphead"><h3>{t.cacheSection}</h3><button className="dsha-btn" disabled={busy !== null || cache === null} onClick={() => void view.clearCache()}>{t.resetCache}</button></div>
+      <div className="dsha-grouphead"><h3>{t.cacheSection}</h3></div>
       <p className="dsha-muted">{t.cacheDesc}</p>
       <div className="dsha-pref-row"><div><strong>{t.cacheEnabled}</strong></div><input type="checkbox" aria-label={t.cacheEnabled} checked={status?.cacheEnabled === true} disabled={busy !== null} onChange={event => void view.update({ cacheEnabled: event.currentTarget.checked }).catch(() => undefined)} /></div>
       <div className="dsha-pref-row"><div><strong>{t.cacheTtl}</strong></div><select className="dsha-select" aria-label={t.cacheTtl} value={status?.cacheTtl ?? '5m'} disabled={busy !== null || status?.cacheEnabled !== true} onChange={event => { const value = event.currentTarget.value; if (isQianwenCacheTtl(value)) void view.update({ cacheTtl: value }).catch(() => undefined) }}>
         {QIANWEN_CACHE_TTLS.map(ttl => <option key={ttl} value={ttl}>{ttl === '5m' ? t.ttl5m : t.ttl1h}</option>)}
       </select></div>
-      {cache === null ? <div className="dsha-empty">{t.cacheEmpty}</div> : <>
-        <div className="dsha-meter-label"><span>{t.cacheHitRatio}</span><strong>{view.cacheHitRatio === null ? t.cacheUnavailable : percentText(view.cacheHitRatio)}</strong></div>
-        <div className="dshqw-stats">
-          {stat(t.cacheRequests, cache.requests)}{stat(t.cacheRead, cache.cacheReadTokens)}{stat(t.cacheMissed, cache.missedInputTokens)}
-          {stat(t.cacheWrite5m, cache.cacheWrite5mTokens)}{stat(t.cacheWrite1h, cache.cacheWrite1hTokens)}{stat(t.reasoningTokens, cache.reasoningTokens)}
-          {stat(t.encryptedReplays, cache.encryptedReplays)}{stat(t.missingEncrypted, cache.missingEncryptedContent)}
-        </div>
-      </>}
       {status?.cacheHint && <p className="dsha-muted">{t.cacheHint.replace('{minutes}', String(Math.floor(status.cacheHint.idleMs / 60_000)))}</p>}
-      {more(t.moreNotes, [t.quotaNote])}
       <div className="dsha-actions"><a href="https://platform.qianwenai.com/home/analytics/token-plan/individual" target="_blank" rel="noreferrer">{t.dashboard}</a></div>
     </section>
 
