@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { GenerateOptions, Message, StreamChunk } from '../src/host/common/llm-compat.ts'
 import { NO_RESOLVED_IMAGES } from '../src/host/common/request-images.ts'
+import { GPT_ENGINEERING_GUIDANCE, GPT_PROGRESS_GUIDANCE } from '../src/host/common/gpt-engineering-guidance.ts'
 import {
   catalogSnapshotPath,
   flushCatalogSnapshots,
@@ -72,7 +73,7 @@ function options(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
 }
 const effort = (value: string) => value as NonNullable<GenerateOptions['reasoningEffort']>
 const finishOf = (chunks: StreamChunk[]) => chunks.find(chunk => chunk.type === 'finish')
-const GPT_PROGRESS_RULE = 'Progress and tool execution rule: when executing multi-step tasks or invoking tools, output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call. Keep progress text brief, professional, and factual. Only present the comprehensive final answer and summary in the final turn after all tool operations are completed.'
+const GPT_TOOL_GUIDANCE = GPT_ENGINEERING_GUIDANCE + '\n\n' + GPT_PROGRESS_GUIDANCE
 
 afterEach(() => { vi.unstubAllEnvs() })
 
@@ -123,7 +124,7 @@ describe('RelayOne OpenAI request mapping', () => {
   it('builds standard Responses without Codex private fields', () => {
     const tools = [{ name: 'lookup', description: 'lookup', parameters: { type: 'object' } }] as NonNullable<GenerateOptions['tools']>
     const body = buildRelayOneResponsesRequest(options({ system: 'system', tools, reasoningEffort: effort('high') }), NO_RESOLVED_IMAGES, entry('gpt-6-astra'), defaultRelayOneSettings())
-    expect(body).toMatchObject({ model: 'gpt-6-astra', stream: true, instructions: 'system\n\n' + GPT_PROGRESS_RULE, store: false, reasoning: { effort: 'high' } })
+    expect(body).toMatchObject({ model: 'gpt-6-astra', stream: true, instructions: 'system\n\n' + GPT_TOOL_GUIDANCE, store: false, reasoning: { effort: 'high' } })
     expect(JSON.stringify(body)).not.toMatch(/responses-lite|originator|x-codex|additional_tools|reasoning.encrypted_content/)
     expect(body.tools).toEqual([{ type: 'function', name: 'lookup', description: 'lookup', strict: false, parameters: { type: 'object' } }])
   })
@@ -145,7 +146,7 @@ describe('RelayOne OpenAI request mapping', () => {
     }
     expect(entry('gpt-6-astra').contextWindow).toBe(272000)
   })
-  it('adds ChatGPT-style progress text to GPT Chat requests only with tools', () => {
+  it('adds shared engineering guidance to GPT Chat requests only with tools', () => {
     const tools = [{ name: 'lookup', description: 'lookup', parameters: { type: 'object' } }] as NonNullable<GenerateOptions['tools']>
     const body = buildRelayOneChatRequest(
       options({ system: 'system', tools }),
@@ -154,7 +155,10 @@ describe('RelayOne OpenAI request mapping', () => {
       defaultRelayOneSettings(),
     )
     const messages = body.messages as Record<string, unknown>[]
-    expect(messages[0]).toEqual({ role: 'system', content: 'system\n\n' + GPT_PROGRESS_RULE })
+    expect(messages[0]).toEqual({ role: 'system', content: 'system\n\n' + GPT_TOOL_GUIDANCE })
+    expect(GPT_TOOL_GUIDANCE).toContain('Verify proportionally')
+    expect(GPT_TOOL_GUIDANCE).toContain('meaningful stage transitions')
+    expect(GPT_TOOL_GUIDANCE).not.toContain('before each tool call')
 
     const withoutTools = buildRelayOneResponsesRequest(
       options({ system: 'system' }), NO_RESOLVED_IMAGES, entry('gpt-6-astra'), defaultRelayOneSettings(),

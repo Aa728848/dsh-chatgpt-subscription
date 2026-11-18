@@ -3,6 +3,7 @@ import { LlmError } from '../common/llm-compat.ts'
 import { toToolCallId } from '../common/brand-compat.ts'
 import { stripMetaSchema } from '../common/tool-schema.ts'
 import type { ResolvedRequestImages } from '../common/request-images.ts'
+import { appendGptEngineeringGuidance } from '../common/gpt-engineering-guidance.ts'
 import type { RelayOneModelEntry } from './model-catalog.ts'
 import type { RelayOneSettings } from './token-store.ts'
 import {
@@ -20,14 +21,10 @@ import {
   relayOneValidArguments,
 } from './mapper-shared.ts'
 
-// Keep this user-facing behaviour aligned with responses-mapper.ts: GPT tool
-// turns should expose brief progress before acting, not stay silent until the end.
-const GPT_PROGRESS_RULE = 'Progress and tool execution rule: when executing multi-step tasks or invoking tools, output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call. Keep progress text brief, professional, and factual. Only present the comprehensive final answer and summary in the final turn after all tool operations are completed.'
-
 function relayOneGptSystemText(options: GenerateOptions, entry: RelayOneModelEntry): string {
   const system = relayOneSystemText(options)
-  if (!/^gpt-/i.test(entry.id) || !options.tools?.length) return system
-  return system === '' ? GPT_PROGRESS_RULE : system + '\n\n' + GPT_PROGRESS_RULE
+  if (!/^gpt-/i.test(entry.id)) return system
+  return appendGptEngineeringGuidance(system, options.tools)
 }
 
 function responseMessageContent(

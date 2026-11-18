@@ -1,5 +1,6 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, GenerateOptions, Message } from './common/llm-compat.ts'
+import { gptEngineeringGuidance } from './common/gpt-engineering-guidance.ts'
 import { createHash } from 'node:crypto'
 import { codexDefaultOutputVerbosity, codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexModelUsesResponsesLite, codexWireReasoningEffort } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
@@ -218,7 +219,7 @@ export async function buildResponsesPayload(
   const instructionParts = [
     options.system?.trim(),
     latestSystemPrompt(options.messages),
-    progressExplanationInstruction(options.tools),
+    gptEngineeringGuidance(options.tools),
     commandToolInstruction(options.tools),
     runCodeInstruction(options.tools),
   ].filter((value): value is string => Boolean(value))
@@ -652,10 +653,6 @@ function uuidV5Bytes(namespace: Buffer, name: Buffer): Buffer {
 function formatUuid(bytes: Buffer): string {
   const hex = bytes.toString('hex')
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
-}
-function progressExplanationInstruction(tools: GenerateOptions['tools']): string | undefined {
-  if (!tools?.length) return undefined
-  return 'Progress and tool execution rule: when executing multi-step tasks or invoking tools, output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call. Keep progress text brief, professional, and factual. Only present the comprehensive final answer and summary in the final turn after all tool operations are completed.'
 }
 
 function runCodeInstruction(tools: GenerateOptions['tools']): string | undefined {

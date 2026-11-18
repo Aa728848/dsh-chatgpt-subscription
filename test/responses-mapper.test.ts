@@ -56,7 +56,7 @@ describe('Responses payload mapping', () => {
       readImage: async (ref) => ({ ref, data: new Uint8Array([1, 2, 3]) }),
     })
     expect(developerText(payload)).toContain('Be precise.')
-    expect(developerText(payload)).toContain('Progress and tool execution rule')
+    expect(developerText(payload)).toContain('Progress communication rule')
     expect(payload.input).toContainEqual({
       role: 'user',
       content: [
@@ -97,7 +97,7 @@ describe('Responses payload mapping', () => {
     ])
   })
 
-  it('injects progress and tool execution rule when tools are present, omits when absent', async () => {
+  it('injects shared engineering guidance when tools are present, omits when absent', async () => {
     const withoutTools = { provider: 'codex-chatgpt', model: 'gpt-5.6-sol', system: 'System prompt only.', messages: [] } as unknown as GenerateOptions
     const payloadWithoutTools = await buildResponsesPayload(withoutTools, unusedAttachments())
     expect(developerText(payloadWithoutTools)).toBe('System prompt only.')
@@ -109,8 +109,12 @@ describe('Responses payload mapping', () => {
     } as unknown as GenerateOptions
     const payloadWithTools = await buildResponsesPayload(withTools, unusedAttachments())
     expect(developerText(payloadWithTools)).toContain('System prompt.')
-    expect(developerText(payloadWithTools)).toContain('Progress and tool execution rule')
-    expect(developerText(payloadWithTools)).toContain('output 1-2 concise sentences of progress, intent, or intermediate findings before each tool call')
+    expect(developerText(payloadWithTools)).toContain('smallest COMPLETE change that addresses the root cause')
+    expect(developerText(payloadWithTools)).toContain('Verify proportionally')
+    expect(developerText(payloadWithTools)).toContain('do not rerun an equivalent check that already passed')
+    expect(developerText(payloadWithTools)).toContain('Progress communication rule')
+    expect(developerText(payloadWithTools)).toContain('meaningful stage transitions, verified findings, blockers, or before a long wait')
+    expect(developerText(payloadWithTools)).not.toContain('before each tool call')
   })
 
   it.each([
