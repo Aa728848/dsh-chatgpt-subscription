@@ -37,6 +37,7 @@
  * store.
  */
 
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -72,6 +73,7 @@ import {
 } from '../src/host/claude/types.ts'
 import { classifyFailure } from '../src/host/claude/client.ts'
 import type { CredentialStore } from '../src/host/token-store.ts'
+import { StickyImageBudgetStore } from '../src/host/common/sticky-image-budget.ts'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -663,6 +665,68 @@ describe('claude adapter failure codes', () => {
     ))
     const error = await failureOf(makeAdapter(store, settings, fn).stream(options())) as { failure: { providerRetryAfterMs?: number } }
     expect(error.failure.providerRetryAfterMs).toBe(42_000)
+  })
+})
+
+describe('Claude sticky image budget (#116)', () => {
+  const mib = 1024 * 1024
+  // Legacy inline shape accepted at the adapter boundary.
+  const image = (data: string) => ({
+    role: 'user', content: [{ type: 'image', mediaType: 'image/png', data }],
+  }) as unknown as GenerateOptions['messages'][number]
+  const countImages = (body: Record<string, unknown>) => (JSON.stringify(body.messages).match(/"type":"image"/g) ?? []).length
+
+  it('sends a 2.3 MB inline image by default and ignores legacy drops on restart', async () => {
+    const data = Buffer.alloc(2_300_000).toString('base64')
+    const sessionId = 'claude-sticky-legacy-session' as NonNullable<GenerateOptions['sessionId']>
+    const home = await scratchDir()
+    const legacy = new StickyImageBudgetStore('claude', path.join(home, 'storages', 'dsh-chatgpt-subscription-claude-cache.json'))
+    legacy.record(sessionId, new Set(['inline:' + createHash('sha256').update(data).digest('hex')]))
+    legacy.flush()
+
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    vi.stubEnv('DSH_HOME', home)
+    vi.resetModules()
+    try {
+      const { ClaudeAdapter: RestartedAdapter } = await import('../src/host/claude/adapter.ts')
+      const adapter = new RestartedAdapter(store, settings, undefined, { fetchFn: fn, loadCatalog: async () => [] })
+      await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId, messages: [image(data)] })))
+      expect(countImages(calls[0]!.body)).toBe(1)
+      expect(JSON.stringify(calls[0]!.body.messages)).not.toContain('[image omitted')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('drops older images above 8 MiB while retaining the newest legal image and explaining sticky omission', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    const sessionId = 'claude-sticky-high-water' as NonNullable<GenerateOptions['sessionId']>
+    const older = image('A'.repeat(4 * mib))
+    const latest = image('B'.repeat(5 * mib))
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId, messages: [older, latest] })))
+    const body = JSON.stringify(calls[0]!.body.messages)
+    expect(countImages(calls[0]!.body)).toBe(1)
+    expect(body).toContain('B'.repeat(100))
+    expect(body).toContain('The same image will stay omitted in this conversation')
+    expect(body).not.toContain('read its file again')
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId, messages: [older] })))
+    expect(countImages(calls[1]!.body)).toBe(0)
+    expect(older.content[0]?.type).toBe('image')
+  })
+
+  it('leaves room for valid images when another inline image exceeds the per-image limit', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { messages: [image('A'.repeat(3 * mib)), image('B'.repeat(6 * mib))] })))
+    const body = JSON.stringify(calls[0]!.body.messages)
+    expect(countImages(calls[0]!.body)).toBe(1)
+    expect(body).toContain('A'.repeat(100))
+    expect(body).not.toContain('B'.repeat(100))
+    expect(body).not.toContain('The same image will stay omitted in this conversation')
   })
 })
 

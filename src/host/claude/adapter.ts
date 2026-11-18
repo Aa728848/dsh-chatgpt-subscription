@@ -185,6 +185,8 @@ import {
 import {
   assertStreamComplete,
   buildClaudeRequestBody,
+  MAX_REQUEST_IMAGE_BYTES,
+  MAX_SINGLE_REQUEST_IMAGE_BYTES,
   claudeBodyBindsThinking,
   claudeBodyHasToolChanges,
   claudeRequestThinks,
@@ -201,7 +203,6 @@ import { ClaudeUnauthorizedError, ensureAccessToken, type ClaudeTokenStore } fro
 import { LlmError, normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../common/llm-compat.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../common/idle-watchdog.ts'
 import {
-  MAX_REQUEST_IMAGE_BYTES,
   offloadRequestImagesWithStickyBudget,
   type ResolvedRequestImages,
 } from '../common/request-images.ts'
@@ -349,7 +350,9 @@ export interface ClaudeAdapterOptions {
 }
 
 const claudePrefixRequests = new PrefixRequestCoordinator()
-const claudeStickyImages = new StickyImageBudgetStore('claude')
+// Drop records depend on the budget. Images evicted under the old 1.5 MB
+// limit must be reconsidered after upgrade, including in existing sessions.
+const claudeStickyImages = new StickyImageBudgetStore(`claude-${MAX_REQUEST_IMAGE_BYTES}-${MAX_SINGLE_REQUEST_IMAGE_BYTES}`)
 
 /**
  * The immutable id of the account a token came from, presented as the two-method
@@ -772,9 +775,12 @@ export class ClaudeAdapter extends LlmAdapter {
       ? offloadRequestImagesWithStickyBudget(
           normalized,
           MAX_REQUEST_IMAGE_BYTES,
-          Math.max(1, Math.floor(MAX_REQUEST_IMAGE_BYTES / 2)),
+          // Trimming back to the low mark must leave room for one legal image.
+          MAX_SINGLE_REQUEST_IMAGE_BYTES,
           stickyImages,
           claudeStickyImages.priorDroppedKeys(normalized.sessionId),
+          undefined,
+          MAX_SINGLE_REQUEST_IMAGE_BYTES,
         )
       : undefined
     const requestOptions = sticky?.options ?? offloadOldestRequestImages(normalized, images)

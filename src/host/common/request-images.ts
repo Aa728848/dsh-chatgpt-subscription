@@ -93,6 +93,10 @@ const OMITTED_IMAGE_TEXT =
   '[image omitted to keep the request within its size limit; older images are omitted first. '
   + 'If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]'
 
+const STICKY_OMITTED_IMAGE_TEXT =
+  '[image omitted to keep the request within its size limit. '
+  + 'The same image will stay omitted in this conversation. If it is needed, use a smaller or cropped copy.]'
+
 /** Media types both upstream wires accept as inline base64. */
 export const SUPPORTED_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
 
@@ -393,6 +397,7 @@ interface ImageOccurrence {
 function collectImageOccurrences(
   options: GenerateOptions,
   images?: ResolvedRequestImages,
+  maxImageBytes = Number.POSITIVE_INFINITY,
 ): ImageOccurrence[] {
   const occurrences: ImageOccurrence[] = []
   const walk = (content: unknown): void => {
@@ -401,8 +406,9 @@ function collectImageOccurrences(
       if (!isRecord(block)) continue
       if (block.type === 'image') {
         const bytes = requestImagePayloadLength(block, images)
+        if (bytes === undefined || bytes > maxImageBytes) continue
         const key = requestImageKey(block, images)
-        if (bytes !== undefined && key !== undefined) occurrences.push({ key, bytes })
+        if (key !== undefined) occurrences.push({ key, bytes })
         continue
       }
       if (block.type === 'tool-result') walk(block.content)
@@ -478,7 +484,7 @@ function replaceDroppedRequestImages(
         if (key === undefined || !droppedKeys.has(key)) return block
         replaced = true
         count += 1
-        return { type: 'text', text: OMITTED_IMAGE_TEXT } as ContentBlock
+        return { type: 'text', text: STICKY_OMITTED_IMAGE_TEXT } as ContentBlock
       }
       if (block.type === 'tool-result' && Array.isArray(block.content)) {
         const inner = replaceIn(block.content)
@@ -548,6 +554,8 @@ export interface StickyImageOffloadResult {
  * @param inlineExcludedKeys - identities whose actual wire form is a hosted
  * reference rather than inline bytes. They stay in request order with a zero
  * byte weight; only genuinely inline images consume this budget.
+ * @param maxImageBytes - per-image limit when the mapper independently replaces
+ * larger images with placeholders. Those images do not consume the total budget.
  */
 export function offloadRequestImagesWithStickyBudget(
   options: GenerateOptions,
@@ -556,6 +564,7 @@ export function offloadRequestImagesWithStickyBudget(
   images?: ResolvedRequestImages,
   priorDroppedKeys?: ReadonlySet<string>,
   inlineExcludedKeys?: ReadonlySet<string>,
+  maxImageBytes = Number.POSITIVE_INFINITY,
 ): StickyImageOffloadResult {
   const allDroppedKeys = new Set<string>(priorDroppedKeys ?? [])
   // Only the images that are still candidates are budgeted: a picture dropped
@@ -563,7 +572,7 @@ export function offloadRequestImagesWithStickyBudget(
   // hosted reference also carries no inline bytes, but retaining its zero-byte
   // entry preserves the request order of the inline images around it.
   const pending = new Map<string, number>()
-  for (const occurrence of collectImageOccurrences(options, images)) {
+  for (const occurrence of collectImageOccurrences(options, images, maxImageBytes)) {
     if (allDroppedKeys.has(occurrence.key)) continue
     const bytes = inlineExcludedKeys?.has(occurrence.key) ? 0 : occurrence.bytes
     pending.set(occurrence.key, (pending.get(occurrence.key) ?? 0) + bytes)
