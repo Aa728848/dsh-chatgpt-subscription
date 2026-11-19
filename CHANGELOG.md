@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.80.3 - 2026-11-19
+
+- **[relayone] 补全非 GPT 模型能力与厂商 Chat 参数兼容**
+  - 按厂商和型号更新 Claude、Gemini、Kimi、MiniMax、Qwen、DeepSeek、GLM、Step 与 SWE-2 的上下文窗口、最大输出、图片输入及推理档位；带 `moonshotai/`、`free/` 等前缀的 ID 复用同一能力规则，旧快照读取时自动重算。
+  - MiniMax、GLM、Step、DeepSeek、Gemini 与 Claude 的 Chat 兼容面使用 `max_tokens`，Kimi、Qwen 与既有 GPT 路径保留 `max_completion_tokens`；GLM 不再发送不兼容的流式用量和并行工具字段，DeepSeek 的 `none` 正确映射为关闭思考。
+  - Composer 额度徽章移除右侧进度条，保留真实剩余百分比和余额详情。MiniMax 修正字段后的直接请求已实测返回 200；DeepSeek 福利分组 502、Claude Max 分组 429/500/503 为诊断时的上游状态，未记为真实生成验收通过。
+  - **验证**：Host/Client/Test/Scripts 类型检查通过；全量 Vitest 393 个测试文件通过、3 个跳过，7,027 项测试通过、10 个跳过；新增模型能力、厂商参数与额度 UI 回归，安全干净构建及 npm 打包审查通过。
+
 ## 0.80.2 - 2026-11-19
 
 - **[antigravity-acp] 修复 ACP server 解包目录残留写满系统盘（[#117](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/117)）**
