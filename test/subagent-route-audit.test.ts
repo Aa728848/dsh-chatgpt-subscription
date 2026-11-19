@@ -170,6 +170,8 @@ describe('subagent route audit', () => {
     const sessions = registry([parent, child])
     expect(auditChildRoutes(parent, sessions, undefined)).toEqual([])
     expect(auditChildRoutes(parent, sessions, [])).toEqual([])
+    expect(auditChildRoutes(parent, sessions, [], { enforceEmptyAllowlist: true }).map(v => v.finding.childId))
+      .toEqual(['c1'])
     // A header-less parent leaves the route unknown: advisory means no accusation.
     const bare = session('p', [catalogEvent('c1')])
     expect(auditChildRoutes(bare, registry([bare, child]), ALLOWED)).toEqual([])

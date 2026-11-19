@@ -253,6 +253,14 @@ function cloneRoutes(routes: readonly SubagentModelRoute[]): SubagentModelRoute[
   return out
 }
 
+/** 宿主快照使用全局设置与各主模型设置的并集。 */
+function nativeAllowedRoutes(
+  defaults: readonly SubagentModelRoute[],
+  overrides: Readonly<Record<string, readonly SubagentModelRoute[]>>,
+): SubagentModelRoute[] {
+  return cloneRoutes([...defaults, ...Object.values(overrides).flat()])
+}
+
 function sameRouteSet(left: readonly SubagentModelRoute[], right: readonly SubagentModelRoute[]): boolean {
   if (left.length !== right.length) return false
   const keys = new Set(right.map(routeKey))
@@ -1004,12 +1012,7 @@ export class SubagentSettingsController {
       this.preferencesStatus = 'ready'
 
       // 2) 宿主授权清单：两份列表的并集，去重保序。
-      const union = new Map<string, SubagentModelRoute>()
-      for (const route of desiredDefault) union.set(routeKey(route), { provider: route.provider, model: route.model })
-      for (const list of Object.values(desiredOverrides)) {
-        for (const route of list) union.set(routeKey(route), { provider: route.provider, model: route.model })
-      }
-      const unionRoutes = [...union.values()]
+      const unionRoutes = nativeAllowedRoutes(desiredDefault, desiredOverrides)
       const scope = this.modelSelection
       const modelSnapshot = scope.getSnapshot()
       const modelDirty = this.currentEnabled() !== desiredEnabled
@@ -1119,18 +1122,17 @@ export class SubagentSettingsController {
     const currentDefaultFork = this.currentDefaultFork()
     const currentForkOverrides = this.currentForkOverrides()
 
-    const union = new Map<string, SubagentModelRoute>()
-    for (const route of desiredDefault) union.set(routeKey(route), route)
-    for (const list of Object.values(desiredOverrides)) {
-      for (const route of list) union.set(routeKey(route), route)
-    }
     const hostAllowed = cloneRoutes(modelSnapshot.value?.allowedModels ?? [])
+    // 两份设置独立写入。重开卡片后仍允许重试未写入宿主的名单。
+    const pendingRouteSync = modelsAvailable
+      && (this.draftDefault !== undefined || (enabled && this.preferencesStatus === 'ready'))
+      && !sameRouteSet(hostAllowed, nativeAllowedRoutes(desiredDefault, desiredOverrides))
     const modelsDirty = this.currentEnabled() !== enabled
       || !sameRouteSet(currentDefault, desiredDefault)
       || !sameOverrides(currentOverrides, desiredOverrides)
       || currentDefaultFork !== desiredDefaultFork
       || !sameForkOverrides(currentForkOverrides, desiredForkOverrides)
-      || (this.draftDefault !== undefined && !sameRouteSet(hostAllowed, [...union.values()]))
+      || pendingRouteSync
 
     const depthPersistedOverridden = userHas(limitsSnapshot.user, 'maxDepth')
     const activePersistedOverridden = userHas(limitsSnapshot.user, 'maxActiveSubagents')

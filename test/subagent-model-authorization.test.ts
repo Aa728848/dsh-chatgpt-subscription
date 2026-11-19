@@ -533,7 +533,7 @@ describe('subagent model authorization', () => {
   it('enriches list_subagent_models output with split authorized routes and rewrites misleading tool descriptions', async () => {
     expect(effectiveAllowedRoutes(recordingAgent([MINIMAX]), PREFERENCE, NO_SESSIONS)).toEqual([MINIMAX])
     expect(effectiveAllowedRoutes(recordingAgent([MINIMAX]), { enabled: false, allowedModels: [MINIMAX] }, NO_SESSIONS))
-      .toEqual([])
+      .toBeUndefined()
 
     const rawProviderList = 'minimax-code — MiniMax Code'
     const enriched = enrichListSubagentModelsOutput(rawProviderList, [MINIMAX])
@@ -545,7 +545,7 @@ describe('subagent model authorization', () => {
     // With no allowlist the output states the opposite fact instead of staying
     // silent: the tool row is mounted statically, so a mounted tool must not be
     // readable as an active allowlist.
-    const unlisted = enrichListSubagentModelsOutput(rawProviderList, [])
+    const unlisted = enrichListSubagentModelsOutput(rawProviderList, undefined)
     expect(unlisted).toContain('minimax-code — MiniMax Code')
     expect(unlisted).toContain('No allowlist is in force for this Session')
     expect(unlisted).toContain('normal inheritance/default behavior')
@@ -553,8 +553,8 @@ describe('subagent model authorization', () => {
     expect(unlisted).not.toContain('routing is unrestricted')
     expect(unlisted).not.toContain('Authorized child routes for this Session')
     // Idempotent there too, and a bare empty output becomes the notice alone.
-    expect(enrichListSubagentModelsOutput(unlisted, [])).toBe(unlisted)
-    expect(enrichListSubagentModelsOutput('', [])).toBe(NO_ALLOWLIST_ROUTING_NOTICE)
+    expect(enrichListSubagentModelsOutput(unlisted, undefined)).toBe(unlisted)
+    expect(enrichListSubagentModelsOutput('', undefined)).toBe(NO_ALLOWLIST_ROUTING_NOTICE)
     expect(enrichListSubagentModelsOutput('', [MINIMAX])).not.toContain('No allowlist is in force')
     // The notice stays a statement of two facts. This listener is host-level and
     // reaches Sessions that never touch the dispatch preset, so a recommendation
@@ -634,7 +634,7 @@ describe('subagent model authorization', () => {
     expect(rewriteAuthorizedToolDescriptions('Model id within that provider; requires `provider`.', [MINIMAX]))
       .toContain('Required in this Session: pass the authorized model id (without the provider/ prefix)')
     // Unrestricted sessions keep the original assembly reference untouched.
-    expect(rewriteAuthorizedPromptAssembly(assembly, [])).toBe(assembly)
+    expect(rewriteAuthorizedPromptAssembly(assembly, undefined)).toBe(assembly)
 
     // Verify the event hooks registered by installSubagentModelAuthorization.
     const listeners = new Map<string, (...args: unknown[]) => unknown>()
@@ -701,25 +701,98 @@ describe('per-main-model subagent routing', () => {
     return routedSession(routes, mainRoute)
   }
 
+  it('uses only exact routes also recorded by the native policy, including after resuming', () => {
+    const updated = {
+      ...BY_MAIN,
+      byMainModel: { 'codex-chatgpt/gpt-6-astra': [MINIMAX, CODEX] },
+    }
+    const resumed = { session: rootSession([CODEX, SONNET], CODEX) }
+    const fresh = { session: rootSession([CODEX, MINIMAX, SONNET], CODEX) }
+    expect(effectiveAllowedRoutes(resumed, updated, NO_SESSIONS)).toEqual([CODEX])
+    expect(delegationDenialReason(resumed, 'subagent', CODEX, updated, NO_SESSIONS)).toBeUndefined()
+    expect(delegationDenialReason(resumed, 'subagent', MINIMAX, updated, NO_SESSIONS))
+      .toContain('is not on the Session allowlist')
+    expect(effectiveAllowedRoutes(fresh, updated, NO_SESSIONS)).toEqual([MINIMAX, CODEX])
+    expect(delegationDenialReason(fresh, 'subagent', MINIMAX, updated, NO_SESSIONS)).toBeUndefined()
+  })
+
+  it('does not fall back to implicit delegation when none of the configured routes is recorded', () => {
+    const resumed = { session: rootSession([SONNET, OPUS], CODEX) }
+    expect(effectiveAllowedRoutes(resumed, BY_MAIN, NO_SESSIONS)).toEqual([])
+    for (const args of [{}, CODEX, SONNET]) {
+      expect(delegationDenialReason(resumed, 'subagent', args, BY_MAIN, NO_SESSIONS))
+        .toContain('start a new Session')
+    }
+    expect(delegationDenialReason(
+      resumed, 'subagent_fork', {}, BY_MAIN, NO_SESSIONS, ['subagent'], 'session', ['subagent_fork'],
+    )).toContain('start a new Session')
+  })
+
+  it('publishes the same policy in model discovery and blocks queries outside it', async () => {
+    const listeners = new Map<string, (...args: unknown[]) => unknown>()
+    let guard: ToolGuard | undefined
+    const ctx = {
+      tools: { guard: (handler: ToolGuard) => { guard = handler; return () => undefined } },
+      on: (event: string, fn: (...args: unknown[]) => unknown) => { listeners.set(event, fn) },
+    }
+    installSubagentModelAuthorization(ctx as never, NO_SESSIONS, {
+      routingOverrides: () => ({ byMainModel: BY_MAIN.byMainModel }),
+    })
+    const postExecute = listeners.get('tools/post-execute')!
+    const query = (agent: AuthorizationAgent, args: unknown) =>
+      guard!({ name: 'list_subagent_models', agent, arguments: args } as never)
+    const discover = (agent: AuthorizationAgent) => postExecute(
+      { name: 'list_subagent_models', agent },
+      { isError: false, value: 'claude — Claude' },
+      async () => ({ kind: 'accept' }),
+    ) as Promise<{ kind: string; value: string }>
+
+    const resumed = { session: rootSession([SONNET], CODEX) }
+    expect(await query(resumed, {})).toBeUndefined()
+    expect(await query(resumed, { provider: CODEX.provider })).toContain('start a new Session')
+    const blocked = await discover(resumed)
+    expect(blocked.value).toContain('Authorized child routes for this Session: (none)')
+    expect(blocked.value).toContain('start a new Session')
+    expect(blocked.value).not.toContain('claude')
+    expect(blocked.value).not.toContain(NO_ALLOWLIST_ROUTING_NOTICE)
+
+    const fresh = { session: rootSession([SONNET, CODEX], CODEX) }
+    expect(await query(fresh, CODEX)).toBeUndefined()
+    expect(await query(fresh, SONNET)).toContain('is not on the Session allowlist')
+    const available = await discover(fresh)
+    expect(available.value).toContain('provider: "codex-chatgpt", model: "gpt-6-astra"')
+    expect(available.value).not.toContain('claude')
+  })
+
+  it('checks a descendant against its own recorded policy after the root locks its filter', () => {
+    const root = rootSession([CODEX, SONNET], CODEX)
+    const child = session([policyEvent([SONNET])], { origin: 'subagent', parentSession: 'root' })
+    const sessions = registry({ root })
+    expect(effectiveAllowedRoutes({ session: root }, BY_MAIN, sessions)).toEqual([CODEX])
+    expect(effectiveAllowedRoutes({ session: child }, BY_MAIN, sessions)).toEqual([])
+    expect(delegationDenialReason({ session: child }, 'subagent', CODEX, BY_MAIN, sessions))
+      .toContain('start a new Session')
+  })
+
   it('applies the entry for the root Session main model, then the fallback list, then the policy', () => {
-    const codexRoot = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const codexRoot = rootSession([SONNET, OPUS, MINIMAX, CODEX], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     expect(effectiveAllowedRoutes({ session: codexRoot }, BY_MAIN, NO_SESSIONS)).toEqual([CODEX])
     // An unmatched main model falls back to the deployment's fallback list.
-    const deepseekRoot = rootSession([SONNET, OPUS], DEEPSEEK)
+    const deepseekRoot = rootSession([SONNET, OPUS, MINIMAX, CODEX], DEEPSEEK)
     expect(effectiveAllowedRoutes({ session: deepseekRoot }, BY_MAIN, NO_SESSIONS)).toEqual([MINIMAX])
     // A deployment with no override configured keeps the Session policy.
     const plain = rootSession([SONNET, OPUS], DEEPSEEK)
     expect(effectiveAllowedRoutes({ session: plain }, PREFERENCE, NO_SESSIONS)).toEqual([SONNET, OPUS])
     // An override can never invent an allowlist for a Session that governs none.
-    expect(effectiveAllowedRoutes({ session: session([]) }, BY_MAIN, NO_SESSIONS)).toEqual([])
+    expect(effectiveAllowedRoutes({ session: session([]) }, BY_MAIN, NO_SESSIONS)).toBeUndefined()
     expect(effectiveAllowedRoutes({ session: session([]) }, BY_MAIN, NO_SESSIONS, 'preference')).toEqual([MINIMAX])
     // An explicit "off" still suspends enforcement everywhere.
-    expect(effectiveAllowedRoutes({ session: codexRoot }, { ...BY_MAIN, enabled: false }, NO_SESSIONS)).toEqual([])
+    expect(effectiveAllowedRoutes({ session: codexRoot }, { ...BY_MAIN, enabled: false }, NO_SESSIONS)).toBeUndefined()
   })
 
   it('resolves the main model from the ROOT Session, never from the child', () => {
-    const root = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
-    const child = session([policyEvent([SONNET, OPUS])], { origin: 'subagent', parentSession: 'root' })
+    const root = rootSession([SONNET, OPUS, MINIMAX, CODEX], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const child = session([policyEvent([SONNET, OPUS, MINIMAX, CODEX])], { origin: 'subagent', parentSession: 'root' })
     const sessions = registry({ root })
     // The child's own route is irrelevant: the main model belongs to the root.
     const childAgent = { session: child, options: DEEPSEEK }
@@ -737,7 +810,7 @@ describe('per-main-model subagent routing', () => {
     expect(resolveRootSessionAndMainRoute({ session: hinted }, NO_SESSIONS, CODEX).mainRoute).toEqual(CODEX)
     // A header that names the route outranks the creation options, which go stale
     // after a mid-session switch.
-    const switched = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const switched = rootSession([SONNET, OPUS, MINIMAX, CODEX], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     expect(resolveRootSessionAndMainRoute({ session: switched, options: DEEPSEEK }, NO_SESSIONS).mainRoute)
       .toEqual({ provider: 'codex-chatgpt', model: 'gpt-6-astra' })
   })
@@ -746,7 +819,7 @@ describe('per-main-model subagent routing', () => {
     // A Session whose main model is switched AFTER its policy was first read
     // keeps the routes it started with: re-pointing them would change the
     // prompt-advertised list mid-conversation and invalidate its prefix cache.
-    const events = [policyEvent([SONNET, OPUS])]
+    const events = [policyEvent([SONNET, OPUS, MINIMAX, CODEX])]
     let config: { provider?: string; model?: string } = { provider: 'codex-chatgpt', model: 'gpt-6-astra' }
     const lockable: PolicySession = {
       eventAt: (seq: number) => events[seq] as { type?: unknown; data?: unknown } | undefined,
@@ -760,7 +833,7 @@ describe('per-main-model subagent routing', () => {
     expect(resolveRootSessionAndMainRoute(agent, NO_SESSIONS).mainRoute)
       .toEqual({ provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     // A different Session object is a different lock.
-    const other = rootSession([SONNET, OPUS], DEEPSEEK)
+    const other = rootSession([SONNET, OPUS, MINIMAX, CODEX], DEEPSEEK)
     expect(effectiveAllowedRoutes({ session: other }, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
   })
 
@@ -770,7 +843,7 @@ describe('per-main-model subagent routing', () => {
     // prompt-assembly hook rewrites the subagent description and the tools:sdk
     // section from it, so a mid-conversation change loses the prefix cache and
     // contradicts the card's "applies to new sessions" promise.
-    const live = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const live = rootSession([SONNET, OPUS, MINIMAX, CODEX], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     const agent = { session: live }
     expect(effectiveAllowedRoutes(agent, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([CODEX])
 
@@ -797,10 +870,10 @@ describe('per-main-model subagent routing', () => {
     expect(rewritten.sections[0]!.text).not.toContain('minimax-code/MiniMax-M3.1-Flash')
 
     // A session created AFTER the edit picks the new list up.
-    const fresh = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const fresh = rootSession([SONNET, OPUS, MINIMAX], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     expect(effectiveAllowedRoutes({ session: fresh }, edited, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
     // The fallback list is locked the same way for a main model with no entry.
-    const deepseekLive = rootSession([SONNET, OPUS], DEEPSEEK)
+    const deepseekLive = rootSession([SONNET, OPUS, MINIMAX, CODEX], DEEPSEEK)
     expect(effectiveAllowedRoutes({ session: deepseekLive }, BY_MAIN, NO_SESSIONS, 'session', true)).toEqual([MINIMAX])
     const editedFallback: SubagentModelSelectionPreference = {
       ...BY_MAIN,
@@ -808,16 +881,16 @@ describe('per-main-model subagent routing', () => {
     }
     expect(effectiveAllowedRoutes({ session: deepseekLive }, editedFallback, NO_SESSIONS, 'session', true))
       .toEqual([MINIMAX])
-    expect(effectiveAllowedRoutes({ session: rootSession([SONNET, OPUS], DEEPSEEK) }, editedFallback, NO_SESSIONS, 'session', true))
+    expect(effectiveAllowedRoutes({ session: rootSession([SONNET, OPUS, MINIMAX, CODEX], DEEPSEEK) }, editedFallback, NO_SESSIONS, 'session', true))
       .toEqual([CODEX])
     // A session with a request header locks on first use even without the flag.
-    const headerLocked = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const headerLocked = rootSession([SONNET, OPUS, MINIMAX, CODEX], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     expect(effectiveAllowedRoutes({ session: headerLocked }, BY_MAIN, NO_SESSIONS)).toEqual([CODEX])
     expect(effectiveAllowedRoutes({ session: headerLocked }, edited, NO_SESSIONS)).toEqual([CODEX])
   })
 
   it('denies a delegation outside the overridden list with that list in the reason', () => {
-    const codexRoot = rootSession([SONNET, OPUS], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    const codexRoot = rootSession([SONNET, OPUS, MINIMAX, CODEX], { provider: 'codex-chatgpt', model: 'gpt-6-astra' })
     const agent = { session: codexRoot }
     // SONNET is on the Session policy but not on this main model's entry.
     expect(delegationDenialReason(agent, 'subagent', { provider: SONNET.provider, model: SONNET.model }, BY_MAIN, NO_SESSIONS))
@@ -1062,7 +1135,7 @@ describe('路由约束写进工具描述', () => {
     const twice = rewriteAuthorizedPromptAssembly(rewritten, [MINIMAX], ['subagent'], ['subagent_fork'])
     expect(twice.tools[0]!.description.split('Never pass provider/model').length - 1).toBe(1)
     // 没有 allowlist 的会话，装配原样返回。
-    expect(rewriteAuthorizedPromptAssembly(assembly, [], ['subagent'], ['subagent_fork'])).toBe(assembly)
+    expect(rewriteAuthorizedPromptAssembly(assembly, undefined, ['subagent'], ['subagent_fork'])).toBe(assembly)
   })
 
   it('拒绝文案点名可以换用的显式工具，并提示保留父路由的另一种做法', () => {

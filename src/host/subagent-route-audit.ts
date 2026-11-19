@@ -292,6 +292,8 @@ function routeAllowed(
 export interface AuditChildRoutesOptions {
   /** Whether same-route `fork`-provider children are authorized on the parent route. */
   readonly allowParentFork?: boolean
+  /** An effective policy with no matching routes denies every known child route. */
+  readonly enforceEmptyAllowlist?: boolean
 }
 
 /**
@@ -310,7 +312,7 @@ export function auditChildRoutes(
   allowed: readonly AuditedRoute[] | undefined,
   options?: AuditChildRoutesOptions,
 ): RouteViolation[] {
-  if (allowed === undefined || allowed.length === 0) return []
+  if (allowed === undefined || (allowed.length === 0 && options?.enforceEmptyAllowlist !== true)) return []
   const violations: RouteViolation[] = []
   for (const finding of childRoutesOf(parent, sessions)) {
     const effective = effectiveRouteOf(finding, sessions)

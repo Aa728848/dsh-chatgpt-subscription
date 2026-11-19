@@ -166,10 +166,12 @@ import {
 } from './host/minimax-code/checkin.ts'
 import {
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
+  effectiveAllowedRoutes,
+  effectiveAllowParentFork,
   installSubagentModelAuthorization,
   normalizeDelegationToolNames,
   normalizeInheritToolNames,
-  resolveRootSessionAndMainRoute,
+  readSubagentRoutingPreference,
   validateDelegationToolNames,
   type PolicySession,
   type SessionsResolver,
@@ -197,11 +199,7 @@ import { promptRefDescriptor } from './host/dispatch-ledger/policy.ts'
 import type { DispatchLedgerSessions } from './host/dispatch-ledger/guard.ts'
 import { installBundledPresets } from './host/preset-sync.ts'
 import { DISPATCH_PRESET, installDispatchPreset } from './host/agent-preset.ts'
-import {
-  auditChildRoutes,
-  auditedRoutesOf,
-  type AuditedSessions,
-} from './host/subagent-route-audit.ts'
+import { auditChildRoutes, type AuditedSessions } from './host/subagent-route-audit.ts'
 import type { PoolStorageMode, SubagentRouteAuditDto } from './shared/contracts.ts'
 import {
   createFileRelayProbeSink,
@@ -946,8 +944,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     },
   })
 
-  // The allowlist a Session recorded outranks the current settings document,
-  // because the built-in delegation tool snapshot it when the Session started.
+  const readSubagentRoutingOverrides = () => {
+    const current = preferences.status()
+    const defaultAllowedModels = current.subagentDefaultModels ?? []
+    const byMainModel = current.subagentModelsByMainModel ?? {}
+    const allowParentForkByMainModel = current.subagentAllowParentForkByMainModel ?? {}
+    return {
+      ...defaultAllowedModels.length > 0 ? { defaultAllowedModels } : {},
+      ...Object.keys(byMainModel).length > 0 ? { byMainModel } : {},
+      ...current.subagentDefaultAllowParentFork === true ? { defaultAllowParentFork: true } : {},
+      ...Object.keys(allowParentForkByMainModel).length > 0 ? { allowParentForkByMainModel } : {},
+    }
+  }
   const delegationToolNames = normalizeDelegationToolNames(pluginConfig.subagentModelTools)
   const delegationInheritNames = normalizeInheritToolNames(pluginConfig.subagentModelInheritTools)
   if (pluginConfig.subagentModelAuthorization !== false) {
@@ -962,24 +970,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           toolNames: delegationToolNames,
           inheritToolNames: delegationInheritNames,
           scope: pluginConfig.subagentModelScope ?? 'session',
-          // Read live from the plugin's own preferences rather than sampled into
-          // the Session: which routes a MAIN model may delegate to is a
-          // deployment choice, and the card's edit has to reach Sessions that are
-          // already running. An empty list means "not configured", which leaves
-          // the Session's own recorded allowlist in charge.
-          routingOverrides: () => {
-            const current = preferences.status()
-            const defaultAllowedModels = current.subagentDefaultModels ?? []
-            const byMainModel = current.subagentModelsByMainModel ?? {}
-            const defaultAllowParentFork = current.subagentDefaultAllowParentFork
-            const allowParentForkByMainModel = current.subagentAllowParentForkByMainModel ?? {}
-            return {
-              ...defaultAllowedModels.length > 0 ? { defaultAllowedModels } : {},
-              ...Object.keys(byMainModel).length > 0 ? { byMainModel } : {},
-              ...defaultAllowParentFork === true ? { defaultAllowParentFork: true } : {},
-              ...Object.keys(allowParentForkByMainModel).length > 0 ? { allowParentForkByMainModel } : {},
-            }
-          },
+          routingOverrides: readSubagentRoutingOverrides,
         })
       }, 'dsh-chatgpt-subscription: subagent model authorization')
     })
@@ -1775,38 +1766,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       const sessions = ctx.get('sessions') as unknown as AuditedSessions
       const target = sessions.get(sessionId)
       if (target === undefined) throw new Error(`Unknown session "${sessionId}".`)
-      const audited = auditedRoutesOf(target)
-      // The audit must report the SAME routes the guard enforces. A Session that
-      // recorded an allowlist can still be narrowed by the per-main-model
-      // override the card stores, so an audit built from the durable event alone
-      // would flag every child on an overridden route as a violation — a false
-      // alarm in a report whose whole value is that it is trustworthy.
-      const current = preferences.status()
-      const mainRoute = resolveRootSessionAndMainRoute(
-        // The audit holds a resolved session, not a calling agent; wrapping it
-        // lets the one shared resolver answer which main model governs it.
-        { session: target as unknown as PolicySession },
-        sessions,
-      ).mainRoute
-      const override = mainRoute === undefined
-        ? undefined
-        : (current.subagentModelsByMainModel ?? {})[`${mainRoute.provider}/${mainRoute.model}`]
-      const fallback = current.subagentDefaultModels ?? []
-      const allowed = audited === undefined
-        ? audited
-        : (override !== undefined && override.length > 0
-          ? override
-          : (fallback.length > 0 ? fallback : audited))
-      const forkOverride = mainRoute === undefined
-        ? undefined
-        : (current.subagentAllowParentForkByMainModel ?? {})[`${mainRoute.provider}/${mainRoute.model}`]
-      const allowParentFork = typeof forkOverride === 'boolean'
-        ? forkOverride
-        : current.subagentDefaultAllowParentFork === true
+      const agent = { session: target as unknown as PolicySession }
+      const preference = readSubagentRoutingPreference({ settings: ctx.settings, routingOverrides: readSubagentRoutingOverrides })
+      const allowed = effectiveAllowedRoutes(agent, preference, sessions, pluginConfig.subagentModelScope)
+      const allowParentFork = allowed !== undefined && effectiveAllowParentFork(agent, preference, sessions)
       return Promise.resolve({
         sessionId,
         allowedModels: (allowed ?? []).map(route => ({ provider: route.provider, model: route.model })),
-        violations: auditChildRoutes(target, sessions, allowed, { allowParentFork }).map(violation => ({
+        violations: auditChildRoutes(target, sessions, allowed, { allowParentFork, enforceEmptyAllowlist: true }).map(violation => ({
           childId: violation.finding.childId,
           parentId: violation.finding.parentId ?? null,
           provider: violation.finding.provider ?? null,

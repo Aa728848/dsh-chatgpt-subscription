@@ -235,6 +235,21 @@ describe('subagent settings card', () => {
     controller.dispose()
   })
 
+  it('repairs a pending native allowlist sync after reopening settings', async () => {
+    const first = ROUTES[0]!
+    const child = ROUTES[2]!
+    const { face, models } = await renderCard({
+      allowed: [first],
+      defaults: [first],
+      overrides: { 'codex-chatgpt/gpt-5.6-sol': [child] },
+    })
+    // The plugin write landed, but the native form still has the previous list.
+    expect(face.store.getSnapshot().dirty).toBe(true)
+    await act(async () => face.save())
+    expect(models.getSnapshot().value?.allowedModels).toEqual([first, child])
+    expect(face.store.getSnapshot().dirty).toBe(false)
+  })
+
   it('marks the draft invalid when the global list would end up empty', async () => {
     const { controller, face } = await renderCard({ defaults: [{ provider: 'codex-chatgpt', model: 'gpt-5.6-sol' }] })
     await act(async () => { face.toggleModel('codex-chatgpt/gpt-5.6-sol') })
