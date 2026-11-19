@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startLogin } from '../src/host/antigravity-acp/login.ts'
@@ -41,6 +41,7 @@ const TERMINAL_SERVER = [
   "import { writeFileSync } from 'node:fs'",
   "if (process.argv.includes('--login')) {",
   "  writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)))",
+  "  writeFileSync(process.argv[2] + '.env', JSON.stringify({ temp: process.env.TEMP, tmp: process.env.TMP, tmpdir: process.env.TMPDIR }))",
   '  process.exit(0)',
   '}',
   OAUTH_SERVER.replace("authMethods: [{ id: 'oauth-personal' }]", "authMethods: [{ id: 'terminal-login', type: 'terminal' }]"),
@@ -92,6 +93,12 @@ describe('startLogin', () => {
       expect(result.started).toBe(true)
       const args = JSON.parse(readFileSync(log, 'utf8')) as string[]
       expect(args).toEqual(['acp', '--disable-telemetry', '--login'])
+      const childEnv = JSON.parse(readFileSync(log + '.env', 'utf8')) as { temp: string; tmp: string; tmpdir: string }
+      expect(childEnv.tmp).toBe(childEnv.temp)
+      expect(childEnv.tmpdir).toBe(childEnv.temp)
+      expect(childEnv.temp).toContain('antigravity-acp')
+      expect(childEnv.temp).not.toBe(process.env.TEMP)
+      expect(existsSync(childEnv.temp)).toBe(false)
     } finally {
       space.dispose()
     }

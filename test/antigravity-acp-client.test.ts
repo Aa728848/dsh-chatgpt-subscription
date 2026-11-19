@@ -6,7 +6,7 @@
  * a frame split across chunk boundaries, and a child that dies mid-request.
  */
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync, rmSync, rmdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AcpClient, AcpError } from '../src/host/antigravity-acp/acp-client.ts'
@@ -46,6 +46,14 @@ process.stdin.on('data', (chunk) => {
     }
     if (request.method === 'die') {
       process.exit(3)
+    }
+    if (request.method === 'environment') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+        tmp: process.env.TMP,
+        temp: process.env.TEMP,
+        tmpdir: process.env.TMPDIR,
+      } }) + '\\n')
+      continue
     }
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {} }) + '\\n')
   }
@@ -113,6 +121,36 @@ describe('AcpClient', () => {
     } finally {
       await client.dispose()
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('isolates the child temporary directory and removes the owned empty directory on exit', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acp-client-temp-test-'))
+    const file = join(dir, 'server.mjs')
+    writeFileSync(file, READ_LINE_SERVER, 'utf8')
+    const client = new AcpClient({
+      command: process.execPath,
+      args: [file],
+      cwd: process.cwd(),
+      tempRoot: dir,
+    })
+    let environment: { tmp?: string; temp?: string; tmpdir?: string } = {}
+    try {
+      try {
+        environment = await client.request('environment', {}) as typeof environment
+      } finally {
+        await client.dispose()
+      }
+      expect(environment.temp).toBeDefined()
+      expect(environment.tmp).toBe(environment.temp)
+      expect(environment.tmpdir).toBe(environment.temp)
+      expect(environment.temp!.startsWith(dir)).toBe(true)
+      // dispose() has observed the process exit, so the empty per-run directory
+      // must already be gone. No recursive cleanup is involved.
+      expect(existsSync(environment.temp!)).toBe(false)
+    } finally {
+      unlinkSync(file)
+      try { rmdirSync(dir) } catch { /* Preserve a non-empty failed-test directory for diagnosis. */ }
     }
   })
 })

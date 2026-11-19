@@ -20,6 +20,7 @@
 
 import { spawn } from 'node:child_process'
 import { AcpClient } from './acp-client.ts'
+import { createAcpProcessTemp } from './process-temp.ts'
 import type { AcpLaunch } from './adapter.ts'
 import { preferAuthMethod } from './types.ts'
 import type { AntigravityAcpAuthDto } from '../../shared/antigravity-acp-contracts.ts'
@@ -107,6 +108,7 @@ async function startProtocolLogin(client: AcpClient, methodId: string): Promise<
 }
 
 function startTerminalLogin(launch: AcpLaunch): Promise<LoginStartResult> {
+  const temp = createAcpProcessTemp()
   let child: ReturnType<typeof spawn>
   try {
     // `launch.args` already selects ACP stdio mode (`acp`, plus any flags), and
@@ -116,11 +118,15 @@ function startTerminalLogin(launch: AcpLaunch): Promise<LoginStartResult> {
     child = spawn(launch.command, [...launch.args, '--login'], {
       detached: true,
       stdio: ['ignore', 'ignore', 'pipe'],
+      env: temp.environment,
       windowsHide: true,
     })
   } catch (error) {
+    temp.release()
     return Promise.resolve({ started: false, error: error instanceof Error ? error.message : String(error) })
   }
+  child.once('error', () => temp.release())
+  child.once('exit', () => temp.release())
   return watchLauncher(child)
 }
 
@@ -161,7 +167,8 @@ function watchLauncher(child: ReturnType<typeof spawn>): Promise<LoginStartResul
     // waiting for the browser for as long as the user takes.
     const detachTimer = setTimeout(() => {
       child.stderr?.removeAllListeners('data')
-      child.removeAllListeners()
+      // Keep the once-only error/exit listeners: the exit listener releases this
+      // launch's private temp directory after the CLI has cleaned its own files.
     }, LOGIN_LAUNCH_BUDGET_MS)
     detachTimer.unref?.()
 

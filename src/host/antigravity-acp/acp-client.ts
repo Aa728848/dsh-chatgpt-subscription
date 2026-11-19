@@ -22,6 +22,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
+import { createAcpProcessTemp, type AcpProcessTemp } from './process-temp.ts'
 
 /** One JSON-RPC request id. */
 export type AcpRequestId = number
@@ -46,6 +47,8 @@ export interface AcpSpawnOptions {
   cwd: string
   /** Extra environment entries layered over a scrubbed copy of this process's environment. */
   env?: Readonly<Record<string, string>>
+  /** Parent for this process's private temporary directory; defaults to DSH's ACP cache. */
+  tempRoot?: string
   /** Grace after stdin EOF before the process is killed. */
   disposeEofGraceMs?: number
   /** Grace between the kill signal and a forced termination. */
@@ -87,6 +90,12 @@ export class AcpError extends Error {
   }
 }
 
+/** PyInstaller onefile needs time to unpack and to remove its own `_MEI` directory after stdin EOF. */
+export const ACP_DISPOSE_EOF_GRACE_MS = 60_000
+
+/** A second, shorter bound applies only after the graceful EOF window has elapsed. */
+export const ACP_DISPOSE_KILL_GRACE_MS = 10_000
+
 /** Bound on the stderr tail kept for diagnostics. */
 const STDERR_TAIL_BYTES = 2_048
 
@@ -116,18 +125,27 @@ export class AcpClient {
   private handlers: AcpClientHandlers
   private readonly disposeEofGraceMs: number
   private readonly disposeGraceMs: number
+  private readonly temp: AcpProcessTemp
   private exitDetail: AcpExitDetail | undefined
 
   constructor(options: AcpSpawnOptions, handlers: AcpClientHandlers = {}) {
     this.handlers = handlers
-    this.disposeEofGraceMs = options.disposeEofGraceMs ?? 6_000
-    this.disposeGraceMs = options.disposeGraceMs ?? 3_000
-    this.child = spawn(options.command, [...(options.args ?? [])], {
-      cwd: options.cwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...scrubbedEnvironment(), ...options.env },
-      windowsHide: true,
-    }) as ChildProcessWithoutNullStreams
+    this.disposeEofGraceMs = options.disposeEofGraceMs ?? ACP_DISPOSE_EOF_GRACE_MS
+    this.disposeGraceMs = options.disposeGraceMs ?? ACP_DISPOSE_KILL_GRACE_MS
+    this.temp = createAcpProcessTemp(options.tempRoot)
+    let child: ChildProcessWithoutNullStreams
+    try {
+      child = spawn(options.command, [...(options.args ?? [])], {
+        cwd: options.cwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...this.temp.environment, ...options.env },
+        windowsHide: true,
+      }) as ChildProcessWithoutNullStreams
+    } catch (error) {
+      this.temp.release()
+      throw error
+    }
+    this.child = child
 
     this.child.stdout.on('data', (chunk: Buffer) => {
       this.handlers.onActivity?.()
@@ -139,7 +157,10 @@ export class AcpClient {
     this.child.stderr.on('data', (chunk: Buffer) => {
       this.stderrTail = (this.stderrTail + chunk.toString('utf8')).slice(-STDERR_TAIL_BYTES)
     })
-    this.child.on('error', (error) => this.failAll(error))
+    this.child.on('error', (error) => {
+      this.temp.release()
+      this.failAll(error)
+    })
     this.child.on('exit', (code, signal) => {
       this.exitDetail = {
         code,
@@ -147,6 +168,10 @@ export class AcpClient {
         ...(this.stderrTail === '' ? {} : { stderrTail: redactStderr(this.stderrTail) }),
       }
       this.closed = true
+      // PyInstaller owns and removes its nested `_MEI` directory during a graceful
+      // exit. Remove only our now-empty run directory; never recursively delete a
+      // temporary tree, and never sweep `_MEI*` from the user's system TEMP.
+      this.temp.release()
       this.failAll(new AcpError(`Antigravity ACP process exited (code ${code ?? 'null'}, signal ${signal ?? 'none'})`))
       this.handlers.onExit?.(this.exitDetail)
     })
@@ -361,22 +386,6 @@ function settlesWithin(promise: Promise<unknown>, budgetMs: number): Promise<boo
       resolve(true)
     })
   })
-}
-
-/**
- * A copy of this process's environment without credentials.
- *
- * The agent authenticates itself and must not inherit a provider key from the
- * host's own environment; the caller may still layer explicit entries on top.
- */
-function scrubbedEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue
-    if (/key|token|secret|password|credential/i.test(key)) continue
-    env[key] = value
-  }
-  return env
 }
 
 function redactStderr(text: string): string {

@@ -26,6 +26,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { dshHomeDir } from '../common/home.ts'
 import { BINARY_CACHE_DIR, BINARY_ENV_VAR } from './types.ts'
+import { createAcpProcessTemp } from './process-temp.ts'
 
 /** One downloadable archive for one platform, transcribed from the official ACP Registry. */
 export interface AcpBinaryRelease {
@@ -395,15 +396,22 @@ async function exists(candidate: string): Promise<boolean> {
 /** Read `agy --version`, or undefined when the executable does not answer. */
 async function readCliVersion(command: string): Promise<string | undefined> {
   const { execFile } = await import('node:child_process')
+  const temp = createAcpProcessTemp()
   return new Promise<string | undefined>((resolve) => {
-    execFile(command, ['--version'], { timeout: 10_000, windowsHide: true }, (error, stdout) => {
-      if (error !== null) {
-        resolve(undefined)
-        return
-      }
-      const text = stdout.trim().split(/\r?\n/)[0]?.trim()
-      resolve(text === undefined || text === '' ? undefined : text)
-    })
+    try {
+      execFile(command, ['--version'], { timeout: 10_000, windowsHide: true, env: temp.environment }, (error, stdout) => {
+        temp.release()
+        if (error !== null) {
+          resolve(undefined)
+          return
+        }
+        const text = stdout.trim().split(/\r?\n/)[0]?.trim()
+        resolve(text === undefined || text === '' ? undefined : text)
+      })
+    } catch {
+      temp.release()
+      resolve(undefined)
+    }
   })
 }
 
