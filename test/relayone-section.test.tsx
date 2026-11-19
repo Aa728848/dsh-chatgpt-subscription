@@ -106,13 +106,14 @@ describe('RelayOne settings section', () => {
     expect(meta?.textContent).toBe('500K')
     expect(meta?.previousSibling?.textContent).not.toBe('gpt-6-astra500K')
   })
-  it('badge hides until quota exists, then shows the real remaining share', () => {
+  it('badge hides until quota exists, then shows text without a progress meter', () => {
     expect(selectRelayOneBadgeFacts(status())).toBeNull()
     const facts = selectRelayOneBadgeFacts(status({ quota: {
       state: 'ready', totalGranted: 1000000, totalUsed: 250000, totalAvailable: 750000,
       remainingPercent: 75, quotaPerUnit: 500000, expiresAt: null, fetchedAt: 1, error: null,
     } }))
-    expect(facts).toMatchObject({ text: '75%', percent: 75, level: 'normal' })
+    expect(facts).toMatchObject({ text: '75%', level: 'normal' })
+    expect(facts).not.toHaveProperty('percent')
     expect(facts?.tooltip).toContain('$1.500')
   })
   it('pins a full-width key grid and the shared style ownership tag', () => {

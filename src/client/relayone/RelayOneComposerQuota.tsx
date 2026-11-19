@@ -27,7 +27,6 @@ export function selectRelayOneBadgeFacts(status: RelayOneStatusDto | null, looku
     text,
     tooltip: '[RelayOne] ' + detail + (quota.state === 'stale' ? ' · ' + lookup('quotaStale') : ''),
     level: quotaLevel(quota.remainingPercent ?? 100),
-    ...(quota.remainingPercent === null ? {} : { percent: quota.remainingPercent }),
   }
 }
 export function RelayOneComposerQuota({ directory, loadModelDirectory, t }: Props): React.JSX.Element | null {

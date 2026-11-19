@@ -100,6 +100,10 @@ export function parseRelayOnePricing(payload: unknown): PricingCatalog {
 const DEFAULT_REASONING: readonly RelayOneReasoningEffort[] = ['low', 'medium', 'high']
 const ADAPTIVE_REASONING: readonly RelayOneReasoningEffort[] = [...DEFAULT_REASONING, 'xhigh', 'max']
 const DISABLEABLE_ADAPTIVE_REASONING: readonly RelayOneReasoningEffort[] = ['none', ...ADAPTIVE_REASONING]
+const LOW_HIGH_MAX_REASONING: readonly RelayOneReasoningEffort[] = ['low', 'high', 'max']
+const DEEPSEEK_REASONING: readonly RelayOneReasoningEffort[] = ['none', ...LOW_HIGH_MAX_REASONING]
+const QWEN_REASONING: readonly RelayOneReasoningEffort[] = ['low', 'high', 'xhigh']
+const SWE_REASONING: readonly RelayOneReasoningEffort[] = ['medium', 'high', 'max']
 
 interface AdaptiveThinkingPolicy {
   efforts: readonly RelayOneReasoningEffort[]
@@ -133,23 +137,72 @@ export function relayOneClaudeAdaptiveThinking(id: string): AdaptiveThinkingPoli
   return undefined
 }
 
+/**
+ * RelayOne passes requests through to the vendor, so model facts follow the
+ * vendor's public contract rather than a subscription line's lower plan cap.
+ * Sources include the Claude/Gemini model tables, Alibaba's Qwen4-Max guide,
+ * Step's Step-5 reasoning guide, and the sibling official-client registries in
+ * kimi-code, minimax-code, glm-coding-plan and qianwen-token-plan.
+ * SWE-2 has no published standalone API window/output limit; keep the local
+ * conservative budget while exposing Cognition's documented effort ladder.
+ */
 function modelFacts(id: string, protocol: RelayOneProtocol | null): Pick<RelayOneModelEntry, 'contextWindow' | 'maxOutputTokens' | 'supportsImages' | 'reasoningEfforts'> {
   const normalized = id.toLowerCase()
-  // Conservative local budgets; users can override context windows in the line settings.
-  if (/^(gpt-|o[134](?:-|$)|codex)/.test(normalized)) {
+  const model = normalized.slice(normalized.lastIndexOf('/') + 1)
+  if (/^(gpt-|o[134](?:-|$)|codex)/.test(model)) {
     return { contextWindow: 272_000, maxOutputTokens: 128_000, supportsImages: true, reasoningEfforts: RELAYONE_REASONING_EFFORTS }
   }
-  if (normalized.startsWith('claude-')) {
-    const adaptive = protocol === 'anthropic' ? relayOneClaudeAdaptiveThinking(normalized) : undefined
-    return { contextWindow: 200_000, maxOutputTokens: 32_768, supportsImages: true, reasoningEfforts: adaptive?.efforts ?? DEFAULT_REASONING }
+  if (model.startsWith('claude-')) {
+    const adaptive = protocol === 'anthropic' ? relayOneClaudeAdaptiveThinking(model) : undefined
+    const reasoningEfforts = adaptive?.efforts ?? DEFAULT_REASONING
+    if (/^claude-(?:(?:opus|sonnet)-5(?:-5)?|haiku-5-5|(?:fable|mythos)-5(?:-[12])?)$/.test(model)) {
+      return { contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, reasoningEfforts }
+    }
+    if (/^claude-haiku-4-5(?:-\d{8})?$/.test(model)) {
+      return { contextWindow: 200_000, maxOutputTokens: 64_000, supportsImages: true, reasoningEfforts }
+    }
+    return { contextWindow: 200_000, maxOutputTokens: 32_768, supportsImages: true, reasoningEfforts }
   }
-  if (normalized.includes('gemini') || normalized.includes('banana')) {
+  if (/^gemini-4-(?:argon|carbon|hydrogen)$/.test(model)) {
+    return { contextWindow: 1_048_576, maxOutputTokens: 65_536, supportsImages: true, reasoningEfforts: DEFAULT_REASONING }
+  }
+  if (model === 'gemini-3.8-flash') {
+    return { contextWindow: 1_000_000, maxOutputTokens: 65_536, supportsImages: true, reasoningEfforts: DEFAULT_REASONING }
+  }
+  if (model === 'minimax-m3.1-flash') {
+    return { contextWindow: 1_000_000, maxOutputTokens: 128_000, supportsImages: true, reasoningEfforts: ADAPTIVE_REASONING }
+  }
+  if (model === 'kimi-k3.1-pro') {
+    return { contextWindow: 1_048_576, maxOutputTokens: 32_768, supportsImages: true, reasoningEfforts: LOW_HIGH_MAX_REASONING }
+  }
+  if (model === 'qwen4-max') {
+    return { contextWindow: 1_000_000, maxOutputTokens: 262_144, supportsImages: true, reasoningEfforts: QWEN_REASONING }
+  }
+  if (model === 'qwen-3.8-flash' || model === 'qwen3.8-flash') {
+    return { contextWindow: 1_000_000, maxOutputTokens: 131_072, supportsImages: true, reasoningEfforts: QWEN_REASONING }
+  }
+  if (model === 'deepseek-v4.1-flash' || model === 'deepseek-v4.1-flash-1017') {
+    return { contextWindow: 1_000_000, maxOutputTokens: 393_216, supportsImages: true, reasoningEfforts: DEEPSEEK_REASONING }
+  }
+  if (model === 'deepseek-v4-pro') {
+    return { contextWindow: 1_000_000, maxOutputTokens: 393_216, supportsImages: false, reasoningEfforts: DEEPSEEK_REASONING }
+  }
+  if (model === 'glm-5.3-flash') {
+    return { contextWindow: 1_048_576, maxOutputTokens: 128_000, supportsImages: true, reasoningEfforts: LOW_HIGH_MAX_REASONING }
+  }
+  if (model === 'step-5-preview') {
+    return { contextWindow: 1_000_000, maxOutputTokens: 64_000, supportsImages: true, reasoningEfforts: DEFAULT_REASONING }
+  }
+  if (model === 'swe-2' || model === 'swe-2-flash') {
+    return { contextWindow: 128_000, maxOutputTokens: 8_192, supportsImages: false, reasoningEfforts: SWE_REASONING }
+  }
+  if (model.includes('gemini') || model.includes('banana')) {
     return { contextWindow: 1_000_000, maxOutputTokens: 32_768, supportsImages: true, reasoningEfforts: DEFAULT_REASONING }
   }
-  if (normalized.includes('qwen') || normalized.includes('deepseek') || normalized.includes('kimi')) {
+  if (model.includes('qwen') || model.includes('deepseek') || model.includes('kimi')) {
     return { contextWindow: 256_000, maxOutputTokens: 32_768, supportsImages: true, reasoningEfforts: DEFAULT_REASONING }
   }
-  if (normalized.includes('glm') || normalized.includes('minimax') || normalized.includes('step')) {
+  if (model.includes('glm') || model.includes('minimax') || model.includes('step')) {
     return { contextWindow: 200_000, maxOutputTokens: 16_384, supportsImages: false, reasoningEfforts: DEFAULT_REASONING }
   }
   return { contextWindow: 128_000, maxOutputTokens: 8_192, supportsImages: false, reasoningEfforts: [] }

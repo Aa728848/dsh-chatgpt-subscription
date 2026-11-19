@@ -63,6 +63,11 @@ const entry = (id: string) => {
   if (found === undefined) throw new Error('missing test model ' + id)
   return found
 }
+const liveEntry = (id: string, endpoint = 'openai') => {
+  const found = mergeRelayOneCatalog({ data: [{ id, supported_endpoint_types: [endpoint] }] })[0]
+  if (found === undefined) throw new Error('missing live test model ' + id)
+  return found
+}
 function options(overrides: Partial<GenerateOptions> = {}): GenerateOptions {
   return {
     provider: RELAYONE_PROVIDER_ID,
@@ -92,6 +97,24 @@ describe('RelayOne live catalog and protocol policy', () => {
   it('honours an explicit Responses endpoint and never invents one for other vendors', () => {
     expect(selectRelayOneProtocol('future', 'Other', ['openai-response'])).toBe('openai-responses')
     expect(selectRelayOneProtocol('gemini-4', 'Google', ['openai'])).toBe('openai-chat')
+  })
+  it.each([
+    { id: 'claude-fable-5-2', endpoint: 'anthropic', contextWindow: 1000000, maxOutputTokens: 128000, supportsImages: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'claude-haiku-4-5-20251001', endpoint: 'anthropic', contextWindow: 200000, maxOutputTokens: 64000, supportsImages: true, reasoningEfforts: ['low', 'medium', 'high'] },
+    { id: 'gemini-4-carbon', contextWindow: 1048576, maxOutputTokens: 65536, supportsImages: true, reasoningEfforts: ['low', 'medium', 'high'] },
+    { id: 'gemini-3.8-flash', contextWindow: 1000000, maxOutputTokens: 65536, supportsImages: true, reasoningEfforts: ['low', 'medium', 'high'] },
+    { id: 'moonshotai/kimi-k3.1-pro', contextWindow: 1048576, maxOutputTokens: 32768, supportsImages: true, reasoningEfforts: ['low', 'high', 'max'] },
+    { id: 'MiniMax-M3.1-Flash', contextWindow: 1000000, maxOutputTokens: 128000, supportsImages: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'qwen4-max', contextWindow: 1000000, maxOutputTokens: 262144, supportsImages: true, reasoningEfforts: ['low', 'high', 'xhigh'] },
+    { id: 'qwen-3.8-flash', contextWindow: 1000000, maxOutputTokens: 131072, supportsImages: true, reasoningEfforts: ['low', 'high', 'xhigh'] },
+    { id: 'free/deepseek-v4.1-flash-1017', contextWindow: 1000000, maxOutputTokens: 393216, supportsImages: true, reasoningEfforts: ['none', 'low', 'high', 'max'] },
+    { id: 'DeepSeek-V4-Pro', contextWindow: 1000000, maxOutputTokens: 393216, supportsImages: false, reasoningEfforts: ['none', 'low', 'high', 'max'] },
+    { id: 'glm-5.3-flash', contextWindow: 1048576, maxOutputTokens: 128000, supportsImages: true, reasoningEfforts: ['low', 'high', 'max'] },
+    { id: 'step-5-preview', contextWindow: 1000000, maxOutputTokens: 64000, supportsImages: true, reasoningEfforts: ['low', 'medium', 'high'] },
+    { id: 'swe-2', contextWindow: 128000, maxOutputTokens: 8192, supportsImages: false, reasoningEfforts: ['medium', 'high', 'max'] },
+    { id: 'swe-2-flash', contextWindow: 128000, maxOutputTokens: 8192, supportsImages: false, reasoningEfforts: ['medium', 'high', 'max'] },
+  ])('publishes the vendor capabilities of $id', ({ id, endpoint, ...expected }) => {
+    expect(liveEntry(id, endpoint)).toMatchObject(expected)
   })
   it('keeps null and explicit empty model selections distinct', () => {
     const all = relayOneModelOptions(catalog(), defaultRelayOneSettings())
@@ -217,6 +240,30 @@ describe('RelayOne OpenAI request mapping', () => {
     const body = buildRelayOneChatRequest(options({ model: 'deepseek-v4.1-flash-1017', tools, reasoningEffort: effort('low') }), NO_RESOLVED_IMAGES, entry('deepseek-v4.1-flash-1017'), defaultRelayOneSettings())
     expect(body).toMatchObject({ stream_options: { include_usage: true }, tool_choice: 'auto', parallel_tool_calls: true, reasoning_effort: 'low' })
     expect(JSON.stringify(body.tools)).toContain('"function"')
+  })
+  it.each(['minimax-m3.1-flash', 'glm-5.3-flash', 'step-5-preview', 'free/deepseek-v4.1-flash-1017', 'gemini-4-carbon'])('uses max_tokens for %s', model => {
+    const body = buildRelayOneChatRequest(options({ model, maxTokens: 4096 }), NO_RESOLVED_IMAGES, liveEntry(model), defaultRelayOneSettings())
+    expect(body.max_tokens).toBe(4096)
+    expect(body).not.toHaveProperty('max_completion_tokens')
+  })
+  it.each(['moonshotai/kimi-k3.1-pro', 'qwen4-max', 'gpt-6-astra'])('keeps max_completion_tokens for %s', model => {
+    const body = buildRelayOneChatRequest(options({ model, maxTokens: 4096 }), NO_RESOLVED_IMAGES, liveEntry(model), defaultRelayOneSettings())
+    expect(body.max_completion_tokens).toBe(4096)
+    expect(body).not.toHaveProperty('max_tokens')
+  })
+  it('omits GLM-only unsupported stream and parallel-tool fields', () => {
+    const model = 'glm-5.3-flash'
+    const tools = [{ name: 'lookup', description: 'lookup', parameters: { type: 'object' } }] as NonNullable<GenerateOptions['tools']>
+    const body = buildRelayOneChatRequest(options({ model, tools, reasoningEffort: effort('max') }), NO_RESOLVED_IMAGES, liveEntry(model), defaultRelayOneSettings())
+    expect(body).toMatchObject({ tool_choice: 'auto', reasoning_effort: 'max' })
+    expect(body).not.toHaveProperty('stream_options')
+    expect(body).not.toHaveProperty('parallel_tool_calls')
+  })
+  it('maps DeepSeek none to its thinking switch instead of an unknown effort', () => {
+    const model = 'free/deepseek-v4.1-flash-1017'
+    const body = buildRelayOneChatRequest(options({ model, reasoningEffort: effort('none') }), NO_RESOLVED_IMAGES, liveEntry(model), defaultRelayOneSettings())
+    expect(body.thinking).toEqual({ type: 'disabled' })
+    expect(body).not.toHaveProperty('reasoning_effort')
   })
 })
 

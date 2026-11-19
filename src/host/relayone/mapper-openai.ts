@@ -4,7 +4,7 @@ import { toToolCallId } from '../common/brand-compat.ts'
 import { stripMetaSchema } from '../common/tool-schema.ts'
 import type { ResolvedRequestImages } from '../common/request-images.ts'
 import { appendGptEngineeringGuidance } from '../common/gpt-engineering-guidance.ts'
-import type { RelayOneModelEntry } from './model-catalog.ts'
+import { isRelayOneOpenAIModel, type RelayOneModelEntry } from './model-catalog.ts'
 import type { RelayOneSettings } from './token-store.ts'
 import {
   isRelayOneRecord,
@@ -161,6 +161,14 @@ function chatContent(
   return parts
 }
 
+function relayOneChatUsesMaxCompletionTokens(entry: RelayOneModelEntry): boolean {
+  const normalized = entry.id.toLowerCase()
+  const model = normalized.slice(normalized.lastIndexOf('/') + 1)
+  // Kimi and Qwen document the newer field. MiniMax, GLM, Step, DeepSeek,
+  // Gemini and Claude's OpenAI-compatible face document `max_tokens`.
+  return isRelayOneOpenAIModel(entry.id, entry.vendor) || model.startsWith('kimi-') || model.startsWith('qwen')
+}
+
 export function buildRelayOneChatRequest(
   options: GenerateOptions,
   images: ResolvedRequestImages,
@@ -198,16 +206,23 @@ export function buildRelayOneChatRequest(
     type: 'function', function: { name: tool.name, description: tool.description, parameters: stripMetaSchema(tool.parameters) },
   }))
   const effort = relayOneEffort(options, settings.defaultReasoningEffort, entry.reasoningEfforts)
+  const normalized = entry.id.toLowerCase()
+  const model = normalized.slice(normalized.lastIndexOf('/') + 1)
+  const glm = model.startsWith('glm-')
+  const deepSeekThinkingOff = effort === 'none' && model.startsWith('deepseek')
   return {
     model: options.model,
     messages,
     stream: true,
-    stream_options: { include_usage: true },
-    ...(options.maxTokens === undefined ? {} : { max_completion_tokens: options.maxTokens }),
+    // GLM's Chat contract rejects stream_options; other declared vendors accept it.
+    ...(glm ? {} : { stream_options: { include_usage: true } }),
+    ...(options.maxTokens === undefined ? {} : relayOneChatUsesMaxCompletionTokens(entry)
+      ? { max_completion_tokens: options.maxTokens } : { max_tokens: options.maxTokens }),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options.stop !== undefined && options.stop.length > 0 ? { stop: options.stop } : {}),
-    ...(tools.length > 0 ? { tools, tool_choice: 'auto', parallel_tool_calls: true } : {}),
-    ...(effort === undefined ? {} : { reasoning_effort: effort }),
+    ...(tools.length > 0 ? { tools, tool_choice: 'auto', ...(glm ? {} : { parallel_tool_calls: true }) } : {}),
+    ...(effort === undefined || deepSeekThinkingOff ? {} : { reasoning_effort: effort }),
+    ...(deepSeekThinkingOff ? { thinking: { type: 'disabled' } } : {}),
   }
 }
 
