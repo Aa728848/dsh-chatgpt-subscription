@@ -949,9 +949,9 @@ describe('claude adapter never rotates after output has started', () => {
 
     // The delta reached the caller...
     expect(seen.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text)).toEqual(['partial answer'])
-    // ...and the failure was SURFACED rather than retried. A retry would have
-    // repeated 'partial answer' and, on a tool call, re-executed the tool.
-    expect(failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    // ...and the adapter did not rotate to another account inside this stream.
+    // The harness still receives TRANSPORT so its bounded retry policy can act.
+    expect(failure).toMatchObject({ code: 'TRANSPORT' })
     expect(requestCount).toBe(1)
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(pool.cooldowns).toHaveLength(0)

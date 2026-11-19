@@ -267,6 +267,14 @@ export const CALLBACK_PATH = '/callback'
  * `host/common/idle-watchdog.ts` for the measured basis.
  */
 export const STREAM_IDLE_TIMEOUT_MS = 120_000
+/**
+ * Separate ceiling before the first streamed value arrives.
+ *
+ * A large prompt can spend much longer in prefill than a healthy stream may
+ * remain silent between values. Once the first value arrives, the watchdog
+ * returns to STREAM_IDLE_TIMEOUT_MS; this is not a whole-response deadline.
+ */
+export const STREAM_FIRST_OUTPUT_TIMEOUT_MS = 360_000
 /** Failure code the adapter reports for that stall. */
 export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 /** Ceiling for a model-listing or usage fetch. */

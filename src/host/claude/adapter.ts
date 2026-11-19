@@ -149,6 +149,7 @@ import {
   MESSAGES_PATH,
   PROVIDER_ID,
   PROVIDER_NAME,
+  STREAM_FIRST_OUTPUT_TIMEOUT_MS,
   STREAM_IDLE_TIMEOUT_CODE,
   STREAM_IDLE_TIMEOUT_MS,
   claudeCliVersion,
@@ -585,7 +586,8 @@ export class ClaudeAdapter extends LlmAdapter {
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,
-      PROVIDER_NAME,
+      'Claude',
+      STREAM_FIRST_OUTPUT_TIMEOUT_MS,
     )
   }
 
@@ -956,13 +958,13 @@ export class ClaudeAdapter extends LlmAdapter {
           throw verdict.error
         }
         if (signal.aborted) throw new LlmError('Claude request aborted', 'ABORTED', { cause: error })
-        // A severed connection BEFORE anything reached the caller is a transport
-        // failure and may be retried; after the first chunk it is reported as a
-        // request problem instead, because a retry would repeat output the user
-        // has already seen (see module note 1).
+        // A severed connection is a transport failure even after output has
+        // started. Account rotation still stops at the first chunk (module note
+        // 1), but the route's bounded retry policy must see the retryable code.
+        // Keep the original error as the cause so socket diagnostics survive.
         throw new LlmError(
           'Claude stream failed: ' + (error instanceof Error ? error.message : String(error)),
-          outputStarted ? 'PROVIDER_ERROR' : 'TRANSPORT',
+          'TRANSPORT',
           { cause: error },
         )
       }
