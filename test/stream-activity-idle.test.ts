@@ -101,10 +101,10 @@ async function pumpHeartbeats(body: ControllableBody, tail: string): Promise<voi
   await vi.advanceTimersByTimeAsync(STEP_MS)
 }
 
-/** Let a genuinely silent connection run past one whole idle window. */
-async function pumpSilence(body: ControllableBody): Promise<void> {
+/** Let a genuinely silent connection run past the route's applicable window. */
+async function pumpSilence(body: ControllableBody, budgetMs = IDLE_TIMEOUT_MS): Promise<void> {
   await flushRealIo()
-  await vi.advanceTimersByTimeAsync(IDLE_TIMEOUT_MS + 1_000)
+  await vi.advanceTimersByTimeAsync(budgetMs + 1_000)
   body.end()
   await flushRealIo()
   await vi.advanceTimersByTimeAsync(STEP_MS)
@@ -192,6 +192,10 @@ async function scratchDir(): Promise<string> {
 // Claude
 // ---------------------------------------------------------------------------
 
+// Mirrored like IDLE_TIMEOUT_MS: Claude's first-output window is deliberately
+// longer than its in-stream idle window, and this case has no first output.
+const CLAUDE_FIRST_OUTPUT_TIMEOUT_MS = 360_000
+
 const CLAUDE_TAIL = [
   'data: {"type":"message_stop"}',
   '',
@@ -256,7 +260,7 @@ describe('claude transport activity keeps the stream alive', () => {
       vi.useFakeTimers()
       const run = collect([])(adapter.stream(claudeOptions))
       const outcome = failureOf(run)
-      await pumpSilence(body)
+      await pumpSilence(body, CLAUDE_FIRST_OUTPUT_TIMEOUT_MS)
       expect(await outcome).toMatchObject({ code: 'TIMEOUT' })
     }
   })
