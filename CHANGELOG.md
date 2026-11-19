@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.80.2 - 2026-11-19
+
+- **[antigravity-acp] 修复 ACP server 解包目录残留写满系统盘（[#117](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/117)）**
+  - 所有 ACP 启动路径统一使用 DSH 缓存下的每进程独立临时目录，并注入 `TMP` / `TEMP` / `TMPDIR`；退出或启动失败仅非递归回收自有空目录，不扫描或删除用户系统临时目录。
+  - stdin EOF 后的优雅退出宽限由 6 秒延长至 60 秒，强制终止等待为 10 秒，避免 PyInstaller onefile 在解包或清理期间被强杀；终端登录与版本探测同样接入隔离和异常回收。
+  - 新增真实子进程环境隔离、退出回收和终端登录回归。全量 Vitest 393 个测试文件通过、3 个跳过，7,003 项测试通过、10 个跳过；类型检查、干净构建与 npm 打包审查通过。
+
 ## 0.80.1 - 2026-11-18
 
 - **[relayone] 修复新版 Claude 的 adaptive thinking 请求**
