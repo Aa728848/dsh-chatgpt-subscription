@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.80.5 - 2026-11-20
+
+- **[antigravity-acp] 修复切换到 ACP 模型必现 `MODEL_SWITCH_COMPACTION_FAILED`（[#119](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/119)）**
+  - 每个 ACP 模型都会申报上下文窗口，优先级为：实时 `usage_update` 上报值 → 目录行携带的窗口 → 随包家族表（Gemini 4 / 3.x flash 1M、gpt-oss 128K、Claude 250K、Gemini 3.1 flash image 64K）→ 未知模型保守取 128K。
+  - 目录读取失败时也会返回窗口，压力压缩与溢出恢复不再因缺少容量而被拒。
+
 ## 0.80.4 - 2026-11-19
 
 - **[调度模式] 修复子代理模型名单与会话授权不一致**
