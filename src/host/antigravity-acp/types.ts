@@ -77,6 +77,8 @@ export function preferAuthMethod(authMethods: readonly string[]): string {
 export interface AcpAvailableModel {
   modelId: string
   name?: string
+  /** Context window the server published for this model, when it published one. */
+  contextWindow?: number
 }
 
 /** The `model` config option as the ACP server announced it. */
@@ -132,20 +134,67 @@ export function collapseModels(
     const efforts = levels === undefined
       ? []
       : EFFORT_ORDER.filter((level) => levels.has(level))
+    // A window the server attached to any tier id of this model describes the
+    // model itself, so it is carried up to the collapsed entry.
+    const contextWindow = availableModels.find(
+      (candidate) => candidate.contextWindow !== undefined
+        && (candidate.modelId === option.value || candidate.modelId.startsWith(option.value + '-')),
+    )?.contextWindow
     return {
       id: option.value,
       name: option.name ?? option.value,
       efforts,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
     }
   })
 }
 
 /**
- * Project one collapsed model into harness model metadata.
+ * Context window this line declares for a model id the catalogue did not price.
  *
- * `context` is omitted when the server published no window: an absent context is
- * "not declared", while a fabricated one would let the harness compact a prompt
- * the model could have taken.
+ * The values are the upstream Antigravity catalogue's own numbers, transcribed
+ * from the retired `antigravity` line's catalogue (the same upstream, one
+ * transport earlier): the Gemini 4 family and the Gemini 3.x flash models take
+ * 1,048,576, `gpt-oss-120b` takes 131,072, the Claude models take 250,000, and
+ * the Gemini 3.1 flash image model takes 65,536.
+ *
+ * This is NOT a second model list: it never decides which models exist, only
+ * how large a context the harness is told to expect. A window the server
+ * publishes always wins (see {@link toResolvedModelInfo}).
+ */
+const SHIPPED_CONTEXT_WINDOWS: ReadonlyArray<readonly [string, number]> = [
+  ['gemini-3.1-flash-image', 65_536],
+  ['gemini-4-', 1_048_576],
+  ['gemini-3', 1_048_576],
+  ['gpt-oss-', 131_072],
+  ['claude-', 250_000],
+]
+
+/**
+ * Window declared for an id the shipped table does not know.
+ *
+ * Deliberately the small end: a window that is too small compacts earlier than
+ * the model needed, while one that is too large lets the harness send a request
+ * past the real limit. 131,072 still leaves the default 65,536-token compaction
+ * headroom a usable budget.
+ */
+export const FALLBACK_CONTEXT_WINDOW = 131_072
+
+/**
+ * Context window this line declares for one model id.
+ *
+ * @param modelId - Model id as the server published it.
+ * @returns The shipped window for that family, else {@link FALLBACK_CONTEXT_WINDOW}.
+ */
+export function defaultContextWindow(modelId: string): number {
+  for (const [prefix, contextWindow] of SHIPPED_CONTEXT_WINDOWS) {
+    if (modelId.startsWith(prefix)) return contextWindow
+  }
+  return FALLBACK_CONTEXT_WINDOW
+}
+
+/**
+ * Project one collapsed model into harness model metadata.
  *
  * @param provider - Registered provider route.
  * @param model - One collapsed model.
@@ -158,15 +207,28 @@ export function toModelInfo(provider: string, model: AntigravityAcpModelDto): Ll
 /**
  * Project one collapsed model into exact-route metadata, including its ladder.
  *
+ * A window is ALWAYS declared, because DSH treats an absent one as a broken
+ * route rather than as "unknown": `dsh-compaction-basic` throws
+ * `TargetPressureConfigError` on every model switch into the line, which the
+ * harness surfaces as `MODEL_SWITCH_COMPACTION_FAILED` before the first token.
+ * The order is: the window a live `usage_update` reported for this model, then
+ * one the catalogue row carries, then the shipped family table.
+ *
  * @param provider - Registered provider route.
  * @param model - One collapsed model.
+ * @param observedContextWindow - Window the server reported for this model in a live turn, when it did.
  * @returns Harness-facing resolved model info, with `reasoning` only when a ladder was published.
  */
-export function toResolvedModelInfo(provider: string, model: AntigravityAcpModelDto): LlmResolvedModelInfo {
+export function toResolvedModelInfo(
+  provider: string,
+  model: AntigravityAcpModelDto,
+  observedContextWindow?: number,
+): LlmResolvedModelInfo {
   const base = toModelInfo(provider, model)
+  const contextWindow = observedContextWindow ?? model.contextWindow ?? defaultContextWindow(model.id)
   return {
     ...base,
-    ...(model.contextWindow === undefined ? {} : { context: { contextWindow: model.contextWindow } }),
+    context: { contextWindow },
     ...(model.efforts.length === 0
       ? {}
       : {

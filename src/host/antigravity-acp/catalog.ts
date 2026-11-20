@@ -195,6 +195,10 @@ function readAvailableModels(raw: unknown): AcpAvailableModel[] {
     models.push({
       modelId: record.modelId,
       ...(typeof record.name === 'string' ? { name: record.name } : {}),
+      // Not every server publishes capacity, and the ones that do may not do it
+      // per tier id; when it is there it is the upstream's own number and it
+      // beats anything this line would otherwise declare.
+      ...(typeof record.contextWindow === 'number' && record.contextWindow > 0 ? { contextWindow: record.contextWindow } : {}),
     })
   }
   return models
