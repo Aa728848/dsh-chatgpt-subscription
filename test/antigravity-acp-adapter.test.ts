@@ -79,6 +79,11 @@ process.stdin.on('data', (chunk) => {
       if (text.includes('STALE')) {
         notify({ sessionId: 'session-0', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'stale answer from session-0' } } })
       }
+      // The occupancy frame the schema defines but the live server omits: the
+      // adapter must be able to learn a model's window from it when it arrives.
+      if (text.includes('OCCUPANCY')) {
+        notify({ sessionId: request.params.sessionId, update: { sessionUpdate: 'usage_update', used: 1024, size: 262144 } })
+      }
       notify({ sessionId: request.params.sessionId, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking...' } } })
       notify({ sessionId: request.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer for: ' + text.slice(0, 40) } } })
       reply(request.id, { stopReason: 'end_turn', usage: { inputTokens: 11, outputTokens: 7, cachedReadTokens: 3, thoughtTokens: 2 } })
@@ -211,6 +216,57 @@ describe('AntigravityAcpAdapter', () => {
       const finish = chunks.at(-1) as { type: string; reason: { kind: string } }
       expect(finish.type).toBe('finish')
       expect(finish.reason.kind).toBe('stop')
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
+  it('declares a context window even when the catalogue cannot be read', async () => {
+    // The bug behind #119: an ACP model resolved without a `context` made every
+    // switch into the line fail with MODEL_SWITCH_COMPACTION_FAILED before the
+    // first token, because dsh-compaction-basic refuses a route with no capacity.
+    // A failed catalogue read must not be able to put the line in that state.
+    const harness = adapterHarness({
+      loadCatalog: async () => {
+        throw new Error('offline')
+      },
+    })
+    try {
+      const resolved = await harness.adapter.resolveModel('antigravity-acp', 'gemini-4-argon')
+      expect(resolved.context).toEqual({ contextWindow: 1_048_576 })
+      // An id nothing has ever listed still gets the conservative fallback rather
+      // than no capacity at all.
+      const unlisted = await harness.adapter.resolveModel('antigravity-acp', 'acme-1')
+      expect(unlisted.context).toEqual({ contextWindow: 131_072 })
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
+  it('learns the real window from a usage_update and resolves with it afterwards', async () => {
+    const harness = adapterHarness()
+    try {
+      // gpt-oss-120b-medium ships at 131,072; the agent reports a 262,144 window
+      // for it in a live turn. The live number is the only capacity the line can
+      // measure, so it must win over the shipped table.
+      expect((await harness.adapter.resolveModel('antigravity-acp', 'gpt-oss-120b-medium')).context).toEqual({
+        contextWindow: 131_072,
+      })
+      const chunks = await collect(
+        harness.adapter.stream(
+          optionsOf({
+            model: 'gpt-oss-120b-medium',
+            messages: [{ role: 'user', content: [{ type: 'text', text: 'OCCUPANCY' }] }],
+          }) as never,
+        ),
+      )
+      expect(chunks.some((chunk) => chunk.type === 'usage')).toBe(true)
+      expect(harness.adapter.occupancy()?.size).toBe(262_144)
+      expect((await harness.adapter.resolveModel('antigravity-acp', 'gpt-oss-120b-medium')).context).toEqual({
+        contextWindow: 262_144,
+      })
     } finally {
       await harness.adapter.dispose()
       harness.dispose()

@@ -50,13 +50,52 @@ describe('collapseModels', () => {
     )
     expect(models[0]?.efforts).toEqual(['low', 'medium', 'high'])
   })
+
+  it('carries a window the server published on a tier id up to the collapsed model', () => {
+    const models = collapseModels(
+      [{ value: 'gemini-4-carbon' }],
+      [
+        { modelId: 'gemini-4-carbon-low', contextWindow: 524_288 },
+        { modelId: 'gemini-4-carbon-high', contextWindow: 524_288 },
+      ],
+    )
+    expect(models[0]?.contextWindow).toBe(524_288)
+  })
 })
 
 describe('toResolvedModelInfo', () => {
-  it('declares no context and no reasoning for a model that published neither', () => {
-    const info = toResolvedModelInfo('antigravity-acp', { id: 'bare', name: 'Bare', efforts: [] })
-    expect(info.context).toBeUndefined()
+  it('declares the shipped window for a model the server did not price', () => {
+    // DSH charges a route with no declared window as broken: model switches into
+    // the line throw MODEL_SWITCH_COMPACTION_FAILED before the first token. Every
+    // model therefore carries a window even when the ACP handshake published none.
+    const info = toResolvedModelInfo('antigravity-acp', { id: 'gemini-4-argon', name: 'Gemini 4 Argon', efforts: [] })
+    expect(info.context).toEqual({ contextWindow: 1_048_576 })
     expect(info.reasoning).toBeUndefined()
+  })
+
+  it('declares a conservative fallback for an id the shipped table does not know', () => {
+    const info = toResolvedModelInfo('antigravity-acp', { id: 'acme-1', name: 'Acme 1', efforts: [] })
+    expect(info.context).toEqual({ contextWindow: 131_072 })
+  })
+
+  it('uses the shipped table per family', () => {
+    const windows = ['gemini-3.1-flash-image', 'gemini-4-hydrogen', 'gemini-3.8-flash', 'gpt-oss-120b-medium', 'claude-sonnet-4-6']
+      .map((id) => toResolvedModelInfo('antigravity-acp', { id, name: id, efforts: [] }).context?.contextWindow)
+    expect(windows).toEqual([65_536, 1_048_576, 1_048_576, 131_072, 250_000])
+  })
+
+  it('prefers a window the catalogue row carries', () => {
+    const info = toResolvedModelInfo('antigravity-acp', { id: 'gemini-4-argon', name: 'Gemini 4 Argon', efforts: [], contextWindow: 524_288 })
+    expect(info.context).toEqual({ contextWindow: 524_288 })
+  })
+
+  it('prefers the window a live turn observed over both other sources', () => {
+    const info = toResolvedModelInfo(
+      'antigravity-acp',
+      { id: 'gemini-4-argon', name: 'Gemini 4 Argon', efforts: [], contextWindow: 524_288 },
+      262_144,
+    )
+    expect(info.context).toEqual({ contextWindow: 262_144 })
   })
 
   it('declares exactly the published ladder', () => {

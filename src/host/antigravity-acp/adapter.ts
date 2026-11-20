@@ -362,6 +362,15 @@ export class AntigravityAcpAdapter extends LlmAdapter {
    * is how a card ends up showing a fabricated cost.
    */
   private lastOccupancy: { used: number; size: number; at: number } | undefined
+  /**
+   * Context window the server reported for each model through `usage_update`.
+   *
+   * The handshake's model list carries no capacity, so this is the only live
+   * window the line ever learns. It is per model and lasts for the process: the
+   * shipped table covers the models nobody has run yet, this overrides it once
+   * the agent has told us how full the window really was.
+   */
+  private readonly observedContextWindows = new Map<string, number>()
 
   constructor(private readonly options: AntigravityAcpAdapterOptions) {
     super()
@@ -398,7 +407,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
 
   async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     const view = await this.options.loadCatalog({ signal }).catch(() => undefined)
-    return toResolvedModelInfo(provider, findModel(view?.models ?? [], model))
+    return toResolvedModelInfo(provider, findModel(view?.models ?? [], model), this.observedContextWindows.get(model))
   }
 
   async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
@@ -666,9 +675,14 @@ export class AntigravityAcpAdapter extends LlmAdapter {
             // (`used` / `size`), not as a billable token count, and the live server
             // this line was written against does not send it at all. It is recorded
             // as an occupancy reading when it appears and never converted into a
-            // token count that was not measured.
+            // token count that was not measured. `size` is the window the agent
+            // itself is working against, so it is also the one capacity fact this
+            // line can learn at runtime.
             const occupancy = readOccupancy(update)
-            if (occupancy !== undefined) this.lastOccupancy = { ...occupancy, at: this.now() }
+            if (occupancy !== undefined) {
+              this.lastOccupancy = { ...occupancy, at: this.now() }
+              this.observedContextWindows.set(turn.model, occupancy.size)
+            }
             continue
           }
           if (type === 'agent_message_chunk' || type === 'agent_thought_chunk') {
