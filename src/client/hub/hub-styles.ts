@@ -13,6 +13,12 @@ const CSS = `
 .dsh-hub-cards{border-top:0.5px solid var(--dsw-alias-border-l2,#eceadf)}
 .dsh-hub-card{align-items:center;background:transparent;border:none;border-bottom:0.5px solid var(--dsw-alias-border-l2,#eceadf);color:var(--dsw-alias-label-primary,#141413);cursor:pointer;display:flex;gap:14px;font:inherit;min-height:68px;padding:12px 6px;text-align:left;width:100%}
 .dsh-hub-card:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04))}
+.dsh-hub-card[data-dragging=true]{opacity:.45}
+.dsh-hub-card[data-drop-target=true]{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));box-shadow:inset 0 2px var(--dsw-alias-button-info-fill,#397ee8)}
+.dsh-hub-drag-handle{align-items:center;background:transparent;border:0;border-radius:6px;color:var(--dsw-alias-label-caption,#a6a094);cursor:grab;display:inline-flex;flex:none;height:32px;justify-content:center;margin-left:-4px;padding:0;touch-action:none;width:20px}
+.dsh-hub-drag-handle:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.04));color:var(--dsw-alias-label-primary,#141413)}
+.dsh-hub-drag-handle:active{cursor:grabbing}
+.dsh-hub-drag-handle:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:1px}
 .dsh-hub-card:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:-2px}
 .dsh-hub-card[data-enabled=false] .dsh-hub-card-name,.dsh-hub-card[data-enabled=false] .dsh-hub-card-note{opacity:.55}
 .dsh-hub-card-copy{display:flex;flex:1;flex-direction:column;gap:3px;min-width:0}
@@ -20,6 +26,10 @@ const CSS = `
 .dsh-hub-card-note{color:var(--dsw-alias-label-tertiary,#8f8d84);font-size:12px;line-height:1.4}
 .dsh-hub-card-note.dsh-hub-note-danger{color:var(--dsw-alias-label-danger,#d94b4b)}
 .dsh-hub-card-side{align-items:center;display:flex;flex:none;gap:10px}
+.dsh-hub-proxy-select{background:var(--dsw-alias-bg-layer-1,#fff);border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:7px;color:var(--dsw-alias-label-secondary,#5d5c52);cursor:pointer;font:inherit;font-size:12px;height:30px;max-width:122px;min-width:0;padding:0 24px 0 9px;width:122px}
+.dsh-hub-proxy-select:hover:not(:disabled){border-color:var(--dsw-alias-label-caption,#a6a094);color:var(--dsw-alias-label-primary,#141413)}
+.dsh-hub-proxy-select:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
+.dsh-hub-proxy-select:disabled{cursor:default;opacity:.55}
 .dsh-hub-chevron{color:var(--dsw-alias-label-caption,#a6a094);display:inline-flex;flex:none}
 .dsh-hub-brand-tile{align-items:center;background:color-mix(in srgb,var(--dsh-hub-brand,#888) 10%,transparent);border-radius:10px;display:inline-flex;flex:none;justify-content:center;overflow:hidden}
 .dsh-hub-brand-tile>svg{display:block}
@@ -36,6 +46,7 @@ const CSS = `
 .dsh-hub-skeleton span{background:var(--dsw-alias-bg-layer-2,#f2f1ea);border-radius:5px;display:block;height:12px}
 .dsh-hub-skeleton .dsh-hub-skel-name{width:120px;margin-bottom:6px}
 .dsh-hub-skeleton .dsh-hub-skel-note{width:180px;height:10px}
+@media(max-width:640px){.dsh-hub-card{gap:8px}.dsh-hub-card-side{gap:6px}.dsh-hub-proxy-select{padding-left:7px;width:100px}.dsh-hub-chevron{display:none}}
 /* The section header carries the title and the one page-level control: title
    left, control right, nothing else. A space-between row gives its LAST item the
    row's right edge, and every line that can appear lives to the left of the icon,

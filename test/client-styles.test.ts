@@ -66,6 +66,9 @@ describe('provider hub overview styles', () => {
     // The switch is a sliding pill, not a native checkbox.
     expect(css).toContain('.dsh-hub-switch[aria-checked=true]')
     expect(css).toContain('.dsh-hub-switch::after')
+    expect(css).toContain('.dsh-hub-drag-handle{')
+    expect(css).toContain('.dsh-hub-proxy-select{')
+    expect(css).toContain('[data-drop-target=true]')
     // The detail page's back bar, which replaced the tab strip.
     expect(css).toContain('.dsh-hub-backbar{')
     expect(css).toContain('.dsh-hub-back{')

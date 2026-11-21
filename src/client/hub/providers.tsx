@@ -10,6 +10,7 @@
 import type { ReactElement } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { ROUTE_PREFIX } from '../../compat.ts'
+import type { LineProxyProviderId } from '../../shared/contracts.ts'
 import { MINIMAX_CODE_ROUTE_PREFIX } from '../../shared/minimax-code-contracts.ts'
 import {
   GLM_CODING_PLAN_PROVIDER_NAME,
@@ -68,6 +69,8 @@ export interface HubProviderDescriptor {
    * place that writes its `enabled` flag. Null when the line has no switch.
    */
   setEnabled: ((enabled: boolean) => Promise<void>) | null
+  /** Per-line proxy preference key; null when an external CLI owns networking. */
+  proxyLine: LineProxyProviderId | null
   renderDetail(props: HubDetailRenderProps): ReactElement
 }
 
@@ -119,24 +122,28 @@ export function hubCardName(descriptor: HubProviderDescriptor, t: (key: string) 
 export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
   {
     id: 'chatgpt',
+    proxyLine: 'codex-chatgpt',
     name: 'ChatGPT',
     setEnabled: setChatGptEnabled,
     renderDetail: ({ t, runtime }) => <CodexSubscriptionSection t={t} {...runtime} />,
   },
   {
     id: 'command-code',
+    proxyLine: 'command-code',
     name: 'Command Code',
     setEnabled: (enabled) => postLineSettings('/command-code/api', { enabled }),
     renderDetail: ({ onModelChange }) => <CommandCodeSection onModelChange={onModelChange} />,
   },
   {
     id: 'kimi-code',
+    proxyLine: 'kimi-code',
     name: 'Kimi Code',
     setEnabled: (enabled) => postLineSettings('/kimi-code/api', { enabled }),
     renderDetail: ({ onModelChange }) => <KimiCodeSection onModelChange={onModelChange} />,
   },
   {
     id: 'minimax-code',
+    proxyLine: 'minimax-code',
     name: 'MiniMax Code',
     setEnabled: (enabled) => postLineSettings(MINIMAX_CODE_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <MinimaxCodeSection onModelChange={onModelChange} />,
@@ -144,12 +151,14 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
   {
     // GLM（ZCode 账号）：位置与 host 侧注册顺序一致（minimax-code 之后、claude 之前）。
     id: 'glm-coding-plan',
+    proxyLine: 'glm-coding-plan',
     name: GLM_CODING_PLAN_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(GLM_CODING_PLAN_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <GlmCodingPlanSection onModelChange={onModelChange} />,
   },
   {
     id: 'claude',
+    proxyLine: 'claude-subscription',
     name: 'Claude',
     setEnabled: (enabled) => postLineSettings('/claude/api', { enabled }),
     renderDetail: ({ onModelChange }) => <ClaudeSection onModelChange={onModelChange} />,
@@ -159,12 +168,14 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     // after `claude`, because the two cards share a vendor and a mark (a user decision).
     // No other entry moved; every other line is still appended at the end.
     id: 'claude-api',
+    proxyLine: 'claude-api',
     name: CLAUDE_API_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(CLAUDE_API_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <ClaudeApiSection onModelChange={onModelChange} />,
   },
   {
     id: 'ollama',
+    proxyLine: 'ollama',
     name: 'Ollama',
     setEnabled: (enabled) => postLineSettings('/ollama/api', { enabled }),
     renderDetail: ({ onModelChange }) => <OllamaSection onModelChange={onModelChange} />,
@@ -173,6 +184,7 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     // Step Code（Step Plan 订阅）：追加在最后，与 host 侧注册顺序一致（ollama 之后）。
     // 既有条目一个字符都没有移动——给已上线的线路重排卡片位置没有收益，只有风险。
     id: 'step-code',
+    proxyLine: 'step-code',
     name: STEP_CODE_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(STEP_CODE_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <StepCodeSection onModelChange={onModelChange} />,
@@ -180,6 +192,7 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
   {
     // Cline Pass（API Key 订阅）：再往后追加一格，既有线路的卡片顺序保持不动。
     id: 'cline-pass',
+    proxyLine: 'cline-pass',
     name: CLINE_PASS_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(CLINE_PASS_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <ClinePassSection onModelChange={onModelChange} />,
@@ -188,6 +201,7 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     // Qoder（订阅）：追加在最后，与 host 侧注册顺序一致（cline-pass 之后）。
     // 既有条目一个字符都没有移动——给已上线的线路重排卡片位置没有收益，只有风险。
     id: 'qoder',
+    proxyLine: 'qoder',
     name: QODER_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(QODER_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <QoderSection onModelChange={onModelChange} />,
@@ -195,6 +209,7 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
   {
     // OpenDesign（订阅，API Key）：再往后追加一格，既有线路的卡片顺序保持不动。
     id: 'opendesign',
+    proxyLine: 'opendesign',
     name: OPENDESIGN_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(OPENDESIGN_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <OpenDesignSection onModelChange={onModelChange} />,
@@ -202,6 +217,7 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
   {
     // WorkBuddy：追加在既有卡片之后，不回填历史中间位置。
     id: 'workbuddy',
+    proxyLine: 'workbuddy-subscription',
     name: 'WorkBuddy',
     setEnabled: (enabled) => postLineSettings('/workbuddy/api', { enabled }),
     renderDetail: ({ onModelChange }) => <WorkBuddySection onModelChange={onModelChange} />,
@@ -210,18 +226,20 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     // Antigravity（ACP）：追加在既有卡片之后，不回填历史中间位置。
     // host 侧注册顺序与之一致（workbuddy 之后）。
     id: 'antigravity-acp',
+    // 官方 agy CLI 自己管理网络，插件代理偏好对这条线路无效。
+    proxyLine: null,
     // 显示名走 hub 字典里的 provider 名，和其余线路同一套解析；没有翻译时退回英文常量。
     name: 'Antigravity (ACP)',
     setEnabled: (enabled) => postLineSettings('/antigravity-acp/api', { enabled }),
     renderDetail: ({ onModelChange }) => <AntigravityAcpSection onModelChange={onModelChange} />,
   },
   {
-    id: 'qianwen-token-plan', name: QIANWEN_TOKEN_PLAN_PROVIDER_NAME,
+    id: 'qianwen-token-plan', proxyLine: 'qianwen-token-plan', name: QIANWEN_TOKEN_PLAN_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(QIANWEN_TOKEN_PLAN_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <QianwenTokenPlanSection onModelChange={onModelChange} />,
   },
   {
-    id: 'relayone', name: RELAYONE_PROVIDER_NAME,
+    id: 'relayone', proxyLine: 'relayone', name: RELAYONE_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(RELAYONE_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <RelayOneSection onModelChange={onModelChange} />,
   },

@@ -82,6 +82,8 @@ describe('parseListing', () => {
         input_modalities: ['text', 'image'],
         default_reasoning_level: 'medium',
         supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }],
+        auto_compact_token_limit: 320_000,
+        comp_hash: 'config-hash',
       }],
     })
 
@@ -93,6 +95,8 @@ describe('parseListing', () => {
       inputModalities: ['text', 'image'],
       reasoningEfforts: ['low', 'high'],
       defaultReasoningEffort: 'medium',
+      autoCompactTokenLimit: 320_000,
+      compHash: 'config-hash',
     })
   })
 

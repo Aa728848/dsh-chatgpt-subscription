@@ -68,12 +68,16 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/host/compaction-policy-guard
  */
 import { replaceCompactionInstruction, type PromptMessage } from './compaction-prompt.ts'
+import { codexRemoteCompactionEnabled } from './codex-remote-compaction.ts'
+import { MINIMAX_CODE_MODELS } from './minimax-code/model-catalog.ts'
 
 /** 压缩服务的名字（`ctx.reflect.store` 与 `ctx.get` 都用它）。 */
 export const COMPACTION_SERVICE_NAME = 'compaction'
 
 /** 受策略保护的 provider。 */
 export const KIMI_COMPACTION_PROVIDER = 'kimi-code'
+export const MINIMAX_COMPACTION_PROVIDER = 'minimax-code'
+export const CODEX_COMPACTION_PROVIDER = 'codex-chatgpt'
 
 /**
  * Kimi Code 的压缩预算。
@@ -91,6 +95,12 @@ export const KIMI_COMPACTION_POLICY_DEFAULTS = Object.freeze({
   maxTokens: 32768,
   compactionRetries: 1,
   maxOverflowRetries: 1,
+})
+
+/** MiniMax's official client compacts at 95% after reserving output. */
+export const MINIMAX_COMPACTION_POLICY_DEFAULTS = Object.freeze({
+  thresholdRatio: 0.95,
+  headroomTokens: 0,
 })
 
 /** 预置的 Kimi Code 模型 id。 */
@@ -202,8 +212,16 @@ export function installCompactionPolicyGuard(
    * @param targetProvider - provider。
    * @returns 冻结的策略。
    */
-  const policyFor = (model: string, targetProvider: string): PolicyLike =>
-    Object.freeze({ ...defaults, provider: targetProvider, model })
+  const policyFor = (model: string, targetProvider: string): PolicyLike => {
+    if (targetProvider === MINIMAX_COMPACTION_PROVIDER && provider !== MINIMAX_COMPACTION_PROVIDER) {
+      return Object.freeze({
+        provider: targetProvider,
+        model,
+        ...MINIMAX_COMPACTION_POLICY_DEFAULTS,
+      })
+    }
+    return Object.freeze({ ...defaults, provider: targetProvider, model })
+  }
 
   /**
    * 登记一个观测到的 provider/model。
@@ -228,17 +246,24 @@ export function installCompactionPolicyGuard(
    */
   const candidates = (): PolicyLike[] => {
     const list: PolicyLike[] = []
-    const models = observed.get(provider)
-    const seen = new Set<string>()
-    for (const model of KIMI_CODE_MODELS) {
-      seen.add(model)
-      list.push(policyFor(model, provider))
-    }
-    if (models !== undefined) {
-      for (const model of models) {
-        if (seen.has(model)) continue
+    for (const targetProvider of [provider, MINIMAX_COMPACTION_PROVIDER]) {
+      const models = observed.get(targetProvider)
+      const seen = new Set<string>()
+      const seeded = targetProvider === provider
+        ? KIMI_CODE_MODELS
+        : targetProvider === MINIMAX_COMPACTION_PROVIDER
+          ? MINIMAX_CODE_MODELS.map(entry => entry.id)
+          : []
+      for (const model of seeded) {
         seen.add(model)
-        list.push(policyFor(model, provider))
+        list.push(policyFor(model, targetProvider))
+      }
+      if (models !== undefined) {
+        for (const model of models) {
+          if (seen.has(model)) continue
+          seen.add(model)
+          list.push(policyFor(model, targetProvider))
+        }
       }
     }
     return list
@@ -382,11 +407,13 @@ export function installCompactionPolicyGuard(
         if (match.call(thisArg, candidate, 0, policies)) return candidate
       }
       // 3. 探针：问 predicate 要哪个模型。命中就合成一条冻结策略。
-      const observedModels = observed.get(provider)
-      const lastModel = observedModels === undefined ? undefined : [...observedModels].at(-1)
-      if (lastModel !== undefined) {
-        const probe = probeFor(lastModel, provider)
-        if (match.call(thisArg, probe, 0, policies)) return policyFor(lastModel, provider)
+      for (const targetProvider of [provider, MINIMAX_COMPACTION_PROVIDER]) {
+        const observedModels = observed.get(targetProvider)
+        const lastModel = observedModels === undefined ? undefined : [...observedModels].at(-1)
+        if (lastModel !== undefined) {
+          const probe = probeFor(lastModel, targetProvider)
+          if (match.call(thisArg, probe, 0, policies)) return policyFor(lastModel, targetProvider)
+        }
       }
       return undefined
     }
@@ -437,6 +464,14 @@ export function installCompactionPolicyGuard(
         // 观测：这些方法的入参里一定带着 agent 或 header。
         observeFrom(args[0])
         observeFrom(args[1])
+        // Native Codex compaction owns ordinary pressure and model-switch
+        // compaction. Context-overflow remains available as a safety fallback
+        // after a native refusal or an unexpectedly large request.
+        if (codexRemoteCompactionEnabled()
+          && providerFrom(args[0]) === CODEX_COMPACTION_PROVIDER
+          && (name === 'compactPressure' || (name === 'compactIfNeeded' && args[1] !== 'context-overflow'))) {
+          return null
+        }
         let nextArgs = args
         if (name === 'summarize') {
           const input = args[0]
@@ -625,12 +660,38 @@ export function installCompactionPolicyGuard(
   }
 }
 
-/**
- * 从一条 service 记录里读服务名。
- *
- * @param record - `ctx.reflect.store` 里的一条记录。
- * @returns 服务名；读不到时为 `undefined`。
- */
+/** Read the exact provider of the current compaction target. */
+function providerFrom(source: unknown): string | undefined {
+  if (!isRecord(source)) return undefined
+  const direct = isRecord(source['config']) ? source['config'] as Record<string, unknown> : undefined
+  if (typeof direct?.['provider'] === 'string') return direct['provider']
+  const options = isRecord(source['options']) ? source['options'] as Record<string, unknown> : undefined
+  if (typeof options?.['provider'] === 'string') return options['provider']
+  const session = isRecord(source['session']) ? source['session'] as Record<string, unknown> : undefined
+  const requestHeader = session?.['requestHeader']
+  if (typeof requestHeader === 'function') {
+    try {
+      const header = requestHeader.call(session)
+      if (isRecord(header) && isRecord(header['config']) && typeof header['config']['provider'] === 'string') {
+        return header['config']['provider']
+      }
+    } catch {
+      return undefined
+    }
+  }
+  const model = isRecord(source['model']) ? source['model'] as Record<string, unknown> : undefined
+  if (typeof model?.['current'] === 'function') {
+    try {
+      const current = (model['current'] as () => unknown).call(model)
+      if (isRecord(current) && typeof current['provider'] === 'string') return current['provider']
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+/** Read a service name from one reflect-store record. */
 function readServiceName(record: ServiceImplLike): string | undefined {
   if (typeof record.name === 'string') return record.name
   const impl = record.impl

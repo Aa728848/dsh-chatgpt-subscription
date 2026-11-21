@@ -10,7 +10,7 @@
  * 两个守卫都只做结构探测，因此这里用假的服务对象代替真实的 harness 服务。
  */
 import { Context, Service } from '@deepseek-ai/cordis'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   KIMI_CODE_PROVIDER,
   PTC_SDK_SECTION_NAME,
@@ -506,6 +506,36 @@ describe('installCompactionPolicyGuard', () => {
     expect(override?.headroomTokens).toBe(KIMI_COMPACTION_POLICY_DEFAULTS.headroomTokens)
     expect(override?.maxTokens).toBe(KIMI_COMPACTION_POLICY_DEFAULTS.maxTokens)
     expect(override?.retainRatio).toBeUndefined()
+    guard.dispose()
+  })
+
+  it('aligns MiniMax with the official post-output-reservation 95% trigger', () => {
+    const engine = new FakeEngine()
+    const guard = installCompactionPolicyGuard(createHost(undefined).ctx)
+    guard.patchEngine(engine)
+    const { override } = resolveTargetPolicy(engine.config, {
+      provider: 'minimax-code',
+      model: 'MiniMax-M3',
+    })
+    expect(override?.thresholdRatio).toBe(0.95)
+    expect(override?.headroomTokens).toBe(0)
+    guard.dispose()
+  })
+
+  it('lets native Codex skip pressure but keeps overflow recovery', async () => {
+    const engine = new FakeEngine()
+    const spy = vi.spyOn(engine, 'compactIfNeeded')
+    const guard = installCompactionPolicyGuard(createHost(undefined).ctx)
+    guard.patchEngine(engine)
+    const agent = { config: { provider: 'codex-chatgpt', model: 'gpt-6.2-astra' } }
+    await engine.compactIfNeeded(agent, 'pressure')
+    expect(spy).not.toHaveBeenCalled()
+    await engine.compactIfNeeded(agent, 'context-overflow')
+    expect(spy).toHaveBeenCalledTimes(1)
+    vi.stubEnv('DSH_CODEX_REMOTE_COMPACTION', '0')
+    await engine.compactIfNeeded(agent, 'pressure')
+    expect(spy).toHaveBeenCalledTimes(2)
+    vi.unstubAllEnvs()
     guard.dispose()
   })
 

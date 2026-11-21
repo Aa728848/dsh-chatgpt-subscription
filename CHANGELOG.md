@@ -7,7 +7,13 @@
   - 新增第一方头、计费上下文、diagnostics、认证对应的 beta/system/cache_control；两条线路处理尾部 assistant、thinking-token-count 拒绝、Mythos 5 能力和新增 usage 元数据。订阅授权入口改用 claude.com 新域。
   - 订阅卡片新增默认关闭的快速模式与 cache-keepalive；1h 等待期优先 cache_touch，失败回退原续热。订阅线路接入官方 context_management、能力记忆、压缩档位跟随和工具结果裁剪跳过。
   - 离线覆盖标准/独立签名向量、最终 body 反算、双线路版本门槛、纠正存盘、touch 回退、UI 结构与三语。真实订阅直连、55 分钟续热和新版本种子仍列未验证。
-  - **验证**：强制 host/client/test/scripts 类型检查通过；全量 409 文件 / 7356 测试通过（3 文件 / 12 测试按既有条件跳过），构建与 1118 条目的打包预演通过。
+  - **验证**：强制 host/client/test/scripts 类型检查通过；全量 410 文件 / 7373 测试通过（3 文件 / 12 测试按既有条件跳过），构建与 1118 条目的打包预演通过。
+- **[codex-chatgpt] 接入 Codex remote-v2 原生上下文压缩**
+  - 按实时模型目录的 `auto_compact_token_limit`（缺省为上下文窗口 90%）在正常回合前发送 `compaction_trigger`，严格验收唯一的不透明 compaction item，并随普通助手消息的 `replayState` 持久化；后续请求只投影最新有效 checkpoint 之后的线上历史，不改写 DSH 原会话。
+  - 原生路径可用时跳过 DSH 压力压缩和工具结果剪裁；明确 400/404 拒绝后锁存停用并恢复完整历史及宿主回退。`DSH_CODEX_REMOTE_COMPACTION=0` 可整体关闭。新增模型/配置兼容校验与 remote-v2 全生命周期离线测试。
+- **[minimax-code] 对齐官方客户端的宿主压缩触发阈值**
+  - 在不改请求协议的前提下，以 `thresholdRatio: 0.95`、`headroomTokens: 0` 对齐官方“扣除输出预留后按 95% 触发”；预置及动态模型均覆盖，显式用户策略保持优先。
+  - **验证**：强制 Host/Client/Test/Scripts 类型检查与生产构建通过；全量 Vitest 397 个文件通过、3 个跳过，7072 项测试通过、10 个跳过。未调用真实付费端点。
 
 - **[kimi-code] 新增「套餐 API Key」登录方式，与设备码登录并列**
   - **入口**：账号管理标题行改为「添加账号」（设备码）+「API Key 登录」两个按钮；后者在账号列表下方展开一个密码输入框，粘贴 Kimi Code 控制台（kimi.com/code）创建的会员 API Key 即可入池。API Key 账号在卡片上标注「登录方式：套餐 API Key」。

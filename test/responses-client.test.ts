@@ -20,7 +20,7 @@ describe('Codex cold prefix coordination', () => {
         provider: 'codex-chatgpt', model: 'gpt-6.2-sol', system, sessionId,
         messages: [{ role: 'user', content: [{ type: 'text', text: sessionId }] }],
         tools: [{ name: toolName, description: 'Look up details', parameters: { type: 'object' } }],
-      } as unknown as GenerateOptions, () => ({ useResponsesLite })))
+      } as unknown as GenerateOptions, () => ({ useResponsesLite, contextWindow: null, autoCompactTokenLimit: null, compHash: null })))
       return acquire.mock.lastCall?.[0]
     }
     try {

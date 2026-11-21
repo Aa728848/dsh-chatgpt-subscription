@@ -168,7 +168,11 @@ export function resolveCodexWireCapabilities(
   live?: readonly CodexCatalogEntry[],
 ): CodexWireCapabilities {
   const liveEntry = live?.find(candidate => candidate.id === model)
+  const fallback = resolveCodexCatalogEntry(model)
   return {
     useResponsesLite: liveEntry?.useResponsesLite ?? codexModelUsesResponsesLite(model),
+    contextWindow: liveEntry?.contextWindow ?? fallback.contextWindow,
+    autoCompactTokenLimit: liveEntry?.autoCompactTokenLimit ?? null,
+    compHash: liveEntry?.compHash ?? null,
   }
 }

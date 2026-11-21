@@ -28,7 +28,7 @@
 
 交互模式 cli 的多轮 prompt/turn 计数取值、未知新版本的种子、真实订阅账号直连的 OAuth 第一方请求与 cache_touch、55 分钟真实续热、Mythos 可用性和部分模型快速模式。结构夹具不是线上字节抓包；cch 的离线证据来自标准向量、独立参考实现向量和适配器实际发送 body 的反算。
 
-验证记录：强制 host/client、test、scripts TypeScript 检查均通过；全量 Vitest 为 409 文件通过、3 个条件跳过，7356 测试通过、12 个条件跳过；`npm run build` 通过；`npm pack --dry-run --json --ignore-scripts` 为 1118 个条目，新增共享模块声明全部入包。参考快照缺失导致的既有 fidelity 跳过不计为通过。UI 已收到同场景 Before，After 待新版宿主重载后截取。
+验证记录：强制 host/client、test、scripts TypeScript 检查均通过；全量 Vitest 为 410 文件通过、3 个条件跳过，7373 测试通过、12 个条件跳过；`npm run build` 通过；`npm pack --dry-run --json --ignore-scripts` 为 1118 个条目，新增共享模块声明全部入包。参考快照缺失导致的既有 fidelity 跳过不计为通过。UI 已收到同场景 Before，After 待新版宿主重载后截取。
 
 ## 证据来源
 

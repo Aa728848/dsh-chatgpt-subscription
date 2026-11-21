@@ -50,7 +50,7 @@ describe('provider capability matrix (legacy inventory compatibility)', () => {
 
   it('does not report unverified Codex features as implemented', () => {
     expect(maySend('codex-chatgpt', 'tool-search')).toBe(false)
-    expect(maySend('codex-chatgpt', 'server-side-compaction')).toBe(false)
+    expect(maySend('codex-chatgpt', 'server-side-compaction')).toBe(true)
     expect(maySend('codex-chatgpt', 'multi-agent-server')).toBe(false)
   })
 })
@@ -318,7 +318,7 @@ describe('strict runtime capability gate & evidence registry', () => {
     ).toBe(false)
   })
 
-  it('denies unverified features by default (MiniMax replay, Codex compaction, websocket)', () => {
+  it('denies unverified features by default (MiniMax replay, Codex websocket)', () => {
     // MiniMax thinking replay: offline implementation exists, but subscription gateway is unverified (W4)
     expect(
       evaluateCapability({
@@ -330,7 +330,7 @@ describe('strict runtime capability gate & evidence registry', () => {
       }).allowed,
     ).toBe(false)
 
-    // Codex server-side compaction is unverified on subscription endpoint
+    // Codex remote-v2 has an official offline contract and an implemented replay path.
     expect(
       evaluateCapability({
         provider: 'codex-chatgpt',
@@ -339,7 +339,7 @@ describe('strict runtime capability gate & evidence registry', () => {
         authMode: 'oauth',
         capability: 'server-side-compaction',
       }).allowed,
-    ).toBe(false)
+    ).toBe(true)
 
     // Codex tool search is unverified on subscription endpoint
     expect(

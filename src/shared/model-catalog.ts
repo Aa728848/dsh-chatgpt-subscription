@@ -23,6 +23,12 @@ export const CODEX_DEFAULT_MAX_TOKENS = 32_768
 export interface CodexWireCapabilities {
   /** Whether the model speaks the Responses Lite protocol. */
   useResponsesLite: boolean
+  /** Catalog context window used to derive the native compaction threshold. */
+  contextWindow?: number | null
+  /** Catalog-provided automatic compaction threshold, when present. */
+  autoCompactTokenLimit?: number | null
+  /** Opaque model-configuration compatibility key for native checkpoints. */
+  compHash?: string | null
 }
 
 export interface CodexModelCatalogEntry {
