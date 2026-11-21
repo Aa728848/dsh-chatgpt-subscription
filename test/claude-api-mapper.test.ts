@@ -267,6 +267,19 @@ describe('claude-api replay', () => {
     // The last user block carries the conversation cache breakpoint (tool_result is markable).
     expect(messages[2]?.content).toEqual([{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'file list', cache_control: { type: 'ephemeral' } }])
   })
+
+  it('normalizes a foreign Responses tool id consistently before pairing its result', () => {
+    const foreign = 'call_4mt2LEbvc0DaBPCGP3dK5cvc|fc_0e3c3b45d14c8351016aea0c329d5887d2aa952cfd9841fc8c'
+    const call = msg('assistant', [{ type: 'tool-call', id: toToolCallId(foreign), name: 'run_code', arguments: '{"code":"return 1"}' }], { kind: 'model', provider: 'sub2api' })
+    const result = msg('user', [{ type: 'tool-result', toolCallId: foreign, content: [{ type: 'text', text: '1' }] }], { kind: 'tool', callId: foreign })
+    const messages = messagesOf(build(options([userText('u'), call, result, userText('next')])))
+    const toolUse = (messages[1]?.content as Array<Record<string, unknown>>)[0]
+    const toolResult = (messages[2]?.content as Array<Record<string, unknown>>)[0]
+    expect(toolUse?.type).toBe('tool_use')
+    expect(toolUse?.id).toMatch(/^[a-zA-Z0-9_-]+$/)
+    expect(toolResult).toMatchObject({ type: 'tool_result', tool_use_id: toolUse?.id })
+    expect(toolUse?.id).not.toBe(foreign)
+  })
 })
 
 describe('claude-api cache breakpoints and speed', () => {
@@ -327,6 +340,47 @@ describe('claude-api cache breakpoints and speed', () => {
     expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
     expect((messages[0]?.content as Array<Record<string, unknown>>)[0]?.cache_control).toEqual({ type: 'ephemeral' })
     expect(JSON.stringify(messages.at(-1))).not.toContain('cache_control')
+  })
+
+  it('keeps the preceding user breakpoint intact as a cross-provider history advances', () => {
+    const history = [
+      userText('old Kimi question', { kind: 'user' }),
+      assistantText('old Kimi answer'),
+      userText('first Claude question'),
+    ]
+    const requestOptions = { system: 'static prompt', tools: [tool('Bash')] }
+    const first = build(options(history, requestOptions))
+    const second = build(options([...history, assistantText('first Claude answer'), userText('second Claude question')], requestOptions))
+    const firstTail = (messagesOf(first).at(-1)?.content as Array<Record<string, unknown>>)[0]
+    const secondPrevious = (messagesOf(second)[2]?.content as Array<Record<string, unknown>>)[0]
+    expect(firstTail?.cache_control).toEqual({ type: 'ephemeral' })
+    expect(secondPrevious).toEqual(firstTail)
+    expect(countClaudeApiCacheBreakpoints(second)).toBe(4)
+
+    const third = build(options([
+      ...history,
+      assistantText('first Claude answer'),
+      userText('second Claude question'),
+      assistantText('second Claude answer'),
+      userText('third Claude question'),
+    ], requestOptions))
+    const thirdPrevious = (messagesOf(third)[4]?.content as Array<Record<string, unknown>>)[0]
+    expect(thirdPrevious?.cache_control).toEqual({ type: 'ephemeral' })
+    expect(countClaudeApiCacheBreakpoints(third)).toBe(4)
+  })
+
+  it('reserves the history-marker budget when static and dynamic system blocks coexist', () => {
+    const history = [systemText('dynamic runtime'), userText('old Kimi question'), assistantText('old answer'), userText('current question')]
+    const first = build(options(history, { system: 'static prompt', tools: [tool('Bash')] }))
+    const next = build(options([...history, assistantText('answer'), userText('next question')], { system: 'static prompt', tools: [tool('Bash')] }))
+    const messages = messagesOf(next)
+    const previous = (messages[2]?.content as Array<Record<string, unknown>>)[0]
+    const current = (messages.at(-1)?.content as Array<Record<string, unknown>>)[0]
+    expect(previous?.cache_control).toEqual({ type: 'ephemeral' })
+    expect(current?.cache_control).toEqual({ type: 'ephemeral' })
+    expect(systemOf(next)[2]?.cache_control).toEqual({ type: 'ephemeral', scope: 'global' })
+    expect(countClaudeApiCacheBreakpoints(next)).toBe(4)
+    expect(countClaudeApiCacheBreakpoints(first)).toBeLessThanOrEqual(4)
   })
 
   it('sends speed only when settings allow it and the model has fast mode', () => {
