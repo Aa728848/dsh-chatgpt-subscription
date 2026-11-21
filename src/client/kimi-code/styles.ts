@@ -144,8 +144,11 @@ const BASE = `
    membership API key. The key field opens below the list, never in the heading. */
 .dshkc-login-actions{display:flex;flex-wrap:wrap;gap:8px}
 .dshkc-apikey{display:flex;flex-direction:column;gap:8px;margin-top:12px}
-.dshkc-apikey-row{align-items:center;display:flex;flex-wrap:wrap;gap:8px}
-.dshkc-apikey-row input{flex:1 1 260px;min-width:200px}
+/* The key field spans the card: the shared .dsha-select caps itself at 220px for
+   short pickers, which left a key field a third of the row wide. */
+.dshkc-apikey-row{align-items:center;display:flex;gap:8px}
+.dshkc-apikey-row input.dsha-select{flex:1 1 auto;font-size:13px;max-width:none;min-width:0;padding:8px 12px;width:auto}
+.dshkc-apikey-row .dsha-btn{flex:0 0 auto}
 `
 
 /** Kimi-specific rules layered on top of the shared control styles. */

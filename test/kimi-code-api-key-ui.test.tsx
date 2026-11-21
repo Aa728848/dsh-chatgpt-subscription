@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { KimiCodeWebStatus } from '../src/shared/kimi-code-contracts.ts'
 import { KimiCodeSection } from '../src/client/kimi-code/KimiCodeSection.tsx'
 import { zh } from '../src/client/kimi-code/locales.ts'
+import { STYLE_ID, installKimiCodeStyles } from '../src/client/kimi-code/styles.ts'
 
 function status(overrides: Partial<KimiCodeWebStatus> = {}): KimiCodeWebStatus {
   return {
@@ -126,6 +127,13 @@ describe('Kimi Code API-key sign-in', () => {
     expect(posts.filter((post) => post.url.endsWith('/login/api-key')).map((post) => post.body)).toEqual([{ apiKey: 'sk-kimi-secret' }])
     expect(node.querySelector('#dshkc-apikey-body')).toBeNull()
     expect(node.innerHTML).not.toContain('sk-kimi-secret')
+  })
+
+  it('lets the key field span the row instead of the 220px picker cap', () => {
+    installKimiCodeStyles()
+    const css = document.getElementById(STYLE_ID)?.textContent ?? ''
+    expect(css).toContain('.dsha-select{')
+    expect(css).toMatch(/\.dshkc-apikey-row input\.dsha-select\{[^}]*flex:1 1 auto[^}]*max-width:none/)
   })
 
   it('re-signing-in an API-key row opens the key field bound to that row', async () => {
