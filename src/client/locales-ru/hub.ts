@@ -171,7 +171,7 @@ export const dictionary: Record<LocaleKey, string> = {
   unknown: 'Неизвестно',
   // The hub overview: the settings page's opening screen.
   hubBack: 'Подписки',
-  hubOverviewHint: 'Выберите провайдера, чтобы управлять аккаунтами, моделями и квотой; переключатель справа решает, показывать ли его в списке моделей.',
+  hubOverviewHint: 'Перетаскивайте маркеры, чтобы менять порядок линий. Справа выбирается режим прокси, а переключатель решает, показывать ли провайдера в списке моделей.',
   hubAccountCount: 'Аккаунтов: {count}',
   hubNoAccounts: 'Аккаунтов пока нет — откройте, чтобы добавить',
   hubStateEnabled: 'Включён',
@@ -182,6 +182,13 @@ export const dictionary: Record<LocaleKey, string> = {
   hubSwitchOn: 'Включить {name}',
   hubSwitchOff: 'Выключить {name}',
   hubCardLabel: '{name}, {annotation}',
+  hubDragProvider: 'Изменить порядок: {name}; также можно использовать стрелки вверх и вниз',
+  hubDragProviderHint: 'Перетащите для изменения порядка; при фокусе используйте стрелки вверх и вниз',
+  hubProxyMode: 'Режим прокси: {name}',
+  hubProxyAuto: 'Системный прокси',
+  hubProxyCustom: 'Свой прокси',
+  hubProxyDirect: 'Напрямую',
+  hubCustomProxyMissing: 'Сначала сохраните адрес своего прокси на странице {name}.',
   // The overview's update control.
   hubUpdateCheck: 'Проверить обновления',
   hubUpdateChecking: 'Проверяем…',

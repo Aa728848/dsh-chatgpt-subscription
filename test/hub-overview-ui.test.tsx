@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { HubOverview, cardAnnotation } from '../src/client/hub/HubOverview.tsx'
+import { HubOverview, cardAnnotation, HUB_PROVIDER_ORDER_STORAGE_KEY } from '../src/client/hub/HubOverview.tsx'
 import { BrandTile } from '../src/client/hub/brand-icons.tsx'
 import { HUB_PROVIDERS } from '../src/client/hub/providers.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -96,12 +96,15 @@ describe('HubOverview', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
+    localStorage.clear()
   })
 
   afterEach(async () => {
     await act(async () => root.unmount())
     container.remove()
     globalThis.fetch = originalFetch
+    localStorage.clear()
+    vi.restoreAllMocks()
   })
 
   function mockFetch(overview: HubOverviewDto | null = overviewDto()) {
@@ -112,6 +115,9 @@ describe('HubOverview', () => {
       if (url.includes('/hub/overview')) {
         if (overview === null) return Response.json({ ok: false, error: { code: 'internal', message: 'boom' } }, { status: 500 })
         return Response.json({ ok: true, value: overview })
+      }
+      if (url.includes('/proxy')) {
+        return Response.json({ ok: true, value: { lineProxies: {}, noProxy: null, detectedProxy: null, activeProxies: {} } })
       }
       // Every line's settings endpoint answers the toggle.
       return Response.json({ ok: true, value: {} })
@@ -142,8 +148,13 @@ describe('HubOverview', () => {
     // Ollama has no switch; every other card does.
     expect(cards()[6]!.querySelector('[role="switch"]')).toBeNull()
     expect(container.querySelectorAll('[role="switch"]')).toHaveLength(14)
-    // Every card renders its brand tile.
+    // Every card renders its brand tile and drag handle. Antigravity's official
+    // CLI owns its networking, so only the other fourteen get a proxy select.
     expect(container.querySelectorAll('.dsh-hub-brand-tile')).toHaveLength(15)
+    expect(container.querySelectorAll('.dsh-hub-drag-handle')).toHaveLength(15)
+    expect(container.querySelectorAll('.dsh-hub-proxy-select')).toHaveLength(14)
+    const antigravity = cards().find((card) => card.querySelector('.dsh-hub-card-name')?.textContent === 'Antigravity（ACP）')!
+    expect(antigravity.querySelector('.dsh-hub-proxy-select')).toBeNull()
   })
 
   it('drills into the detail page from a card click', async () => {
@@ -212,5 +223,142 @@ describe('HubOverview', () => {
     await act(async () => retry.click())
     expect(cards()).toHaveLength(15)
     expect(calls.some((call) => call.url.includes('/hub/overview'))).toBe(true)
+  })
+
+  it('drags a card into a new order and persists the ordered ids', async () => {
+    mockFetch()
+    const onOpen = await render()
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() }
+    const dragEvent = (type: string) => {
+      const event = new Event(type, { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', { value: dataTransfer })
+      return event
+    }
+    await act(async () => {
+      cards()[0]!.querySelector('.dsh-hub-drag-handle')!.dispatchEvent(dragEvent('dragstart'))
+    })
+    await act(async () => {
+      cards()[2]!.dispatchEvent(dragEvent('dragover'))
+      cards()[2]!.dispatchEvent(dragEvent('drop'))
+    })
+    expect(cards().slice(0, 4).map((card) => card.querySelector('.dsh-hub-card-name')?.textContent))
+      .toEqual(['Command Code', 'Kimi Code', 'ChatGPT', 'MiniMax Code'])
+    expect(JSON.parse(localStorage.getItem(HUB_PROVIDER_ORDER_STORAGE_KEY)!)).toEqual([
+      'command-code', 'kimi-code', 'chatgpt', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama',
+      'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone',
+    ])
+    expect(dataTransfer.setData).toHaveBeenCalledWith('text/plain', 'chatgpt')
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('restores saved order, drops unknown ids and appends new providers', async () => {
+    localStorage.setItem(HUB_PROVIDER_ORDER_STORAGE_KEY, JSON.stringify(['kimi-code', 'removed-line', 'kimi-code']))
+    mockFetch()
+    await render()
+    const names = cards().map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)
+    expect(names.slice(0, 3)).toEqual(['Kimi Code', 'ChatGPT', 'Command Code'])
+    expect(names).toHaveLength(15)
+  })
+
+  it('falls back to registry order when the saved order is corrupt', async () => {
+    localStorage.setItem(HUB_PROVIDER_ORDER_STORAGE_KEY, '{bad json')
+    mockFetch()
+    await render()
+    expect(cards()[0]!.querySelector('.dsh-hub-card-name')?.textContent).toBe('ChatGPT')
+  })
+
+  it('moves a focused drag handle with arrow keys without opening the card', async () => {
+    mockFetch()
+    const onOpen = await render()
+    const handle = cards()[0]!.querySelector('.dsh-hub-drag-handle')!
+    await act(async () => {
+      handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    })
+    expect(cards().slice(0, 2).map((card) => card.querySelector('.dsh-hub-card-name')?.textContent))
+      .toEqual(['Command Code', 'ChatGPT'])
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('saves a direct proxy mode without drilling into the card', async () => {
+    const calls = mockFetch()
+    const onOpen = await render()
+    const select = cards()[0]!.querySelector<HTMLSelectElement>('.dsh-hub-proxy-select')!
+    await act(async () => {
+      select.value = 'direct'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const commit = calls.find((call) => call.url.includes('/preferences/update') && typeof call.body === 'object' && call.body !== null && 'lineProxies' in call.body)
+    expect(commit?.body).toEqual({ lineProxies: { 'codex-chatgpt': { mode: 'direct', customProxyUrl: null } } })
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('reuses a saved custom proxy address', async () => {
+    const calls: Array<{ url: string; body?: unknown }> = []
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.body !== undefined) calls.push({ url, body: JSON.parse(String(init.body)) })
+      if (url.includes('/hub/overview')) return Response.json({ ok: true, value: overviewDto() })
+      if (url.includes('/proxy')) return Response.json({ ok: true, value: {
+        lineProxies: { 'codex-chatgpt': { mode: 'auto', customProxyUrl: 'http://127.0.0.1:7890' } },
+        noProxy: null, detectedProxy: null, activeProxies: {},
+      } })
+      return Response.json({ ok: true, value: {} })
+    }) as typeof fetch
+    await render()
+    const select = cards()[0]!.querySelector<HTMLSelectElement>('.dsh-hub-proxy-select')!
+    await act(async () => {
+      select.value = 'custom'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(calls.find((call) => call.url.includes('/preferences/update'))?.body).toEqual({
+      lineProxies: { 'codex-chatgpt': { mode: 'custom', customProxyUrl: 'http://127.0.0.1:7890' } },
+    })
+  })
+
+  it('opens the detail page instead of saving an empty custom proxy', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined)
+    const calls = mockFetch()
+    const onOpen = await render()
+    const select = cards()[0]!.querySelector<HTMLSelectElement>('.dsh-hub-proxy-select')!
+    await act(async () => {
+      select.value = 'custom'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(alert).toHaveBeenCalledWith('请先在 ChatGPT 详情页保存自定义代理地址。')
+    expect(onOpen).toHaveBeenCalledWith('chatgpt')
+    expect(calls.some((call) => typeof call.body === 'object' && call.body !== null && 'lineProxies' in call.body)).toBe(false)
+    expect(select.value).toBe('auto')
+  })
+
+  it('keeps the last saved proxy mode and shows an error when saving fails', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/hub/overview')) return Response.json({ ok: true, value: overviewDto() })
+      if (url.includes('/proxy')) return Response.json({ ok: true, value: { lineProxies: {}, noProxy: null, detectedProxy: null, activeProxies: {} } })
+      return Response.json({ ok: false, error: { code: 'internal', message: 'proxy save failed' } }, { status: 500 })
+    }) as typeof fetch
+    const onOpen = await render()
+    const select = cards()[0]!.querySelector<HTMLSelectElement>('.dsh-hub-proxy-select')!
+    await act(async () => {
+      select.value = 'direct'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(select.value).toBe('auto')
+    expect(cards()[0]!.querySelector('.dsh-hub-card-note')?.textContent).toContain('proxy save failed')
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('keeps cards and switches usable when the proxy snapshot fails', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/hub/overview')) return Response.json({ ok: true, value: overviewDto() })
+      if (url.includes('/proxy')) return Response.json({ ok: false, error: { code: 'internal', message: 'proxy unavailable' } }, { status: 500 })
+      return Response.json({ ok: true, value: {} })
+    }) as typeof fetch
+    await render()
+    expect(cards()).toHaveLength(15)
+    expect(cards()[0]!.querySelector<HTMLSelectElement>('.dsh-hub-proxy-select')!.disabled).toBe(true)
+    expect(cards()[0]!.querySelector('.dsh-hub-proxy-select')!.getAttribute('title')).toContain('proxy unavailable')
+    expect(cards()[0]!.querySelector<HTMLButtonElement>('[role="switch"]')!.disabled).toBe(false)
   })
 })

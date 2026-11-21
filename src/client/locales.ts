@@ -168,7 +168,7 @@ export const zh = {
   unknown: '未知',
   // The hub overview: the settings page's opening screen.
   hubBack: '订阅服务',
-  hubOverviewHint: '选择供应商以管理账号、模型与配额；右侧开关控制该供应商是否出现在模型列表中。',
+  hubOverviewHint: '拖动手柄可排序；右侧选择线路代理模式，开关控制该供应商是否出现在模型列表中。',
   hubAccountCount: '{count} 个账号',
   hubNoAccounts: '暂无账号，点击进入添加',
   hubStateEnabled: '已启用',
@@ -179,6 +179,13 @@ export const zh = {
   hubSwitchOn: '启用 {name}',
   hubSwitchOff: '停用 {name}',
   hubCardLabel: '{name}，{annotation}',
+  hubDragProvider: '拖动排序 {name}；也可用上下方向键移动',
+  hubDragProviderHint: '拖动排序；聚焦后可用上下方向键移动',
+  hubProxyMode: '{name} 代理模式',
+  hubProxyAuto: '系统代理',
+  hubProxyCustom: '自定义代理',
+  hubProxyDirect: '直连',
+  hubCustomProxyMissing: '请先在 {name} 详情页保存自定义代理地址。',
   // The overview's update control, at the right end of the hint line. The button
   // says what it will do next; the small line under it says what the last answer
   // meant. {version} is the published version and {current} the one running.
@@ -417,7 +424,7 @@ export const en: Record<keyof typeof zh, string> = {
   unknown: 'Unknown',
   // The hub overview: the settings page's opening screen.
   hubBack: 'Subscriptions',
-  hubOverviewHint: 'Pick a provider to manage its accounts, models and quota. The switch controls whether it appears in the model picker.',
+  hubOverviewHint: 'Drag the handles to reorder lines. Choose a proxy mode on the right; the switch controls whether the provider appears in the model picker.',
   hubAccountCount: '{count} accounts',
   hubNoAccounts: 'No accounts yet — open to add one',
   hubStateEnabled: 'Enabled',
@@ -428,6 +435,13 @@ export const en: Record<keyof typeof zh, string> = {
   hubSwitchOn: 'Enable {name}',
   hubSwitchOff: 'Disable {name}',
   hubCardLabel: '{name}, {annotation}',
+  hubDragProvider: 'Reorder {name}; you can also use the up and down arrow keys',
+  hubDragProviderHint: 'Drag to reorder; when focused, use the up and down arrow keys',
+  hubProxyMode: '{name} proxy mode',
+  hubProxyAuto: 'System proxy',
+  hubProxyCustom: 'Custom proxy',
+  hubProxyDirect: 'Direct',
+  hubCustomProxyMissing: 'Save a custom proxy URL on the {name} detail page first.',
   // The overview's update control, at the right end of the hint line. The button
   // says what it will do next; the small line under it says what the last answer
   // meant. {version} is the published version and {current} the one running.
