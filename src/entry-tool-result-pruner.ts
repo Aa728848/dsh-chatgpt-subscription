@@ -29,6 +29,7 @@ import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
+import { codexRemoteCompactionEnabled } from './host/codex-remote-compaction.ts'
 
 // ── 冻结契约 ───────────────────────────────────────────────────────────────
 
@@ -314,6 +315,7 @@ export function shouldSkipPruningForSession(
 ): boolean {
   const provider = readSessionProvider(session)
   if (provider === undefined) return false
+  if (provider === 'codex-chatgpt' && codexRemoteCompactionEnabled()) return true
   return skipProviders.has(provider)
 }
 

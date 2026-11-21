@@ -4,6 +4,14 @@ import { gptEngineeringGuidance } from './common/gpt-engineering-guidance.ts'
 import { createHash } from 'node:crypto'
 import { codexDefaultOutputVerbosity, codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexModelUsesResponsesLite, codexWireReasoningEffort } from '../shared/model-catalog.ts'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
+import {
+  checkpointFromMetadata,
+  codexRemoteCompactionEnabled,
+  isCompactionItem,
+  latestCodexCompaction,
+  projectFreshCodexCompaction,
+  type CodexRemoteCompactionCheckpoint,
+} from './codex-remote-compaction.ts'
 
 /**
  * The Responses request body, in the field order the official client sends.
@@ -53,6 +61,10 @@ export interface ResponsesWireOptions {
    * it is stable across conversations too.
    */
   idNamespace?: string
+  /** Current model-configuration hash used to validate persisted checkpoints. */
+  compHash?: string
+  /** A just-created checkpoint to put before the latest user turn. */
+  freshCompaction?: CodexRemoteCompactionCheckpoint
 }
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -227,9 +239,14 @@ export async function buildResponsesPayload(
   const input: Array<Record<string, unknown>> = []
   const knownToolCalls = new Map<string, string | undefined>()
   const localImageStats: LocalRawImageStats = { attempted: 0, resolved: 0, failed: 0 }
-  for (const message of options.messages) {
+  const nativeCompaction = latestCodexCompaction(options.messages, options.model, wire.compHash ?? null)
+  for (let messageIndex = 0; messageIndex < options.messages.length; messageIndex += 1) {
+    const message = options.messages[messageIndex]!
     if (message.role === 'system') continue
-    const replayItems = normalizeReplayCallIds(replayOutputItems(message), normalizeCallId)
+    // The opaque checkpoint replaces earlier wire input only; DSH keeps the
+    // original transcript for display, editing and a later local fallback.
+    if (nativeCompaction !== null && messageIndex < nativeCompaction.index && message.role !== 'developer') continue
+    const replayItems = normalizeReplayCallIds(replayOutputItems(message, options.model, wire.compHash ?? null), normalizeCallId)
     if (message.role === 'assistant' && replayItems !== null) {
       input.push(...replayItems)
       for (const item of replayItems) {
@@ -393,7 +410,7 @@ export async function buildResponsesPayload(
     ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     ...(text !== undefined ? { text } : {}),
   }
-  return payload
+  return wire.freshCompaction === undefined ? payload : projectFreshCodexCompaction(payload, wire.freshCompaction)
 }
 
 
@@ -932,7 +949,11 @@ function blocksToText(blocks: readonly ContentBlock[]): string {
   }).filter(Boolean).join('\n')
 }
 
-function replayOutputItems(message: Message): Array<Record<string, unknown>> | null {
+function replayOutputItems(
+  message: Message,
+  model: string,
+  compHash: string | null,
+): Array<Record<string, unknown>> | null {
   if (message.source?.kind !== 'model') return null
   const replay = message.source?.replayState
   if (typeof replay !== 'object' || replay === null || Array.isArray(replay)) return null
@@ -943,9 +964,11 @@ function replayOutputItems(message: Message): Array<Record<string, unknown>> | n
       ? record(envelope.response)!.outputItems as unknown[]
       : null
   if (!Array.isArray(items)) return null
+  const nativeMetadata = record(record(envelope.response)?.nativeCompaction)
+  const nativeCheckpoint = checkpointFromMetadata(nativeMetadata, model, compHash)
   return structuredClone(items.filter((item): item is Record<string, unknown> => (
     typeof item === 'object' && item !== null && !Array.isArray(item)
-  )))
+  )).filter(item => !isCompactionItem(item) || (codexRemoteCompactionEnabled() && nativeCheckpoint !== null)))
 }
 
 function record(value: unknown): Record<string, unknown> | null {

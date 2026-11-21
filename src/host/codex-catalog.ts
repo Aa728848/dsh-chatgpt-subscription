@@ -39,6 +39,10 @@ export interface CodexCatalogEntry {
    * the shipped table instead of being read as "not Lite".
    */
   useResponsesLite?: boolean
+  /** Server-stated automatic compaction threshold; null when absent. */
+  autoCompactTokenLimit?: number | null
+  /** Opaque model-configuration compatibility key for compaction items. */
+  compHash?: string | null
 }
 
 interface CatalogCache {
@@ -268,6 +272,8 @@ function parseListingEntry(value: unknown): CodexCatalogEntry[] {
   const useResponsesLite = typeof record.use_responses_lite === 'boolean'
     ? record.use_responses_lite
     : typeof record.useResponsesLite === 'boolean' ? record.useResponsesLite : undefined
+  const autoCompactTokenLimit = asNumber(record.auto_compact_token_limit) ?? asNumber(record.autoCompactTokenLimit)
+  const compHash = asString(record.comp_hash) ?? asString(record.compHash)
   const fallback = CODEX_MODEL_CATALOG.find((entry) => entry.id === id)
   return [{
     id,
@@ -284,6 +290,8 @@ function parseListingEntry(value: unknown): CodexCatalogEntry[] {
     // the model is not Lite - it has said nothing, and the shipped table is
     // then the only source that knows.
     ...(useResponsesLite !== undefined ? { useResponsesLite } : {}),
+    autoCompactTokenLimit: autoCompactTokenLimit !== undefined && autoCompactTokenLimit > 0 ? autoCompactTokenLimit : null,
+    compHash: compHash ?? null,
   }]
 }
 

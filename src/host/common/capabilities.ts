@@ -181,6 +181,22 @@ const VERIFIED_RECORDS: readonly CapabilityEvidenceRecord[] = [
     notes: 'Official contract: x-cmd-zdr: 1 header active across provider wires. 422 cmd_zdr_no_providers cannot silently degrade.',
   },
   {
+    id: 'codex-remote-compaction-v2',
+    provider: 'codex-chatgpt',
+    wire: 'responses',
+    modelSelector: '*',
+    authMode: 'oauth',
+    capability: 'server-side-compaction',
+    status: 'supported',
+    evidenceLevel: 'offline-contract',
+    implemented: true,
+    date: '2026-11-21',
+    testPath: 'test/codex-remote-compaction.test.ts',
+    link: 'https://developers.openai.com/codex/config-reference',
+    versionTag: '0.2.2-rc.3',
+    notes: 'Codex remote compaction v2 uses Responses compaction_trigger items, persists opaque checkpoints in replayState, and falls back to the full transcript after a definite refusal.',
+  },
+  {
     id: 'workbuddy-chat-prompt-cache-read',
     provider: 'workbuddy-subscription',
     wire: 'chat-completions',
@@ -381,7 +397,7 @@ export function supportsOllamaThinkingControl(model: string, wire = 'openai', au
 // ---------------------------------------------------------------------------
 
 const TABLE: Readonly<Record<string, Readonly<Partial<Record<Capability, CapabilityState>>>>> = {
-  'codex-chatgpt': { 'prompt-cache-read': 'supported', 'prompt-cache-write': 'supported', 'thinking-replay': 'supported', 'server-side-compaction': 'unknown', 'tool-search': 'unknown', 'append-only-tools': 'unknown', 'native-image': 'supported', 'native-video': 'unsupported', 'multi-agent-server': 'unknown', 'websocket-transport': 'unsupported', zdr: 'unknown' },
+  'codex-chatgpt': { 'prompt-cache-read': 'supported', 'prompt-cache-write': 'supported', 'thinking-replay': 'supported', 'server-side-compaction': 'supported', 'tool-search': 'unknown', 'append-only-tools': 'unknown', 'native-image': 'supported', 'native-video': 'unsupported', 'multi-agent-server': 'unknown', 'websocket-transport': 'unsupported', zdr: 'unknown' },
   claude: { 'prompt-cache-read': 'supported', 'prompt-cache-write': 'supported', 'thinking-replay': 'supported', 'server-side-compaction': 'unknown', 'tool-search': 'unknown', 'append-only-tools': 'unsupported', 'native-image': 'supported', 'native-video': 'unsupported', 'multi-agent-server': 'unsupported', 'websocket-transport': 'unsupported', zdr: 'unsupported' },
   'kimi-code': { 'prompt-cache-read': 'supported', 'prompt-cache-write': 'supported', 'thinking-replay': 'supported', 'server-side-compaction': 'unknown', 'tool-search': 'unsupported', 'append-only-tools': 'supported', 'native-image': 'supported', 'native-video': 'supported', 'multi-agent-server': 'unsupported', 'websocket-transport': 'unsupported', zdr: 'unsupported' },
   'minimax-code': { 'prompt-cache-read': 'supported', 'prompt-cache-write': 'supported', 'thinking-replay': 'unknown', 'server-side-compaction': 'unknown', 'tool-search': 'unsupported', 'append-only-tools': 'unsupported', 'native-image': 'supported', 'native-video': 'unsupported', 'multi-agent-server': 'unsupported', 'websocket-transport': 'unsupported', zdr: 'unsupported' },

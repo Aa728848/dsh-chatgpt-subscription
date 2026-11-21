@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **[codex-chatgpt] 接入 Codex remote-v2 原生上下文压缩**
+  - 按实时模型目录的 `auto_compact_token_limit`（缺省为上下文窗口 90%）在正常回合前发送 `compaction_trigger`，严格验收唯一的不透明 compaction item，并随普通助手消息的 `replayState` 持久化；后续请求只投影最新有效 checkpoint 之后的线上历史，不改写 DSH 原会话。
+  - 原生路径可用时跳过 DSH 压力压缩和工具结果剪裁；明确 400/404 拒绝后锁存停用并恢复完整历史及宿主回退。`DSH_CODEX_REMOTE_COMPACTION=0` 可整体关闭。新增模型/配置兼容校验与 remote-v2 全生命周期离线测试。
+- **[minimax-code] 对齐官方客户端的宿主压缩触发阈值**
+  - 在不改请求协议的前提下，以 `thresholdRatio: 0.95`、`headroomTokens: 0` 对齐官方“扣除输出预留后按 95% 触发”；预置及动态模型均覆盖，显式用户策略保持优先。
+  - **验证**：强制 Host/Client/Test/Scripts 类型检查与生产构建通过；全量 Vitest 397 个文件通过、3 个跳过，7072 项测试通过、10 个跳过。未调用真实付费端点。
+
 - **[kimi-code] 新增「套餐 API Key」登录方式，与设备码登录并列**
   - **入口**：账号管理标题行改为「添加账号」（设备码）+「API Key 登录」两个按钮；后者在账号列表下方展开一个密码输入框，粘贴 Kimi Code 控制台（kimi.com/code）创建的会员 API Key 即可入池。API Key 账号在卡片上标注「登录方式：套餐 API Key」。
   - **宿主**（`src/host/kimi-code/{api-key,token-store,account-pool,oauth,routes,client}.ts`）：新增 `POST /kimi-code/api/login/api-key`（同源校验）。Key 先经 `GET /coding/v1/models` 验证（首选区域 401 时再试另一区域；`KIMI_CODE_BASE_URL` 固定时只试一个），再读一次 `/me` 取昵称与套餐，然后以 `authKind: 'api-key'` 写入加密号池；Key 不出现在任何应答与日志里。凭据无 refresh token、无过期时间，号池永不刷新它，按 Key 的 SHA-256 摘要去重（不按 `/me` 的用户 id，避免与同一会员的设备码账号互相覆盖）。

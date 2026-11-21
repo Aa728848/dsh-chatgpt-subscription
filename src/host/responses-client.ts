@@ -12,7 +12,7 @@ import {
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 import { CODEX_RESPONSES_URL } from '../compat.ts'
-import { codexModelUsesResponsesLite, resolveCodexFallbackModel, type CodexWireCapabilities } from '../shared/model-catalog.ts'
+import { codexModelUsesResponsesLite, resolveCodexCatalogEntry, resolveCodexFallbackModel, type CodexWireCapabilities } from '../shared/model-catalog.ts'
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from './common/idle-watchdog.ts'
 import { chatGPTConcurrency, type CodexAccountPool } from './codex-account-pool.ts'
 import { OAuthService } from './oauth-service.ts'
@@ -25,6 +25,15 @@ import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from './common/
 import { CODEX_RESPONSES_LITE_HEADER, CODEX_ROUTING_HINT_HEADER, CODEX_TURN_STATE_HEADER, authOwnerKey, codexHeaders, codexRoutingHint, retryAfterMs, stableSessionId } from './wire-auth.ts'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { CodexOutputVerbosity, CodexReasoningSummary } from '../shared/contracts.ts'
+import {
+  checkpointFromOutputItems,
+  codexCompactionReplayMetadata,
+  noteCodexRemoteCompactionFailure,
+  projectFreshCodexCompaction,
+  shouldCompactCodexPayload,
+  withCodexCompactionTrigger,
+  type CodexRemoteCompactionCheckpoint,
+} from './codex-remote-compaction.ts'
 
 type FetchLike = typeof fetch
 const MAX_VISIBLE_REASONING_CHARS = 12_000
@@ -164,6 +173,8 @@ export class ResponsesClient {
     // One retry without the tool-update channel; the latch keeps every later
     // request in that shape, so a refused backend costs one turn and not each.
     let strippedToolChanges = false
+    let nativeCompaction: CodexRemoteCompactionCheckpoint | undefined
+    let remoteCompactionAttempted = false
     const statesToolChange = (candidate: { readonly messages: readonly { readonly role: string; readonly content?: unknown }[] }): boolean =>
       candidate.messages.some((message) => message.role === 'developer'
         && Array.isArray(message.content)
@@ -175,8 +186,9 @@ export class ResponsesClient {
     while (true) {
       // Resolved per attempt, not once per request: a 404 fallback moves the
       // request to another model, and that model may speak another protocol.
-      const useResponsesLite = resolveCapabilities(attemptOptions.model).useResponsesLite
-      const payload = await buildResponsesPayload(
+      const wireCapabilities = resolveCapabilities(attemptOptions.model)
+      const useResponsesLite = wireCapabilities.useResponsesLite
+      let payload = await buildResponsesPayload(
         attemptOptions,
         this.attachments,
         this.localRawImages,
@@ -188,8 +200,34 @@ export class ResponsesClient {
         promptCacheKeyFor(sessionId),
         // The item ids are derived from the conversation identity, so the same
         // request recomputed in the same conversation carries the same ids.
-        { useResponsesLite, idNamespace: sessionId },
+        {
+          useResponsesLite,
+          idNamespace: sessionId,
+          ...(wireCapabilities.compHash == null ? {} : { compHash: wireCapabilities.compHash }),
+        },
       )
+      if (!remoteCompactionAttempted
+        && nativeCompaction === undefined
+        && options.purpose === undefined
+        && shouldCompactCodexPayload(payload, wireCapabilities)) {
+        remoteCompactionAttempted = true
+        try {
+          nativeCompaction = await this.remoteCompact(
+            payload,
+            sessionId,
+            turnKey,
+            wireCapabilities,
+            options.signal,
+            useResponsesLite,
+          )
+          payload = projectFreshCodexCompaction(payload, nativeCompaction)
+        } catch (error) {
+          if (options.signal?.aborted) throw error
+          noteCodexRemoteCompactionFailure(error)
+          // A failed native attempt never fabricates a checkpoint. Send the
+          // original full window; DSH overflow recovery remains the last resort.
+        }
+      }
       try {
         const opened = await this.send(payload, sessionId, turnKey, options.signal, useResponsesLite)
         response = opened.response
@@ -201,8 +239,14 @@ export class ResponsesClient {
           if (fallback && fallback.id !== currentModel) {
             currentModel = fallback.id
             attemptOptions = { ...attemptOptions, model: fallback.id }
+            nativeCompaction = undefined
             continue
           }
+        }
+        if (nativeCompaction !== undefined && noteCodexRemoteCompactionFailure(error)) {
+          nativeCompaction = undefined
+          // Rebuild from the untouched DSH transcript after a definite refusal.
+          continue
         }
         // A backend may refuse the tool-update channel — the `additional_tools`
         // item or a deferred declaration — with a 400 while the rest of the
@@ -227,7 +271,7 @@ export class ResponsesClient {
         // The parser sees transport activity the watchdog cannot see on its own:
         // status frames and truncated reasoning deltas keep the connection alive
         // without producing a visible chunk, and used to look like a silent one.
-        (watchdogSignal, activity) => parseResponsesStream(response!, watchdogSignal, undefined, activity),
+        (watchdogSignal, activity) => parseResponsesStream(response!, watchdogSignal, undefined, activity, nativeCompaction),
         options.signal,
         this.codexStreamIdleTimeoutMs,
         'LLM_STREAM_IDLE_TIMEOUT',
@@ -239,6 +283,50 @@ export class ResponsesClient {
       // Without a host turn identity, routing state is request-local only.
       this.turnStates.delete(turnKey)
       release?.()
+      this.onGenerationFinished()
+    }
+  }
+
+  private async remoteCompact(
+    payload: Record<string, unknown>,
+    sessionId: string,
+    turnKey: string,
+    capabilities: CodexWireCapabilities,
+    signal: AbortSignal | undefined,
+    useResponsesLite: boolean,
+  ): Promise<CodexRemoteCompactionCheckpoint> {
+    const opened = await this.send(
+      withCodexCompactionTrigger(payload),
+      sessionId,
+      turnKey,
+      signal,
+      useResponsesLite,
+    )
+    let checkpoint: CodexRemoteCompactionCheckpoint | null = null
+    try {
+      const stream = wrapStreamWithWatchdog(
+        (watchdogSignal, activity) => parseResponsesStream(opened.response, watchdogSignal, undefined, activity),
+        signal,
+        this.codexStreamIdleTimeoutMs,
+        'LLM_STREAM_IDLE_TIMEOUT',
+        'Codex remote compaction',
+      )
+      for await (const chunk of stream) {
+        if (chunk.type !== 'finish') continue
+        const replay = record(chunk.replayState)
+        const response = record(replay?.response)
+        const items = Array.isArray(response?.outputItems) ? response.outputItems : []
+        checkpoint = checkpointFromOutputItems(items, String(payload.model), capabilities.compHash)
+      }
+      if (checkpoint === null) {
+        throw new LlmError(
+          'Codex remote compaction did not return exactly one encrypted compaction item.',
+          'PROTOCOL_ERROR',
+        )
+      }
+      return checkpoint
+    } finally {
+      opened.release?.()
       this.onGenerationFinished()
     }
   }
@@ -479,7 +567,12 @@ export class ResponsesClient {
  * the Lite body is a different request, not a different spelling of this one.
  */
 function defaultWireCapabilities(model: string): CodexWireCapabilities {
-  return { useResponsesLite: codexModelUsesResponsesLite(model) }
+  return {
+    useResponsesLite: codexModelUsesResponsesLite(model),
+    contextWindow: resolveCodexCatalogEntry(model).contextWindow,
+    autoCompactTokenLimit: null,
+    compHash: null,
+  }
 }
 /**
  * Whether the transport failed before the request could reach ChatGPT.
@@ -578,6 +671,8 @@ export async function* parseResponsesStream(
   _legacyHiddenSandboxControls: ReadonlySet<string> = new Set(),
   /** Reports transport activity so a caller-side idle watchdog keeps rearming. */
   activity?: StreamActivity,
+  /** A remote-v2 checkpoint minted immediately before this ordinary answer. */
+  nativeCompaction?: CodexRemoteCompactionCheckpoint,
 ): AsyncIterable<StreamChunk> {
   if (response.body === null) throw new LlmError('Codex returned no response stream.', 'PROVIDER_ERROR')
   const reader = response.body.getReader()
@@ -596,7 +691,9 @@ export async function* parseResponsesStream(
   /** Whether the terminal event was an incomplete response, whatever it maps to. */
   let terminalIncomplete = false
   let usage: TokenUsage | null = null
-  let replayOutput: Array<Record<string, unknown>> = []
+  let replayOutput: Array<Record<string, unknown>> = nativeCompaction === undefined
+    ? []
+    : [structuredClone(nativeCompaction.item)]
   const tools = new Map<string, ToolState>()
 
   const toolFor = (event: Record<string, unknown>, item?: Record<string, unknown>): ToolState => {
@@ -737,8 +834,11 @@ export async function* parseResponsesStream(
       usage = mapUsage(record(completed?.usage))
       const output = completed?.output
       if (Array.isArray(output)) {
-        replayOutput = output.filter((item): item is Record<string, unknown> => record(item) !== null)
+        const terminalOutput = output.filter((item): item is Record<string, unknown> => record(item) !== null)
           .map((item) => structuredClone(item))
+        replayOutput = nativeCompaction === undefined
+          ? terminalOutput
+          : [structuredClone(nativeCompaction.item), ...terminalOutput]
         for (const item of output) yield* adoptText(messageItemText(record(item)))
       }
       if (type === 'response.incomplete') {
@@ -853,7 +953,14 @@ export async function* parseResponsesStream(
   yield {
     type: 'finish',
     reason: validToolCount > 0 ? { kind: 'tool-calls' } : finalReason,
-    replayState: { response: { outputItems: replayOutput } },
+    replayState: {
+      response: {
+        outputItems: replayOutput,
+        ...(nativeCompaction === undefined
+          ? {}
+          : { nativeCompaction: codexCompactionReplayMetadata(nativeCompaction) }),
+      },
+    },
   }
 }
 

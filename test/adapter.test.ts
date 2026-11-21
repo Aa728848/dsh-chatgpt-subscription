@@ -182,9 +182,14 @@ describe('CodexChatGptAdapter', () => {
     expect(prepared.model.context?.contextWindow).toBe(400_000)
     for await (const _chunk of prepared.stream({} as never)) { /* drain */ }
 
-    expect(resolve?.('gpt-6-astra')).toEqual({ useResponsesLite: false })
+    expect(resolve?.('gpt-6-astra')).toMatchObject({
+      useResponsesLite: false,
+      contextWindow: 400_000,
+      autoCompactTokenLimit: null,
+      compHash: null,
+    })
     // A model the listing says nothing about still falls back to the shipped table.
-    expect(resolve?.('gpt-5.5')).toEqual({ useResponsesLite: false })
+    expect(resolve?.('gpt-5.5')).toMatchObject({ useResponsesLite: false })
   })
   it('returns empty model list when disabled or visibleModelIds is empty', async () => {
     const disabledPrefs = {

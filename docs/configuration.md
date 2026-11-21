@@ -210,6 +210,7 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | --- | --- | --- |
 | **Codex** | `CODEX_HOME` | 本机 Codex CLI 配置目录（默认 `~/.codex`，用于探测 `auth.json`） |
 | | `DSH_CODEX_MAX_IMAGE_BYTES` | 单次请求图片负载字节上限（默认 `2097152`，即 2 MiB） |
+| | `DSH_CODEX_REMOTE_COMPACTION` | 默认开启 Codex remote-v2 原生压缩；设为 `0` 恢复 DSH 压缩与工具结果剪裁 |
 | **Claude** | `CLAUDE_CONFIG_DIR` | 本机 Claude Code 配置目录（默认 `~/.claude`） |
 | | `DSH_CLAUDE_CLI_VERSION` | 覆盖向 Anthropic 网关申报的客户端版本号 |
 | | `DSH_CLAUDE_OAUTH_AUTHORIZE_URL` | 覆盖 Claude OAuth 授权入口 URL |

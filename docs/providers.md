@@ -98,6 +98,7 @@
   - 多轮会话携带稳定的 `prompt_cache_key`，并在上游下发 `x-codex-turn-state` 时回传续接；基础指令是 `input` 内的 developer 消息，标准和 Lite 请求均按实际基础指令与工具声明协调并发冷前缀；
   - 推理摘要默认省略（避免无感消耗计费生成 token），显式选择 `auto` / `concise` / `detailed` 时才发送；
   - 输出详细程度默认按目录声明发 `low`（仅对声明 `supportsOutputVerbosity` 的模型发送）；
+  - **原生 remote-v2 上下文压缩**：按模型目录的 `auto_compact_token_limit`（缺省为窗口 90%）在正常回合前发送 `compaction_trigger`，将不透明 checkpoint 随助手消息 `replayState` 持久化并用于后续线上投影；原生路径可用时跳过 DSH 的压力压缩与工具结果剪裁，明确 400/404 拒绝后恢复完整历史和宿主回退。设 `DSH_CODEX_REMOTE_COMPACTION=0` 可整体关闭；
   - **不发送 `max_output_tokens`**（订阅端点在多款模型上对显式 `max_output_tokens` 返回 400）；模型最大输出（GPT-6 系列 128K，其余 32,768）仅在本地作为 DSH 上下文压缩的输出预留（`defaultMaxTokens`）；
   - 单次请求图片内联负载默认上限 **2 MiB**（可通过 `DSH_CODEX_MAX_IMAGE_BYTES` 覆盖），超限按最旧优先替换为可见文字占位；
   - 生图工具支持可选尺寸、质量、透明背景、GIF 帧参数及最多 5 张本地 PNG/JPEG/WebP 参考图；新参数仅在显式提供时发送，上游拒绝时明确报错，不静默降级。
@@ -187,6 +188,7 @@
   - 单次刷新令牌提前 5 分钟按身份单飞轮换，落盘前先核对磁盘是否已被桌面端刷新，避免跨进程误判失效。
 - **模型、思考与视频能力**：
   - 因上游订阅网关未开放 `GET /v1/models`，随包内置硬编码目录（`MiniMax-M2.7`、`MiniMax-M2.7-highspeed`、`MiniMax-M3`、`MiniMax-M3.1-Flash`）；
+  - 宿主自动压缩对齐官方 `contextManagement.compactionTriggerAt` 的口径：扣除输出预留后按 95% 触发（DSH 策略为 `thresholdRatio: 0.95`、`headroomTokens: 0`）；用户在 preset 中显式写的模型策略仍优先，MiniMax 请求体不增加任何压缩字段；
   - 思考控制统一走 `output_config.effort`（M2.7 恒开无档位，M3 开关二态，M3.1 Flash 支持 `low`/`medium`/`high`/`xhigh`/`max`，未选档位时不默认顶到 `max`）；携带 `interleaved-thinking-2025-05-14` 支持跨轮签名思考回放；
   - 请求体默认上限 **64 MB**，单次请求图片预算 **16 MB**（可通过 `DSH_MINIMAX_CODE_MAX_BODY_BYTES` / `DSH_MINIMAX_CODE_MAX_IMAGE_BYTES` 覆盖）；
   - **全套视频工作流**：M3 / M3.1 Flash 支持原生视频块输入；注册 `minimax_generate_video`（支持 MiniMax-H3 / H3-Max / Hailuo-2.3 文生视频、首尾帧与多模态参考，自动下载至工作区）与 `minimax_understand_video` 工具，客户端配套提供 `/video` 交互式参数弹窗、对话内播放器与右侧栏文档预览器；

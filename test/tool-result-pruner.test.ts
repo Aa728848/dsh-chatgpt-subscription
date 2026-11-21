@@ -416,10 +416,10 @@ describe('provider 感知的会话修剪', () => {
     expect(pruner.pruneSession(pruned.session).pruned).toHaveLength(1)
   })
 
-  it('codex-chatgpt 会话做头/中/尾修剪，并紧挨着写计价与替换事件', () => {
+  it('opendesign 会话做头/中/尾修剪，并紧挨着写计价与替换事件', () => {
     const pruner = createPruner()
     const mock = createMockSession({
-      provider: 'codex-chatgpt',
+      provider: 'opendesign',
       results: [{ callId: 'call-codex', content: [{ type: 'text', text: 'x'.repeat(200) }] }],
     })
     const originalSeq = mock.nodes[0] as number
@@ -484,7 +484,7 @@ describe('provider 感知的会话修剪', () => {
   it('跳过短结果，并在第二遍收敛', () => {
     const pruner = createPruner()
     const mock = createMockSession({
-      provider: 'codex-chatgpt',
+      provider: 'opendesign',
       results: [
         { callId: 'long-a', content: [{ type: 'text', text: 'A'.repeat(100) }] },
         { callId: 'short-b', content: [{ type: 'text', text: 'short' }] },
@@ -585,7 +585,7 @@ describe('宿主级跨 preset 守卫', () => {
     guard.dispose()
   })
 
-  it('kimi-code 会话被短路，非 kimi 会话原样转给底层实现', () => {
+  it('kimi-code 与原生 Codex 会话被短路，禁用原生后恢复剪裁', () => {
     const host = createFakeHost()
     const pruner = createPruner()
     const spy = vi.spyOn(pruner, 'pruneSession')
@@ -605,10 +605,21 @@ describe('宿主级跨 preset 守卫', () => {
       results: [{ callId: 'codex-call', content: [{ type: 'text', text: 'c'.repeat(200) }] }],
     })
     const result = pruner.pruneSession(codex.session)
-    expect(spy).toHaveBeenCalledTimes(1)
-    expect(result.pruned).toHaveLength(1)
-    expect(codex.appended.map(event => event.type)).toEqual(['compaction/prune', 'tool/result'])
+    expect(result).toEqual({ pruned: [], charsRemoved: 0 })
+    expect(spy).not.toHaveBeenCalled()
+    expect(codex.appended).toEqual([])
 
+    vi.stubEnv('DSH_CODEX_REMOTE_COMPACTION', '0')
+    const fallback = createMockSession({
+      provider: 'codex-chatgpt',
+      results: [{ callId: 'codex-fallback', content: [{ type: 'text', text: 'c'.repeat(200) }] }],
+    })
+    const restored = pruner.pruneSession(fallback.session)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(restored.pruned).toHaveLength(1)
+    expect(fallback.appended.map(event => event.type)).toEqual(['compaction/prune', 'tool/result'])
+
+    vi.unstubAllEnvs()
     guard.dispose()
   })
 
