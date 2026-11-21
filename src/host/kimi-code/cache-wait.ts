@@ -3,18 +3,33 @@ import { PLUGIN_MESSAGE_SOURCE_KIND } from '../common/llm-compat.ts'
 import { CACHE_TTL_MS, sessionLastActiveAt } from './cache-hint.ts'
 import { sessionCacheState } from './session-cache-state.ts'
 import { promptCacheActivityStore } from '../common/cache-activity.ts'
-import { promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-cache-policy.ts'
+import { promptCachePolicyKey, promptCachePolicyOf, type PromptCacheOverride } from '../common/prompt-cache-policy.ts'
 
-/** When an idle parent reaches its cache decision point (five minutes before TTL). */
-export const CACHE_WAIT_DECISION_MS = 20 * 60 * 1000
+/** Keepalive margin: every line decides this long before its cache expires. */
+export const CACHE_WAIT_MARGIN_MS = 5 * 60 * 1000
+const SHORT_TTL_WARNED = new Set<string>()
+
+/**
+ * Idle decision point of a line: its cache TTL minus the keepalive margin.
+ * A TTL with no room for the margin gets no keepalive at all (undefined), so no
+ * TTL can collapse into a zero-delay timer that re-arms itself in a loop.
+ */
+export function cacheWaitDecisionMs(ttlMs: number): number | undefined {
+  return ttlMs > CACHE_WAIT_MARGIN_MS ? ttlMs - CACHE_WAIT_MARGIN_MS : undefined
+}
+
+/** Kimi's decision point at its measured TTL; also the pure evaluator's default. */
+export const CACHE_WAIT_DECISION_MS = cacheWaitDecisionMs(CACHE_TTL_MS) ?? 20 * 60 * 1000
 /** Minimum prompt tokens required before a wait warmup is sent (0 = any active context). */
 export const DEFAULT_MIN_WARMUP_TOKENS = 0
 /** Environment override for wait-time cache keepalive warmup. */
 export const CACHE_WAIT_WARMUP_ENV = 'DSH_KIMI_CODE_CACHE_WAIT_WARMUP'
 /** Settings description for the progress-updates / Kimi cache-wait switch. */
 export const CACHE_WAIT_WARMUP_SETTING_DESCRIPTION =
-  '等待子代理完成期间按线路缓存 TTL 轻量续热；默认用于 Kimi（20/25 分钟），其他线路需明确 TTL 并在 promptCacheOverrides 中显式启用。'
+  '等待子代理或后台任务完成期间按线路缓存 TTL 轻量续热；默认用于 Kimi（20/25 分钟）与两条 Claude 线路的 1 小时缓存档（55/60 分钟），其他线路需明确 TTL 并在 promptCacheOverrides 中显式启用。'
 const MAX_TRACKED_SESSIONS = 256
+/** Per-session bound on tracked background jobs; registrations beyond it are ignored. */
+const MAX_TRACKED_JOBS = 256
 
 export interface CacheWaitSession {
   readonly id: string
@@ -34,6 +49,8 @@ export interface CacheWaitAgent {
 export interface CacheWaitActivity {
   readonly lastActiveAt?: number
   readonly totalTokens?: number
+  /** The cache lifetime the session's last request wrote; a mismatch gates the session out. */
+  readonly ttlMs?: number
 }
 
 export interface CacheWaitTimer {
@@ -61,6 +78,7 @@ export interface CacheWaitOptions {
   /** Deployment policy overrides; unknown providers remain inert. */
   readonly overrides?: Readonly<Record<string, PromptCacheOverride>>
   readonly logger?: CacheWaitLogger
+  /** Explicit decision point; the TTL-minus-margin rule still gates a short TTL out. */
   readonly decisionMs?: number
   readonly ttlMs?: number
   readonly minWarmupTokens?: number
@@ -149,6 +167,7 @@ export function cacheWaitWarmupEnabled(env: Record<string, string | undefined> =
 
 interface WaitState {
   readonly children: Set<string>
+  readonly jobs: Set<string>
   waiting: boolean
   handled: boolean
   warmupUsed: boolean
@@ -162,6 +181,7 @@ interface WaitState {
 export interface CacheWaitSnapshot {
   readonly waiting: boolean
   readonly childCount: number
+  readonly jobCount: number
   readonly handled: boolean
   readonly warmupUsed: boolean
   readonly warmupCount: number
@@ -225,7 +245,7 @@ export class KimiCacheWaitController {
   private readonly kimiSession?: (session: CacheWaitSession) => boolean
   private readonly warmup: () => boolean
   private readonly logger?: CacheWaitLogger
-  private readonly decisionMs: number
+  private readonly decisionMs?: number
   private readonly minWarmupTokens: number
   private disposed = false
 
@@ -240,7 +260,7 @@ export class KimiCacheWaitController {
       ? warmupOption
       : () => (warmupOption ?? true)
     this.logger = options.logger
-    this.decisionMs = options.decisionMs ?? CACHE_WAIT_DECISION_MS
+    this.decisionMs = options.decisionMs
     this.minWarmupTokens = options.minWarmupTokens ?? DEFAULT_MIN_WARMUP_TOKENS
   }
 
@@ -282,6 +302,25 @@ export class KimiCacheWaitController {
         if (text(source?.kind) === 'subagent-settled') this.removeChild(text(source?.senderSessionId))
         return
       }
+      if (type === 'job/registered') {
+        const jobId = text(data?.jobId)
+        if (jobId === undefined) return
+        const state = this.stateFor(session.id)
+        if (state.jobs.has(jobId) || state.jobs.size >= MAX_TRACKED_JOBS) return
+        state.jobs.add(jobId)
+        // New delegated work: re-arm this batch exactly like a newly catalogued child.
+        state.warmupUsed = false
+        state.warmupCount = 0
+        state.warmupFailed = false
+        state.lastWarmupAt = undefined
+        state.handled = false
+        this.reconcile(session, state)
+        return
+      }
+      if (type === 'job/settled') {
+        this.removeJob(session.id, text(data?.jobId))
+        return
+      }
       const state = this.stateFor(session.id)
       if (type === 'turn/start') {
         state.waiting = false
@@ -290,7 +329,8 @@ export class KimiCacheWaitController {
       }
       if (type === 'turn/end') {
         // Every completed turn (including a warmup turn or a natural child report)
-        // re-arms the 20-minute wait timer while any child subagent remains active.
+        // re-arms the wait timer (TTL minus the keepalive margin) while any child
+        // subagent, or any background job on a line that opted in, remains active.
         state.waiting = true
         state.handled = false
         this.reconcile(session, state)
@@ -320,6 +360,7 @@ export class KimiCacheWaitController {
     return {
       waiting: state?.waiting ?? false,
       childCount: state?.children.size ?? 0,
+      jobCount: state?.jobs.size ?? 0,
       handled: state?.handled ?? false,
       warmupUsed: state?.warmupUsed ?? false,
       warmupCount: state?.warmupCount ?? 0,
@@ -346,6 +387,7 @@ export class KimiCacheWaitController {
     }
     const state: WaitState = {
       children: new Set(),
+      jobs: new Set(),
       waiting: false,
       handled: false,
       warmupUsed: false,
@@ -376,7 +418,16 @@ export class KimiCacheWaitController {
     const state = this.states.get(parent)
     if (state === undefined) return
     state.children.delete(childId)
-    if (state.children.size === 0) this.clearTimer(state)
+    if (state.children.size === 0 && state.jobs.size === 0) this.clearTimer(state)
+  }
+
+  /** Forget a settled background job; an unknown id or session is simply ignored. */
+  private removeJob(sessionId: string, jobId: string | undefined): void {
+    if (jobId === undefined) return
+    const state = this.states.get(sessionId)
+    if (state === undefined) return
+    state.jobs.delete(jobId)
+    if (state.jobs.size === 0 && state.children.size === 0) this.clearTimer(state)
   }
 
   private clearTimer(state: WaitState): void {
@@ -409,12 +460,21 @@ export class KimiCacheWaitController {
 
   private reconcile(session: CacheWaitSession, state: WaitState): void {
     this.clearTimer(state)
-    if (this.disposed || !state.waiting || state.handled || state.children.size === 0) return
+    if (this.disposed || !state.waiting || state.handled) return
+    if (state.children.size === 0 && state.jobs.size === 0) return
     const provider = this.providerForSession(session)
     if (provider === undefined) return
-    const cachePolicy = promptCachePolicyOf(provider, this.options.overrides?.[provider])
+    // Deployment overrides are keyed by the line id its adapter reads (e.g. claude), while
+    // the session carries the route id (claude-subscription): honour both spellings.
+    const cachePolicy = promptCachePolicyOf(provider, this.options.overrides?.[provider] ?? this.options.overrides?.[promptCachePolicyKey(provider)])
     if (!cachePolicy.waitWarmup || cachePolicy.ttlMs === undefined) return
+    // Background jobs count as delegated work only on a line that opted in.
+    const jobCount = cachePolicy.waitJobs === true ? state.jobs.size : 0
+    if (state.children.size === 0 && jobCount === 0) return
     const activity = this.activity(session.id, provider)
+    // Tier gating: a session whose last request wrote another cache lifetime is not on
+    // this policy's tier. The timer was already cleared above, so nothing stays armed.
+    if (activity?.ttlMs !== undefined && activity.ttlMs !== cachePolicy.ttlMs) return
     if (activity === undefined && state.lastWarmupAt === undefined) return
     const effectiveLastActiveAt = Math.max(
       activity?.lastActiveAt ?? -Infinity,
@@ -422,17 +482,25 @@ export class KimiCacheWaitController {
     )
     if (!Number.isFinite(effectiveLastActiveAt)) return
     const now = this.now()
+    const computedDecisionMs = cacheWaitDecisionMs(cachePolicy.ttlMs)
+    if (computedDecisionMs === undefined) {
+      // No room for the margin: schedule nothing at all, and say so once per provider.
+      if (!SHORT_TTL_WARNED.has(provider)) {
+        SHORT_TTL_WARNED.add(provider)
+        this.logger?.warn(`kimi-cache-wait: ${provider} enables waitWarmup with ttlMs ${cachePolicy.ttlMs}, which leaves no room for the ${CACHE_WAIT_MARGIN_MS} ms keepalive margin; no keepalive is scheduled`)
+      }
+      return
+    }
+    const decisionMs = this.decisionMs ?? computedDecisionMs
     const action = evaluateCacheWait({
       waiting: state.waiting,
-      hasChildren: state.children.size > 0,
+      hasChildren: state.children.size > 0 || jobCount > 0,
       now,
       lastActiveAt: effectiveLastActiveAt,
       totalTokens: activity?.totalTokens,
       warmupEnabled: this.isWarmupEnabled(),
       warmupFailed: state.warmupFailed,
-      decisionMs: provider === 'kimi-code'
-        ? this.decisionMs
-        : Math.max(1, Math.floor(cachePolicy.ttlMs * 0.8)),
+      decisionMs,
       ttlMs: cachePolicy.ttlMs,
       minWarmupTokens: this.minWarmupTokens,
     })

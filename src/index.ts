@@ -276,6 +276,14 @@ import { PROVIDER_ID as RELAYONE_PROVIDER_ID, PROVIDER_NAME as RELAYONE_PROVIDER
 import { createRelayOneImageTool } from './host/relayone/image-tool.ts'
 import { createRelayOneVideoTool } from './host/relayone/video-tool.ts'
 import { RelayOneQuotaReader } from './host/relayone/quota.ts'
+import { ClaudeApiAdapter } from './host/claude-api/adapter.ts'
+import { registerClaudeApiRoutes, warmClaudeApiCatalogOnStartup } from './host/claude-api/routes.ts'
+import { ClaudeApiCredentialStore, ClaudeApiSettingsStore } from './host/claude-api/token-store.ts'
+import { ClaudeApiCatalogManager } from './host/claude-api/catalog-manager.ts'
+import { ClaudeApiClientVersionResolver } from './host/claude-api/client-version.ts'
+import { ClaudeApiCompactionStore } from './host/claude-api/compaction-store.ts'
+import { claudeApiModelOptions } from './host/claude-api/model-catalog.ts'
+import { PROVIDER_ID as CLAUDE_API_PROVIDER_ID, PROVIDER_NAME as CLAUDE_API_PROVIDER_NAME } from './host/claude-api/types.ts'
 
 interface Volatile<T> {
   get(): T
@@ -1606,6 +1614,36 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     })
     void warmRelayOneCatalogOnStartup(relayOneCatalog).catch(() => undefined)
 
+    // Claude API: one encrypted key, custom endpoint, official Claude Code request shape. No pool.
+    const claudeApiStore = new ClaudeApiCredentialStore()
+    const claudeApiSettings = new ClaudeApiSettingsStore()
+    const claudeApiVersion = new ClaudeApiClientVersionResolver({ fetchFn: proxyFetchFor(CLAUDE_API_PROVIDER_ID) })
+    const stopClaudeApiVersion = claudeApiVersion.start()
+    const claudeApiCompaction = new ClaudeApiCompactionStore()
+    void claudeApiCompaction.warm().catch(() => undefined)
+    const claudeApiCatalog = new ClaudeApiCatalogManager(claudeApiStore, claudeApiSettings, {
+      version: claudeApiVersion,
+      fetchFn: proxyFetchFor(CLAUDE_API_PROVIDER_ID),
+      onChanged: () => ctx.emit?.('llm/adapters-updated'),
+    })
+    const claudeApiAdapter = new ClaudeApiAdapter(claudeApiStore, claudeApiSettings, claudeApiCatalog, {
+      fetchFn: modelFetch[CLAUDE_API_PROVIDER_ID],
+      attachments: ctx.attachments,
+      promptCache: promptCacheOverrides[CLAUDE_API_PROVIDER_ID],
+      version: claudeApiVersion,
+      compactionStore: claudeApiCompaction,
+    })
+    const claudeApiClaim = claimProviderRoute(ctx, {
+      providerId: CLAUDE_API_PROVIDER_ID, label: CLAUDE_API_PROVIDER_NAME, adapter: claudeApiAdapter,
+    })
+    const disposeClaudeApiRoutes = registerClaudeApiRoutes(ctx, claudeApiStore, claudeApiSettings, claudeApiCatalog, {
+      version: claudeApiVersion,
+      serving: () => claudeApiClaim.serving(),
+      conflict: () => claudeApiClaim.conflict(),
+      fetchFn: proxyFetchFor(CLAUDE_API_PROVIDER_ID),
+    })
+    void warmClaudeApiCatalogOnStartup(claudeApiCatalog).catch(() => undefined)
+
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as
     // the primary account and nothing has to be migrated up front.
@@ -1892,6 +1930,22 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
             authenticated: routable(accounts),
             enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
             totalModelCount: total,
+          }
+        },
+      },
+      {
+        id: 'claude-api', providerId: CLAUDE_API_PROVIDER_ID, canToggle: true,
+        read: async () => {
+          const [current, credentials] = await Promise.all([claudeApiSettings.read(), claudeApiStore.read(), claudeApiCatalog.warm()])
+          const snapshot = claudeApiCatalog.snapshot()
+          const models = claudeApiModelOptions(snapshot.entries, current, snapshot.live)
+          const total = catalogTotal(models.length)
+          return {
+            enabled: current.enabled,
+            accountCount: credentials === null ? 0 : 1,
+            authenticated: credentials !== null,
+            enabledModelCount: credentials === null ? null : models.filter(model => model.enabled).length,
+            totalModelCount: credentials === null ? null : total,
           }
         },
       },
@@ -2234,6 +2288,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       relayOneClaim.dispose()
       disposeRelayOneImageTool()
       disposeRelayOneVideoTool()
+      disposeClaudeApiRoutes()
+      claudeApiClaim.dispose()
+      stopClaudeApiVersion()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -3101,3 +3158,10 @@ export { RelayOneQuotaReader } from './host/relayone/quota.ts'
 export * from './shared/relayone-contracts.ts'
 export { createRelayOneImageTool } from './host/relayone/image-tool.ts'
 export { createRelayOneVideoTool } from './host/relayone/video-tool.ts'
+export { ClaudeApiAdapter } from './host/claude-api/adapter.ts'
+export { registerClaudeApiRoutes, getClaudeApiWebStatus, warmClaudeApiCatalogOnStartup } from './host/claude-api/routes.ts'
+export { ClaudeApiCredentialStore, ClaudeApiSettingsStore } from './host/claude-api/token-store.ts'
+export { ClaudeApiCatalogManager } from './host/claude-api/catalog-manager.ts'
+export { ClaudeApiClientVersionResolver } from './host/claude-api/client-version.ts'
+export { ClaudeApiCompactionStore } from './host/claude-api/compaction-store.ts'
+export * from './shared/claude-api-contracts.ts'

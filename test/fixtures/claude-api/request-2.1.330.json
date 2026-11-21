@@ -1,0 +1,530 @@
+{
+  "capturedWith": "@anthropic-ai/claude-code@2.1.330, print mode (-p), API key, custom ANTHROPIC_BASE_URL",
+  "note": "Structural capture. Prompt and tool texts are replaced by their lengths; the API key and device id are placeholders.",
+  "requests": [
+    {
+      "url": "/v1/messages?beta=true",
+      "headers": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.330 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "7e8e116a-f1b6-4569-a4a3-362e8b9a38cb"
+        ],
+        [
+          "X-Stainless-Arch",
+          "x64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "Windows"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.12.1"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "interleaved-thinking-2025-05-14,context-management-2025-06-27,claude-code-20250219,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,effort-2025-11-24"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "<api-key>"
+        ],
+        [
+          "x-app",
+          "cli"
+        ]
+      ],
+      "body": {
+        "model": "claude-haiku-5-5",
+        "max_tokens": 128000,
+        "stream": true,
+        "thinking": {
+          "type": "adaptive",
+          "display": "omitted"
+        },
+        "output_config": {
+          "effort": "medium"
+        },
+        "context_management": {
+          "edits": [
+            {
+              "type": "clear_thinking_20251015",
+              "keep": "all"
+            }
+          ]
+        },
+        "metadata": {
+          "user_id": "{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"account_uuid\":\"\",\"session_id\":\"7e8e116a-f1b6-4569-a4a3-362e8b9a38cb\"}"
+        },
+        "system": [
+          {
+            "type": "text",
+            "text": "x-anthropic-billing-header: cc_version=2.1.330.9e1; cc_entrypoint=sdk-cli;"
+          },
+          {
+            "type": "text",
+            "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "textLength": 8446,
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "textLength": 582
+              },
+              {
+                "type": "text",
+                "text": "Reply with exactly: OK"
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "output_config": {
+              "effort": "medium"
+            },
+            "content": [
+              {
+                "type": "text",
+                "textLength": 9323,
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "Agent",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Bash",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Edit",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Glob",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Grep",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "ListAgents",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Read",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "ReportFindings",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "ScheduleWakeup",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Skill",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "ToolSearch",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Workflow",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "DeferredToolPlaceholder",
+            "keys": [
+              "defer_loading",
+              "description",
+              "input_schema",
+              "name"
+            ],
+            "defer_loading": true
+          },
+          {
+            "name": "Write",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "url": "/v1/messages?beta=true",
+      "headers": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.330 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "033882b8-bf44-4930-a38a-7ce0c737903f"
+        ],
+        [
+          "X-Stainless-Arch",
+          "x64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "Windows"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.12.1"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,effort-2025-11-24"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "<api-key>"
+        ],
+        [
+          "x-app",
+          "cli"
+        ]
+      ],
+      "body": {
+        "model": "claude-opus-5-5",
+        "max_tokens": 128000,
+        "stream": true,
+        "thinking": {
+          "type": "adaptive",
+          "display": "omitted"
+        },
+        "output_config": {
+          "effort": "medium"
+        },
+        "context_management": {
+          "edits": [
+            {
+              "type": "clear_thinking_20251015",
+              "keep": "all"
+            }
+          ]
+        },
+        "metadata": {
+          "user_id": "{\"device_id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"account_uuid\":\"\",\"session_id\":\"033882b8-bf44-4930-a38a-7ce0c737903f\"}"
+        },
+        "system": [
+          {
+            "type": "text",
+            "text": "x-anthropic-billing-header: cc_version=2.1.330.9e1; cc_entrypoint=sdk-cli;"
+          },
+          {
+            "type": "text",
+            "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "textLength": 5870,
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "textLength": 581
+              },
+              {
+                "type": "text",
+                "text": "Reply with exactly: OK"
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "output_config": {
+              "effort": "medium"
+            },
+            "content": [
+              {
+                "type": "text",
+                "textLength": 9270,
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "Agent",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Bash",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Edit",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Glob",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Grep",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "ListAgents",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Read",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "ReportFindings",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "ScheduleWakeup",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Skill",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "ToolSearch",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "Workflow",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          },
+          {
+            "name": "DeferredToolPlaceholder",
+            "keys": [
+              "defer_loading",
+              "description",
+              "input_schema",
+              "name"
+            ],
+            "defer_loading": true
+          },
+          {
+            "name": "Write",
+            "keys": [
+              "description",
+              "input_schema",
+              "name"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

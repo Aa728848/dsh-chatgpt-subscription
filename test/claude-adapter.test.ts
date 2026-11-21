@@ -74,6 +74,8 @@ import {
 import { classifyFailure } from '../src/host/claude/client.ts'
 import type { CredentialStore } from '../src/host/token-store.ts'
 import { StickyImageBudgetStore } from '../src/host/common/sticky-image-budget.ts'
+import { promptCacheActivityStore } from '../src/host/common/cache-activity.ts'
+import { promptCachePolicyOf } from '../src/host/common/prompt-cache-policy.ts'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -1180,5 +1182,91 @@ describe('claude adapter request images', () => {
     expect(serialized).toContain('image/webp')
     // The scaled request version is what was read.
     expect(reads).toContain('request:fat')
+  })
+})
+
+describe('Claude subscription wait-time cache activity', () => {
+  const activityStore = promptCacheActivityStore(PROVIDER_ID)
+  const EXTENDED_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+  const sid = (value: string) => value as NonNullable<GenerateOptions['sessionId']>
+  function usageAnswer(): Response {
+    return streamResponse([
+      { type: 'message_start', message: { id: 'msg_1', usage: { input_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 } } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+      MESSAGE_STOP,
+    ])
+  }
+
+  it('records the 1h tier the request really sent, at issuance and again at stream end', async () => {
+    const { store, settings } = await mount()
+    let atIssuance: ReturnType<typeof activityStore.read>
+    const { fn, calls } = recordingFetch(() => { atIssuance = activityStore.read('claude-act-default'); return usageAnswer() })
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-default') })))
+    expect(promptCachePolicyOf(PROVIDER_ID).ttlMs).toBe(3_600_000)
+    // Nothing stored follows the official subscription tier, which is the hour.
+    expect(calls[0]!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
+    expect(atIssuance).toMatchObject({ ttlMs: 3_600_000 })
+    expect(atIssuance!.lastActiveAt).toBeGreaterThan(0)
+    expect(activityStore.read('claude-act-default')).toMatchObject({ ttlMs: 3_600_000, totalTokens: 112 })
+  })
+
+  it('records 300000 for a session that really sends the 5m tier', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheTtl: '5m' })
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-5m') })))
+    expect(calls[0]!.headers['anthropic-beta'] ?? '').not.toContain(EXTENDED_TTL_BETA)
+    expect(activityStore.read('claude-act-5m')).toMatchObject({ ttlMs: 300_000, totalTokens: 112 })
+  })
+
+  it('records 3600000 for an explicit 1h choice', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheTtl: '1h' })
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-1h') })))
+    expect(calls[0]!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
+    expect(activityStore.read('claude-act-1h')).toMatchObject({ ttlMs: 3_600_000, totalTokens: 112 })
+  })
+
+  it('keeps the issue time as lastActiveAt when the stream ends later', async () => {
+    const { store, settings } = await mount()
+    // Newer than every real record in this shared store, and still inside the
+    // credential's 24h validity so no refresh is triggered by the mocked clock.
+    const issuedAt = Date.now() + 60_000_000
+    let clock = issuedAt
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    try {
+      const { fn } = recordingFetch(() => usageAnswer())
+      const adapter = makeAdapter(store, settings, fn)
+      const chunks: StreamChunk[] = []
+      for await (const chunk of adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-issue') }))) {
+        chunks.push(chunk)
+        clock += 60_000
+      }
+      expect(chunks.length).toBeGreaterThan(0)
+      expect(clock).toBeGreaterThan(issuedAt)
+      expect(activityStore.read('claude-act-issue')).toMatchObject({
+        lastActiveAt: issuedAt, ttlMs: 3_600_000, totalTokens: 112,
+      })
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it('records nothing for an auxiliary purpose or without a session id', async () => {
+    const { store, settings } = await mount()
+    const { fn } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    // 'compaction' is the auxiliary purpose this harness generation types; the gate
+    // is "no purpose at all", so every named purpose is excluded the same way.
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-aux'), purpose: 'compaction' })))
+    expect(activityStore.read('claude-act-aux')).toBeUndefined()
+    const before = activityStore.read(undefined)
+    await drain(adapter.stream(options('claude-sonnet-4-6')))
+    expect(activityStore.read(undefined)).toEqual(before)
   })
 })

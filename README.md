@@ -2,7 +2,7 @@
 
 面向 **DeepSeek Harness（DSH）** 的多平台订阅接入与智能体运行时增强插件包。
 
-插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **15 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
+插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **16 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
 
 - **跨平台支持**：Windows、macOS、Linux（含无桌面密钥环的远程服务器部署模式）
 - **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.3** 全系列版本
@@ -28,7 +28,7 @@
 
 ## 供应线路总览
 
-插件同时注册 **15 条相互隔离的供应线路**。每条线路拥有独立的 Provider ID、凭据存储、模型目录与上下文窗口覆盖；支持账号池的线路另有独立轮换策略。任意一条线路限流或故障均不影响其它线路。
+插件同时注册 **16 条相互隔离的供应线路**。每条线路拥有独立的 Provider ID、凭据存储、模型目录与上下文窗口覆盖；支持账号池的线路另有独立轮换策略。任意一条线路限流或故障均不影响其它线路。
 
 | Provider ID | 订阅 / 服务 | 传输协议 | 登录与凭据方式 | 模型目录来源 |
 | --- | --- | --- | --- | --- |
@@ -47,6 +47,7 @@
 | `antigravity-acp` | Google Antigravity（官方 CLI） | **ACP v1 / stdio JSON-RPC**（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；本插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 |
 | `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个套餐专属 API Key（主机加密存储，无账号池） | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 |
 | `relayone` | RelayOne 中转站 | Responses / Chat Completions / Anthropic Messages 自动选择 | 单个 API Key（主机加密存储，无账号池） | 当前 Key `/v1/models` + 公开分组/协议元数据 + 隔离快照 |
+| `claude-api` | Claude API（Anthropic Messages） | Anthropic Messages（官方 Claude Code 客户端请求形态） | 单个 API Key（主机加密存储，无账号池） | 当前 Key `/v1/models` + 随包能力表 + 凭据隔离快照 |
 
 > **合规与风险提示**：
 > - `claude-subscription` 通过订阅 OAuth 凭据模拟官方 CLI 身份转发请求，与 Anthropic 现行服务条款存在冲突，未获官方授权，存在账号被限制或封禁的风险。
@@ -59,13 +60,13 @@
 ## 核心特性
 
 ### 1. 统一订阅中心与多账号池调度
-- **聚合总览页**：在 **设置 → 订阅服务** 提供单页总览卡片，集中查看 15 条线路的启停状态、可用账号数与已勾选模型数，支持在线检测 npm 更新并一键升级插件（自动保护本地 `link:` 开发目录）。
+- **聚合总览页**：在 **设置 → 订阅服务** 提供单页总览卡片，集中查看 16 条线路的启停状态、可用账号数与已勾选模型数，支持在线检测 npm 更新并一键升级插件（自动保护本地 `link:` 开发目录）。
 - **统一号池内核**：支持账号池的线路共享多账号池架构，支持 **顺序耗尽（`sequential`）/ 轮流使用（`round-robin`）/ 固定当前（`sticky`）** 三种策略；遇到账号级 429 配额耗尽自动按重置窗口冷却换号，遇到全局瞬时过载则原地指数退避，防止抽干号池。
 - **本机登录态零侵入收编**：支持只读导入本机已登录的 Codex CLI、Claude Code、ZCode、StepCode、Qoder CLI、CodeBuddy 桌面端凭据，以及复用 MiniMax Code 桌面端登录态。导入前仅做 `stat` 存在性检查，绝不修改或删除第三方客户端文件，也不跨进程抢刷单次轮换令牌。
 - **桌面与无头服务器双存储模式**：默认使用系统加密密钥环（`keyring`：Windows DPAPI / macOS Keychain / Linux Secret Service）；无桌面环境的 Linux 服务器可一键切换至 DSH 标准凭据库（`credentials`：`$DSH_HOME/.credentials.yaml`，强制 `0600` 权限），告别安装 `gnome-keyring` 的繁琐配置。
 
 ### 2. 全共享网络代理与智能网页抓取
-- **每条线路各配各的代理**：15 条线路的设置卡里各有「网络代理」（系统代理自动检测 / 自定义代理 / 直连），只影响该线路的对话、OAuth 登录续期、额度查询与目录拉取；回环地址永远直连，**「不使用代理的主机」**是全局共用的一份列表（每条线路都能改），与 `NO_PROXY`（进程环境 / `$DSH_HOME/.env`）合并生效。
+- **每条线路各配各的代理**：16 条线路的设置卡里各有「网络代理」（系统代理自动检测 / 自定义代理 / 直连），只影响该线路的对话、OAuth 登录续期、额度查询与目录拉取；回环地址永远直连，**「不使用代理的主机」**是全局共用的一份列表（每条线路都能改），与 `NO_PROXY`（进程环境 / `$DSH_HOME/.env`）合并生效。
 - **Codex 搜索与 `fake-ip` 友好的 `web_fetch`**：支持将 DSH 搜索切换为 ChatGPT 订阅侧 Codex 搜索；在 Clash / Mihomo 等开启 `fake-ip`（`198.18.0.0/15`）的代理环境下，`fetchProvider: auto` 会自动用插件抓取器接管 `web_fetch`，交由远端代理解析域名，解决内置抓取器因本地 DNS 固定报错 `WEB_BLOCKED_URL` 的痛点。
 
 ### 3. 精细上下文预算、独立压缩路由与前缀缓存保护
@@ -73,7 +74,14 @@
 - **独立压缩模型**：支持在设置页指定更快或更便宜的跨线路模型专门执行上下文压缩摘要（`purpose: 'compaction'`），自动处理多模态降级与半截摘要回退。
 - **Qwen4 原生降本增能**：`qianwen-token-plan` 提供 5m/1h 显式缓存与多断点、CoT 摘要和 encrypted_content 同模型回放、七档推理原样透传、max_completion_tokens 预算、视觉 detail/max_pixels 控制及分档缓存统计；单 Key，不做账号池或伪造余额。
 - **RelayOne 动态中转**：单 Key 自动发现当前上游分组与模型，OpenAI 优先 Responses、Claude 优先 Anthropic、其余走 Chat；GPT 推理全档位透传、默认 272K 上下文可覆盖 500K；通过 New API 官方令牌用量接口显示真实剩余额度；支持对话工具、生图/编辑和异步视频，媒体工具受全局 `mediaTools` 开关控制。
+- **Claude API 官方形态**：单 Key、端点可自定义，按官方 Claude Code 客户端的请求头、计费归因与指纹形态发送；客户端版本跟随 npm 最新、全局一致（新版本在线路空闲超过缓存 TTL 后采纳，采纳前卡片显示 pending）；5m/1h 显式缓存、对话中 system 消息与工具增删、单轮提醒 `clear_at`、快速模式；服务端按需压缩默认开，上游拒绝或空摘要时同调用退回客户端压缩；system 角色/快速模式/模型级压缩被上游拒绝时记入能力记忆（7 天）并运行时纠正；不做额度显示、账号池与媒体工具。
+- **等待期缓存保活**：Kimi、Claude 订阅与 Claude API 在主会话等待子代理或后台任务期间，于缓存到期前 5 分钟自动发一次很小的续热请求（Kimi 空闲 20 分钟、两条 Claude 线路的 1 小时档空闲 55 分钟）；两条 Claude 线路只在 1 小时档生效，5 分钟档从不续热。每次续热是一次真实请求，按缓存读取价格读回整段前缀，Claude 订阅线路还计入订阅额度。
 - **前缀缓存零漂移架构**：针对 Kimi Code、MiniMax Code、Claude、Qwen 等前缀缓存敏感线路，内置计划模式指引尾部一次性投递、Agent Teams `team:policy` 与实验性 Timeline `timeline:planning` 系统段尾部投递及描述冻结、PTC `tools:sdk` 与 Code Mode 恒定说明段冻结、历史工具结果修剪自动跳过（`./tool-result-pruner`），以及受控线路大结果 `ref://` 引用投影与 `cache_warmup_result` 分页/字面量定位补读。
+
+### 4. Claude API：官方客户端形态与服务端压缩
+- **能做**：粘贴单个 API Key 即以官方 Claude Code 客户端形态使用 Anthropic Messages（请求头、计费归因块、指纹与版本号一致，版本跟随 npm 且全局一致，新版本仅空闲后采纳）；端点可自定义；5m/1h 显式缓存断点、思考清理、快速模式、单轮提醒 `clear_at`、对话中 system 消息与工具增删；服务端按需压缩默认开启，压缩块按摘要哈希持久化并在后续主轮次整块回放；1 小时缓存档在子代理或后台任务运行期间约每 55 分钟自动续热一次（5 分钟档不做）。
+- **不能做**：额度显示与输入框徽章、账号池、原生 API 形态、阈值压缩、生图/视频等媒体工具、任务预算；上游明确拒绝压缩或返回空摘要时在同一次调用内退回客户端压缩，并把该端点+模型标记为不支持 30 分钟。
+- **风险提示**：请求形态依据官方客户端抓包与源码快照，未经直连官方端点实测；官方客户端若更改请求头或指纹盐，需重新抓包更新常量。详见 [Claude API 线路设计与证据](docs/claude-api-line-plan.md)。
 
 ---
 
@@ -189,7 +197,7 @@ npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chat
 | `toolRunawayGuard` | `true` | 热生效 | 对同参重复、同族连续报错与后台无变化轮询做分级提醒（Kimi 保留第 12 次强停） |
 | `teamPolicyCacheGuard` / `timelineCacheGuard` | `true` | 热生效 | 冻结 Agent Teams `team:policy` 与 Timeline 规划段/任务工具描述，变更走尾部投递保缓存 |
 | `cacheWarmup` / `cacheWarmupRetrieval` | `true` | 热生效 | 受控线路大日志结果与导航检索大纲的 `ref://` 预览投影 |
-| `cacheAffinity` / `cacheWaitWarmup` | `true` | 热生效 | 轮换优先选前缀缓存仍热的账号（剩余额度 ≥20%），以及等待子代理期间的缓存保活 |
+| `cacheAffinity` / `cacheWaitWarmup` | `true` | 热生效 | 轮换优先选前缀缓存仍热的账号（剩余额度 ≥20%），以及等待子代理或后台任务期间的缓存保活（TTL 前 5 分钟：Kimi 20 分钟，Claude 订阅与 Claude API 的 1h 档 55 分钟） |
 | `noAnswerResume` | `{}`（开启） | 重载插件 | 无正文且无工具调用异常收尾时自动续跑；设 `false` 关闭 |
 | `reasoningCollapseGuard` | `false`（关闭） | 重载插件 | 传 `{}` 或阈值对象开启双信号推理复读熔断器 |
 
@@ -229,7 +237,7 @@ npm pack --dry-run
 ## 进阶文档索引
 
 - **[文档总导航（docs/README.md）](docs/README.md)** — 全部参考手册与历史工程审计档案目录
-- **[供应线路完整指南（docs/providers.md）](docs/providers.md)** — 15 条线路的鉴权、模型能力、协议细节、验证边界与 HTTP 路由表
+- **[供应线路完整指南（docs/providers.md）](docs/providers.md)** — 16 条线路的鉴权、模型能力、协议细节、验证边界与 HTTP 路由表
 - **[RelayOne 线路设计与证据](docs/relayone-line-plan.md)** — 动态分组、三协议工具链、媒体任务与在线验证边界
 - **[部署配置与安全参考（docs/configuration.md）](docs/configuration.md)** — `cordis.patch.yml` 全字段、`poolStorage`、代理策略与全量环境变量表
 - **[架构设计与开发指南（docs/architecture.md）](docs/architecture.md)** — 多入口设计、共享内核、三语国际化、缓存守卫与跨代际兼容规范

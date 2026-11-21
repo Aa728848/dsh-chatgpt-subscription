@@ -22,6 +22,8 @@ export interface PromptCachePolicy {
   readonly affinity: boolean
   readonly waitWarmup: boolean
   readonly hint: boolean
+  /** Keep the cache warm while background jobs run too; only meaningful with waitWarmup. */
+  readonly waitJobs?: boolean
 }
 
 export type PromptCacheOverride = Partial<Omit<PromptCachePolicy, 'ttlMs'>> & { ttlMs?: number }
@@ -38,12 +40,22 @@ const DISABLED: PromptCachePolicy = Object.freeze({
   stickyImages: false,
   affinity: false,
   waitWarmup: false,
+  waitJobs: false,
   hint: false,
 })
 
 function policy(input: PromptCachePolicy): PromptCachePolicy {
-  return Object.freeze(input)
+  return Object.freeze({ ...input, waitJobs: input.waitJobs ?? false })
 }
+
+/**
+ * Route ids whose facts live under another line's entry. The Claude subscription
+ * line reads its own policy as 'claude' while the harness routes 'claude-subscription';
+ * the wait controller resolves the ROUTE id, so both must reach the same facts.
+ */
+const POLICY_ID_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  'claude-subscription': 'claude',
+})
 
 /** Built-in facts already represented by a line's mapper, adapter, or official client. */
 export const PROMPT_CACHE_POLICIES: Readonly<Record<string, PromptCachePolicy>> = Object.freeze({
@@ -51,6 +63,7 @@ export const PROMPT_CACHE_POLICIES: Readonly<Record<string, PromptCachePolicy>> 
     mode: 'automatic', scope: 'account', ttlMs: 25 * MINUTE_MS,
     staticPrefix: true, coldStart: 'warm', stickyImages: true,
     affinity: true, waitWarmup: true, hint: true,
+    waitJobs: true,
   }),
   'codex-chatgpt': policy({
     mode: 'automatic', scope: 'unknown', staticPrefix: true, coldStart: 'in-flight',
@@ -61,9 +74,13 @@ export const PROMPT_CACHE_POLICIES: Readonly<Record<string, PromptCachePolicy>> 
     staticPrefix: true, coldStart: 'in-flight', stickyImages: false,
     affinity: false, waitWarmup: false, hint: true,
   }),
+  // Wait-time keepalive on the 1h tier only, gated by the lifetime each request
+  // actually wrote (the adapter's activity record). coldStart stays in-flight and
+  // hint/affinity stay false: naming a ttl here enables nothing but the keepalive.
   claude: policy({
     mode: 'explicit', scope: 'unknown', staticPrefix: true, coldStart: 'in-flight',
-    stickyImages: true, affinity: false, waitWarmup: false, hint: false,
+    stickyImages: true, affinity: false, waitWarmup: true, hint: false,
+    ttlMs: 60 * MINUTE_MS, waitJobs: true,
   }),
   'minimax-code': policy({
     mode: 'explicit', scope: 'unknown', staticPrefix: true, coldStart: 'in-flight',
@@ -83,13 +100,25 @@ export const PROMPT_CACHE_POLICIES: Readonly<Record<string, PromptCachePolicy>> 
   }),
   // Gateway routing hints are not a local account pool, a measured TTL, or a reason to prewarm.
   relayone: policy({ ...DISABLED, mode: 'automatic', staticPrefix: true }),
+  // Claude API: mapper-placed explicit cache breakpoints; no pool affinity, prewarm or hints.
+  // No static-prefix reordering: history is append-only, the billing block already differs
+  // per conversation, and hoisting reminders past a checkpoint defeats the block replay.
+  // Wait-time keepalive is opt-in for the 1h tier only: the adapter records the lifetime
+  // each request actually wrote, and a 5m session is gated out by that record. The idle
+  // clock starts at request issuance, so a long stream cannot delay the decision point.
+  'claude-api': policy({
+    mode: 'explicit', scope: 'unknown', staticPrefix: false, coldStart: 'in-flight',
+    stickyImages: false, affinity: false, waitWarmup: true, hint: false,
+    ttlMs: 60 * MINUTE_MS, waitJobs: true,
+  }),
 })
 
 const OVERRIDE_KEYS = new Set([
   'mode', 'scope', 'ttlMs', 'staticPrefix', 'coldStart', 'stickyImages',
   'affinity', 'waitWarmup', 'hint',
+  'waitJobs',
 ])
-const BOOLEAN_KEYS = ['staticPrefix', 'stickyImages', 'affinity', 'waitWarmup', 'hint'] as const
+const BOOLEAN_KEYS = ['staticPrefix', 'stickyImages', 'affinity', 'waitWarmup', 'hint', 'waitJobs'] as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -144,9 +173,14 @@ function validateResolved(provider: string, value: PromptCachePolicy): PromptCac
   return policy(value)
 }
 
+/** The table key a provider id resolves to: itself, or the line id a route id is an alias of. */
+export function promptCachePolicyKey(provider: string): string {
+  return PROMPT_CACHE_POLICIES[provider] === undefined ? POLICY_ID_ALIASES[provider] ?? provider : provider
+}
+
 /** Resolve one line, applying an already-validated or config-shaped override. */
 export function promptCachePolicyOf(provider: string, override?: PromptCacheOverride): PromptCachePolicy {
-  const base = PROMPT_CACHE_POLICIES[provider] ?? DISABLED
+  const base = PROMPT_CACHE_POLICIES[provider] ?? PROMPT_CACHE_POLICIES[POLICY_ID_ALIASES[provider] ?? ''] ?? DISABLED
   const parsed = override === undefined ? undefined : parsePromptCacheOverride(provider, override)
   return validateResolved(provider, { ...base, ...parsed })
 }

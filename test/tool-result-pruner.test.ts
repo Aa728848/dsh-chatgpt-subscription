@@ -265,7 +265,7 @@ describe('修剪配置', () => {
     expect(PRUNE_MARKER).toBe('\n\n[... tool result middle pruned ...]\n\n')
     expect(DEFAULTS).toEqual({ thresholdChars: 8192, headChars: 4096, tailChars: 1024 })
     expect(Object.isFrozen(DEFAULTS)).toBe(true)
-    expect(DEFAULT_SKIP_PROVIDERS).toEqual(['kimi-code', 'minimax-code', 'qianwen-token-plan'])
+    expect(DEFAULT_SKIP_PROVIDERS).toEqual(['kimi-code', 'minimax-code', 'qianwen-token-plan', 'claude-api'])
     expect(Object.isFrozen(DEFAULT_SKIP_PROVIDERS)).toBe(true)
     expect(PRUNER_SERVICE_NAME).toBe('toolResultPruner')
   })

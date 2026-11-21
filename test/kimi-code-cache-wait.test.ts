@@ -92,7 +92,7 @@ function harness(options: {
     agents: { get: id => id === PARENT ? agent : undefined },
     activity: () => activity,
     ...(options.enablePolicy === true && options.provider !== undefined
-      ? { overrides: { [options.provider]: { waitWarmup: true, ttlMs: 1_000 } } }
+      ? { overrides: { [options.provider]: { waitWarmup: true, ttlMs: 600_000 } } }
       : {}),
   })
   const parent = session(PARENT, options.provider ?? 'kimi-code')
@@ -226,8 +226,8 @@ describe('KimiCacheWaitController', () => {
     const h = harness({ provider: 'step-code', enablePolicy: true })
     h.controller.observe(h.parent, catalog())
     h.controller.observe(h.parent, turn('turn/end'))
-    expect(h.clock.nextAt).toBe(800)
-    h.clock.advance(800)
+    expect(h.clock.nextAt).toBe(300_000)
+    h.clock.advance(300_000)
     expect(h.agent.steer).toHaveBeenCalledTimes(1)
     expect(h.controller.snapshot(PARENT).lastDecision).toBe('warmup')
   })

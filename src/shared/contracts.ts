@@ -201,6 +201,7 @@ export const LINE_PROXY_PROVIDER_IDS = [
   'antigravity-acp',
   'qianwen-token-plan',
   'relayone',
+  'claude-api',
 ] as const
 
 export type LineProxyProviderId = typeof LINE_PROXY_PROVIDER_IDS[number]

@@ -166,6 +166,7 @@ export const en: Record<HostLocaleKey, string> = {
   'antigravityAcp.nativeTool': '[Antigravity ran its own tool outside DSH permissions: {call}]\n',
   'provider.qianwen-token-plan': 'Qwen Token Plan',
   'provider.relayone': 'RelayOne',
+  'provider.claude-api': 'Claude API',
   'qwen.notConfigured': 'Configure a Qwen Token Plan API key in settings first.',
   'qwen.invalidApiKey': 'The Qwen Token Plan API key is empty or too long.',
   'qwen.responseMissingChoices': 'The Qianwen response is missing choices.',

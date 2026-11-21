@@ -6,6 +6,8 @@ import { CommonSessionCacheStateStore } from './session-cache-state.ts'
 export interface PromptCacheActivity {
   readonly lastActiveAt: number
   readonly totalTokens: number
+  /** The cache lifetime this session's most recent request wrote with; absent = unknown. */
+  readonly ttlMs?: number
 }
 
 interface ActivityRecord extends PromptCacheActivity {
@@ -22,7 +24,10 @@ function normalizeRecord(value: unknown): ActivityRecord | undefined {
   const totalTokens = typeof record.totalTokens === 'number' && Number.isFinite(record.totalTokens)
     ? Math.max(0, Math.floor(record.totalTokens))
     : 0
-  return { lastActiveAt, totalTokens, updatedAt }
+  const ttlMs = typeof record.ttlMs === 'number' && Number.isFinite(record.ttlMs) && record.ttlMs > 0
+    ? record.ttlMs
+    : undefined
+  return { lastActiveAt, totalTokens, updatedAt, ...(ttlMs === undefined ? {} : { ttlMs }) }
 }
 
 function persistenceEnabled(): boolean {
@@ -43,15 +48,18 @@ export class PromptCacheActivityStore {
 
   read(sessionId?: string): PromptCacheActivity | undefined {
     const record = this.store.read(sessionId)
-    return record === undefined ? undefined : { lastActiveAt: record.lastActiveAt, totalTokens: record.totalTokens }
+    if (record === undefined) return undefined
+    const activity: PromptCacheActivity = { lastActiveAt: record.lastActiveAt, totalTokens: record.totalTokens }
+    return record.ttlMs === undefined ? activity : { ...activity, ttlMs: record.ttlMs }
   }
 
-  record(sessionId: string | undefined, totalTokens: number, at: number = Date.now()): void {
+  record(sessionId: string | undefined, totalTokens: number, at: number = Date.now(), ttlMs?: number): void {
     if (sessionId === undefined || sessionId.trim() === '') return
     this.store.write(sessionId, {
       lastActiveAt: at,
       totalTokens: Number.isFinite(totalTokens) ? Math.max(0, Math.floor(totalTokens)) : 0,
       updatedAt: at,
+      ...(ttlMs === undefined ? {} : { ttlMs }),
     })
   }
 

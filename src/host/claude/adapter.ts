@@ -208,6 +208,7 @@ import {
   type ResolvedRequestImages,
 } from '../common/request-images.ts'
 import { StickyImageBudgetStore } from '../common/sticky-image-budget.ts'
+import { promptCacheActivityStore } from '../common/cache-activity.ts'
 
 /**
  * Transient-failure retry policy for the `claude-subscription` route.
@@ -354,6 +355,8 @@ const claudePrefixRequests = new PrefixRequestCoordinator()
 // Drop records depend on the budget. Images evicted under the old 1.5 MB
 // limit must be reconsidered after upgrade, including in existing sessions.
 const claudeStickyImages = new StickyImageBudgetStore(`claude-${MAX_REQUEST_IMAGE_BYTES}-${MAX_SINGLE_REQUEST_IMAGE_BYTES}`)
+/** Wait-time keepalive evidence; only this line's MAIN turns write it. */
+const claudeCacheActivity = promptCacheActivityStore(PROVIDER_ID)
 
 /**
  * The immutable id of the account a token came from, presented as the two-method
@@ -810,6 +813,16 @@ export class ClaudeAdapter extends LlmAdapter {
     // a settings change mid-turn cannot desynchronize them.
     const settings = await this.settings().catch(() => null)
 
+    // Wait-time keepalive evidence: only MAIN turns record, and the idle clock starts
+    // when the request is SENT - that is when upstream touches the cache, so a stream
+    // that runs for minutes must not push the decision point past the TTL. The tier
+    // recorded is the one this request really asks for, read from the SAME settings
+    // snapshot attemptRequest builds the body and the beta header from.
+    const waitSessionId = requestOptions.sessionId?.trim() || undefined
+    const mainTurn = requestOptions.purpose === undefined && waitSessionId !== undefined
+    const waitTtlMs = ClaudeAdapter.cacheTtlFor(settings) === '1h' ? 60 * 60_000 : 5 * 60_000
+    let issuedAt = 0
+
     const pool = this.accountPool
     const tried = new Set<string>()
     let response: Response | undefined
@@ -841,6 +854,10 @@ export class ClaudeAdapter extends LlmAdapter {
     while (true) {
       const { credentials, accountId } = await this.resolveCredential(pool, tried, fetchFn, signal)
       usedAccountId = accountId
+      if (mainTurn) {
+        issuedAt = Date.now()
+        claudeCacheActivity.record(waitSessionId, claudeCacheActivity.read(waitSessionId)?.totalTokens ?? 0, issuedAt, waitTtlMs)
+      }
       response = await this.attemptRequest(credentials, requestOptions, images, toolNames, thinking, settings, signal, fetchFn)
       // Headers are transport activity: the streaming idle budget starts at the
       // hand-off, so a slow prefill is not spent from it.
@@ -969,6 +986,18 @@ export class ClaudeAdapter extends LlmAdapter {
         )
       }
     } finally {
+      // Add the measured prompt size, keeping the issue time: this record must never
+      // move lastActiveAt later than the moment the request was sent.
+      if (mainTurn) {
+        claudeCacheActivity.record(
+          waitSessionId,
+          state.sawUsage
+            ? state.inputTokens + state.cacheReadTokens + state.cacheWriteTokens
+            : claudeCacheActivity.read(waitSessionId)?.totalTokens ?? 0,
+          issuedAt,
+          waitTtlMs,
+        )
+      }
       void reader.cancel().catch(() => undefined)
     }
   }

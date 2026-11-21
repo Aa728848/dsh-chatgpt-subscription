@@ -1,6 +1,6 @@
 # 供应线路完整指南与接口参考
 
-本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **15 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
+本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **16 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
 
 > 跨线路共用的号池调度、存储后端（`poolStorage`）、统一网络代理与环境变量详见 [部署配置与安全参考](configuration.md)。
 
@@ -25,6 +25,7 @@
 15. [Antigravity（ACP）：`antigravity-acp`](#15-antigravityacpantigravity-acp)
 16. [Qwen Token Plan（千问）：`qianwen-token-plan`](#16-qwen-token-plan千问qianwen-token-plan)
 17. [RelayOne：`relayone`](#17-relayonerelayone)
+18. [Claude API：`claude-api`](#18-claude-apiclaude-api)
 
 ---
 
@@ -49,6 +50,7 @@
 | `antigravity-acp` | Antigravity（ACP） | ACP v1 / stdio JSON-RPC（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 | `/antigravity-acp/api` |
 | `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个 Token Plan 专属 API Key，系统加密存储；无账号池 | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 | `/qianwen-token-plan/api` |
 | `relayone` | RelayOne | Responses / Chat / Anthropic Messages | 单个 API Key，系统加密存储；无账号池 | 当前 Key live listing + 分组/端点元数据 + 凭据隔离快照 | `/relayone/api` |
+| `claude-api` | Claude API | Anthropic Messages（官方 Claude Code 形态） | 单个 API Key，系统加密存储；无账号池 | 当前 Key live listing + 随包能力表 + 凭据隔离快照 | `/claude-api/api` |
 
 > **合规与风险声明**：
 > - `claude-subscription` 使用订阅 OAuth 凭据模拟客户端身份转发请求，与 Anthropic 现行服务条款冲突，未获官方授权，存在账号受限或封禁风险。
@@ -111,7 +113,7 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/status` | 账号（脱敏）、连接状态、额度、抓取后端状态及本机 Codex CLI 文件存在性 |
-| `GET` | `/hub/overview` | 订阅中心首页 15 条线路的聚合只读摘要 |
+| `GET` | `/hub/overview` | 订阅中心首页 16 条线路的聚合只读摘要 |
 | `GET` / `POST` | `/update`（检测 / 应用） | 检查 npm 新版本并在支持的部署上一键升级插件 |
 | `POST` | `/i18n/locale` | 客户端向宿主同步当前界面语言（`zh` / `en` / `ru`） |
 | `POST` | `/login/start` | 启动浏览器回调 OAuth 登录 |
@@ -144,6 +146,7 @@
   - 四档思考形态按模型精确匹配：`mid-convo`（adaptive + `block_binding: drop_block` + `output_config.effort`）、`adaptive`（绑定前缀模型自动附带 `block_binding: drop_block`）、`budget`（`budget_tokens`，为正文至少预留 1024 token）、`none`；带签名的 `thinking` / `redacted_thinking` 块原样回放；
   - 支持合法位置的会话中途原生 `role: 'system'` 消息；单图 5 MiB base64 防线与整请求 8 MiB 图片预算独立执行；
   - **提示缓存 TTL** 可选「跟随官方（1h）/ 1 小时 / 5 分钟」。
+  - **等待续热（仅 1 小时档，含「跟随官方」）**：主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时，自动发一次很小的续热请求保住前缀缓存，该轮结束后重新计时；5 分钟档从不续热。空闲时钟从请求**发出**时算起，沿用全局 `cacheWaitWarmup` 开关，无新增设置项。每次续热是一次真实请求，按缓存读取价格读回整段前缀并计入订阅额度。选号与该会话下一次真实请求完全一致（默认 sequential 取 primary、sticky 取上次账号，只在凭据失效或账号级限流后换号）；若把轮换策略显式设为 `round-robin`，续热可能落到另一个账号、白写一次缓存。
 - **额度与换号约束**：
   - 合并 `GET /api/oauth/usage`（0–100 百分比）与 `/v1/messages` 响应头（0–1 分数）双源额度；
   - 仅在凭据失效或账号级限流时换号（最多 3 次），全局过载/5xx 不换号，**一旦已产生流式输出绝不中途换号**。
@@ -168,7 +171,7 @@
   - 支持视频输入（`k3`、`kimi-for-coding`、`k3.1-pro` 系列）并注册 `kimi_attach_video` 工具（视频预算 48 MiB base64）；
   - **粘性双水位内联图片预算**：默认 20 MiB 高水位 / 10 MiB 低水位（`DSH_KIMI_CODE_MAX_IMAGE_BYTES` 可覆盖），只计量实际发送的 base64 字节；OpenAI 协议下成功上传的 `ms://` 图片引用不占该预算，上传失败回退为内联时重新计量。已淘汰旧图持久化记录，避免后续轮次反复重算打断前缀缓存；
   - **请求体守卫与自动压缩衔接**：1M 档模型默认上限 **24 MiB**、256K 档默认 **2 MiB**（`DSH_KIMI_CODE_MAX_BODY_BYTES` 可覆盖），超限抛出 `CONTEXT_WINDOW_EXCEEDED` 交由 DSH 自动压缩重试；另支持 `DSH_KIMI_CODE_BYTES_PER_TOKEN` 提前压缩折算；
-  - **缓存预热与等待策略**：自动监测约 25 分钟前缀缓存存活窗口，配合 `cache-warmup` 子系统（大结果 `ref://` 预览 + `cache_warmup_result` 精确分页补读）、主代理等待子代理期间的可选轻量续热，以及四段式重复工具调用刹车（`KIMI_CODE_REPEAT_BREAKER`）。
+  - **缓存预热与等待策略**：自动监测约 25 分钟前缀缓存存活窗口，配合 `cache-warmup` 子系统（大结果 `ref://` 预览 + `cache_warmup_result` 精确分页补读）、主代理等待子代理或后台任务期间的可选轻量续热（决策点为 TTL 前 5 分钟，默认 20 分钟），以及四段式重复工具调用刹车（`KIMI_CODE_REPEAT_BREAKER`）。
   - **共享化边界**：结果预览与分级重复提醒可覆盖其他受控线路；静态前缀排序和 in-flight 冷启动协调已复用到 Codex、Step、Claude、MiniMax。账号亲和、warm 跳过、等待续热和 hosted media 仍按各线路证据与 `promptCacheOverrides` 启用，Kimi 的 TTL、协议字段和错误词表不向外复制。
   - **慢预填充与断流**：首 chunk 前允许等待 360 秒，专用响应头传输兜底为 420 秒；首 chunk 后按 120 秒传输活动预算检测断流。看门狗 TIMEOUT 不自动重试，避免上游已接收长前缀后重复写入缓存并消耗额度。
 - **额度窗口**：展示 5 小时、7 天、月度会员共享池、月度 Kimi Code 池四个窗口与加油包余额。
@@ -375,3 +378,15 @@
 - **媒体**：`relayone_generate_image` 支持生图、参考图编辑与异步任务；`relayone_generate_video` 支持提交、轮询、下载和工作区播放。二者受全局 `mediaTools` 控制。
 - **路由**：`GET status`、`PUT/DELETE credentials`、`GET/PATCH settings`、`POST catalog/refresh`、`POST connection/test`；写操作全部同源校验。
 - **验证边界**：公开契约与离线 mock 已验证；没有真实 Key 时不声称付费生成成功。详见 [线路设计与证据](relayone-line-plan.md)。
+
+## 18. Claude API：`claude-api`
+
+- **鉴权**：单个 Anthropic API Key，`x-api-key` 头；Windows DPAPI / macOS Keychain / Linux Secret Service，无账号池。端点默认官方地址，可自定义（http 与 https 都接受）。
+- **请求形态**：只做官方 Claude Code 客户端形态：`system` 恰好三块（计费归因、身份句、DSH 系统提示），User-Agent、计费块与指纹共用同一客户端版本；版本跟随 npm 最新、全局一致，新版本仅在线路空闲超过缓存 TTL 后采纳、采纳前卡片显示 pending，`DSH_CLAUDE_API_CLI_VERSION` 可覆盖。beta 头从最终请求体推导，不从设置推导。
+- **目录**：当前 Key 的 `GET /v1/models` 决定可用 id；能力行来自随包表（官方文档支持列表转录），快照按 Key+端点指纹隔离；随包兜底表不被用户白名单过滤，显式空选在两个阶段都表示「全不启用」。
+- **可选能力**：5m/1h 缓存断点（默认 5m）、思考开启时的 `context_management` 清理、快速模式（默认关；未知 `claude-*` 模型乐观尝试并按上游应答纠正，结论记忆 7 天）、单轮提醒 `clear_at`、对话中 system 消息与工具增删；仅对支持对话中 system 消息的模型声明 `toolUpdate: 'in-history'`（上游拒绝 system 角色时记入能力记忆 7 天：折叠重试、期间不再声明）。
+- **等待续热**：仅 1 小时缓存档生效。主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时，自动发一次很小的续热请求保住前缀缓存，该轮结束后重新计时；5 分钟档从不续热。空闲时钟从请求发出时算起。沿用全局 `cacheWaitWarmup` 开关，无新增设置项；每次续热是一次真实请求，按缓存读取价格读回整段前缀。
+- **服务端压缩**：默认开、设置页可关；仅当模型支持、本进程内该会话由本线路服务过主轮次、且请求带压缩指令时生效。上游 400 明确指向 compaction 或返回空摘要时，同一次调用内退回原样客户端请求，并把该端点+模型标记为不支持 30 分钟。压缩块以摘要哈希为键持久化（属主可读写、条数与天数有上限），后续主轮次在历史最前整块回放并带 compact beta；陈旧块被 400 拒绝时遗忘并以文本形重试一次。
+- **不做**：额度显示与输入框徽章、账号池、原生 API 形态、阈值压缩、媒体工具、任务预算。
+- **路由**：`GET status`、`POST settings`、`POST key`、`DELETE key`、`POST test`、`POST catalog/refresh`；写操作全部同源校验。
+- **验证边界**：请求形态依据官方客户端抓包与源码快照，经上游为官方 API 的兼容环境实测；没有直连官方端点实测，部分模型快速模式未测通。详见 [线路设计与证据](claude-api-line-plan.md)。

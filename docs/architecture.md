@@ -44,6 +44,7 @@
 │   │   ├── workbuddy/               # WorkBuddy 线路
 │   │   ├── qianwen-token-plan/      # Qwen Token Plan：单 Key、Qwen4 显式缓存与密文思考回放
 │   │   ├── relayone/                # RelayOne：动态分组、三协议、单 Key 与媒体任务
+│   │   ├── claude-api/              # Claude API：单 Key、官方 Claude Code 形态、服务端压缩与块存储
 │   │   ├── cache-warmup/            # 受控线路大结果投影与 ref:// 补读子包
 │   │   ├── codemode/                # Code Mode 工具发现、常驻 REPL 传输与恒定说明段
 │   │   ├── dispatch-ledger/         # 调度模式 Mandate v2 账本与血缘守卫
@@ -59,6 +60,7 @@
 │   │   ├── antigravity-acp/         # Antigravity（ACP）设置卡、API 封装与输入框胶囊
 │   │   ├── qianwen-token-plan/      # Qwen Token Plan 设置卡、TTL/推理/视觉配置与缓存胶囊
 │   │   ├── relayone/                # RelayOne 设置卡、目录徽章与三语
+│   │   ├── claude-api/              # Claude API 设置卡、压缩/缓存/快速模式开关与三语
 │   │   ├── codemode/                # code_run 工具调用视图与样式
 │   │   ├── dispatch-ledger/         # Mandate v2 账本工具调用视图
 │   │   ├── subagent/                # 增强版「子智能体」模型白名单设置卡
@@ -146,7 +148,7 @@
 
 客户端入口 `src/client/index.tsx` 挂载以下界面能力：
 
-- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 15 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
+- **订阅服务总览中心（`settings.section: subscription-hub`）**：聚合全部 16 条线路的状态开关、账号池管理、模型勾选、上下文窗口覆盖、思考档位、缓存诊断，以及一键 npm 版本检查与升级（自动识别并保护 `link:` 本地开发目录不被覆盖）。
 - **输入框额度胶囊（`conversation.input.right`）**：按当前会话选中的模型自动展示对应线路的剩余额度、余额或真实缓存指标；无公开数据时保持隐藏，不伪造百分比。
 - **多媒体工具视图与命令**：`codex_image_generate` 生图预览卡，`minimax_generate_video` 视频卡片、右侧栏文档预览器及 `/video` 斜杠命令参数表单。
 - **进展更新面板**与 **Mermaid 图表观察器**（自动将代码块安全渲染为交互图表）。

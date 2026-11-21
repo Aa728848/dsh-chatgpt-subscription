@@ -9,6 +9,37 @@
   - **兼容**：旧凭据没有 `authKind` 字段，读回时行为与之前完全一致；OAuth 凭据仍强制要求 refresh token。
   - **回归**：新增 `test/kimi-code-api-key.test.ts`（15 例：规范化、解析往返、单凭据路径不刷新、号池去重与不刷新、区域回退、路由成功 / 拒绝 / 跨源 / 替换 / 拒绝替换设备码账号）与 `test/kimi-code-api-key-ui.test.tsx`（3 例：标题行恰两个按钮、提交体与清空、Key 行重新登录走粘贴框）；把去重改回按用户 id 时对应用例变红。
 
+- **[claude-api] 新增 Claude API 线路：单 Key、官方 Claude Code 请求形态、服务端按需压缩**
+  - **入口**：枢纽总览新增 `claude-api` 卡片，紧跟 `claude` 之后；粘贴单个 API Key、端点可自定义；模型勾选、上下文窗口覆盖、默认推理等级、5m/1h 缓存、快速模式与服务端压缩开关。
+  - **宿主**：新增 `src/host/claude-api/` 适配器与入口接线；请求头/计费归因/指纹与官方客户端抓包一致，beta 从最终请求体推导；客户端版本跟随 npm 最新、全局一致，新版本仅在线路空闲超过缓存 TTL 后采纳（`DSH_CLAUDE_API_CLI_VERSION` 可覆盖、立即生效）；压缩块按摘要哈希存储并在后续主轮次整块回放，上游拒绝或空摘要同调用退回客户端压缩并标记不支持 30 分钟，陈旧块遗忘后文本形重试一次；system 角色、快速模式与模型级压缩拒绝记入能力记忆（端点+模型为键、7 天过期）并运行时纠正。
+  - **注册**：受控线路、诊断线路、线路代理列表、提示缓存策略表与三语线路名各单条追加；不做额度显示、账号池与媒体工具。
+  - **回归**：新增 `test/claude-api-adapter.test.ts`（10 例：抓包头集合与 body 推导 beta、会话版本钉住、listModels 门控与兜底表不过滤、压缩 happy 与下一轮块回放、未服务会话原样请求、400/空摘要同调用退回、陈旧块单次重试、密钥脱敏）。
+
+- **[claude-api] 1 小时缓存档新增等待续热（子代理与后台任务都算委派）**
+  - 主会话空闲满 55 分钟（策略 `ttlMs: 3_600_000` 前 5 分钟）且仍有子代理或后台任务在跑时，共享控制器 steer 一条很小的续热请求保住前缀缓存，该轮结束后重新计时；空闲达到 TTL 走冷恢复。策略表新增 `waitJobs: true`，`staticPrefix` / `hint` / `affinity` 仍为 false、`coldStart` 仍为 in-flight。
+  - **档位门**：活动记录新增可选 `ttlMs`，适配器为每个主轮次写入本次请求实际使用的缓存寿命（1h → 3_600_000，5m → 300_000）；与策略 TTL 不一致的会话不排定时器、不续热，已排定的定时器在下次 reconcile 清除，因此 5 分钟档从不续热。其他线路的活动记录不带该字段，行为不变。
+  - **计时基准**：`lastActiveAt` 取请求**发出**时刻，流结束那次记录只补 `totalTokens`，不往后移；长流式轮次不会把决策点推过缓存过期。标题/压缩/时间线等辅助请求不记活动。
+  - **开关与文案**：沿用全局 `cacheWaitWarmup` / `DSH_KIMI_CODE_CACHE_WAIT_WARMUP`，无新增设置项；设置卡折叠说明（zh/en/ru）与文档写明「约每 55 分钟一次、5 分钟档不做」。
+  - **回归**：新增 `test/kimi-cache-wait-jobs.test.ts`（13 例），并向 `test/prompt-cache-policy.test.ts`、`test/claude-api-adapter.test.ts`、`test/claude-api-section.test.tsx` 追加用例；既有 cache-wait 与策略断言未改动。
+
+- **[claude-subscription] 1 小时缓存档新增等待续热（子代理与后台任务都算委派）**
+  - 与 Claude API 线路同规则：主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时发一次很小的续热请求，该轮结束后重新计时；5 分钟档从不续热。策略 `claude` 条目新增 `ttlMs: 3_600_000`、`waitWarmup: true`、`waitJobs: true`，`mode` / `scope` / `staticPrefix` / `coldStart` / `stickyImages` / `affinity` / `hint` 全部不变（冷启动仍 in-flight：命名 TTL 不打开预热、提示或亲和）。
+  - **路由 id 别名**：本线路自身代码按 `claude` 读策略，宿主路由 id 是 `claude-subscription`，而等待控制器按路由 id 解析；策略表因此新增 `POLICY_ID_ALIASES`（`claude-subscription` → `claude`），两个 id 解析到同一份事实，活动记录按路由 id 写入。
+  - **计时与档位**：适配器在每个主轮次**发出请求时**记 `lastActiveAt`，流结束只补 `totalTokens`；`ttlMs` 取该请求真正使用的档位（`cacheTtlFor`：留空＝跟随官方＝1h）。标题/压缩等辅助请求不记活动。
+  - **账号选择**：续热是普通主轮次，走与该会话下一次真实请求相同的选号（默认 sequential 取 primary、sticky 取上次账号，只在凭据失效或账号级限流后换号），因此续热写的就是下一轮要用的那份缓存；用户显式选 `round-robin` 时逐请求换号，续热可能落到别的账号（文档已注明）。
+  - **成本**：每次续热是一次真实请求，按缓存读取价格读回整段前缀并计入订阅额度。
+  - **回归**：`test/claude-adapter.test.ts` 新增 5 例、`test/kimi-cache-wait-jobs.test.ts` 新增 3 例、`test/prompt-cache-policy.test.ts` 新增 2 例；既有 Claude 订阅用例逐字未改。
+
+- **[通用] 等待续热决策点统一为「TTL 前 5 分钟」，废弃旧的 80% 规则**
+  - 新增导出纯函数 `cacheWaitDecisionMs(ttlMs)` 与常量 `CACHE_WAIT_MARGIN_MS`（5 分钟）：**所有线路（含 Kimi）**一律 `ttlMs - 5 分钟`。Kimi 默认 25 分钟 TTL 仍得到 20 分钟，既有子代理等待用例逐字未改；TTL 被覆盖时按新公式走，不再固定 20 分钟。
+  - TTL ≤ 5 分钟时函数返回 `undefined`，控制器对该会话不排定时器、不续热，每进程每线路只告警一次；任何 TTL 都不会产生 0 或接近 0 的决策点而自我重排成循环。策略校验不变：这样的部署照常启动，只是没有续热。
+  - 控制器里的 Kimi 专用分支删除，所有线路走同一公式；`CACHE_WAIT_DECISION_MS` 改为由 `cacheWaitDecisionMs(CACHE_TTL_MS)` 求值导出（Kimi 实测 25 分钟 TTL → 20 分钟，数值不变），`CacheWaitOptions.decisionMs` 保留为显式覆盖注入项（短 TTL 的「不续热」门仍然优先），`evaluateCacheWait` 的显式 `decisionMs` 入参保留。
+  - **既有断言更新**：`test/kimi-code-cache-wait.test.ts` 的跨线路用例把覆盖 TTL 从 1 秒改为 10 分钟（1 秒 TTL 按新规则不再续热），决策点与推进量 800ms → 300000ms。
+
+- **[kimi-code] 等待续热现在也覆盖运行中的后台任务**
+  - 策略 `waitJobs: true`：只有后台任务在跑（没有子代理）时，主会话空闲满 20 分钟同样续热，任务 `job/settled` 后停止。20 分钟决策点、25 分钟 TTL、活动来源、续热消息、账号亲和与 `cacheWaitWarmup` / `DSH_KIMI_CODE_CACHE_WAIT_WARMUP` 开关全部不变；Kimi 活动记录不带 `ttlMs`，档位门对它不适用。
+  - 共享控制器新增 `job/registered` / `job/settled` 跟踪（每会话上限 256 个任务 id，随会话状态丢弃），新任务与新子代理一样重置本批次记账；不发这两个事件的旧世代宿主上行为与之前一致。开关说明与文档措辞改为「子代理或后台任务」。
+
 ## 0.80.5 - 2026-11-20
 
 - **[antigravity-acp] 修复切换到 ACP 模型必现 `MODEL_SWITCH_COMPACTION_FAILED`（[#119](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/119)）**
