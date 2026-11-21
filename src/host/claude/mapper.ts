@@ -190,6 +190,12 @@
 
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../common/context-overflow.ts'
 import {
+  buildClaudeCodeSystemBlocks,
+  claudeCodeFirstUserText,
+  claudeCodeMetadataUserId,
+  type ClaudeCodeFirstPartyContext,
+} from '../common/claude-code-first-party.ts'
+import {
   LlmError,
   type ContentBlock,
   type FinishReason,
@@ -202,8 +208,10 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import { toToolCallId } from '../common/brand-compat.ts'
 import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import {
+  claudeFastModeFor,
   claudeModelBindsThinkingToPrefix,
   claudeModelCanDisableThinking,
+  claudeSupportsContextEditing,
   claudeModelSupportsTemperature,
   claudeSupportsMidConversationSystemMessages,
   claudeThinkingMode,
@@ -1317,9 +1325,9 @@ function wireRoleOf(message: Message): 'user' | 'assistant' | 'system' {
  * all: there, the top-level `system` field is the only place an instruction
  * can live.
  */
-export function claudeSystemMessagesInPlace(options: GenerateOptions): ReadonlySet<number> {
+export function claudeSystemMessagesInPlace(options: GenerateOptions, catalog?: readonly ClaudeModelEntry[]): ReadonlySet<number> {
   const inPlace = new Set<number>()
-  if (!claudeSupportsMidConversationSystemMessages(options.model)) return inPlace
+  if (!claudeSupportsMidConversationSystemMessages(options.model, catalog)) return inPlace
 
   const messages = options.messages
   for (let index = 0; index < messages.length; index += 1) {
@@ -1342,8 +1350,8 @@ export function claudeSystemMessagesInPlace(options: GenerateOptions): ReadonlyS
  * {@link claudeSystemMessagesInPlace}, so this list and the folded text can
  * never disagree about one message.
  */
-function messagesForTheWire(options: GenerateOptions): Message[] {
-  const inPlace = claudeSystemMessagesInPlace(options)
+function messagesForTheWire(options: GenerateOptions, catalog?: readonly ClaudeModelEntry[]): Message[] {
+  const inPlace = claudeSystemMessagesInPlace(options, catalog)
   return options.messages.filter((message, index) => message.role !== 'system' || inPlace.has(index))
 }
 
@@ -1411,7 +1419,18 @@ function replayBlockFor(message: Message, index: number): Record<string, unknown
  * turn-over-turn belongs in a trailing user message, not here, because one
  * changed byte at the head invalidates the whole cached prefix.
  */
-export function leadingSystemText(options: GenerateOptions): string | undefined {
+function foldedClaudeSystemText(options: GenerateOptions, catalog?: readonly ClaudeModelEntry[]): string | undefined {
+  const parts: string[] = []
+  const inPlace = claudeSystemMessagesInPlace(options, catalog)
+  options.messages.forEach((message, index) => {
+    if (message.role !== 'system' || inPlace.has(index)) return
+    const text = textOf(message.content)
+    if (text !== '') parts.push(text)
+  })
+  return parts.length === 0 ? undefined : parts.join('\n\n')
+}
+
+export function leadingSystemText(options: GenerateOptions, catalog?: readonly ClaudeModelEntry[]): string | undefined {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
   // The system messages that could NOT keep their place are folded here. The
@@ -1426,13 +1445,17 @@ export function leadingSystemText(options: GenerateOptions): string | undefined 
   // is never merged with the historical messages: they are different things —
   // one is the prompt that applies to the whole conversation, the other is an
   // instruction that starts applying at one point in it.
-  const inPlace = claudeSystemMessagesInPlace(options)
-  options.messages.forEach((message, index) => {
-    if (message.role !== 'system' || inPlace.has(index)) return
-    const text = textOf(message.content)
-    if (text !== '') parts.push(text)
-  })
+  const folded = foldedClaudeSystemText(options, catalog)
+  if (folded !== undefined) parts.push(folded)
   return parts.length === 0 ? undefined : parts.join('\n\n')
+}
+
+export interface ClaudeFirstPartyRequest {
+  version: string
+  deviceId: string
+  accountUuid: string
+  context: ClaudeCodeFirstPartyContext
+  entrypoint?: string
 }
 
 /**
@@ -1451,9 +1474,23 @@ export function buildClaudeSystemBlocks(
   options: GenerateOptions,
   cacheControl: boolean = true,
   ttl: ClaudeCacheTtl = CLAUDE_DEFAULT_CACHE_TTL,
+  firstParty?: ClaudeFirstPartyRequest,
+  catalog?: readonly ClaudeModelEntry[],
 ): AnthropicBlock[] {
+  if (firstParty !== undefined) {
+    return buildClaudeCodeSystemBlocks({
+      version: firstParty.version,
+      entrypoint: firstParty.entrypoint ?? 'cli',
+      firstUserText: claudeCodeFirstUserText(options.messages),
+      context: firstParty.context,
+      identityText: CLAUDE_CODE_IDENTITY_TEXT,
+      ...(typeof options.system === 'string' && options.system.trim() !== '' ? { staticText: options.system } : {}),
+      ...(foldedClaudeSystemText(options, catalog) === undefined ? {} : { dynamicText: foldedClaudeSystemText(options, catalog) }),
+      cacheTtl: ttl,
+    }).map(block => ({ ...block }))
+  }
   const blocks: AnthropicBlock[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY_TEXT }]
-  const userText = leadingSystemText(options)
+  const userText = leadingSystemText(options, catalog)
   if (userText !== undefined) blocks.push({ type: 'text', text: userText })
   if (cacheControl) {
     const last = blocks[blocks.length - 1] as AnthropicBlock
@@ -1510,7 +1547,8 @@ function markClaudeCacheBreakpoints(body: Record<string, unknown>, ttl: ClaudeCa
   if (Array.isArray(system)) {
     const last = system[system.length - 1] as AnthropicBlock | undefined
     if (last !== undefined) {
-      last.cache_control = { ...marker }
+      const scope = isRecord(last.cache_control) && last.cache_control.scope === 'global' ? 'global' : undefined
+      last.cache_control = { ...marker, ...(scope === undefined ? {} : { scope }) }
       marked += 1
     }
   }
@@ -1950,6 +1988,10 @@ export interface ClaudeRequestOptions {
    * (`claudeBetas({ cacheTtl })`).
    */
   cacheTtl?: ClaudeCacheTtl
+  /** First-party context; production passes this on every Messages request. */
+  firstParty?: ClaudeFirstPartyRequest
+  /** Per-line opt-in; the catalog still decides whether speed is legal. */
+  fastMode?: boolean
   /**
    * Tool-name translation to use. Pass the same value to createStreamState so
    * the response side maps back through the identical table.
@@ -1973,8 +2015,8 @@ export interface ClaudeRequestOptions {
 /**
  * Build one Messages request body.
  *
- * Field order in the returned object is irrelevant to the server and is kept
- * readable only.
+ * Field order is fixed to the first-party capture. The server treats JSON as an
+ * object, but cch signs the final serialized string, so incidental reordering is forbidden.
  *
  * @param options - request options carrying the normalized conversation.
  * @param images - images read for this request by resolveRequestImages.
@@ -2006,7 +2048,7 @@ export function buildClaudeRequestBody(
   const { thinking, outputConfig } = claudeThinking(options.model, effort, level, maxTokens, request.thinkingBudgets, catalog)
 
   const entries: ClaudeWireEntry[] = []
-  const wire = messagesForTheWire(options)
+  const wire = messagesForTheWire(options, catalog)
   for (let index = 0; index < wire.length; index += 1) {
     const message = wire[index] as Message
     // A historical system message KEEPS ITS OWN SLOT when the model accepts a
@@ -2063,23 +2105,39 @@ export function buildClaudeRequestBody(
   const caching = request.cacheControl !== false
   const cacheTtl = request.cacheTtl ?? CLAUDE_DEFAULT_CACHE_TTL
 
+  const messages = cleanOrphanedToolCalls(mergeClaudeMessages(entries), mergeClaudeMessages)
+  if (messages[messages.length - 1]?.role === 'assistant') {
+    // Upstream rejects assistant prefill. This wire-only continuation leaves the
+    // durable DSH history and the assistant's replay blocks untouched.
+    messages.push({ role: 'user', content: [{ type: 'text', text: 'Continue from where you left off.' }] })
+  }
+  const firstParty = request.firstParty
+  const contextEditing = claudeSupportsContextEditing(options.model, catalog)
   const body: Record<string, unknown> = {
     model: options.model,
-    max_tokens: maxTokens,
-    stream: true,
-    system: buildClaudeSystemBlocks(options, caching, cacheTtl),
-    messages: cleanOrphanedToolCalls(mergeClaudeMessages(entries), mergeClaudeMessages),
+    messages,
+    system: buildClaudeSystemBlocks(options, caching, cacheTtl, firstParty, catalog),
     ...(options.tools !== undefined && options.tools.length > 0
       ? { tools: claudeWireTools(options, names) }
       : {}),
+    ...(firstParty === undefined ? {} : {
+      metadata: { user_id: claudeCodeMetadataUserId(firstParty.deviceId, firstParty.accountUuid, firstParty.context.sessionUuid) },
+    }),
+    max_tokens: maxTokens,
     ...(thinking === undefined ? {} : { thinking }),
+    ...(thinkingEnabled && contextEditing
+      ? { context_management: { edits: [{ type: 'clear_thinking_20251015', keep: 'all' }] } }
+      : {}),
     ...(outputConfig === undefined ? {} : { output_config: outputConfig }),
+    ...(request.fastMode === true && claudeFastModeFor(options.model, catalog) !== null ? { speed: 'fast' } : {}),
     ...(temperatureAllowed && options.temperature !== undefined ? { temperature: options.temperature } : {}),
     // Stop sequences are not part of the required body this chunk was specified
     // with, but GenerateOptions carries them and the wire accepts them; sending
     // them costs nothing and dropping them would silently ignore a caller's
     // request to stop.
     ...(options.stop !== undefined && options.stop.length > 0 ? { stop_sequences: [...options.stop] } : {}),
+    ...(firstParty === undefined ? {} : { diagnostics: { previous_message_id: null } }),
+    stream: true,
   }
 
   // The breakpoints go on the FINISHED body: the message marker needs the MERGED
@@ -2190,6 +2248,9 @@ export interface ClaudeStreamState {
    * models understates, so it outranks the estimate above.
    */
   reportedReasoningTokens: number | undefined
+  speed?: 'standard' | 'fast'
+  serviceTier?: string
+  inferenceGeo?: string
   sawUsage: boolean
   finished: boolean
 }
@@ -2403,7 +2464,13 @@ function flushOpenBlocks(state: ClaudeStreamState): StreamChunk[] {
  * brief only named the read side: dropping a number the wire sent would make
  * the billed-input total unaccountable.
  */
-function tokenUsage(state: ClaudeStreamState): TokenUsage {
+export type ClaudeTokenUsage = TokenUsage & {
+  speed?: 'standard' | 'fast'
+  service_tier?: string
+  inference_geo?: string
+}
+
+function tokenUsage(state: ClaudeStreamState): ClaudeTokenUsage {
   // Capped at outputTokens: reasoning is a subset of output, and DSH discards a
   // usage record whose reasoning count exceeds its output count.
   const reasoningTokens = Math.min(state.reportedReasoningTokens ?? state.reasoningTokens, state.outputTokens)
@@ -2413,6 +2480,9 @@ function tokenUsage(state: ClaudeStreamState): TokenUsage {
     ...(state.cacheReadTokens > 0 ? { cacheReadTokens: state.cacheReadTokens } : {}),
     ...(state.cacheWriteTokens > 0 ? { cacheWriteTokens: state.cacheWriteTokens } : {}),
     ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+    ...(state.speed === undefined ? {} : { speed: state.speed }),
+    ...(state.serviceTier === undefined ? {} : { service_tier: state.serviceTier }),
+    ...(state.inferenceGeo === undefined ? {} : { inference_geo: state.inferenceGeo }),
   }
 }
 
@@ -2492,6 +2562,11 @@ export function assertStreamComplete(state: ClaudeStreamState): void {
 
 function applyUsage(state: ClaudeStreamState, usage: Record<string, unknown>, cumulativeOutput: boolean): void {
   state.sawUsage = true
+  if (usage.speed === 'standard' || usage.speed === 'fast') state.speed = usage.speed
+  const serviceTier = asString(usage.service_tier)
+  if (serviceTier !== undefined && serviceTier !== '') state.serviceTier = serviceTier
+  const inferenceGeo = asString(usage.inference_geo)
+  if (inferenceGeo !== undefined && inferenceGeo !== '') state.inferenceGeo = inferenceGeo
   if (usage.input_tokens !== undefined) state.inputTokens = numberOr(usage.input_tokens, state.inputTokens)
   if (usage.cache_creation_input_tokens !== undefined) {
     state.cacheWriteTokens = numberOr(usage.cache_creation_input_tokens, state.cacheWriteTokens)

@@ -149,4 +149,14 @@ describe('claude-api stream', () => {
     const { chunks } = run([start({ input_tokens: 3, output_tokens: 1 }), messageDelta('end_turn', { output_tokens: 9 }), messageStop])
     expect(usageOf(chunks)).toEqual({ inputTokens: 3, outputTokens: 9 })
   })
+
+  it('passes through optional upstream usage metadata without changing token counts', () => {
+    const { chunks } = run([
+      start({ input_tokens: 3, output_tokens: 1, speed: 'fast', service_tier: 'standard', inference_geo: 'test-region' }),
+      messageDelta('end_turn', { output_tokens: 9 }), messageStop,
+    ])
+    expect(usageOf(chunks)).toEqual({
+      inputTokens: 3, outputTokens: 9, speed: 'fast', service_tier: 'standard', inference_geo: 'test-region',
+    })
+  })
 })

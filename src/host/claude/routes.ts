@@ -109,6 +109,7 @@ import type {
   ClaudePoolCredentials,
 } from './account-pool.ts'
 import type { ContextWindowOverridePatch } from '../common/context-window-overrides.ts'
+import type { ClaudeCodeVersionResolver } from '../common/claude-code-version.ts'
 import {
   CLAUDE_REASONING_EFFORTS,
   isClaudeCacheTtl,
@@ -310,6 +311,8 @@ function quotaDto(quota: ClaudeQuotaSnapshot | null): ClaudeAccountQuota | null 
 
 export interface ClaudeStatusOptions {
   fetchFn?: typeof fetch
+  /** Shared Claude Code version used by the Messages connectivity probe. */
+  version?: ClaudeCodeVersionResolver
   /** Whether this plugin currently owns the provider route; re-read on every status. */
   serving?: boolean | (() => boolean)
   /** Diagnostic when another plugin owns the provider route; re-read on every status. */
@@ -423,6 +426,8 @@ export async function getClaudeWebStatus(
     contextWindowOverrides: settings.contextWindowOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort as ClaudeWebStatus['defaultReasoningEffort'],
     cacheTtl: settings.cacheTtl,
+    fastMode: settings.fastMode,
+    cacheKeepalive: settings.cacheKeepalive,
     selectedAccountId: settings.selectedAccountId,
     accounts: poolAccounts.map((summary): PoolClaudeAccountSummaryDto => summary),
     rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
@@ -685,7 +690,11 @@ export function registerClaudeRoutes(
           if (credentials === undefined) return sendJson(response, 400, { ok: false, error: 'Not signed in.' })
           // The probe RETURNS its verdict rather than throwing, so a refusal is
           // rendered by the card instead of being flattened into a 500.
-          const probe = await probeConnection(credentials, { fetchFn })
+          const probe = await probeConnection(credentials, {
+            fetchFn,
+            deviceId: await modelSettings.ensureDeviceId(),
+            ...(options.version === undefined ? {} : { version: options.version.currentProfile() }),
+          })
           const value: ClaudeConnectionDto = probe.ok
             ? {
                 connected: true,
@@ -791,6 +800,14 @@ export function registerClaudeRoutes(
             if (ttl === null || isClaudeCacheTtl(ttl)) {
               patch.cacheTtl = ttl
             }
+          }
+          if (body.fastMode !== undefined) {
+            if (typeof body.fastMode !== 'boolean') return sendJson(response, 400, { ok: false, error: 'fastMode must be boolean.' })
+            patch.fastMode = body.fastMode
+          }
+          if (body.cacheKeepalive !== undefined) {
+            if (typeof body.cacheKeepalive !== 'boolean') return sendJson(response, 400, { ok: false, error: 'cacheKeepalive must be boolean.' })
+            patch.cacheKeepalive = body.cacheKeepalive
           }
           if (body.selectedAccountId !== undefined) {
             const selected = body.selectedAccountId

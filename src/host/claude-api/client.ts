@@ -1,4 +1,5 @@
 import type { ClaudeApiConnectionDto } from '../../shared/claude-api-contracts.ts'
+import { claudeCodeFirstPartyHeaders, type ClaudeCodeFirstPartyContext } from '../common/claude-code-first-party.ts'
 import { parseClaudeApiModelListing, type ClaudeApiModelEntry } from './model-catalog.ts'
 import {
   CLAUDE_API_ANTHROPIC_VERSION,
@@ -25,6 +26,7 @@ export interface ClaudeApiHeadersInput {
   version: string
   sessionUuid: string
   betas: readonly string[]
+  firstParty?: ClaudeCodeFirstPartyContext
   /**
    * Accepted so a caller can state its intent, but it does NOT change the header
    * set: the captured client sends accept: application/json on stream:true
@@ -46,6 +48,7 @@ export function buildClaudeApiHeaders(input: ClaudeApiHeadersInput): Record<stri
     'anthropic-dangerous-direct-browser-access': 'true',
     'x-api-key': input.apiKey,
     ...CLAUDE_API_STAINLESS_HEADERS,
+    ...(input.firstParty === undefined ? {} : claudeCodeFirstPartyHeaders(input.firstParty)),
   }
   if (betas.length > 0) headers['anthropic-beta'] = betas.join(',')
   return headers

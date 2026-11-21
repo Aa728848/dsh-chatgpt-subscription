@@ -293,6 +293,10 @@ export interface ClaudeWebStatus extends Partial<AccountPoolStatusDto> {
   defaultReasoningEffort: ClaudeReasoningEffort | null
   /** Prompt-cache tier; `null` means "follow the official subscription default". */
   cacheTtl: ClaudeCacheTtl | null
+  /** Whether eligible models receive speed: fast. */
+  fastMode?: boolean
+  /** Whether 1h main requests advertise cache-keepalive and permit cache_touch. */
+  cacheKeepalive?: boolean
   /** Account selected for catalog, quota and all requests; null means automatic. */
   selectedAccountId: string | null
   /** Signed-in accounts; empty or absent when no pool is installed. */
@@ -311,6 +315,8 @@ export interface ClaudeSettingsUpdateDto {
   defaultReasoningEffort?: ClaudeReasoningEffort | null
   /** `null` restores the subscription default. */
   cacheTtl?: ClaudeCacheTtl | null
+  fastMode?: boolean
+  cacheKeepalive?: boolean
   selectedAccountId?: string | null
 }
 

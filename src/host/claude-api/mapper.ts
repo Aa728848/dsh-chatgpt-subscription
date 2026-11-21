@@ -16,6 +16,13 @@
 
 import type { ContentBlock, GenerateOptions, Message } from '../common/llm-compat.ts'
 import { stripMetaSchema } from '../common/tool-schema.ts'
+import {
+  buildClaudeCodeSystemBlocks,
+  claudeCodeFirstPartyBetas,
+  claudeCodeFirstUserText,
+  mergeClaudeCodeBetas,
+  type ClaudeCodeFirstPartyContext,
+} from '../common/claude-code-first-party.ts'
 import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import {
   imageBlockToInline,
@@ -26,15 +33,14 @@ import {
 import type { ClaudeApiModelEntry } from './model-catalog.ts'
 import type { ClaudeApiSettings } from './token-store.ts'
 import {
-  CLAUDE_API_BASE_BETAS,
   CLAUDE_API_BETA_CLEAR_AT,
+  CLAUDE_API_ENTRYPOINT,
   CLAUDE_API_BETA_COMPACT,
   CLAUDE_API_BETA_FAST_MODE,
   CLAUDE_API_BETA_INLINE_TOOLS,
   CLAUDE_API_BETA_THINKING_BINDING,
   CLAUDE_API_IDENTITY_TEXT,
   CLAUDE_API_TURN_SCOPED_SOURCE_KINDS,
-  claudeApiBillingBlock,
   claudeApiMetadataUserId,
 } from './types.ts'
 import { extractCheckpointSummary } from './compaction.ts'
@@ -47,6 +53,7 @@ export interface ClaudeApiRequestContext {
   version: string
   deviceId: string
   sessionUuid: string
+  firstParty: ClaudeCodeFirstPartyContext
   /** Synchronous lookup of stored server-compaction blocks, keyed by summary text. */
   compactionBlocks?: { lookup(summary: string): { content: string; signature: string; toolChanges?: unknown } | undefined }
 }
@@ -204,18 +211,7 @@ function textOf(content: readonly ContentBlock[]): string {
  * DSH appends reminder-only records that contain no user text at all.
  */
 export function claudeApiFirstUserText(options: GenerateOptions): string {
-  for (const message of options.messages) {
-    if (message.role !== 'user') continue
-    if (message.source?.kind === 'tool') continue
-    if (message.content.some(block => block.type === 'tool-result')) continue
-    for (const block of message.content) {
-      if (block.type !== 'text' || typeof block.text !== 'string') continue
-      const text = sanitizeText(block.text)
-      if (text.trimStart().startsWith('<system-reminder>')) continue
-      if (text !== '') return text
-    }
-  }
-  return ''
+  return claudeCodeFirstUserText(options.messages)
 }
 
 function imageBlockFor(block: Record<string, unknown>, images: ResolvedRequestImages, entry: ClaudeApiModelEntry): Block {
@@ -456,8 +452,11 @@ function markCacheBreakpoints(body: Record<string, unknown>, settings: ClaudeApi
   const marker = cacheMarker(settings)
   const system = body.system
   if (Array.isArray(system)) {
-    for (const block of system.slice(1)) {
-      if (isRecord(block)) block.cache_control = { ...marker }
+    for (const block of system.slice(2)) {
+      if (isRecord(block)) {
+        const scope = isRecord(block.cache_control) && block.cache_control.scope === 'global' ? 'global' : undefined
+        block.cache_control = { ...marker, ...(scope === undefined ? {} : { scope }) }
+      }
     }
   }
   const messages = body.messages
@@ -580,13 +579,17 @@ export function buildClaudeApiRequest(
     entries.push({ role: 'user', content: userContent(message, images, entry) })
   }
 
-  const systemParts = [typeof options.system === 'string' ? options.system.trim() : '', ...foldedSystemTexts].filter(part => part !== '')
-  const systemText = systemParts.join('\n\n')
-  const system: Block[] = [
-    { type: 'text', text: claudeApiBillingBlock(context.version, firstUserText) },
-    { type: 'text', text: CLAUDE_API_IDENTITY_TEXT },
-  ]
-  if (systemText !== '') system.push({ type: 'text', text: systemText })
+  const systemText = foldedSystemTexts.join('\n\n')
+  const system = buildClaudeCodeSystemBlocks({
+    version: context.version,
+    entrypoint: CLAUDE_API_ENTRYPOINT,
+    firstUserText,
+    context: context.firstParty,
+    identityText: CLAUDE_API_IDENTITY_TEXT,
+    ...(typeof options.system === 'string' && options.system.trim() !== '' ? { staticText: options.system } : {}),
+    ...(systemText === '' ? {} : { dynamicText: systemText }),
+    cacheTtl: settings.cacheTtl,
+  })
 
   const fields = thinkingFields(options, settings, entry)
   const baseMax = options.maxTokens ?? Math.min(entry.maxOutputTokens, 16_384)
@@ -602,20 +605,25 @@ export function buildClaudeApiRequest(
   const thinkingEnabled = thinking !== undefined && thinking.type !== 'disabled'
   const tools = wireTools(options)
 
+  const messages = cleanOrphanedToolCalls(mergeEntries(entries), mergeEntries)
+  if (messages[messages.length - 1]?.role === 'assistant') {
+    messages.push({ role: 'user', content: [{ type: 'text', text: 'Continue from where you left off.' }] })
+  }
   const body: Record<string, unknown> = {
     model: options.model,
-    max_tokens: maxTokens,
-    stream: true,
+    messages,
     system,
-    messages: cleanOrphanedToolCalls(mergeEntries(entries), mergeEntries),
     ...(tools.length > 0 ? { tools } : {}),
+    metadata: { user_id: claudeApiMetadataUserId(context.deviceId, context.sessionUuid) },
+    max_tokens: maxTokens,
     ...(thinking === undefined ? {} : { thinking }),
-    ...(fields.outputConfig === undefined ? {} : { output_config: fields.outputConfig }),
     ...(thinkingEnabled && entry.contextEditing ? { context_management: { edits: [{ type: 'clear_thinking_20251015', keep: 'all' }] } } : {}),
+    ...(fields.outputConfig === undefined ? {} : { output_config: fields.outputConfig }),
+    ...(settings.fastMode && entry.fastMode !== null ? { speed: 'fast' } : {}),
     ...(entry.supportsTemperature && !thinkingEnabled && options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.stop !== undefined && options.stop.length > 0 ? { stop_sequences: [...options.stop] } : {}),
-    ...(settings.fastMode && entry.fastMode !== null ? { speed: 'fast' } : {}),
-    metadata: { user_id: claudeApiMetadataUserId(context.deviceId, context.sessionUuid) },
+    diagnostics: { previous_message_id: null },
+    stream: true,
   }
   markCacheBreakpoints(body, settings)
   return body
@@ -626,8 +634,16 @@ export function buildClaudeApiRequest(
  * set first, then the conditional betas in the spec table's order. A gateway silently
  * strips unlicensed fields, so the header must follow the bytes.
  */
-export function deriveClaudeApiBetas(body: Record<string, unknown>, entry: ClaudeApiModelEntry): string[] {
-  const betas = [...CLAUDE_API_BASE_BETAS]
+export function deriveClaudeApiBetas(
+  body: Record<string, unknown>,
+  entry: ClaudeApiModelEntry,
+  thinkingTokenCount = true,
+): string[] {
+  const betas = claudeCodeFirstPartyBetas({
+    auth: 'api-key',
+    model: typeof body.model === 'string' ? body.model : entry.id,
+    thinkingTokenCount,
+  })
   const messages = Array.isArray(body.messages) ? body.messages.filter(isRecord) : []
   const contentBlocks = messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(isRecord) : [])
   const hasCompactionBlock = contentBlocks.some(block => block.type === 'compaction')
@@ -639,5 +655,5 @@ export function deriveClaudeApiBetas(body: Record<string, unknown>, entry: Claud
   if (hasInlineToolDefinition || (hasTopCompaction && hasToolChangeBlocks)) betas.push(CLAUDE_API_BETA_INLINE_TOOLS)
   if (messages.some(message => message.clear_at !== undefined)) betas.push(CLAUDE_API_BETA_CLEAR_AT)
   if (body.speed !== undefined && entry.fastMode === 'beta') betas.push(CLAUDE_API_BETA_FAST_MODE)
-  return betas
+  return mergeClaudeCodeBetas(betas)
 }

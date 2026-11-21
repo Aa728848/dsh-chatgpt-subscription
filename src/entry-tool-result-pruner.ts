@@ -59,6 +59,8 @@ export const DEFAULT_SKIP_PROVIDERS: readonly string[] = deepFreeze([
   // later thinking block (measured: appending keeps a 34572-token prefix as cache_read, editing
   // an earlier block rewrites it), so history is never edited on this line either.
   'claude-api',
+  'claude',
+  'claude-subscription',
 ])
 
 // ── 配置 ───────────────────────────────────────────────────────────────────

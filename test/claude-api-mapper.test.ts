@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ContentBlock, GenerateOptions, Message } from '../src/host/common/llm-compat.ts'
 import { NO_RESOLVED_IMAGES } from '../src/host/common/request-images.ts'
 import { toToolCallId } from '../src/host/common/brand-compat.ts'
+import { TEST_FIRST_PARTY_CONTEXT } from './claude-api-fixtures.ts'
 import { resolveClaudeApiModel, type ClaudeApiModelEntry } from '../src/host/claude-api/model-catalog.ts'
 import { defaultClaudeApiSettings, type ClaudeApiSettings } from '../src/host/claude-api/token-store.ts'
 import {
@@ -43,7 +44,7 @@ function options(messages: Message[], extra: Partial<GenerateOptions> = {}): Gen
   return { provider: 'claude-api', model: 'claude-fable-5-2', messages, ...extra }
 }
 function contextFor(entry: ClaudeApiModelEntry, settings: Partial<ClaudeApiSettings> = {}, extra: Partial<ClaudeApiRequestContext> = {}): ClaudeApiRequestContext {
-  return { entry, settings: { ...defaultClaudeApiSettings(), ...settings }, version: '2.1.330', deviceId: DEVICE_ID, sessionUuid: SESSION_UUID, ...extra }
+  return { entry, settings: { ...defaultClaudeApiSettings(), ...settings }, version: '2.1.330', deviceId: DEVICE_ID, sessionUuid: SESSION_UUID, firstParty: TEST_FIRST_PARTY_CONTEXT, ...extra }
 }
 const fable = () => resolveClaudeApiModel('claude-fable-5-2')
 const build = (opts: GenerateOptions, entry: ClaudeApiModelEntry = fable(), settings: Partial<ClaudeApiSettings> = {}, extra: Partial<ClaudeApiRequestContext> = {}) =>
@@ -60,9 +61,9 @@ describe('claude-api request shape', () => {
     expect(system).toHaveLength(3)
     // The capture anchor: fingerprint of the user's own first text at 2.1.330 is 9e1.
     expect(claudeApiFingerprint('Reply with exactly: OK', '2.1.330')).toBe('9e1')
-    expect(system[0]).toEqual({ type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.330.9e1; cc_entrypoint=cli;' })
-    expect(system[1]).toEqual({ type: 'text', text: CLAUDE_API_IDENTITY_TEXT, cache_control: { type: 'ephemeral' } })
-    expect(system[2]).toEqual({ type: 'text', text: 'DSH system prompt', cache_control: { type: 'ephemeral' } })
+    expect(system[0]).toEqual({ type: 'text', text: claudeApiBillingBlock('2.1.330', 'Reply with exactly: OK', TEST_FIRST_PARTY_CONTEXT) })
+    expect(system[1]).toEqual({ type: 'text', text: CLAUDE_API_IDENTITY_TEXT })
+    expect(system[2]).toEqual({ type: 'text', text: 'DSH system prompt', cache_control: { type: 'ephemeral', scope: 'global' } })
     expect(body.metadata).toEqual({ user_id: claudeApiMetadataUserId(DEVICE_ID, SESSION_UUID) })
     expect(JSON.parse((body.metadata as Record<string, string>).user_id)).toEqual({ device_id: DEVICE_ID, account_uuid: '', session_id: SESSION_UUID })
     expect(body.stream).toBe(true)
@@ -76,7 +77,7 @@ describe('claude-api request shape', () => {
 
   it('uses ONE context version for the billing block and the fingerprint', () => {
     const body = build(options([userText('Reply with exactly: OK')]), fable(), {}, { version: '9.9.9' })
-    expect(systemOf(body)[0]?.text).toBe(claudeApiBillingBlock('9.9.9', 'Reply with exactly: OK'))
+    expect(systemOf(body)[0]?.text).toBe(claudeApiBillingBlock('9.9.9', 'Reply with exactly: OK', TEST_FIRST_PARTY_CONTEXT))
     expect(systemOf(body)[0]?.text).toContain('cc_version=9.9.9.' + claudeApiFingerprint('Reply with exactly: OK', '9.9.9'))
   })
 
@@ -100,7 +101,7 @@ describe('claude-api system messages', () => {
   it('keeps a legal mid-conversation system message in place', () => {
     const body = build(options([userText('u'), systemText('mid instruction'), assistantText('a')]))
     const messages = messagesOf(body)
-    expect(messages.map(m => m.role)).toEqual(['user', 'system', 'assistant'])
+    expect(messages.map(m => m.role)).toEqual(['user', 'system', 'assistant', 'user'])
     expect(messages[1]?.content).toEqual([{ type: 'text', text: 'mid instruction' }])
     expect(systemOf(body)).toHaveLength(2)
   })
@@ -123,7 +124,7 @@ describe('claude-api system messages', () => {
       { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1', content: [] },
     ] } })
     const legal = build(options([userText('u'), serverTurn, systemText('mid'), assistantText('a')]))
-    expect(messagesOf(legal).map(m => m.role)).toEqual(['user', 'assistant', 'system', 'assistant'])
+    expect(messagesOf(legal).map(m => m.role)).toEqual(['user', 'assistant', 'system', 'assistant', 'user'])
     const plainTurn = msg('assistant', [{ type: 'text', text: 'no server result' }], { kind: 'model', replayState: { response: { provider: 'claude-api', protocol: 'anthropic' }, blocks: [{ type: 'text', text: 'no server result' }] } })
     const illegal = build(options([userText('u'), plainTurn, systemText('mid'), assistantText('a')]))
     expect(messagesOf(illegal).some(m => m.role === 'system')).toBe(false)
@@ -131,7 +132,7 @@ describe('claude-api system messages', () => {
 
   it('judges adjacent system messages as a group', () => {
     const legal = build(options([userText('u'), systemText('A'), systemText('B'), assistantText('a')]))
-    expect(messagesOf(legal).map(m => m.role)).toEqual(['user', 'system', 'system', 'assistant'])
+    expect(messagesOf(legal).map(m => m.role)).toEqual(['user', 'system', 'system', 'assistant', 'user'])
     const illegal = build(options([userText('u'), systemText('A'), systemText('B'), userText('u2')]))
     expect(messagesOf(illegal).some(m => m.role === 'system')).toBe(false)
     expect(systemOf(illegal)[2]?.text).toBe('A\n\nB')
@@ -193,7 +194,7 @@ describe('claude-api thinking and temperature', () => {
     const body = build(options([userText('u')], { reasoningEffort: effort('none') }), entry)
     expect(body.thinking).toEqual({ type: 'disabled' })
     expect(body.context_management).toBeUndefined()
-    expect(deriveClaudeApiBetas(body, entry)).not.toContain(CLAUDE_API_BETA_THINKING_BINDING)
+    expect(deriveClaudeApiBetas(body, entry)).toContain(CLAUDE_API_BETA_THINKING_BINDING)
   })
 
   it('sends the budget form on legacy models', () => {
@@ -269,10 +270,10 @@ describe('claude-api replay', () => {
 })
 
 describe('claude-api cache breakpoints and speed', () => {
-  it('marks identity, system prompt, last user block and last tool - never above four, no ttl at 5m', () => {
+  it('marks system prompt, last user block and last tool, never identity, at 5m', () => {
     const opts = options([userText('u')], { system: 'prompt', tools: [tool('Bash'), tool('Read')] })
     const body = build(opts)
-    expect(countClaudeApiCacheBreakpoints(body)).toBe(4)
+    expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
     const markers: unknown[] = []
     const visit = (value: unknown): void => {
       if (Array.isArray(value)) { value.forEach(visit); return }
@@ -282,7 +283,8 @@ describe('claude-api cache breakpoints and speed', () => {
       Object.values(record).forEach(visit)
     }
     visit(body)
-    expect(markers).toEqual(Array.from({ length: 4 }, () => ({ type: 'ephemeral' })))
+    expect(markers).toHaveLength(3)
+    expect(markers).toContainEqual({ type: 'ephemeral', scope: 'global' })
     const tools = body.tools as Array<Record<string, unknown>>
     expect(tools[0]?.cache_control).toBeUndefined()
     expect(tools[1]?.cache_control).toEqual({ type: 'ephemeral' })
@@ -291,17 +293,18 @@ describe('claude-api cache breakpoints and speed', () => {
   it('writes ttl 1h at the 1h tier and never marks deferred tools', () => {
     const opts = options([userText('u')], { system: 'prompt', tools: [tool('Bash'), tool('Read', true)] })
     const body = build(opts, fable(), { cacheTtl: '1h' })
-    expect(countClaudeApiCacheBreakpoints(body)).toBe(4)
+    expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
     const tools = body.tools as Array<Record<string, unknown>>
     expect(tools[0]?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
     expect(tools[1]?.cache_control).toBeUndefined()
-    expect(systemOf(body)[1]?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(systemOf(body)[1]?.cache_control).toBeUndefined()
+    expect(systemOf(body)[2]?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h', scope: 'global' })
   })
 
   it('stays within four breakpoints in degraded shapes', () => {
-    expect(countClaudeApiCacheBreakpoints(build(options([userText('u')])))).toBe(2)
-    expect(countClaudeApiCacheBreakpoints(build(options([userText('u')], { system: 'p' })))).toBe(3)
-    expect(countClaudeApiCacheBreakpoints(build(options([])))).toBe(1)
+    expect(countClaudeApiCacheBreakpoints(build(options([userText('u')])))).toBe(1)
+    expect(countClaudeApiCacheBreakpoints(build(options([userText('u')], { system: 'p' })))).toBe(2)
+    expect(countClaudeApiCacheBreakpoints(build(options([])))).toBe(0)
   })
 
   it('keeps the history breakpoint when a turn-scoped message ends the history', () => {
@@ -310,7 +313,7 @@ describe('claude-api cache breakpoints and speed', () => {
     const messages = messagesOf(body)
     expect(messages.at(-1)?.role).toBe('system')
     expect(messages.at(-1)?.clear_at).toBe('next_user_message')
-    expect(countClaudeApiCacheBreakpoints(body)).toBe(4)
+    expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
     expect((messages[0]?.content as Array<Record<string, unknown>>)[0]?.cache_control).toEqual({ type: 'ephemeral' })
     expect(JSON.stringify(messages.at(-1))).not.toContain('cache_control')
   })
@@ -321,7 +324,7 @@ describe('claude-api cache breakpoints and speed', () => {
     const messages = messagesOf(body)
     expect(messages.at(-1)?.role).toBe('system')
     expect(messages.at(-1)?.clear_at).toBeUndefined()
-    expect(countClaudeApiCacheBreakpoints(body)).toBe(4)
+    expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
     expect((messages[0]?.content as Array<Record<string, unknown>>)[0]?.cache_control).toEqual({ type: 'ephemeral' })
     expect(JSON.stringify(messages.at(-1))).not.toContain('cache_control')
   })
@@ -345,7 +348,7 @@ describe('claude-api turn-scoped system messages', () => {
   it('does not convert another source kind', () => {
     const body = build(options([userText('u'), nudge('some-other-kind'), assistantText('a')]))
     expect(messagesOf(body).some(m => m.role === 'system')).toBe(false)
-    expect(deriveClaudeApiBetas(body, fable())).not.toContain(CLAUDE_API_BETA_CLEAR_AT)
+    expect(deriveClaudeApiBetas(body, fable())).toContain(CLAUDE_API_BETA_CLEAR_AT)
   })
   it('does not convert at an illegal position (directly followed by a user turn)', () => {
     const body = build(options([userText('u'), nudge('progress-updates-nudge'), userText('u2'), assistantText('a')]))
@@ -373,9 +376,9 @@ describe('claude-api beta derivation', () => {
   it('always sends the base set first, in order', () => {
     expect(deriveClaudeApiBetas(plain(), fable()).slice(0, CLAUDE_API_BASE_BETAS.length)).toEqual([...CLAUDE_API_BASE_BETAS])
   })
-  it('thinking-binding beta follows the body field', () => {
+  it('thinking-binding beta remains in the first-party base set', () => {
     expect(deriveClaudeApiBetas(plain(), fable())).toContain(CLAUDE_API_BETA_THINKING_BINDING)
-    expect(deriveClaudeApiBetas(build(options([userText('u')]), resolveClaudeApiModel('claude-fable-5')), fable())).not.toContain(CLAUDE_API_BETA_THINKING_BINDING)
+    expect(deriveClaudeApiBetas(build(options([userText('u')]), resolveClaudeApiModel('claude-fable-5')), fable())).toContain(CLAUDE_API_BETA_THINKING_BINDING)
   })
   it('compact beta follows top-level compaction or a compaction block', () => {
     expect(deriveClaudeApiBetas({ ...plain(), compaction: { type: 'summarize' } }, fable())).toContain(CLAUDE_API_BETA_COMPACT)
@@ -431,7 +434,7 @@ describe('claude-api placement after the compaction block', () => {
     expect((messages[0]?.content as Array<Record<string, unknown>>)[0]?.type).toBe('compaction')
     expect(messages[1]?.role).toBe('user')
     expect(messages.some(m => m.clear_at !== undefined)).toBe(false)
-    expect(deriveClaudeApiBetas(body, fable())).not.toContain(CLAUDE_API_BETA_CLEAR_AT)
+    expect(deriveClaudeApiBetas(body, fable())).toContain(CLAUDE_API_BETA_CLEAR_AT)
   })
   it('folds a system message directly after the block', () => {
     const body = build(options([checkpoint(), systemText('mid'), assistantText('a')]), fable(), {}, found)

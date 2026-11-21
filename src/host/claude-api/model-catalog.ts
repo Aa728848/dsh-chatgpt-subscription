@@ -67,7 +67,11 @@ export const CLAUDE_API_MODELS: readonly ClaudeApiModelEntry[] = Object.freeze([
   row('claude-fable-5-1', 'Claude Fable 5.1', { supportsTemperature: true }),
   row('claude-mythos-5-1', 'Claude Mythos 5.1', { supportsTemperature: true }),
   row('claude-fable-5', 'Claude Fable 5', { supportsTemperature: true, preservedThinking: false }),
-  row('claude-mythos-5', 'Claude Mythos 5', { supportsTemperature: true, preservedThinking: false }),
+  // Binary 2.1.330 capabilities only; live serving is unverified on the test account group.
+  row('claude-mythos-5', 'Claude Mythos 5', {
+    supportsTemperature: true, preservedThinking: false, thinkingMode: 'budget', reasoningEfforts: [],
+    canDisableThinking: true, midConversationSystem: false, fastMode: null, serverCompaction: false, contextEditing: false,
+  }),
   row('claude-opus-5-5', 'Claude Opus 5.5', { fastMode: 'ga' }),
   row('claude-opus-5', 'Claude Opus 5', { canDisableThinking: true, preservedThinking: false, fastMode: 'beta' }),
   row('claude-sonnet-5-5', 'Claude Sonnet 5.5'),

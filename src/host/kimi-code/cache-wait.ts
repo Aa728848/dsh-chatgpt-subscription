@@ -70,6 +70,8 @@ export interface CacheWaitLogger {
 export interface CacheWaitOptions {
   /** Whether wait-time cache warmup is enabled (boolean or live getter). Enabled by default. */
   readonly warmup?: boolean | (() => boolean)
+  /** Provider-specific cache touch. True consumes the event; false falls back to steer. */
+  readonly keepalive?: (sessionId: string, provider: string) => Promise<boolean>
   readonly now?: () => number
   readonly timer?: CacheWaitTimer
   readonly agents?: CacheWaitAgents
@@ -517,7 +519,29 @@ export class KimiCacheWaitController {
     if (action.kind === 'cold') return
 
     state.warmupUsed = true
-    state.lastWarmupAt = now
+    const keepalive = this.options.keepalive
+    if (keepalive !== undefined && promptCachePolicyKey(provider) === 'claude') {
+      void keepalive(session.id, provider).then(handled => {
+        if (this.disposed || !state.waiting || (state.children.size === 0 && state.jobs.size === 0)) return
+        if (handled) {
+          state.lastWarmupAt = this.now()
+          state.warmupCount += 1
+          this.logger?.info?.(`kimi-cache-wait: cache touch succeeded for session ${session.id}`)
+          return
+        }
+        this.queueWarmup(session, state)
+      }).catch(error => {
+        if (this.disposed || !state.waiting || (state.children.size === 0 && state.jobs.size === 0)) return
+        this.logger?.warn(`kimi-cache-wait: cache touch failed for session ${session.id}: ${error instanceof Error ? error.message : String(error)}`)
+        this.queueWarmup(session, state)
+      })
+      return
+    }
+    this.queueWarmup(session, state)
+  }
+
+  private queueWarmup(session: CacheWaitSession, state: WaitState): void {
+    state.lastWarmupAt = this.now()
     try {
       const agent = this.agents?.get(session.id)
       if (agent?.steer === undefined) throw new Error('the parent Agent is not available for warmup')

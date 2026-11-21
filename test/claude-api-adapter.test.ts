@@ -13,6 +13,7 @@ import { ClaudeApiClientVersionResolver, claudeApiClientVersionPath, serializeCl
 import { ClaudeApiCompactionStore } from '../src/host/claude-api/compaction-store.ts'
 import { ClaudeApiSettingsStore, claudeApiCredentialFingerprint, type ClaudeApiCredentials } from '../src/host/claude-api/token-store.ts'
 import { promptCachePolicyOf } from '../src/host/common/prompt-cache-policy.ts'
+import { claudeCodeCchToken } from '../src/host/common/claude-code-cch.ts'
 import { promptCacheActivityStore } from '../src/host/common/cache-activity.ts'
 import type { ClaudeApiCredentialStore } from '../src/host/claude-api/token-store.ts'
 import { deriveClaudeApiBetas } from '../src/host/claude-api/mapper.ts'
@@ -111,7 +112,8 @@ function setup(generation?: (callIndex: number, url: string, init?: RequestInit)
   const store = fakeCredentialStore(key)
   const settingsStore = new ClaudeApiSettingsStore()
   const npmFetch = vi.fn(async () => Response.json({ version: '2.1.330' }))
-  const resolver = new ClaudeApiClientVersionResolver({ fetchFn: npmFetch as unknown as typeof fetch, env: {}, ...(now !== undefined ? { now } : {}) })
+  const profiles = ['2.1.330', '2.1.9', '2.0.1', '2.2.0', '2.3.0', '2.4.0'].map(version => ({ version, seed: 1n }))
+  const resolver = new ClaudeApiClientVersionResolver({ fetchFn: npmFetch as unknown as typeof fetch, env: {}, profiles, ...(now !== undefined ? { now } : {}) })
   const calls: Array<{ url: string; init?: RequestInit }> = []
   const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input)
@@ -129,6 +131,13 @@ function setup(generation?: (callIndex: number, url: string, init?: RequestInit)
 }
 const bodyOf = (call: { init?: RequestInit }): Record<string, any> => JSON.parse(String(call.init?.body))
 const headersOf = (call: { init?: RequestInit }): Headers => new Headers(call.init?.headers)
+function expectSignedBody(call: { init?: RequestInit }): void {
+  const body = bodyOf(call)
+  const wire = JSON.stringify(body)
+  const actual = body.system[0]?.text.match(/cch=([0-9a-f]{5});/)?.[1]
+  expect(actual).toBe(claudeCodeCchToken(wire.replace(/cch=[0-9a-f]{5};/, 'cch=00000;'), 1n))
+  expect(headersOf(call).get('x-claude-code-prompt-id')).toBe(body.system[0]?.text.match(/cc_prompt_id=([^;]+)/)?.[1])
+}
 
 let testHome = ''
 beforeEach(async () => {
@@ -161,7 +170,8 @@ describe('Claude API adapter wire shape', () => {
     const body = bodyOf(call)
     const version = headers.get('user-agent')!.match(/claude-cli\/(\d+\.\d+\.\d+)/)![1]
     expect(headers.get('user-agent')).toBe(claudeApiUserAgent(version))
-    expect(body.system[0].text).toBe(claudeApiBillingBlock(version, 'hello'))
+    expect(body.system[0].text).toContain('cc_version=' + version + '.')
+    expectSignedBody(call)
     expect(body.system).toHaveLength(3)
     expect(headers.get('anthropic-beta')).toBe(deriveClaudeApiBetas(body, resolveClaudeApiModel(MODEL)).join(','))
     expect(body.metadata.user_id).toContain(claudeApiSessionUuid('wire-session'))
@@ -215,7 +225,8 @@ describe('Claude API adapter wire shape', () => {
     const compAgent = headersOf(s.calls[1]!).get('user-agent')
     expect(compAgent).toBe(claudeApiUserAgent('2.1.330'))
     expect(headersOf(s.calls[2]!).get('user-agent')).toBe(compAgent)
-    expect(bodyOf(s.calls[2]!).system[0].text).toBe(claudeApiBillingBlock('2.1.330', 'hello'))
+    expect(bodyOf(s.calls[2]!).system[0].text).toContain('cc_version=2.1.330.')
+    expectSignedBody(s.calls[2]!)
     expect(headersOf(s.calls[3]!).get('user-agent')).toBe(claudeApiUserAgent('2.1.330'))
     expect(s.resolver.current().pending).toBe('2.2.0')
   })
@@ -272,7 +283,7 @@ describe('Claude API adapter server compaction', () => {
     expect(compBody.compaction).toEqual({ type: 'summarize', instructions: COMPACTION_INSTRUCTION })
     expect(compBody.max_tokens).toBeGreaterThanOrEqual(8192)
     expect(compBody).not.toHaveProperty('context_management')
-    expect(compBody.messages).toHaveLength(2)
+    expect(compBody.messages).toHaveLength(3)
     expect(headersOf(s.calls[1]!).get('anthropic-beta')).toContain(CLAUDE_API_BETA_COMPACT)
     expect(s.compactionStore.lookup(SUMMARY, SCOPE)).toMatchObject({ content: SUMMARY, signature: 'sig-1', model: MODEL, scope: SCOPE })
     await collect(s.adapter.stream(options({
@@ -301,7 +312,7 @@ describe('Claude API adapter server compaction', () => {
     const body = bodyOf(s.calls[0]!)
     expect(body.compaction).toEqual({ type: 'summarize', instructions: COMPACTION_INSTRUCTION })
     expect(body.max_tokens).toBeGreaterThanOrEqual(8192)
-    expect(body.messages).toHaveLength(2)
+    expect(body.messages).toHaveLength(3)
     expect(headersOf(s.calls[0]!).get('anthropic-beta')).toContain(CLAUDE_API_BETA_COMPACT)
     expect(s.compactionStore.lookup(SUMMARY, SCOPE)).toMatchObject({ content: SUMMARY, model: MODEL })
   })
@@ -451,7 +462,9 @@ describe('Claude API adapter compaction gates and retries', () => {
     const main = bodyOf(s.calls[0]!)
     const comp = bodyOf(s.calls[1]!)
     expect(comp.compaction).toEqual({ type: 'summarize', instructions: COMPACTION_INSTRUCTION })
-    expect(JSON.stringify(comp.system)).toBe(JSON.stringify(main.system))
+    expect(JSON.stringify(comp.system.slice(1))).toBe(JSON.stringify(main.system.slice(1)))
+    expect(comp.system[0].text).toContain('cch=')
+    expect(comp.system[0].text).not.toBe(main.system[0].text)
     expect(JSON.stringify(comp.tools)).toBe(JSON.stringify(main.tools))
   })
 
@@ -792,6 +805,23 @@ describe('Claude API adapter system-role correction', () => {
     expect(bodyOf(s.calls[2]!)).not.toHaveProperty('speed')
     expect(bodyOf(s.calls[2]!).messages.some((m: { role: string }) => m.role === 'system')).toBe(false)
     expect(bodyOf(s.calls[2]!).system[2].text).toContain('extra rule')
+  })
+  it('drops thinking-token-count once and persists the conclusion for a second adapter', async () => {
+    const file = path.join(testHome, 'thinking-capability.json')
+    const memory = new ClaudeApiCapabilityMemory(file)
+    const s = setup(async index => index === 0
+      ? Response.json({ error: { message: 'Unexpected value(s) thinking-token-count-2026-05-13 for the anthropic-beta header' } }, { status: 400 })
+      : textStream('thinking-retry'), KEY, undefined, memory)
+    await s.goLive()
+    await collect(s.adapter.stream(options({ sessionId: 'thinking-count' })))
+    expect(s.calls).toHaveLength(2)
+    expect(headersOf(s.calls[0]!).get('anthropic-beta')).toContain('thinking-token-count-2026-05-13')
+    expect(headersOf(s.calls[1]!).get('anthropic-beta')).not.toContain('thinking-token-count-2026-05-13')
+    expectSignedBody(s.calls[1]!)
+    const restarted = setup(undefined, KEY, undefined, new ClaudeApiCapabilityMemory(file))
+    await collect(restarted.adapter.stream(options({ sessionId: 'thinking-count' })))
+    expect(restarted.calls).toHaveLength(1)
+    expect(headersOf(restarted.calls[0]!).get('anthropic-beta')).not.toContain('thinking-token-count-2026-05-13')
   })
 })
 

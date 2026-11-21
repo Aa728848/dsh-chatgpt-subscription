@@ -141,11 +141,13 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-attachment'
+import { randomUUID } from 'node:crypto'
 import {
   API_BASE,
   CLAUDE_SUBSCRIPTION_CACHE_TTL,
   DEFAULT_CONTEXT_WINDOW,
   ERROR_CODE_CLIENT_VERSION_TOO_OLD,
+  ANTHROPIC_VERSION,
   MESSAGES_PATH,
   PROVIDER_ID,
   PROVIDER_NAME,
@@ -178,6 +180,7 @@ import {
 } from './model-catalog.ts'
 import {
   buildClaudeHeaders,
+  claudeUserAgent,
   classifyFailure,
   loadCatalog,
   networkFailure,
@@ -188,9 +191,7 @@ import {
   buildClaudeRequestBody,
   MAX_REQUEST_IMAGE_BYTES,
   MAX_SINGLE_REQUEST_IMAGE_BYTES,
-  claudeBodyBindsThinking,
   claudeBodyHasToolChanges,
-  claudeRequestThinks,
   claudeToolNames,
   closeStream,
   createStreamState,
@@ -209,6 +210,20 @@ import {
 } from '../common/request-images.ts'
 import { StickyImageBudgetStore } from '../common/sticky-image-budget.ts'
 import { promptCacheActivityStore } from '../common/cache-activity.ts'
+import { ClaudeCodeVersionResolver, type ClaudeCodeVersionSelection } from '../common/claude-code-version.ts'
+import {
+  ClaudeCodeFirstPartyTracker,
+  claudeCodeSessionUuid,
+  type ClaudeCodeFirstPartyContext,
+} from '../common/claude-code-first-party.ts'
+import { signClaudeCodeCch } from '../common/claude-code-cch.ts'
+import { ClaudeCapabilityMemory, claudeCapabilityMemoryPath } from '../common/claude-capability-memory.ts'
+import {
+  isClaudeSpeedNeedsBeta,
+  isClaudeSpeedUnsupported,
+  isClaudeSystemRoleUnsupported,
+  isClaudeThinkingTokenCountUnsupported,
+} from '../common/claude-code-corrections.ts'
 
 /**
  * Transient-failure retry policy for the `claude-subscription` route.
@@ -298,12 +313,13 @@ const MISSING_CREDENTIAL_MESSAGE = 'Not signed in to ' + PROVIDER_NAME + '. Sign
 export function assertClaudeCliVersionMeetsFloor(
   modelId: string,
   catalog: readonly ClaudeModelEntry[] = FALLBACK_MODELS,
+  reportedVersion = claudeCliVersion(),
 ): void {
   const floor = claudeMinCliVersionFor(modelId, catalog)
   // "No known floor" is not "no floor": an absent value is the table declining to
   // assert a restriction, so it lets the request through unchanged.
   if (floor === undefined) return
-  const effective = claudeCliVersion()
+  const effective = reportedVersion
   if (meetsDottedVersionFloor(effective, floor)) return
 
   throw new LlmError(
@@ -330,6 +346,7 @@ export interface ClaudeAccountPoolLike {
     fetchFn?: typeof fetch,
   ): Promise<{ account: { id: string }; credentials: ClaudeCredentials }>
   hasAnotherAvailableAccount(triedAccountIds: ReadonlySet<string>): Promise<boolean>
+  getFreshCredential?(accountId?: string, fetchFn?: typeof fetch): Promise<ClaudeCredentials>
   markCooldown(accountId: string, durationMs: number, reason: string): Promise<void>
   markAuthFailed(accountId: string, reason: string): Promise<void>
 }
@@ -349,6 +366,9 @@ export interface ClaudeAdapterOptions {
   accountPool?: ClaudeAccountPoolLike
   /** Optional deployment override for cache-prefix behaviour. */
   promptCache?: PromptCacheOverride
+  /** Shared with claude-api in production; isolated defaults keep unit tests independent. */
+  version?: ClaudeCodeVersionResolver
+  capabilityMemory?: ClaudeCapabilityMemory
 }
 
 const claudePrefixRequests = new PrefixRequestCoordinator()
@@ -405,9 +425,26 @@ export function toolUpdateMode(modelId: string): 'in-history' | undefined {
   return 'in-history'
 }
 
+interface ClaudeProtocolCorrections {
+  fastMode?: 'unsupported' | 'beta'
+  systemRoleUnsupported?: boolean
+  thinkingTokenCountUnsupported?: boolean
+}
+
+interface ClaudeCacheTouchRecord {
+  requestId: string
+  accountId?: string
+}
+
 export class ClaudeAdapter extends LlmAdapter {
   /** Null keeps the pre-pool single-credential path. */
   private readonly accountPool: ClaudeAccountPoolLike | null
+  private readonly version: ClaudeCodeVersionResolver
+  private readonly capabilityMemory: ClaudeCapabilityMemory
+  private readonly firstParty = new ClaudeCodeFirstPartyTracker()
+  private readonly sessionEfforts = new Map<string, string | null>()
+  private readonly cacheTouchRecords = new Map<string, ClaudeCacheTouchRecord>()
+  private readonly cacheTouchFlights = new Map<string, Promise<boolean>>()
 
   constructor(
     private readonly store = new FileCredentialStore(),
@@ -417,6 +454,8 @@ export class ClaudeAdapter extends LlmAdapter {
   ) {
     super()
     this.accountPool = options.accountPool ?? null
+    this.version = options.version ?? new ClaudeCodeVersionResolver()
+    this.capabilityMemory = options.capabilityMemory ?? new ClaudeCapabilityMemory(claudeCapabilityMemoryPath('claude'))
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -681,10 +720,14 @@ export class ClaudeAdapter extends LlmAdapter {
     requestOptions: NormalizedGenerateOptions,
     images: Awaited<ReturnType<typeof resolveRequestImages>>,
     toolNames: ClaudeToolNames,
-    thinking: boolean,
     settings: ClaudeModelSettings | null,
     signal: AbortSignal,
     fetchFn: typeof fetch,
+    version: ClaudeCodeVersionSelection,
+    firstParty: ClaudeCodeFirstPartyContext,
+    deviceId: string,
+    accountId: string | undefined,
+    corrections: ClaudeProtocolCorrections,
   ): Promise<Response> {
     // Resolved ONCE and used for both halves of the request: the marker in the
     // body and the beta in the header. They license the same capability, and a
@@ -696,7 +739,19 @@ export class ClaudeAdapter extends LlmAdapter {
     // which requests the one-hour tier while the plan is drawing on included
     // usage. See CLAUDE_SUBSCRIPTION_CACHE_TTL.
     const cacheTtl = ClaudeAdapter.cacheTtlFor(settings)
-    const catalog = requestOptions.maxTokens === undefined ? await this.catalog(credentials) : undefined
+    const catalog = await this.catalog(credentials)
+    const capabilityScope = accountId ?? credentials.account?.uuid ?? 'single'
+    const remembered = this.capabilityMemory.get(capabilityScope, requestOptions.model)
+    const resolvedEntry = resolveClaudeModel(requestOptions.model, catalog)
+    const rememberedFastMode = corrections.fastMode ?? remembered.fastMode
+    const fastMode = rememberedFastMode === 'unsupported' ? null : rememberedFastMode
+    const systemRoleUnsupported = corrections.systemRoleUnsupported === true || remembered.systemRoleUnsupported
+    const entry: ClaudeModelEntry = {
+      ...resolvedEntry,
+      ...(fastMode === undefined ? {} : { fastMode }),
+      ...(systemRoleUnsupported ? { midConversationSystem: false } : {}),
+    }
+    const effectiveCatalog = [entry, ...catalog.filter(candidate => candidate.id !== entry.id)]
     const payload = buildClaudeRequestBody({
       ...requestOptions,
       maxTokens: requestOptions.maxTokens ?? maxOutputTokensFor(requestOptions.model, catalog),
@@ -715,6 +770,14 @@ export class ClaudeAdapter extends LlmAdapter {
       // this provider. See the mapper's section 7 for where the breakpoints go.
       cacheControl: true,
       cacheTtl,
+      catalog: effectiveCatalog,
+      fastMode: settings?.fastMode === true,
+      firstParty: {
+        version: version.value,
+        deviceId,
+        accountUuid: credentials.account?.uuid ?? '',
+        context: firstParty,
+      },
     })
     try {
       const cachePolicy = promptCachePolicyOf('claude', this.options.promptCache)
@@ -734,10 +797,11 @@ export class ClaudeAdapter extends LlmAdapter {
           // and for every non-haiku one alike.
           headers: buildClaudeHeaders(credentials.accessToken, {
             model: requestOptions.model,
-            thinking,
-            // Read off the body just built: the vendor documents block_binding
-            // without its beta as a 400 on every request.
-            thinkingBinding: claudeBodyBindsThinking(payload),
+            version: version.value,
+            firstParty,
+            thinkingTokenCount: !(corrections.thinkingTokenCountUnsupported === true || remembered.thinkingTokenCountUnsupported),
+            cacheKeepalive: settings?.cacheKeepalive === true,
+            fastMode,
             // Read off the body too: the blocks and the beta that licenses them
             // must come from the same request or neither is trustworthy.
             toolChanges: claudeBodyHasToolChanges(payload),
@@ -745,13 +809,105 @@ export class ClaudeAdapter extends LlmAdapter {
             cacheTtl,
             method: 'POST',
           }),
-          body: JSON.stringify(payload),
+          body: signClaudeCodeCch(JSON.stringify(payload), version.seed),
           signal,
         },
       )
     } catch (error) {
       if (signal.aborted) throw new LlmError('Claude request aborted', 'ABORTED', { cause: error })
       throw toLlmError(networkFailure(error))
+    }
+  }
+
+  private rememberSessionEffort(sessionId: string, effort: string | null): void {
+    this.sessionEfforts.delete(sessionId)
+    this.sessionEfforts.set(sessionId, effort)
+    while (this.sessionEfforts.size > 500) {
+      const oldest = this.sessionEfforts.keys().next().value
+      if (oldest === undefined) break
+      this.sessionEfforts.delete(oldest)
+    }
+  }
+
+  /** Apply one remembered protocol refusal and retry on the same credential. */
+  private async correctProtocolFailure(
+    status: number,
+    detail: string,
+    settings: ClaudeModelSettings | null,
+    scope: string,
+    model: string,
+    corrections: ClaudeProtocolCorrections,
+  ): Promise<boolean> {
+    if (status !== 400) return false
+    if (corrections.systemRoleUnsupported !== true && isClaudeSystemRoleUnsupported(detail)) {
+      corrections.systemRoleUnsupported = true
+      await this.capabilityMemory.setSystemRoleUnsupported(scope, model)
+      return true
+    }
+    if (settings?.fastMode === true && corrections.fastMode === undefined && isClaudeSpeedUnsupported(detail)) {
+      corrections.fastMode = 'unsupported'
+      await this.capabilityMemory.setFastMode(scope, model, 'unsupported')
+      return true
+    }
+    if (settings?.fastMode === true && corrections.fastMode !== 'beta' && isClaudeSpeedNeedsBeta(detail)) {
+      corrections.fastMode = 'beta'
+      await this.capabilityMemory.setFastMode(scope, model, 'beta')
+      return true
+    }
+    if (corrections.thinkingTokenCountUnsupported !== true && isClaudeThinkingTokenCountUnsupported(detail)) {
+      corrections.thinkingTokenCountUnsupported = true
+      await this.capabilityMemory.setThinkingTokenCountUnsupported(scope, model)
+      return true
+    }
+    return false
+  }
+
+  /** Cache-touch is one best-effort attempt; false selects the existing steer warmup. */
+  async tryCacheTouch(sessionId: string): Promise<boolean> {
+    const existing = this.cacheTouchFlights.get(sessionId)
+    if (existing !== undefined) return existing
+    const flight = this.performCacheTouch(sessionId).finally(() => { this.cacheTouchFlights.delete(sessionId) })
+    this.cacheTouchFlights.set(sessionId, flight)
+    return flight
+  }
+
+  private async performCacheTouch(sessionId: string): Promise<boolean> {
+    const record = this.cacheTouchRecords.get(sessionId)
+    if (record === undefined) return false
+    try {
+      const settings = await this.settings()
+      if (!settings.cacheKeepalive || ClaudeAdapter.cacheTtlFor(settings) !== '1h') return false
+      const fetchFn = this.options.fetchFn ?? fetch
+      const signal = AbortSignal.timeout(30_000)
+      let credentials: ClaudeCredentials
+      if (this.accountPool !== null && record.accountId !== undefined) {
+        if (this.accountPool.getFreshCredential === undefined) return false
+        credentials = await this.accountPool.getFreshCredential(record.accountId, fetchFn)
+      } else if (this.accountPool === null) {
+        credentials = (await this.resolveCredential(null, new Set(), fetchFn, signal)).credentials
+      } else {
+        return false
+      }
+      const response = await fetchFn(API_BASE + '/v1/messages/cache_touch', {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer ' + credentials.accessToken,
+          'content-type': 'application/json',
+          'user-agent': claudeUserAgent('cli', this.version.currentProfile().value),
+          'x-app': 'cli',
+          'anthropic-version': ANTHROPIC_VERSION,
+          'anthropic-beta': 'oauth-2025-04-20,cache-keepalive-2026-09-03',
+        },
+        body: JSON.stringify({ request_id: record.requestId }),
+        signal,
+      })
+      await response.arrayBuffer().catch(() => undefined)
+      if (!response.ok) return false
+      const previous = claudeCacheActivity.read(sessionId)
+      claudeCacheActivity.record(sessionId, previous?.totalTokens ?? 0, Date.now(), 60 * 60_000)
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -799,27 +955,36 @@ export class ClaudeAdapter extends LlmAdapter {
     // verdict about a client version, so spending a request to learn it would
     // only produce the opaque upstream 400 this replaces. See the function's own
     // doc comment for what it is careful NOT to do.
-    assertClaudeCliVersionMeetsFloor(requestOptions.model, await this.catalogForRequest())
-    const effort = requestOptions.reasoningEffort === undefined || requestOptions.reasoningEffort === null
-      ? undefined
-      : String(requestOptions.reasoningEffort)
-    // Derived from the SAME catalog rule the body uses, so the beta set and the
-    // body cannot disagree about whether this request thinks. It is not a
-    // hardcoded true: a mid-convo model thinks whatever the caller asked for,
-    // and a model with no thinking form never does.
-    const thinking = claudeRequestThinks(requestOptions.model, effort)
-    // Read once per turn, next to the thinking flag for the same reason: both
-    // shape the body AND the beta set, and both must come from one snapshot so
-    // a settings change mid-turn cannot desynchronize them.
+    const requestCatalog = await this.catalogForRequest()
+    await Promise.all([this.version.warm(), this.capabilityMemory.warm()])
+    const version = this.version.currentProfile()
+    assertClaudeCliVersionMeetsFloor(requestOptions.model, requestCatalog, version.value)
+    // Read once per turn, next to the version: every attempt in this call shares both.
     const settings = await this.settings().catch(() => null)
+    const sessionId = requestOptions.sessionId?.trim() || undefined
+    const namedEffort = typeof requestOptions.reasoningEffort === 'string' && requestOptions.reasoningEffort.trim() !== ''
+      ? requestOptions.reasoningEffort.trim() : undefined
+    let callOptions = requestOptions
+    if (requestOptions.purpose === 'compaction' && namedEffort === undefined && sessionId !== undefined) {
+      const remembered = this.sessionEfforts.get(sessionId)
+      if (remembered === null) callOptions = { ...requestOptions, reasoningEffort: undefined }
+      else if (remembered !== undefined && claudeReasoningEfforts(requestOptions.model, requestCatalog).includes(remembered)) {
+        callOptions = { ...requestOptions, reasoningEffort: ReasoningEffortId(remembered) }
+      }
+    }
+    this.version.noteActivity(ClaudeAdapter.cacheTtlFor(settings), 'claude')
+    const deviceId = await this.modelSettings.ensureDeviceId()
+    const sessionUuid = sessionId === undefined ? randomUUID() : claudeCodeSessionUuid(sessionId, 'dsh-claude-subscription-session:')
+    const firstParty = this.firstParty.begin(sessionUuid, sessionId ?? sessionUuid)
 
     // Wait-time keepalive evidence: only MAIN turns record, and the idle clock starts
     // when the request is SENT - that is when upstream touches the cache, so a stream
     // that runs for minutes must not push the decision point past the TTL. The tier
     // recorded is the one this request really asks for, read from the SAME settings
     // snapshot attemptRequest builds the body and the beta header from.
-    const waitSessionId = requestOptions.sessionId?.trim() || undefined
+    const waitSessionId = sessionId
     const mainTurn = requestOptions.purpose === undefined && waitSessionId !== undefined
+    if (mainTurn) this.rememberSessionEffort(waitSessionId, namedEffort ?? settings?.defaultReasoningEffort ?? null)
     const waitTtlMs = ClaudeAdapter.cacheTtlFor(settings) === '1h' ? 60 * 60_000 : 5 * 60_000
     let issuedAt = 0
 
@@ -850,15 +1015,21 @@ export class ClaudeAdapter extends LlmAdapter {
      * exhausted account fails identically.
      */
     let usedAccountId: string | undefined
+    const corrections: ClaudeProtocolCorrections = {}
+    let retryCredentials: ClaudeCredentials | undefined
 
     while (true) {
-      const { credentials, accountId } = await this.resolveCredential(pool, tried, fetchFn, signal)
+      const resolved = retryCredentials !== undefined
+        ? { credentials: retryCredentials, accountId: usedAccountId }
+        : await this.resolveCredential(pool, tried, fetchFn, signal)
+      retryCredentials = undefined
+      const { credentials, accountId } = resolved
       usedAccountId = accountId
       if (mainTurn) {
         issuedAt = Date.now()
         claudeCacheActivity.record(waitSessionId, claudeCacheActivity.read(waitSessionId)?.totalTokens ?? 0, issuedAt, waitTtlMs)
       }
-      response = await this.attemptRequest(credentials, requestOptions, images, toolNames, thinking, settings, signal, fetchFn)
+      response = await this.attemptRequest(credentials, callOptions, images, toolNames, settings, signal, fetchFn, version, firstParty, deviceId, accountId, corrections)
       // Headers are transport activity: the streaming idle budget starts at the
       // hand-off, so a slow prefill is not spent from it.
       activity?.pulse()
@@ -869,6 +1040,11 @@ export class ClaudeAdapter extends LlmAdapter {
       if (response.ok) break
 
       const detail = (await response.text().catch(() => '')).slice(0, 2_000)
+      const scope = accountId ?? credentials.account?.uuid ?? 'single'
+      if (await this.correctProtocolFailure(response.status, detail, settings, scope, requestOptions.model, corrections)) {
+        retryCredentials = credentials
+        continue
+      }
       const failure = classifyFailure(response.status, detail, response.headers)
 
       // The pool is consulted only through the same branch that already requires
@@ -893,6 +1069,22 @@ export class ClaudeAdapter extends LlmAdapter {
     }
 
     if (response === undefined) throw new LlmError('Claude produced no response', 'PROVIDER_ERROR')
+    if (mainTurn && settings?.cacheKeepalive === true && waitTtlMs === 60 * 60_000) {
+      const requestId = response.headers.get('request-id') ?? ''
+      if (/^req_[A-Za-z0-9_-]{1,36}$/.test(requestId)) {
+        this.cacheTouchRecords.delete(waitSessionId)
+        this.cacheTouchRecords.set(waitSessionId, { requestId, ...(usedAccountId === undefined ? {} : { accountId: usedAccountId }) })
+        while (this.cacheTouchRecords.size > 256) {
+          const oldest = this.cacheTouchRecords.keys().next().value
+          if (oldest === undefined) break
+          this.cacheTouchRecords.delete(oldest)
+        }
+      } else {
+        this.cacheTouchRecords.delete(waitSessionId)
+      }
+    } else if (mainTurn) {
+      this.cacheTouchRecords.delete(waitSessionId)
+    }
     if (response.body === null) throw new LlmError('Claude returned an empty response body', 'PROVIDER_ERROR')
 
     const reader = response.body.getReader()

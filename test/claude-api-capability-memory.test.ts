@@ -119,8 +119,8 @@ describe('ClaudeApiCapabilityMemory codec and expiry', () => {
     expect(parsed[BASE + '\n' + 'm2']?.fastMode).toEqual({ value: 'beta', expiresAt: 1000 + CLAUDE_API_CAPABILITY_MEMORY_TTL_MS })
     const restored = new ClaudeApiCapabilityMemory(file(), () => 1000)
     await restored.warm()
-    expect(restored.get(BASE, 'm1')).toEqual({ compactionUnsupported: true, fastMode: undefined, systemRoleUnsupported: false })
-    expect(restored.get(BASE, 'm2')).toEqual({ compactionUnsupported: false, fastMode: 'beta', systemRoleUnsupported: false })
+    expect(restored.get(BASE, 'm1')).toEqual({ compactionUnsupported: true, fastMode: undefined, systemRoleUnsupported: false, thinkingTokenCountUnsupported: false })
+    expect(restored.get(BASE, 'm2')).toEqual({ compactionUnsupported: false, fastMode: 'beta', systemRoleUnsupported: false, thinkingTokenCountUnsupported: false })
   })
   it('drops expired fields on read and removes them on the next write', async () => {
     let clock = 1000
@@ -128,7 +128,7 @@ describe('ClaudeApiCapabilityMemory codec and expiry', () => {
     await memory.setCompactionUnsupported(BASE, 'm')
     await memory.setFastMode(BASE, 'm', 'beta')
     clock = 1000 + CLAUDE_API_CAPABILITY_MEMORY_TTL_MS + 1
-    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: false, fastMode: undefined, systemRoleUnsupported: false })
+    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: false, fastMode: undefined, systemRoleUnsupported: false, thinkingTokenCountUnsupported: false })
     await memory.setFastMode(BASE, 'other', 'unsupported')
     const parsed = parseClaudeApiCapabilityMemory(JSON.parse(await fs.readFile(file(), 'utf8')))
     expect(parsed[BASE + '\n' + 'm']).toBeUndefined()
@@ -138,14 +138,14 @@ describe('ClaudeApiCapabilityMemory codec and expiry', () => {
     const memory = new ClaudeApiCapabilityMemory(file(), () => 1000)
     await memory.setCompactionUnsupported(BASE, 'm')
     await memory.setFastMode(BASE, 'm', 'beta')
-    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: true, fastMode: 'beta', systemRoleUnsupported: false })
+    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: true, fastMode: 'beta', systemRoleUnsupported: false, thinkingTokenCountUnsupported: false })
     await memory.setFastMode(BASE, 'm', 'unsupported')
-    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: true, fastMode: 'unsupported', systemRoleUnsupported: false })
+    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: true, fastMode: 'unsupported', systemRoleUnsupported: false, thinkingTokenCountUnsupported: false })
   })
   it('treats a missing or damaged file as nothing remembered', async () => {
     const memory = new ClaudeApiCapabilityMemory(file())
     await memory.warm()
-    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: false, fastMode: undefined, systemRoleUnsupported: false })
+    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: false, fastMode: undefined, systemRoleUnsupported: false, thinkingTokenCountUnsupported: false })
     await fs.mkdir(path.dirname(file()), { recursive: true })
     await fs.writeFile(file(), '{broken', 'utf8')
     const damaged = new ClaudeApiCapabilityMemory(file())
@@ -157,15 +157,27 @@ describe('ClaudeApiCapabilityMemory codec and expiry', () => {
     const memory = new ClaudeApiCapabilityMemory(file(), () => clock)
     await memory.setCompactionUnsupported(BASE, 'm')
     await memory.setSystemRoleUnsupported(BASE, 'm')
-    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: true, fastMode: undefined, systemRoleUnsupported: true })
+    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: true, fastMode: undefined, systemRoleUnsupported: true, thinkingTokenCountUnsupported: false })
     const parsed = parseClaudeApiCapabilityMemory(JSON.parse(await fs.readFile(file(), 'utf8')))
     expect(parsed[BASE + '\n' + 'm']?.systemRole).toEqual({ value: 'unsupported', expiresAt: 1000 + CLAUDE_API_CAPABILITY_MEMORY_TTL_MS })
     clock = 1000 + CLAUDE_API_CAPABILITY_MEMORY_TTL_MS + 1
-    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: false, fastMode: undefined, systemRoleUnsupported: false })
+    expect(memory.get(BASE, 'm')).toEqual({ compactionUnsupported: false, fastMode: undefined, systemRoleUnsupported: false, thinkingTokenCountUnsupported: false })
     await memory.setFastMode(BASE, 'm', 'beta')
     const after = parseClaudeApiCapabilityMemory(JSON.parse(await fs.readFile(file(), 'utf8')))
     expect(after[BASE + '\n' + 'm']?.systemRole).toBeUndefined()
     expect(after[BASE + '\n' + 'm']?.fastMode?.value).toBe('beta')
+  })
+  it('persists thinking-token-count refusal independently', async () => {
+    const memory = new ClaudeApiCapabilityMemory(file(), () => 1000)
+    await memory.setThinkingTokenCountUnsupported(BASE, 'm')
+    expect(memory.get(BASE, 'm')).toEqual({
+      compactionUnsupported: false, fastMode: undefined, systemRoleUnsupported: false, thinkingTokenCountUnsupported: true,
+    })
+    const restored = new ClaudeApiCapabilityMemory(file(), () => 1000)
+    await restored.warm()
+    expect(restored.get(BASE, 'm').thinkingTokenCountUnsupported).toBe(true)
+    const parsed = parseClaudeApiCapabilityMemory(JSON.parse(await fs.readFile(file(), 'utf8')))
+    expect(parsed[BASE + '\n' + 'm']?.thinkingTokenCount).toEqual({ value: 'unsupported', expiresAt: 1000 + CLAUDE_API_CAPABILITY_MEMORY_TTL_MS })
   })
 })
 

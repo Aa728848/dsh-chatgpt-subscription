@@ -44,8 +44,8 @@ export function stripClaudeApiCompactionDirective(options: GenerateOptions): Gen
 }
 
 /**
- * One compaction request. Upstream rejects a history ending in an assistant turn with
- * unanswered tool calls; that is the caller's history to repair, not this builder's.
+ * One compaction request. The shared mapper adds a wire-only user continuation when
+ * the stripped history ends in assistant content, because upstream rejects prefill.
  */
 export function buildClaudeApiCompactionRequest(
   options: GenerateOptions,

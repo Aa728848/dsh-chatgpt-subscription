@@ -118,31 +118,42 @@
  * than left for the caller to re-derive from headers.
  */
 
+import { createHash } from 'node:crypto'
 import {
   ANTHROPIC_VERSION,
   API_BASE,
   CATALOG_CACHE_TTL_MS,
-  CLAUDE_CODE_BETA,
   DISCOVERY_TIMEOUT_MS,
   ERROR_CODE_CLIENT_VERSION_TOO_OLD,
   ERROR_TYPE,
-  EXTENDED_CACHE_TTL_BETA,
   INLINE_TOOLS_BETA,
-  INTERLEAVED_THINKING_BETA,
   MESSAGES_PATH,
   MODELS_DISCOVERY_TIMEOUT_MS,
   MODELS_PATH,
-  OAUTH_BETA,
   QUOTA_CACHE_TTL_MS,
   QUOTA_FULL_REFRESH_MS,
-  THINKING_BINDING_CONTROLS_BETA,
   USAGE_PATH,
   claudeCliVersion,
   isClaudeErrorType,
   type ClaudeCacheTtl,
   type ClaudeErrorType,
 } from './types.ts'
+import {
+  CLAUDE_CODE_BETA_CACHE_KEEPALIVE,
+  CLAUDE_CODE_BETA_FAST_MODE,
+  CLAUDE_CODE_STAINLESS_HEADERS,
+  buildClaudeCodeSystemBlocks,
+  claudeCodeFirstPartyBetas,
+  claudeCodeFirstPartyHeaders,
+  claudeCodeMetadataUserId,
+  claudeCodeSessionUuid,
+  mergeClaudeCodeBetas,
+  ClaudeCodeFirstPartyTracker,
+  type ClaudeCodeFirstPartyContext,
+} from '../common/claude-code-first-party.ts'
 import { FALLBACK_MODELS, resolveClaudeModel, type ClaudeModelEntry } from './model-catalog.ts'
+import { ClaudeCodeVersionResolver, type ClaudeCodeVersionSelection } from '../common/claude-code-version.ts'
+import { signClaudeCodeCch } from '../common/claude-code-cch.ts'
 import type { ClaudeCredentials } from './token-store.ts'
 
 // ---------------------------------------------------------------------------
@@ -224,21 +235,8 @@ export type ClaudeUserAgentKind = 'cli' | 'code'
 
 /** Options for {@link buildClaudeHeaders}. */
 export interface ClaudeHeaderOptions {
-  /**
-   * Exact model id this request targets.
-   *
-   * The one header consequence is the `claude-code-20250219` beta: the
-   * reference's rule is that a haiku model does not receive it. Omit it for a
-   * request that names no model (the usage read), which keeps the beta.
-   */
+  /** Exact model id; the first-party helper applies the captured Haiku beta order. */
   model?: string
-  /** Whether this request enables thinking; adds the interleaved-thinking beta. */
-  thinking?: boolean
-  /**
-   * Whether this request's body carries `thinking.block_binding`; adds the beta
-   * that licenses the field. Without it the body is a 400 on every request.
-   */
-  thinkingBinding?: boolean
   /**
    * Prompt-cache tier this request's body writes. `1h` adds the beta that
    * licenses it, so the header and the body cannot disagree.
@@ -254,51 +252,42 @@ export interface ClaudeHeaderOptions {
   method?: 'GET' | 'POST' | string
   /** Which product identity to report. Defaults to the Messages-API one. */
   userAgent?: ClaudeUserAgentKind
+  /** Shared version selected for this request; defaults to the legacy accessor for auxiliary surfaces. */
+  version?: string
+  /** First-party Messages context. Auxiliary catalog/quota calls leave this absent. */
+  firstParty?: ClaudeCodeFirstPartyContext
+  /** Remembered refusal removes thinking-token-count before the request is sent. */
+  thinkingTokenCount?: boolean
+  /** Explicit subscription opt-in; meaningful only on a first-party 1h request. */
+  cacheKeepalive?: boolean
+  /** Runtime-corrected fast-mode wire requirement. */
+  fastMode?: 'ga' | 'beta' | null
   /** Extra headers. `x-api-key` is stripped from the result regardless. */
   extra?: Record<string, string>
 }
 
 /**
- * Whether a model id belongs to the haiku family.
- *
- * A substring test on the id is the only offline signal available, and it is
- * what the reference keys on. The failure mode is asymmetric and small: an id
- * that renames its family token would merely receive the claude-code beta it
- * did not need, which is a superset of the betas it does need.
- */
-function isHaikuModel(modelId: string): boolean {
-  return modelId.toLowerCase().includes('haiku')
-}
-
-/**
  * The `anthropic-beta` set for one request, in a stable order.
  *
- * Order is not observable — the server parses the header as a set — so the order
- * below is chosen for readability in a log rather than to match a reference.
+ * The server parses this as a set, but the plugin keeps the capture-backed order
+ * so Opus/Haiku fixtures can detect accidental reordering.
  */
-export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'thinking' | 'thinkingBinding' | 'cacheTtl' | 'toolChanges'> = {}): string[] {
-  const betas: string[] = []
-  // The haiku exclusion is the reference's own rule, not this module's taste:
-  // a haiku id is served without the claude-code identity beta.
-  if (options.model === undefined || !isHaikuModel(options.model)) betas.push(CLAUDE_CODE_BETA)
-  betas.push(OAUTH_BETA)
-  if (options.thinking === true) betas.push(INTERLEAVED_THINKING_BETA)
-  if (options.thinkingBinding === true) betas.push(THINKING_BINDING_CONTROLS_BETA)
-  // The header follows the BODY here, for the same reason it does for
-  // `block_binding`: the one-hour cache tier is a licensed capability, and a body
-  // asking for `ttl: '1h'` without the marker is refused. Deriving it from the
-  // tier rather than from a setting means a caller cannot desynchronize the two.
-  if (options.cacheTtl === '1h') betas.push(EXTENDED_CACHE_TTL_BETA)
-  // Same rule as the tier above: the header follows the BODY. A request that
-  // states a tool change carries the blocks, so the marker is derived from the
-  // request itself rather than from a setting a caller could forget to set.
-  if (options.toolChanges === true) betas.push(INLINE_TOOLS_BETA)
-  return betas
+export function claudeBetas(options: Pick<ClaudeHeaderOptions, 'model' | 'cacheTtl' | 'toolChanges' | 'thinkingTokenCount' | 'cacheKeepalive' | 'fastMode'> = {}): string[] {
+  const base = claudeCodeFirstPartyBetas({
+    auth: 'oauth',
+    ...(options.model === undefined ? {} : { model: options.model }),
+    cacheTtl: options.cacheTtl ?? '5m',
+    thinkingTokenCount: options.thinkingTokenCount !== false,
+  })
+  return mergeClaudeCodeBetas(base, [
+    ...(options.toolChanges === true ? [INLINE_TOOLS_BETA] : []),
+    ...(options.cacheKeepalive === true && options.cacheTtl === '1h' ? [CLAUDE_CODE_BETA_CACHE_KEEPALIVE] : []),
+    ...(options.fastMode === 'beta' ? [CLAUDE_CODE_BETA_FAST_MODE] : []),
+  ])
 }
 
 /** The `User-Agent` value this line reports for one surface. */
-export function claudeUserAgent(kind: ClaudeUserAgentKind = 'cli'): string {
-  const version = claudeCliVersion()
+export function claudeUserAgent(kind: ClaudeUserAgentKind = 'cli', version = claudeCliVersion()): string {
   return kind === 'code' ? 'claude-code/' + version : 'claude-cli/' + version + ' (external, cli)'
 }
 
@@ -318,10 +307,16 @@ export function buildClaudeHeaders(accessToken: string, options: ClaudeHeaderOpt
   const method = (options.method ?? 'POST').toUpperCase()
   const headers: ClaudeRequestHeaders = {
     authorization: 'Bearer ' + accessToken,
-    'user-agent': claudeUserAgent(options.userAgent ?? 'cli'),
+    'user-agent': claudeUserAgent(options.userAgent ?? 'cli', options.version),
     'x-app': 'cli',
     'anthropic-version': ANTHROPIC_VERSION,
     'anthropic-beta': claudeBetas(options).join(','),
+    ...(options.firstParty === undefined ? {} : {
+      accept: 'application/json',
+      'anthropic-dangerous-direct-browser-access': 'true',
+      ...CLAUDE_CODE_STAINLESS_HEADERS,
+      ...claudeCodeFirstPartyHeaders(options.firstParty),
+    }),
   }
   // Emitted unless the caller explicitly says GET. The default is the
   // fail-safe direction: a stray content-type on a GET is ignored, while a
@@ -1219,11 +1214,14 @@ export interface ProbeOptions {
    * Defaults to the cheapest id in the shipped table. A probe is a connectivity
    * and credential check, and the widest-entitlement model answers it on every
    * plan; a caller that wants to prove a SPECIFIC model's entitlement passes it
-   * here. Note that the default is a haiku id, so the probe exercises the header
-   * set that omits the claude-code beta — pass the user's selected model to
+   * here. The default haiku id exercises the captured haiku beta order; pass a
+   * selected model to
    * probe the exact header set that model's real calls will use.
    */
   model?: string
+  /** Shared first-party version and host-only install id. */
+  version?: ClaudeCodeVersionSelection
+  deviceId?: string
   /** Deadline for the probe. Defaults to the discovery ceiling. */
   timeoutMs?: number
 }
@@ -1251,14 +1249,26 @@ export async function probeConnection(
   const startedAt = now()
   let response: Response
   try {
+    const version = options.version ?? new ClaudeCodeVersionResolver().currentProfile()
+    const account = credentials.account?.uuid ?? ''
+    const sessionUuid = claudeCodeSessionUuid(account || 'anonymous', 'dsh-claude-probe-session:')
+    const firstParty = new ClaudeCodeFirstPartyTracker().begin(sessionUuid)
+    const deviceId = options.deviceId ?? createHash('sha256').update('claude-probe:' + account).digest('hex')
+    const payload = {
+      model,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
+      system: buildClaudeCodeSystemBlocks({
+        version: version.value, entrypoint: 'cli', firstUserText: 'ping', context: firstParty,
+        identityText: "You are Claude Code, Anthropic's official CLI for Claude.", cacheTtl: '1h',
+      }),
+      metadata: { user_id: claudeCodeMetadataUserId(deviceId, account, sessionUuid) },
+      max_tokens: 1,
+      diagnostics: { previous_message_id: null },
+    }
     response = await fetchFn(API_BASE + MESSAGES_PATH, {
       method: 'POST',
-      headers: buildClaudeHeaders(credentials.accessToken, { method: 'POST', model }),
-      body: JSON.stringify({
-        model,
-        max_tokens: 1,
-        messages: [{ role: 'user', content: 'ping' }],
-      }),
+      headers: buildClaudeHeaders(credentials.accessToken, { method: 'POST', model, version: version.value, firstParty, cacheTtl: '1h' }),
+      body: signClaudeCodeCch(JSON.stringify(payload), version.seed),
       signal: timeoutSignal(options.signal, options.timeoutMs ?? DISCOVERY_TIMEOUT_MS),
     })
   } catch (error) {

@@ -9,11 +9,26 @@
 | 端点 | 默认 `https://api.anthropic.com`，可自定义；http 与 https 都接受 |
 | 凭据 | 单 Key，系统加密存储，无账号池 |
 | 请求形态 | 只做 Claude Code 形态 |
-| 客户端版本号 | 跟随 npm 上 `@anthropic-ai/claude-code` 的最新版，取不到时用最后一次取到的值；全局一致，新版本仅在线路空闲超过缓存 TTL 后采纳，采纳前在卡片上以 pending 显示 |
+| 客户端版本号 | 两条 Claude 线路共用。仅在已有对应 cch 种子时采用 npm 新版本；未知版本沿用最后的已验证组合。两条线路都超过各自已用缓存 TTL 后才切换 |
 | 入口 | 枢纽卡片紧跟 `claude` 之后；沿用 Claude 品牌标记 |
 | 服务端压缩 | 默认开，设置页有开关；只在本线路生效 |
 | 可选能力 | 缓存时长 5m / 1h（默认 5m）、官方同款 `context_management`、快速模式（默认关）、单轮提醒 `clear_at` |
 | 不做 | 额度显示与输入框徽章、账号池、原生 API 形态、阈值压缩、媒体工具、任务预算 |
+
+## 2026-11-22 第一方协议修正
+
+- 两条线路均使用第一方 Messages 形态：5 个第一方请求头、带 `cch` 的计费块、`diagnostics`、按认证方式区分的 beta 集，以及计费/身份/宿主静态提示/动态提示的有序 system 块。无实际提示内容时不伪造空块。
+- `cch` 在最终 `JSON.stringify` 后计算：先做 model/max_tokens 的纯文本 hashView，再以版本对应种子执行 xxHash64 并取低 20 位。算法与参考向量见 [cch 报告](2026-11-21_cch-attestation-report.md)。所有纠正、压缩和重试都重新经过该接缝。
+- 共享版本解析器位于 `src/host/common/claude-code-version.ts`，当前已知组合是 2.1.330 与报告中的种子。两个旧版本环境变量是同一 pin 的兼容别名；同时设置但值不同会报配置错误。未知版本 pin 必须与 `DSH_CLAUDE_CCH_SEED` 成对提供。
+- 订阅线路新增默认关闭的 fastMode 与 cacheKeepalive 开关、官方 `context_management`、按账号+模型持久化的能力结论、压缩跟随会话 effort。cache_touch 只在 1h 主会话的现有等待决策点优先执行，失败回退原 steer；API 线路不启用 touch。
+- 两条线路都防止尾部 assistant prefill，支持 thinking-token-count 摘除重试，按二进制修正 mythos-5，并透传 usage.speed / service_tier / inference_geo。订阅授权入口默认改为 `https://claude.com/cai/oauth/authorize`。
+- 不移植订阅服务端压缩或单轮提醒 clear_at；不接 thinking.display: updates、clear_tool_uses、dangerous-tool-use。
+
+### 仍未验证
+
+交互模式 cli 的多轮 prompt/turn 计数取值、未知新版本的种子、真实订阅账号直连的 OAuth 第一方请求与 cache_touch、55 分钟真实续热、Mythos 可用性和部分模型快速模式。结构夹具不是线上字节抓包；cch 的离线证据来自标准向量、独立参考实现向量和适配器实际发送 body 的反算。
+
+验证记录：强制 host/client、test、scripts TypeScript 检查均通过；全量 Vitest 为 409 文件通过、3 个条件跳过，7356 测试通过、12 个条件跳过；`npm run build` 通过；`npm pack --dry-run --json --ignore-scripts` 为 1118 个条目，新增共享模块声明全部入包。参考快照缺失导致的既有 fidelity 跳过不计为通过。UI 已收到同场景 Before，After 待新版宿主重载后截取。
 
 ## 证据来源
 
@@ -30,14 +45,15 @@
 ## 请求形态
 
 - `POST <baseUrl>/v1/messages?beta=true`，流式。
-- 请求头（大小写无关）：`accept: application/json`、`content-type: application/json`、`user-agent: claude-cli/<版本> (external, cli)`、`x-app: cli`、`x-claude-code-session-id: <会话 UUID>`、`anthropic-version: 2023-06-01`、`anthropic-dangerous-direct-browser-access: true`、`x-api-key`、`anthropic-beta`，以及 `CLAUDE_API_STAINLESS_HEADERS` 的八个头。
-- `system` 恰好三块，顺序固定：
-  1. 计费归因块 `claudeApiBillingBlock(version, firstUserText)`，不带缓存标记。
-  2. 身份句 `CLAUDE_API_IDENTITY_TEXT`，带缓存标记。
-  3. DSH 的系统提示（含折叠进来的 system 消息），带缓存标记；没有系统提示时省略这一块。
+- 请求头（大小写无关）：`accept: application/json`、`content-type: application/json`、`user-agent: claude-cli/<版本> (external, cli)`、`x-app: cli`、`x-claude-code-session-id: <会话 UUID>`、`anthropic-version: 2023-06-01`、`anthropic-dangerous-direct-browser-access: true`、`x-api-key`、`anthropic-beta`，以及 `CLAUDE_API_STAINLESS_HEADERS` 的八个头、5 个第一方头（`x-claude-1p-request-class`、`x-claude-code-prompt-id`、`x-claude-code-request-class`、`x-claude-code-sandy-plover`、`x-client-request-id`）。
+- `system` 按实际内容有两到四块，顺序固定：
+  1. 计费归因块 `claudeApiBillingBlock(version, firstUserText, firstParty)`，含 cch 占位符，不带缓存标记。
+  2. 身份句 `CLAUDE_API_IDENTITY_TEXT`，不带缓存标记。
+  3. DSH 静态系统提示，带缓存标记与 `scope: "global"`；没有则省略。
+  4. 折叠进来的动态 system 文本，带当前 TTL 的缓存标记；没有则省略。
 - `firstUserText` 是第一条用户消息里用户自己的第一段文本（不是工具结果，也不是排在它前面的提醒块）；没有则为空串。
 - `metadata.user_id` = `claudeApiMetadataUserId(deviceId, claudeApiSessionUuid(sessionId))`；没有会话 ID 时每次请求用随机 UUID。
-- 同一个调用里 UA、计费块、指纹用同一个版本号：适配器每调用只读一次 `ClaudeApiClientVersionResolver.current().value`（这也是 pending 版本可能被采纳的时机），随后 `noteActivity(settings.cacheTtl)` 记录活动，流结束或失败时再记一次；目录读取与连接测试不算活动。
+- 同一个调用里 UA、计费块、指纹用同一个版本号：适配器每调用只读一次 `ClaudeApiClientVersionResolver.currentProfile()`（value 与种子同时固定）（这也是 pending 版本可能被采纳的时机），随后 `noteActivity(settings.cacheTtl)` 记录活动，流结束或失败时再记一次；目录读取与连接测试不算活动。
 - 工具只发 `name`、`description`、`input_schema`、`defer_loading` 四个字段，不做名称大小写归一。
 
 ## beta 规则
@@ -46,10 +62,10 @@
 
 | beta 常量 | 条件 |
 | --- | --- |
-| `CLAUDE_API_BETA_THINKING_BINDING` | 请求体含 `thinking.block_binding` |
+| `CLAUDE_API_BETA_THINKING_BINDING` | 已属第一方底集，不再重复追加 |
 | `CLAUDE_API_BETA_COMPACT` | 顶层有 `compaction`，或任一消息含 `type: "compaction"` 的块 |
 | `CLAUDE_API_BETA_INLINE_TOOLS` | 任一 `tool_addition` 的 `tool.type` 是 `tool_definition`；或顶层有 `compaction` 且消息里有 `tool_addition` / `tool_removal` |
-| `CLAUDE_API_BETA_CLEAR_AT` | 任一消息带 `clear_at` |
+| `CLAUDE_API_BETA_CLEAR_AT` | 非 Haiku 底集已包含；Haiku 在消息带 `clear_at` 时补充，最终稳定去重 |
 | `CLAUDE_API_BETA_FAST_MODE` | 请求体有 `speed` 且模型 `fastMode === 'beta'` |
 
 实测：缺少对应 beta 时，兼容网关可能静默剥掉 `context_management`、`thinking.block_binding` 和消息级 `output_config` 并返回 200；`tool_addition`、`clear_at`、`compaction` 块缺头时上游明确 400。所以头必须从请求体推导，不能从设置推导。
@@ -130,10 +146,10 @@ DSH 的压缩引擎发出的请求是 `purpose: 'compaction'`，消息为“待�
 ## 风险与未验证项
 
 - 交互模式的入口标识 `cli` 与身份句只有源码依据，没有抓包；用它们构造的请求实测被接受。
-- 请求形态按 2.1.330 抓取。版本号自动跟随 npm 后，若官方改了请求头、beta 集或 `system` 结构，线路不会自动跟上；指纹盐若被更换，指纹会与官方不一致。需要时重新抓包更新常量。
+- 请求形态按 2.1.330 抓取。npm 新版本若没有已登记 cch 种子，线路继续使用最后的已验证组合；请求头、beta、system、指纹盐或种子变化都需要新抓包与代码更新。
 - `X-Stainless-*` 里的 SDK 与运行时版本不随 npm 变化。
 - 没有直连官方端点做过实测。
 - Opus 5 与 Opus 4.8 的快速模式带 beta 后一直被上游限流，未测通。
-- Mythos 各型号的能力行照抄同代 Fable，未单独验证。
+- mythos-5 已按 2.1.330 二进制目录改为 budget/无 effort/无 mid-conversation/context editing/server compaction；真实账号可用性未验证，5-1/5-2 维持原目录。
 - 把仓库现有压缩指令作为 `instructions` 传入只在短对话上验证过会被遵守。
 - 等待续热只经离线注入时钟/定时器与 mocked 流验证（含 `job/registered` / `job/settled` 事件形状）；没有对真实端点跑过「1 小时档 + 空闲 55 分钟 + 委派仍在跑」的长会话，也没有实测续热请求的缓存读取命中率。

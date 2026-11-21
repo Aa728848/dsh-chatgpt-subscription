@@ -7,6 +7,7 @@ import {
   testClaudeApiConnection,
 } from '../src/host/claude-api/client.ts'
 import { CLAUDE_API_BASE_BETAS, CLAUDE_API_STAINLESS_HEADERS } from '../src/host/claude-api/types.ts'
+import { TEST_FIRST_PARTY_CONTEXT } from './claude-api-fixtures.ts'
 
 const SESSION = '7e8e116a-f1b6-4569-a4a3-362e8b9a38cb'
 const KEY = 'sk-client-test'
@@ -22,7 +23,7 @@ describe('buildClaudeApiHeaders', () => {
   it('sends exactly the captured header names, in lower case', async () => {
     const { pairs, stream } = await capture()
     expect(stream).toBe(true)
-    const headers = buildClaudeApiHeaders({ apiKey: KEY, version: '2.1.330', sessionUuid: SESSION, betas: CLAUDE_API_BASE_BETAS, stream: true })
+    const headers = buildClaudeApiHeaders({ apiKey: KEY, version: '2.1.330', sessionUuid: SESSION, betas: CLAUDE_API_BASE_BETAS, stream: true, firstParty: TEST_FIRST_PARTY_CONTEXT })
     expect(Object.keys(headers).sort()).toEqual(pairs.map(([name]) => name.toLowerCase()).sort())
     expect(Object.keys(headers).every(name => name === name.toLowerCase())).toBe(true)
     // The captured client streams with accept: application/json, not text/event-stream.

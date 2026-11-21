@@ -23,6 +23,10 @@ import {
 } from '../common/request-images.ts'
 import type { PromptCacheOverride } from '../common/prompt-cache-policy.ts'
 import { promptCacheActivityStore } from '../common/cache-activity.ts'
+import { ClaudeCodeFirstPartyTracker } from '../common/claude-code-first-party.ts'
+import { signClaudeCodeCch } from '../common/claude-code-cch.ts'
+import { isClaudeThinkingTokenCountUnsupported } from '../common/claude-code-corrections.ts'
+import type { ClaudeCodeVersionSelection } from '../common/claude-code-version.ts'
 import { fetchWithContextBudgetRecovery } from '../common/context-budget-fetch.ts'
 import { outputReservation } from '../common/output-reservation.ts'
 import { ClaudeApiCatalogManager } from './catalog-manager.ts'
@@ -153,6 +157,7 @@ export async function classifyClaudeApiResponse(response: Response, apiKey?: str
 export class ClaudeApiAdapter extends LlmAdapter {
   private readonly fetchFn: typeof fetch
   private readonly capabilityMemory: ClaudeApiCapabilityMemory
+  private readonly firstParty = new ClaudeCodeFirstPartyTracker()
   /** Endpoint-level compaction refusals (30 min, in memory only); model-level facts live in the capability memory. */
   private readonly unsupported = new Map<string, number>()
   /** The effort each session's most recent MAIN turn resolved; null means "no effort sent". */
@@ -265,17 +270,19 @@ export class ClaudeApiAdapter extends LlmAdapter {
     body: Record<string, unknown>,
     entry: ClaudeApiModelEntry,
     apiKey: string,
-    version: string,
+    version: ClaudeCodeVersionSelection,
     sessionUuid: string,
     baseUrl: string,
     signal: AbortSignal,
+    firstParty: ClaudeApiRequestContext['firstParty'],
+    thinkingTokenCount: boolean,
   ): Promise<Response> {
     let response: Response
     try {
       response = await this.fetchFn(claudeApiUrl(baseUrl, CLAUDE_API_MESSAGES_PATH), {
         method: 'POST',
-        headers: buildClaudeApiHeaders({ apiKey, version, sessionUuid, betas: deriveClaudeApiBetas(body, entry), stream: true }),
-        body: JSON.stringify(body),
+        headers: buildClaudeApiHeaders({ apiKey, version: version.value, sessionUuid, betas: deriveClaudeApiBetas(body, entry, thinkingTokenCount), stream: true, firstParty }),
+        body: signClaudeCodeCch(JSON.stringify(body), version.seed),
         signal,
       })
     } catch (error) {
@@ -357,7 +364,7 @@ export class ClaudeApiAdapter extends LlmAdapter {
     await this.options.version.warm()
     // Read ONCE per call: this is where a pending version may be adopted, before the call
     // counts as activity. Every request inside the call shares this one value.
-    const version = this.options.version.current().value
+    const version = this.options.version.currentProfile()
     this.options.version.noteActivity(settings.cacheTtl)
     try {
       const sessionUuid = sessionId !== undefined ? claudeApiSessionUuid(sessionId) : randomUUID()
@@ -377,8 +384,9 @@ export class ClaudeApiAdapter extends LlmAdapter {
       }
       // A block goes to the mapper only for a model that can take it on an unmarked pair;
       // otherwise the checkpoint keeps its text form and the block stays stored.
+      const firstParty = this.firstParty.begin(sessionUuid, sessionId ?? sessionUuid)
       const context: ClaudeApiRequestContext = {
-        entry: activeEntry, settings: callSettings, version, deviceId, sessionUuid,
+        entry: activeEntry, settings: callSettings, version: version.value, deviceId, sessionUuid, firstParty,
         compactionBlocks: {
           lookup: summary => entry.serverCompaction && !this.isUnsupported(settings.baseUrl, entry.id)
             ? this.options.compactionStore.lookup(summary, scope)
@@ -388,9 +396,10 @@ export class ClaudeApiAdapter extends LlmAdapter {
       // Fast-mode corrections: at most once each per call, always before any output.
       const speedState = { unsupported: false, beta: false }
       const systemState = { corrected: false }
+      const thinkingState = { corrected: false }
       const openCorrected = async (rebuild: () => Record<string, unknown>): Promise<Response> => {
         try {
-          return await this.openRequest(rebuild(), activeEntry, credentials.apiKey, version, sessionUuid, settings.baseUrl, signal)
+          return await this.openRequest(rebuild(), activeEntry, credentials.apiKey, version, sessionUuid, settings.baseUrl, signal, context.firstParty, !thinkingState.corrected && !facts.thinkingTokenCountUnsupported)
         } catch (error) {
           const classified = error as ClassifiedError
           const errorBody = classified.claudeApiBody ?? classified.claudeApiDetail ?? ''
@@ -399,6 +408,9 @@ export class ClaudeApiAdapter extends LlmAdapter {
             systemState.corrected = true
             await this.capabilityMemory.setSystemRoleUnsupported(settings.baseUrl, entry.id)
             activeEntry = { ...activeEntry, midConversationSystem: false }
+          } else if (!thinkingState.corrected && isClaudeThinkingTokenCountUnsupported(errorBody)) {
+            thinkingState.corrected = true
+            await this.capabilityMemory.setThinkingTokenCountUnsupported(settings.baseUrl, entry.id)
           } else if (!fastEligible) {
             throw error
           } else if (!speedState.unsupported && isClaudeApiSpeedUnsupported(errorBody)) {

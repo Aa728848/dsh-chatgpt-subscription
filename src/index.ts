@@ -1046,10 +1046,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // Parent waiting is separate from provider cache lifetime. The controller
   // watches turn and delegation events, never imposes a deadline on a child,
   // and continuously warms the parent cache every 20 minutes while children run.
+  let claudeAdapter: ClaudeAdapter | undefined
   ctx.effect(() => {
     const dispose = installKimiCacheWait(ctx as unknown as KimiCacheWaitContext, {
       warmup: () => resolveCacheWaitWarmupEnabled(pluginConfig, process.env),
       overrides: promptCacheOverrides,
+      keepalive: async (sessionId, provider) => {
+        if (provider !== 'claude' && provider !== 'claude-subscription') return false
+        return await claudeAdapter?.tryCacheTouch(sessionId) ?? false
+      },
     })
     if (dispose === undefined) {
       ctx.logger.warn('[dsh-chatgpt-subscription] Kimi cache wait skipped: this harness exposes no event bus')
@@ -1402,11 +1407,12 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       checkin: minimaxCodeCheckin,
     }, minimaxCodeModelSettings, minimaxCodePreferences)
 
-    const claudeAdapter = new ClaudeAdapter(
+    const claudeCodeVersion = new ClaudeApiClientVersionResolver({ fetchFn: proxyFetchFor('claude-subscription') })
+    claudeAdapter = new ClaudeAdapter(
       claudeStore,
       claudeModelSettings,
       claudePreferences,
-      { fetchFn: modelFetch.claude, attachments: ctx.attachments, accountPool: claudeAccountPool, promptCache: promptCacheOverrides.claude },
+      { fetchFn: modelFetch.claude, attachments: ctx.attachments, accountPool: claudeAccountPool, promptCache: promptCacheOverrides.claude, version: claudeCodeVersion },
     )
     // Registered unconditionally: there is no acknowledgement, flag or other
     // prior state that can hold this line back. The only thing that can keep the
@@ -1425,6 +1431,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       claudePreferences,
       {
         fetchFn: proxyFetchFor('claude-subscription'),
+        version: claudeCodeVersion,
         serving: () => claudeClaim.serving(),
         conflict: () => claudeClaim.conflict(),
         accountPool: claudeAccountPool,
@@ -1617,7 +1624,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // Claude API: one encrypted key, custom endpoint, official Claude Code request shape. No pool.
     const claudeApiStore = new ClaudeApiCredentialStore()
     const claudeApiSettings = new ClaudeApiSettingsStore()
-    const claudeApiVersion = new ClaudeApiClientVersionResolver({ fetchFn: proxyFetchFor(CLAUDE_API_PROVIDER_ID) })
+    const claudeApiVersion = claudeCodeVersion
     const stopClaudeApiVersion = claudeApiVersion.start()
     const claudeApiCompaction = new ClaudeApiCompactionStore()
     void claudeApiCompaction.warm().catch(() => undefined)

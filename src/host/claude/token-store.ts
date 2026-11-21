@@ -168,6 +168,12 @@ export interface ClaudeModelSettings {
   enabledModelIds: string[]
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: string | null
+  /** Send speed: fast on models whose catalog entry supports it. */
+  fastMode: boolean
+  /** Permit first-party cache_touch for 1h main requests. Default off. */
+  cacheKeepalive: boolean
+  /** Host-only install id used in metadata.user_id; never included in ClaudeWebStatus. */
+  deviceId: string
   /**
    * Prompt-cache tier the line asks for. `null` means "follow the official
    * subscription client", which is the one-hour tier while a plan is drawing
@@ -188,6 +194,8 @@ export interface ClaudeSettingsPatch {
   /** `null` deletes one override and falls back to the catalog default. */
   contextWindowOverrides?: ContextWindowOverridePatch
   defaultReasoningEffort?: string | null
+  fastMode?: boolean
+  cacheKeepalive?: boolean
   /** `null` restores the subscription default (the one-hour tier). */
   cacheTtl?: ClaudeCacheTtl | null
   selectedAccountId?: string | null
@@ -208,6 +216,9 @@ export function defaultClaudeSettings(): ClaudeModelSettings {
     enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
+    fastMode: false,
+    cacheKeepalive: false,
+    deviceId: '',
     cacheTtl: null,
     selectedAccountId: null,
   }
@@ -499,6 +510,9 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
     }
   }
   const defaultReasoningEffort = nonEmptyString(record.defaultReasoningEffort) ?? null
+  const fastMode = record.fastMode === true
+  const cacheKeepalive = record.cacheKeepalive === true
+  const deviceId = typeof record.deviceId === 'string' && /^[0-9a-f]{64}$/.test(record.deviceId) ? record.deviceId : ''
   // An unrecognised tier is read as "not set" rather than passed through: a
   // value the wire would reject must not become a stored preference.
   const cacheTtl = isClaudeCacheTtl(record.cacheTtl) ? record.cacheTtl : null
@@ -508,6 +522,9 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
     enabledModelIds,
     contextWindowOverrides,
     defaultReasoningEffort,
+    fastMode,
+    cacheKeepalive,
+    deviceId,
     cacheTtl,
     selectedAccountId,
   }
@@ -524,6 +541,9 @@ function mergeClaudeSettings(current: ClaudeModelSettings, patch: ClaudeSettings
     defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
       ? patch.defaultReasoningEffort
       : current.defaultReasoningEffort,
+    fastMode: patch.fastMode ?? current.fastMode,
+    cacheKeepalive: patch.cacheKeepalive ?? current.cacheKeepalive,
+    deviceId: current.deviceId,
     cacheTtl: patch.cacheTtl !== undefined ? patch.cacheTtl : current.cacheTtl,
     selectedAccountId: patch.selectedAccountId !== undefined ? patch.selectedAccountId : current.selectedAccountId,
   }
@@ -805,6 +825,17 @@ export class FileModelSettingsStore {
     await fs.rename(tmp, this.filePath)
   }
 
+  /** Generate the host-only metadata device id once, under the settings write lock. */
+  async ensureDeviceId(): Promise<string> {
+    return serializeOn(settingsOperations, path.resolve(this.filePath), async () => {
+      const current = await this.read()
+      if (current.deviceId !== '') return current.deviceId
+      const deviceId = randomBytes(32).toString('hex')
+      await this.write({ ...current, deviceId })
+      return deviceId
+    })
+  }
+
   /**
    * Read-modify-write under the same per-path lock the credentials use.
    *
@@ -851,6 +882,9 @@ export function registerClaudePreferenceStore(
     enabledModelIds: z.array(z.string()).default([...DEFAULT_ENABLED_MODEL_IDS]),
     contextWindowOverrides: z.dict(z.number()).default({}),
     defaultReasoningEffort: z.union([z.string(), z.const(null)]).default(null),
+    fastMode: z.boolean().default(false),
+    cacheKeepalive: z.boolean().default(false),
+    deviceId: z.string().default(''),
     cacheTtl: z.union([z.const('5m'), z.const('1h'), z.const(null)]).default(null),
     selectedAccountId: z.union([z.string(), z.const(null)]).default(null),
   })) as SettingsScope<{
@@ -858,6 +892,9 @@ export function registerClaudePreferenceStore(
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
     defaultReasoningEffort: string | null
+    fastMode: boolean
+    cacheKeepalive: boolean
+    deviceId: string
     cacheTtl: ClaudeCacheTtl | null
     selectedAccountId: string | null
   }>
@@ -870,6 +907,9 @@ export function registerClaudePreferenceStore(
         enabledModelIds: value.enabledModelIds,
         contextWindowOverrides: value.contextWindowOverrides,
         defaultReasoningEffort: value.defaultReasoningEffort,
+        fastMode: value.fastMode === true,
+        cacheKeepalive: value.cacheKeepalive === true,
+        deviceId: typeof value.deviceId === 'string' && /^[0-9a-f]{64}$/.test(value.deviceId) ? value.deviceId : '',
         cacheTtl: isClaudeCacheTtl(value.cacheTtl) ? value.cacheTtl : null,
         selectedAccountId: value.selectedAccountId ?? null,
       }

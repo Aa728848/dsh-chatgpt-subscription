@@ -73,6 +73,7 @@ function harness(options: {
   provider?: string
   enablePolicy?: boolean
   steerError?: Error
+  keepalive?: (sessionId: string, provider: string) => Promise<boolean>
 } = {}) {
   const clock = new ManualClock()
   const activity = {
@@ -89,6 +90,7 @@ function harness(options: {
     now: () => clock.now,
     timer: clock.timer,
     warmup: options.warmup,
+    ...(options.keepalive === undefined ? {} : { keepalive: options.keepalive }),
     agents: { get: id => id === PARENT ? agent : undefined },
     activity: () => activity,
     ...(options.enablePolicy === true && options.provider !== undefined
@@ -243,6 +245,44 @@ describe('KimiCacheWaitController', () => {
     })
     expect(h.controller.snapshot(PARENT).childCount).toBe(0)
     expect(h.clock.pending).toBe(0)
+  })
+
+  it('uses a successful Claude cache touch instead of steering a synthetic turn', async () => {
+    const keepalive = vi.fn(async () => true)
+    const h = harness({ provider: 'claude-subscription', keepalive })
+    h.controller.observe(h.parent, catalog())
+    h.controller.observe(h.parent, turn('turn/end'))
+    h.clock.advance(55 * 60_000)
+    await vi.waitFor(() => expect(keepalive).toHaveBeenCalledWith(PARENT, 'claude-subscription'))
+    expect(h.agent.steer).not.toHaveBeenCalled()
+    expect(h.controller.snapshot(PARENT)).toMatchObject({ warmupUsed: true, warmupCount: 1, lastDecision: 'warmup' })
+  })
+
+  it.each([false, true])('falls back to steer when cache touch is unavailable (reject=%s)', async (reject) => {
+    const keepalive = vi.fn(async () => { if (reject) throw new Error('touch unavailable'); return false })
+    const h = harness({ provider: 'claude-subscription', keepalive })
+    h.controller.observe(h.parent, catalog())
+    h.controller.observe(h.parent, turn('turn/end'))
+    h.clock.advance(55 * 60_000)
+    await vi.waitFor(() => expect(h.agent.steer).toHaveBeenCalledTimes(1))
+    expect(keepalive).toHaveBeenCalledTimes(1)
+    expect(h.controller.snapshot(PARENT).warmupCount).toBe(1)
+  })
+
+  it('ignores a late cache-touch completion after the child has settled', async () => {
+    let finish: ((value: boolean) => void) | undefined
+    const keepalive = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve }))
+    const h = harness({ provider: 'claude-subscription', keepalive })
+    h.controller.observe(h.parent, catalog())
+    h.controller.observe(h.parent, turn('turn/end'))
+    h.clock.advance(55 * 60_000)
+    await vi.waitFor(() => expect(keepalive).toHaveBeenCalledTimes(1))
+    h.controller.settleChild({ id: CHILD })
+    finish?.(false)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(h.agent.steer).not.toHaveBeenCalled()
+    expect(h.controller.snapshot(PARENT).childCount).toBe(0)
   })
 
   it('contains warmup failures and refuses a second attempt in the same batch', () => {

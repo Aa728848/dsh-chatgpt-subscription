@@ -138,15 +138,16 @@
 
 - **鉴权与客户端身份**：
   - 使用 Claude Pro / Max 订阅 OAuth 令牌访问 `POST https://api.anthropic.com/v1/messages?beta=true`（`Authorization: Bearer <token>`，严格省略 `x-api-key`）；
-  - 注入官方 Claude Code 必需的 `user-agent: claude-cli/<version>`、`x-app: cli`、`anthropic-beta`（含 `oauth-2025-04-20`、`claude-code-20250219` 及按需附加的 `thinking-binding-controls-2026-08-01`、`extended-cache-ttl-2025-04-11`）以及首块 `system` 身份声明；
+  - 使用第一方 Messages 形态：共享 Claude Code 版本与 cch 种子、5 个第一方头、含 cch 的计费块、metadata/diagnostics、OAuth 第一方 beta 和有序 system/cache_control；连接探测也走同一签名接缝。OAuth 授权默认入口为 `https://claude.com/cai/oauth/authorize`；
   - OAuth PKCE 的 `state` 与 `code_verifier` 独立随机生成，支持**手动粘贴 `<code#state>`**（默认）与 **loopback 自动探测端口回调**两种模式；单次授权通过 CAS 防重兑换。
 - **模型能力与思考模式**：
   - 随包内置 17 款 Claude 模型能力表（含 Opus 5.5、Sonnet 5.5、Haiku 5.5 等），实时可调用清单以 `GET /v1/models` 为准；未识别的新模型按官方规则继承当前代模板（adaptive thinking、effort、图片输入）；
   - 本地预检 `minCliVersion`（如 Opus 5.5 要求 `>= 2.1.280`，插件默认申报版本高于表内全部门槛，亦可用 `DSH_CLAUDE_CLI_VERSION` 覆盖）；
   - 四档思考形态按模型精确匹配：`mid-convo`（adaptive + `block_binding: drop_block` + `output_config.effort`）、`adaptive`（绑定前缀模型自动附带 `block_binding: drop_block`）、`budget`（`budget_tokens`，为正文至少预留 1024 token）、`none`；带签名的 `thinking` / `redacted_thinking` 块原样回放；
   - 支持合法位置的会话中途原生 `role: 'system'` 消息；单图 5 MiB base64 防线与整请求 8 MiB 图片预算独立执行；
-  - **提示缓存 TTL** 可选「跟随官方（1h）/ 1 小时 / 5 分钟」。
-  - **等待续热（仅 1 小时档，含「跟随官方」）**：主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时，自动发一次很小的续热请求保住前缀缓存，该轮结束后重新计时；5 分钟档从不续热。空闲时钟从请求**发出**时算起，沿用全局 `cacheWaitWarmup` 开关，无新增设置项。每次续热是一次真实请求，按缓存读取价格读回整段前缀并计入订阅额度。选号与该会话下一次真实请求完全一致（默认 sequential 取 primary、sticky 取上次账号，只在凭据失效或账号级限流后换号）；若把轮换策略显式设为 `round-robin`，续热可能落到另一个账号、白写一次缓存。
+  - **提示缓存 TTL** 可选「跟随官方（1h）/ 1 小时 / 5 分钟」；快速模式与 cache-keepalive 是两个独立、默认关闭的开关。开启后者时仅 1h 主请求携带 cache-keepalive beta，等待续热优先按上一响应的 request-id 调用 cache_touch，失败回退原轻量请求；touch 固定产生该响应的账号。
+  - 官方 context_management、尾部 assistant 防护、thinking-token-count 摘除重试与按账号+模型的 7 天能力记忆均已接入；压缩请求跟随会话最近主轮次 effort。cache_touch 的真实订阅直连和 55 分钟效果尚未验证。
+  - **等待续热（仅 1 小时档，含「跟随官方」）**：主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时，自动发一次很小的续热请求保住前缀缓存，该轮结束后重新计时；5 分钟档从不续热。空闲时钟从请求**发出**时算起，沿用全局 `cacheWaitWarmup` 开关；新的 cache-keepalive 开关只把优先续热方式换成 cache_touch，失败仍走这里的真实请求。每次 steer 续热是一次真实请求，按缓存读取价格读回整段前缀并计入订阅额度。选号与该会话下一次真实请求完全一致（默认 sequential 取 primary、sticky 取上次账号，只在凭据失效或账号级限流后换号）；若把轮换策略显式设为 `round-robin`，续热可能落到另一个账号、白写一次缓存。
 - **额度与换号约束**：
   - 合并 `GET /api/oauth/usage`（0–100 百分比）与 `/v1/messages` 响应头（0–1 分数）双源额度；
   - 仅在凭据失效或账号级限流时换号（最多 3 次），全局过载/5xx 不换号，**一旦已产生流式输出绝不中途换号**。
@@ -382,11 +383,11 @@
 ## 18. Claude API：`claude-api`
 
 - **鉴权**：单个 Anthropic API Key，`x-api-key` 头；Windows DPAPI / macOS Keychain / Linux Secret Service，无账号池。端点默认官方地址，可自定义（http 与 https 都接受）。
-- **请求形态**：只做官方 Claude Code 客户端形态：`system` 恰好三块（计费归因、身份句、DSH 系统提示），User-Agent、计费块与指纹共用同一客户端版本；版本跟随 npm 最新、全局一致，新版本仅在线路空闲超过缓存 TTL 后采纳、采纳前卡片显示 pending，`DSH_CLAUDE_API_CLI_VERSION` 可覆盖。beta 头从最终请求体推导，不从设置推导。
+- **请求形态**：使用 Claude Code 第一方形态：5 个第一方头、带 cch 的计费块、metadata/diagnostics，以及按实际内容构造的计费/身份/静态/动态 system 块。User-Agent、计费块、cch 种子共用同一版本组合；仅采用已有种子的 npm 版本，且两条 Claude 线路都超过各自缓存 TTL 后才切换。beta 从最终 body 推导并去重，cch 在最终序列化后计算；尾部 assistant 与 thinking-token-count 拒绝均有有界保护。
 - **目录**：当前 Key 的 `GET /v1/models` 决定可用 id；能力行来自随包表（官方文档支持列表转录），快照按 Key+端点指纹隔离；随包兜底表不被用户白名单过滤，显式空选在两个阶段都表示「全不启用」。
 - **可选能力**：5m/1h 缓存断点（默认 5m）、思考开启时的 `context_management` 清理、快速模式（默认关；未知 `claude-*` 模型乐观尝试并按上游应答纠正，结论记忆 7 天）、单轮提醒 `clear_at`、对话中 system 消息与工具增删；仅对支持对话中 system 消息的模型声明 `toolUpdate: 'in-history'`（上游拒绝 system 角色时记入能力记忆 7 天：折叠重试、期间不再声明）。
 - **等待续热**：仅 1 小时缓存档生效。主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时，自动发一次很小的续热请求保住前缀缓存，该轮结束后重新计时；5 分钟档从不续热。空闲时钟从请求发出时算起。沿用全局 `cacheWaitWarmup` 开关，无新增设置项；每次续热是一次真实请求，按缓存读取价格读回整段前缀。
 - **服务端压缩**：默认开、设置页可关；仅当模型支持、本进程内该会话由本线路服务过主轮次、且请求带压缩指令时生效。上游 400 明确指向 compaction 或返回空摘要时，同一次调用内退回原样客户端请求，并把该端点+模型标记为不支持 30 分钟。压缩块以摘要哈希为键持久化（属主可读写、条数与天数有上限），后续主轮次在历史最前整块回放并带 compact beta；陈旧块被 400 拒绝时遗忘并以文本形重试一次。
 - **不做**：额度显示与输入框徽章、账号池、原生 API 形态、阈值压缩、媒体工具、任务预算。
 - **路由**：`GET status`、`POST settings`、`POST key`、`DELETE key`、`POST test`、`POST catalog/refresh`；写操作全部同源校验。
-- **验证边界**：请求形态依据官方客户端抓包与源码快照，经上游为官方 API 的兼容环境实测；没有直连官方端点实测，部分模型快速模式未测通。详见 [线路设计与证据](claude-api-line-plan.md)。
+- **验证边界**：第一方字段和 cch 有抓包/算法及离线最终 body 验证；旧能力曾兼容网关实测。新形态未直连官方端点实测，真实订阅 cache_touch、交互式多轮计数器、部分模型快速模式和 Mythos 可用性未验证。详见 [线路设计与证据](claude-api-line-plan.md)。

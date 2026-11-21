@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { TEST_FIRST_PARTY_CONTEXT } from './claude-api-fixtures.ts'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -38,9 +39,12 @@ import {
   ClaudeApiClientVersionResolver,
   parseClaudeApiClientVersion,
   serializeClaudeApiClientVersion,
+  type ClaudeCodeVersionProfile,
 } from '../src/host/claude-api/client-version.ts'
 
 let home = ''
+const TEST_VERSION_PROFILES: readonly ClaudeCodeVersionProfile[] = ['2.1.330', '2.1.9', '2.0.1', '2.2.0', '2.3.0', '2.4.0']
+  .map(version => ({ version, seed: 1n }))
 beforeEach(async () => {
   home = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-api-core-'))
   vi.stubEnv('DSH_HOME', home)
@@ -165,7 +169,7 @@ describe('ClaudeApiClientVersionResolver', () => {
   const offline = vi.fn(async () => { throw new Error('registry unreachable') }) as unknown as typeof fetch
 
   it('uses and persists the fetched value', async () => {
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn: registry('2.2.0'), filePath: file(), env: {}, now: () => 1000 })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn: registry('2.2.0'), filePath: file(), env: {}, now: () => 1000 })
     expect(await resolver.refresh({ force: true })).toEqual({ value: '2.2.0', source: 'npm', fetchedAt: 1000, pending: null })
     const written = await fs.readFile(file(), 'utf8')
     expect(written).toBe(serializeClaudeApiClientVersion({ version: '2.2.0', fetchedAt: 1000 }))
@@ -175,16 +179,16 @@ describe('ClaudeApiClientVersionResolver', () => {
     const persisted = serializeClaudeApiClientVersion({ version: '2.1.9', fetchedAt: 5 })
     await fs.mkdir(path.dirname(file()), { recursive: true })
     await fs.writeFile(file(), persisted, 'utf8')
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn: offline, filePath: file(), env: {} })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn: offline, filePath: file(), env: {} })
     expect(await resolver.refresh({ force: true })).toEqual({ value: '2.1.9', source: 'cached', fetchedAt: 5, pending: null })
     expect(await fs.readFile(file(), 'utf8')).toBe(persisted)
   })
   it('falls back to the shipped default when nothing is persisted', async () => {
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn: offline, filePath: file(), env: {} })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn: offline, filePath: file(), env: {} })
     expect(await resolver.refresh({ force: true })).toEqual({ value: CLAUDE_API_DEFAULT_CLI_VERSION, source: 'default', fetchedAt: null, pending: null })
   })
   it('lets the operator pin win over a fetched value', async () => {
-    const resolver = new ClaudeApiClientVersionResolver({
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES,
       fetchFn: registry('2.2.0'), filePath: file(), env: { DSH_CLAUDE_API_CLI_VERSION: '2.0.1' },
     })
     await resolver.refresh({ force: true })
@@ -195,11 +199,11 @@ describe('ClaudeApiClientVersionResolver', () => {
     await fs.mkdir(path.dirname(file()), { recursive: true })
     await fs.writeFile(file(), persisted, 'utf8')
     for (const payload of ['2.2.0-beta.1', 'latest', 220, null]) {
-      const resolver = new ClaudeApiClientVersionResolver({ fetchFn: registry(payload), filePath: file(), env: {} })
+      const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn: registry(payload), filePath: file(), env: {} })
       expect(await resolver.refresh({ force: true })).toEqual({ value: '2.1.9', source: 'cached', fetchedAt: 5, pending: null })
       expect(await fs.readFile(file(), 'utf8')).toBe(persisted)
     }
-    const broken = new ClaudeApiClientVersionResolver({
+    const broken = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES,
       fetchFn: vi.fn(async () => new Response('not json', { status: 200 })) as unknown as typeof fetch,
       filePath: file(), env: {},
     })
@@ -209,13 +213,13 @@ describe('ClaudeApiClientVersionResolver', () => {
   it('adopts a newly fetched version immediately when no activity was recorded', async () => {
     await fs.mkdir(path.dirname(file()), { recursive: true })
     await fs.writeFile(file(), serializeClaudeApiClientVersion({ version: '2.1.9', fetchedAt: 5 }), 'utf8')
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn: registry('2.2.0'), filePath: file(), env: {} })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn: registry('2.2.0'), filePath: file(), env: {} })
     expect(await resolver.refresh({ force: true })).toEqual({ value: '2.2.0', source: 'npm', fetchedAt: expect.any(Number), pending: null })
   })
   it('defers a fetched version while the line is active and adopts it after the ttl of inactivity', async () => {
     let clock = 1000
     const fetchFn = registry('2.2.0')
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn, filePath: file(), env: {}, now: () => clock })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn, filePath: file(), env: {}, now: () => clock })
     await resolver.refresh({ force: true })
     resolver.noteActivity('5m')
     ;(fetchFn as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => new Response(JSON.stringify({ version: '2.3.0' }), { status: 200 }))
@@ -229,7 +233,7 @@ describe('ClaudeApiClientVersionResolver', () => {
   it('holds a pending version for the full hour after 1h activity, even when later requests use 5m', async () => {
     let clock = 0
     const fetchFn = registry('2.2.0')
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn, filePath: file(), env: {}, now: () => clock })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn, filePath: file(), env: {}, now: () => clock })
     await resolver.refresh({ force: true })
     resolver.noteActivity('1h')
     ;(fetchFn as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => new Response(JSON.stringify({ version: '2.3.0' }), { status: 200 }))
@@ -245,7 +249,7 @@ describe('ClaudeApiClientVersionResolver', () => {
   it('resets the remembered ttl to five minutes when a pending version is adopted', async () => {
     let clock = 0
     const fetchFn = registry('2.2.0')
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn, filePath: file(), env: {}, now: () => clock })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn, filePath: file(), env: {}, now: () => clock })
     await resolver.refresh({ force: true })
     resolver.noteActivity('1h')
     ;(fetchFn as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => new Response(JSON.stringify({ version: '2.3.0' }), { status: 200 }))
@@ -263,7 +267,7 @@ describe('ClaudeApiClientVersionResolver', () => {
   it('applies an env pin immediately despite activity and a pending candidate', async () => {
     let clock = 0
     const fetchFn = registry('2.2.0')
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn, filePath: file(), env: { DSH_CLAUDE_API_CLI_VERSION: '2.0.1' }, now: () => clock })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn, filePath: file(), env: { DSH_CLAUDE_API_CLI_VERSION: '2.0.1' }, now: () => clock })
     await resolver.refresh({ force: true })
     resolver.noteActivity('1h')
     ;(fetchFn as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => new Response(JSON.stringify({ version: '2.3.0' }), { status: 200 }))
@@ -274,17 +278,50 @@ describe('ClaudeApiClientVersionResolver', () => {
     await fs.mkdir(path.dirname(file()), { recursive: true })
     await fs.writeFile(file(), serializeClaudeApiClientVersion({ version: '2.1.9', fetchedAt: 5 }), 'utf8')
     const fetchFn = vi.fn(async () => { throw new Error('must not fetch') }) as unknown as typeof fetch
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn, filePath: file(), env: {} })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn, filePath: file(), env: {} })
     await resolver.warm()
     expect(resolver.current()).toEqual({ value: '2.1.9', source: 'cached', fetchedAt: 5, pending: null })
     expect(fetchFn).not.toHaveBeenCalled()
   })
   it('never rejects a refresh', async () => {
-    const resolver = new ClaudeApiClientVersionResolver({ fetchFn: offline, filePath: file(), env: {} })
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn: offline, filePath: file(), env: {} })
     await expect(resolver.refresh({ force: true })).resolves.toMatchObject({ source: 'default' })
     await expect(resolver.refresh()).resolves.toMatchObject({ source: 'default' })
-    const httpError = new ClaudeApiClientVersionResolver({ fetchFn: registry('2.2.0', false), filePath: file(), env: {} })
+    const httpError = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn: registry('2.2.0', false), filePath: file(), env: {} })
     await expect(httpError.refresh({ force: true })).resolves.toMatchObject({ source: 'default' })
+  })
+  it('requires both Claude lines to be idle beyond their own cache ttl', async () => {
+    let clock = 0
+    const fetchFn = registry('2.2.0')
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn, filePath: file(), env: {}, now: () => clock })
+    await resolver.refresh({ force: true })
+    resolver.noteActivity('1h', 'claude')
+    resolver.noteActivity('5m', 'claude-api')
+    ;(fetchFn as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => new Response(JSON.stringify({ version: '2.3.0' }), { status: 200 }))
+    await resolver.refresh({ force: true })
+    clock = 6 * 60_000
+    expect(resolver.current()).toMatchObject({ value: '2.2.0', pending: '2.3.0' })
+    clock = 61 * 60_000
+    expect(resolver.current()).toMatchObject({ value: '2.3.0', pending: null })
+  })
+  it('does not adopt or persist an npm version without a verified seed', async () => {
+    const resolver = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, fetchFn: registry('9.9.9'), filePath: file(), env: {} })
+    expect(await resolver.refresh({ force: true })).toMatchObject({ value: '2.1.330', source: 'default', pending: null })
+    await expect(fs.access(file())).rejects.toThrow()
+  })
+  it('rejects conflicting environment pins and an unknown pin without a seed', () => {
+    const conflict = new ClaudeApiClientVersionResolver({
+      profiles: TEST_VERSION_PROFILES, filePath: file(),
+      env: { DSH_CLAUDE_CLI_VERSION: '2.1.330', DSH_CLAUDE_API_CLI_VERSION: '2.2.0' },
+    })
+    expect(() => conflict.current()).toThrow('must match')
+    const missingSeed = new ClaudeApiClientVersionResolver({ profiles: TEST_VERSION_PROFILES, filePath: file(), env: { DSH_CLAUDE_API_CLI_VERSION: '9.9.9' } })
+    expect(() => missingSeed.current()).toThrow('DSH_CLAUDE_CCH_SEED')
+    const explicit = new ClaudeApiClientVersionResolver({
+      profiles: TEST_VERSION_PROFILES, filePath: file(),
+      env: { DSH_CLAUDE_API_CLI_VERSION: '9.9.9', DSH_CLAUDE_CCH_SEED: '0x2a' },
+    })
+    expect(explicit.currentProfile()).toMatchObject({ value: '9.9.9', seed: 42n })
   })
 })
 
@@ -294,8 +331,11 @@ describe('capture-backed attribution constants', () => {
     const fixture = JSON.parse(await fs.readFile(new URL('./fixtures/claude-api/request-2.1.330.json', import.meta.url), 'utf8')) as {
       requests: Array<{ body: { system: Array<{ text: string }> } }>
     }
-    const captured = fixture.requests[0]!.body.system[0]!.text.replaceAll('sdk-cli', 'cli')
-    expect(claudeApiBillingBlock('2.1.330', 'Reply with exactly: OK')).toBe(captured)
+    expect(fixture.requests[0]!.body.system[0]!.text).toContain('x-anthropic-billing-header:')
+    expect(claudeApiBillingBlock('2.1.330', 'Reply with exactly: OK', TEST_FIRST_PARTY_CONTEXT)).toBe(
+      'x-anthropic-billing-header: cc_version=2.1.330.9e1; cc_entrypoint=cli; cch=00000; '
+      + 'cc_prompt_id=11111111-2222-4333-8444-555555555556; cc_turn_origin=sdk; cc_prompt_index=0; cc_turn_index=1;',
+    )
     expect(CLAUDE_API_MODELS.length).toBeGreaterThan(0)
   })
 })

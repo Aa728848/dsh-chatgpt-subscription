@@ -25,6 +25,7 @@ import {
 } from '../src/host/claude-api/compaction-store.ts'
 import { COMPACTION_INSTRUCTION, SHIPPED_INSTRUCTION_OPENING } from '../src/host/compaction-prompt.ts'
 import { CLAUDE_API_BETA_COMPACT } from '../src/host/claude-api/types.ts'
+import { TEST_FIRST_PARTY_CONTEXT } from './claude-api-fixtures.ts'
 
 function msg(role: Message['role'], content: ContentBlock[], source?: Message['source']): Message {
   return { role, content, ...(source !== undefined ? { source } : {}) }
@@ -36,7 +37,7 @@ function options(messages: Message[], extra: Partial<GenerateOptions> = {}): Gen
   return { provider: 'claude-api', model: 'claude-fable-5-2', messages, ...extra }
 }
 function contextFor(extra: Partial<ClaudeApiRequestContext> = {}): ClaudeApiRequestContext {
-  return { entry: resolveClaudeApiModel('claude-fable-5-2'), settings: defaultClaudeApiSettings(), version: '2.1.330', deviceId: 'a'.repeat(64), sessionUuid: '11111111-2222-4333-8444-555555555555', ...extra }
+  return { entry: resolveClaudeApiModel('claude-fable-5-2'), settings: defaultClaudeApiSettings(), version: '2.1.330', deviceId: 'a'.repeat(64), sessionUuid: '11111111-2222-4333-8444-555555555555', firstParty: TEST_FIRST_PARTY_CONTEXT, ...extra }
 }
 const tool = { name: 'Bash', description: 'Bash tool', parameters: { type: 'object', properties: {} } }
 const SCOPE = 'f'.repeat(64)

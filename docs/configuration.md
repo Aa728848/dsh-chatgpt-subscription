@@ -109,7 +109,7 @@ promptCacheOverrides:
 
 **`waitJobs`（布尔，默认 `false`）**：等待续热是否把**运行中的后台任务**也算作委派，而不只是子代理。只在 `waitWarmup` 开启时有意义；只写 `waitWarmup: false` 关掉续热时不必同时改它。内置只有 `kimi-code`、`claude`（订阅，路由 id `claude-subscription`）与 `claude-api` 为 `true`，其余线路一律 `false`，行为与之前完全一致。任务证据来自宿主写进所有者会话的 `job/registered` / `job/settled` 事件；不发这两个事件的旧世代宿主上该开关自然失效。决策点对**所有线路**统一为 `ttlMs - 5 分钟`（导出纯函数 `cacheWaitDecisionMs(ttlMs)`，余量常量 `CACHE_WAIT_MARGIN_MS`）：Kimi 的 25 分钟 TTL 得到 20 分钟，Claude API 的 1 小时档得到 55 分钟。TTL ≤ 5 分钟时余量放不下，该线路**没有续热**：不排定时器、不产生请求，每进程每线路只告警一次；策略校验不变，这样的部署照常启动。
 
-**两条 Claude 线路的档位门**：`cacheWaitWarmup` 现在也管 Claude 订阅与 Claude API，但只在 **1 小时缓存档**生效（订阅线路的「跟随官方」留空即 1h）。适配器把每个主轮次实际写入的缓存寿命记进活动存储，控制器发现记录寿命与策略 `ttlMs`（3_600_000）不一致时对该会话不排定时器、不续热；5 分钟档因此从不产生续热请求。空闲时钟从请求**发出**时算起，流结束只补用量。
+**两条 Claude 线路的档位门**：`cacheWaitWarmup` 现在也管 Claude 订阅与 Claude API，但只在 **1 小时缓存档**生效（订阅线路的「跟随官方」留空即 1h）。适配器把每个主轮次实际写入的缓存寿命记进活动存储，控制器发现记录寿命与策略 `ttlMs`（3_600_000）不一致时对该会话不排定时器、不续热；5 分钟档因此从不产生续热请求。空闲时钟从请求**发出**时算起，流结束只补用量。订阅卡片另有默认关闭的 cache-keepalive：开启且实际为 1h 时，决策点先按上一响应的 request-id 调用 cache_touch，固定原账号；拒绝、404 或网络失败都在同次决策回退到原 steer 续热，5m 和 API 线路不使用 touch。
 
 **策略 id 与路由 id**：Claude 订阅线路自身代码按 `claude` 读策略，宿主路由 id 则是 `claude-subscription`。等待控制器按路由 id 解析，因此策略表带一份别名（`claude-subscription` → `claude`），两个 id 解析到同一份事实；活动记录按路由 id 写入。
 
@@ -218,7 +218,7 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | **Codex** | `CODEX_HOME` | 本机 Codex CLI 配置目录（默认 `~/.codex`，用于探测 `auth.json`） |
 | | `DSH_CODEX_MAX_IMAGE_BYTES` | 单次请求图片负载字节上限（默认 `2097152`，即 2 MiB） |
 | **Claude** | `CLAUDE_CONFIG_DIR` | 本机 Claude Code 配置目录（默认 `~/.claude`） |
-| | `DSH_CLAUDE_CLI_VERSION` | 覆盖向 Anthropic 网关申报的客户端版本号 |
+| | `DSH_CLAUDE_CLI_VERSION` | 覆盖两条 Claude 线路共享的客户端版本；与 API 专用别名同时设置时必须一致。未知版本需同时给 `DSH_CLAUDE_CCH_SEED` |
 | | `DSH_CLAUDE_OAUTH_AUTHORIZE_URL` | 覆盖 Claude OAuth 授权入口 URL |
 | **Kimi Code** | `DSH_KIMI_CODE_OAUTH_HOST` / `KIMI_CODE_OAUTH_HOST` | 覆盖 OAuth 主机（国际区设为 `https://auth.kimi.ai`） |
 | | `DSH_KIMI_CODE_BASE_URL` / `KIMI_CODE_BASE_URL` | 覆盖模型接口基址（国际区设为 `https://api.kimi.ai/coding`） |
@@ -250,7 +250,8 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | **OpenDesign** | `OPENDESIGN_API_KEY` | 号池为空时自动投射为首要账号的静态 API Key（不落盘） |
 | **WorkBuddy** | `CODEBUDDY_AUTH_DIR` / `WORKBUDDY_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` | 覆盖本机 CodeBuddy / WorkBuddy 桌面端凭据与密钥目录 |
 | **Antigravity (ACP)** | `DSH_ANTIGRAVITY_ACP_BIN` | 显式覆盖官方 `agy` / `agy_acp_server` 可执行文件路径 |
-| **Claude API** | `DSH_CLAUDE_API_CLI_VERSION` | 覆盖 Claude API 线路申报的客户端版本号（plain 发布号，立即生效；缺省跟随 npm 最新、全局一致，新版本仅空闲超过缓存 TTL 后采纳） |
+| **Claude API** | `DSH_CLAUDE_API_CLI_VERSION` | 两条 Claude 线路共享版本的兼容别名；与订阅变量冲突会报错。仅自动采用已有 cch 种子的 npm 版本，双方均超过各自缓存 TTL 后切换 |
+| | `DSH_CLAUDE_CCH_SEED` | 与未知版本的显式 pin 成对提供 cch 种子（64 位 hex）；没有种子的 pin 不会发出可能错误的签名 |
 
 ---
 
@@ -272,4 +273,4 @@ RelayOne 在设置卡粘贴单个 API Key。保存后自动读取该 Key 当前�
 
 Claude API 在设置卡粘贴单个 API Key；端点默认官方地址，可改为任意 http/https origin。可配置对话模型勾选（未设置跟随目录、显式空选为全不启用）、上下文窗口覆盖、默认推理等级、缓存时长 5m/1h、快速模式、服务端压缩开关与独立代理。
 
-客户端版本号默认跟随 npm 上 `@anthropic-ai/claude-code` 的最新发布版，全局一致；新版本仅在线路空闲不短于记住的缓存 TTL（5m/1h 取最长）后采纳，采纳前在卡片上显示 pending，`DSH_CLAUDE_API_CLI_VERSION` 可覆盖且立即生效。压缩块、版本缓存与模型能力记忆（`claude-api-capability-memory.json`，端点+模型为键、7 天过期）位于 `$DSH_HOME/storages`，属主可读写；服务端压缩对任何路由到本线路的压缩请求生效（含其他线路改派），上游拒绝时同调用退回客户端压缩。
+客户端版本由两条 Claude 线路共享。后台仍读取 npm latest，但只有代码已登记对应 cch 种子的版本才进入候选；未知版本继续使用最后的已验证组合。两条线路各自最近一次活动都超过其记住的缓存 TTL 后才切换，活跃线路会阻止另一线路单独升级。`DSH_CLAUDE_CLI_VERSION` / `DSH_CLAUDE_API_CLI_VERSION` 是同一 pin 的兼容别名，冲突时明确报错；未知 pin 需成对设置 `DSH_CLAUDE_CCH_SEED`。压缩块、版本缓存与模型能力记忆（`claude-api-capability-memory.json`，端点+模型为键、7 天过期）位于 `$DSH_HOME/storages`，属主可读写；服务端压缩对任何路由到本线路的压缩请求生效（含其他线路改派），上游拒绝时同调用退回客户端压缩。

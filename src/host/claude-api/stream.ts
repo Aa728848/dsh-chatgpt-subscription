@@ -63,6 +63,9 @@ export interface ClaudeApiStreamState {
   cacheReadTokens: number
   cacheWriteTokens: number
   reasoningTokens: number
+  speed?: 'standard' | 'fast'
+  serviceTier?: string
+  inferenceGeo?: string
   sawUsage: boolean
   sawIterations: boolean
   finished: boolean
@@ -135,6 +138,11 @@ function flushOpen(state: ClaudeApiStreamState): StreamChunk[] {
 function applyUsage(state: ClaudeApiStreamState, raw: unknown, cumulativeOutput: boolean): void {
   if (!isRecord(raw)) return
   state.sawUsage = true
+  if (raw.speed === 'standard' || raw.speed === 'fast') state.speed = raw.speed
+  const serviceTier = asString(raw.service_tier)
+  if (serviceTier !== undefined && serviceTier !== '') state.serviceTier = serviceTier
+  const inferenceGeo = asString(raw.inference_geo)
+  if (inferenceGeo !== undefined && inferenceGeo !== '') state.inferenceGeo = inferenceGeo
   const iterations = Array.isArray(raw.iterations) ? raw.iterations.filter(isRecord) : []
   if (iterations.length > 0) {
     state.sawIterations = true
@@ -169,13 +177,22 @@ function applyUsage(state: ClaudeApiStreamState, raw: unknown, cumulativeOutput:
   if (reasoning !== undefined) state.reasoningTokens = reasoning
 }
 
-function tokenUsage(state: ClaudeApiStreamState): TokenUsage {
+export type ClaudeApiTokenUsage = TokenUsage & {
+  speed?: 'standard' | 'fast'
+  service_tier?: string
+  inference_geo?: string
+}
+
+function tokenUsage(state: ClaudeApiStreamState): ClaudeApiTokenUsage {
   return {
     inputTokens: state.inputTokens,
     outputTokens: state.outputTokens,
     ...(state.cacheReadTokens > 0 ? { cacheReadTokens: state.cacheReadTokens } : {}),
     ...(state.cacheWriteTokens > 0 ? { cacheWriteTokens: state.cacheWriteTokens } : {}),
     ...(state.reasoningTokens > 0 ? { reasoningTokens: Math.min(state.reasoningTokens, state.outputTokens) } : {}),
+    ...(state.speed === undefined ? {} : { speed: state.speed }),
+    ...(state.serviceTier === undefined ? {} : { service_tier: state.serviceTier }),
+    ...(state.inferenceGeo === undefined ? {} : { inference_geo: state.inferenceGeo }),
   }
 }
 
