@@ -256,6 +256,12 @@ describe('KimiCacheWaitController', () => {
     await vi.waitFor(() => expect(keepalive).toHaveBeenCalledWith(PARENT, 'claude-subscription'))
     expect(h.agent.steer).not.toHaveBeenCalled()
     expect(h.controller.snapshot(PARENT)).toMatchObject({ warmupUsed: true, warmupCount: 1, lastDecision: 'warmup' })
+    await vi.waitFor(() => expect(h.clock.nextAt).toBe(110 * 60_000))
+    h.clock.advance(55 * 60_000)
+    await vi.waitFor(() => expect(keepalive).toHaveBeenCalledTimes(2))
+    expect(h.agent.steer).not.toHaveBeenCalled()
+    h.controller.settleChild({ id: CHILD })
+    expect(h.clock.pending).toBe(0)
   })
 
   it.each([false, true])('falls back to steer when cache touch is unavailable (reject=%s)', async (reject) => {

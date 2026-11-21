@@ -526,7 +526,10 @@ export class KimiCacheWaitController {
         if (handled) {
           state.lastWarmupAt = this.now()
           state.warmupCount += 1
+          state.handled = false
           this.logger?.info?.(`kimi-cache-wait: cache touch succeeded for session ${session.id}`)
+          // A direct provider touch creates no Session turn/end event to re-arm us.
+          this.reconcile(session, state)
           return
         }
         this.queueWarmup(session, state)

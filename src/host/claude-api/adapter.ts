@@ -416,11 +416,11 @@ export class ClaudeApiAdapter extends LlmAdapter {
           } else if (!speedState.unsupported && isClaudeApiSpeedUnsupported(errorBody)) {
             speedState.unsupported = true
             await this.capabilityMemory.setFastMode(settings.baseUrl, entry.id, 'unsupported')
-            activeEntry = { ...entry, fastMode: null }
+            activeEntry = { ...activeEntry, fastMode: null }
           } else if (!speedState.beta && isClaudeApiSpeedNeedsBeta(errorBody)) {
             speedState.beta = true
             await this.capabilityMemory.setFastMode(settings.baseUrl, entry.id, 'beta')
-            activeEntry = { ...entry, fastMode: 'beta' }
+            activeEntry = { ...activeEntry, fastMode: 'beta' }
           } else {
             throw error
           }

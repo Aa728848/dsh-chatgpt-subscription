@@ -806,6 +806,28 @@ describe('Claude API adapter system-role correction', () => {
     expect(bodyOf(s.calls[2]!).messages.some((m: { role: string }) => m.role === 'system')).toBe(false)
     expect(bodyOf(s.calls[2]!).system[2].text).toContain('extra rule')
   })
+  it('keeps an earlier system-role correction when speed is refused afterwards', async () => {
+    const s = setup(async index => {
+      if (index === 0) return Response.json({ error: { message: REFUSAL } }, { status: 400 })
+      if (index === 1) return Response.json({ error: { message: "'claude-future-9' does not support the `speed` parameter." } }, { status: 400 })
+      return textStream('reverse-composed')
+    })
+    await s.goLive()
+    await s.settingsStore.update({ fastMode: true })
+    const chunks = await collect(s.adapter.stream(options({
+      sessionId: 'sys-reverse', model: 'claude-future-9',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+        { role: 'system', content: [{ type: 'text', text: 'extra rule' }] },
+      ],
+    })))
+    expect(JSON.stringify(chunks)).toContain('reverse-composed')
+    expect(s.calls).toHaveLength(3)
+    expect(bodyOf(s.calls[2]!)).not.toHaveProperty('speed')
+    expect(bodyOf(s.calls[2]!).messages.some((m: { role: string }) => m.role === 'system')).toBe(false)
+    expect(bodyOf(s.calls[2]!).system[2].text).toContain('extra rule')
+  })
+
   it('drops thinking-token-count once and persists the conclusion for a second adapter', async () => {
     const file = path.join(testHome, 'thinking-capability.json')
     const memory = new ClaudeApiCapabilityMemory(file)

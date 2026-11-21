@@ -37,9 +37,9 @@ function validArguments(text: string): boolean {
   return isRecord(safeJson(text === '' ? '{}' : text))
 }
 
-interface OpenText { index: number; text: string }
-interface PendingTool { index: number; id: string; name: string; arguments: string }
-interface PendingThinking { index: number; kind: 'thinking' | 'redacted_thinking'; text: string; signature: string; data: string }
+interface OpenText { index: number; replayIndex: number; text: string }
+interface PendingTool { index: number; replayIndex: number; id: string; name: string; arguments: string }
+interface PendingThinking { index: number; replayIndex: number; kind: 'thinking' | 'redacted_thinking'; text: string; signature: string; data: string }
 interface PendingServerTool { replay: Block; arguments: string }
 
 /** The whole-block compaction event the adapter stores and later replays. */
@@ -87,7 +87,7 @@ function closeText(state: ClaudeApiStreamState, contentIndex: number): StreamChu
   if (open === undefined) return []
   state.openText.delete(contentIndex)
   state.blocks[open.index] = { type: 'text', text: open.text }
-  state.replayBlocks[open.index] = { type: 'text', text: open.text }
+  state.replayBlocks[open.replayIndex] = { type: 'text', text: open.text }
   return [{ type: 'block-end', index: open.index, block: { type: 'text', text: open.text } }]
 }
 
@@ -101,7 +101,7 @@ function closeTool(state: ClaudeApiStreamState, contentIndex: number): StreamChu
   const args = tool.arguments || '{}'
   const parsed = safeJson(args)
   state.blocks[tool.index] = { type: 'tool-call', id: toToolCallId(tool.id), name: tool.name, arguments: args }
-  state.replayBlocks[tool.index] = { type: 'tool_use', id: tool.id, name: tool.name, input: isRecord(parsed) ? parsed : {} }
+  state.replayBlocks[tool.replayIndex] = { type: 'tool_use', id: tool.id, name: tool.name, input: isRecord(parsed) ? parsed : {} }
   state.hasToolCall = true
   return [{ type: 'block-end', index: tool.index, block: { type: 'tool-call', id: toToolCallId(tool.id), name: tool.name, arguments: args } }]
 }
@@ -114,7 +114,7 @@ function closeThinking(state: ClaudeApiStreamState, contentIndex: number): Strea
   state.blocks[pending.index] = { type: 'reasoning', text }
   // Empty text WITH a signature is replayable (the signature is what the prefix check
   // reads); without a signature the block must not be sent back unsigned.
-  state.replayBlocks[pending.index] = pending.kind === 'redacted_thinking'
+  state.replayBlocks[pending.replayIndex] = pending.kind === 'redacted_thinking'
     ? (pending.data !== '' ? { type: 'redacted_thinking', data: pending.data, ...(pending.signature !== '' ? { signature: pending.signature } : {}) } : null)
     : (pending.signature !== '' ? { type: 'thinking', thinking: pending.text, signature: pending.signature } : null)
   state.reasoningTokens += Math.ceil(text.length / 4)
@@ -270,7 +270,7 @@ export function feedClaudeApiPayload(state: ClaudeApiStreamState, event: unknown
       const seed = asString(block.text) ?? ''
       state.blocks.push({ type: 'text', text: '' })
       state.replayBlocks.push(null)
-      state.openText.set(contentIndex, { index, text: seed })
+      state.openText.set(contentIndex, { index, replayIndex: state.replayBlocks.length - 1, text: seed })
       return [
         { type: 'block-start', index, blockType: 'text' },
         ...(seed ? [{ type: 'text-delta', index, text: seed } as StreamChunk] : []),
@@ -284,7 +284,7 @@ export function feedClaudeApiPayload(state: ClaudeApiStreamState, event: unknown
       const seed = Object.keys(input).length > 0 ? JSON.stringify(input) : ''
       state.blocks.push({ type: 'tool-call', id: toToolCallId(id), name, arguments: '' })
       state.replayBlocks.push(null)
-      state.tools.set(contentIndex, { index, id, name, arguments: seed })
+      state.tools.set(contentIndex, { index, replayIndex: state.replayBlocks.length - 1, id, name, arguments: seed })
       return [
         { type: 'block-start', index, blockType: 'tool-call' },
         { type: 'tool-call-delta', index, id: toToolCallId(id), name: name || undefined, argumentsDelta: seed },
@@ -296,7 +296,7 @@ export function feedClaudeApiPayload(state: ClaudeApiStreamState, event: unknown
       state.blocks.push({ type: 'reasoning', text: '' })
       state.replayBlocks.push(null)
       state.thinking.set(contentIndex, {
-        index, kind, text: seed, signature: asString(block.signature) ?? '', data: asString(block.data) ?? '',
+        index, replayIndex: state.replayBlocks.length - 1, kind, text: seed, signature: asString(block.signature) ?? '', data: asString(block.data) ?? '',
       })
       return [
         { type: 'block-start', index, blockType: 'reasoning' },

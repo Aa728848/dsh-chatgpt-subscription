@@ -92,6 +92,24 @@ describe('claude-api stream', () => {
     ])
   })
 
+  it('preserves replay-only server tools around later visible blocks', () => {
+    const server = { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'x' } }
+    const result = { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1', content: [] }
+    const { chunks } = run([
+      start(), blockStart(0, { ...server, input: {} }),
+      delta(0, { type: 'input_json_delta', partial_json: '{"query":"x"}' }), blockStop(0),
+      blockStart(1, result), blockStop(1),
+      blockStart(2, { type: 'text', text: 'answer' }), blockStop(2),
+      blockStart(3, { type: 'tool_use', id: 'toolu_1', name: 'run', input: {} }),
+      delta(3, { type: 'input_json_delta', partial_json: '{"value":1}' }), blockStop(3),
+      messageDelta('tool_use'), messageStop,
+    ])
+    expect(replayOf(chunks)).toEqual([
+      server, result, { type: 'text', text: 'answer' },
+      { type: 'tool_use', id: 'toolu_1', name: 'run', input: { value: 1 } },
+    ])
+  })
+
   it('handles the whole-block compaction event, sums usage.iterations and finishes normally', () => {
     const { chunks, state } = run([
       start({ input_tokens: 0, output_tokens: 0, iterations: [
