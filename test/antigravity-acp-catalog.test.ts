@@ -3,7 +3,7 @@
  * different id vocabularies, and this is the one place the two are reconciled.
  */
 import { describe, expect, it } from 'vitest'
-import { collapseModels, findModel, toResolvedModelInfo } from '../src/host/antigravity-acp/types.ts'
+import { collapseModels, findModel, toModelInfo, toResolvedModelInfo } from '../src/host/antigravity-acp/types.ts'
 
 describe('collapseModels', () => {
   it('collapses tier ids into one model each and keeps the published ladder', () => {
@@ -60,6 +60,14 @@ describe('collapseModels', () => {
       ],
     )
     expect(models[0]?.contextWindow).toBe(524_288)
+  })
+})
+
+describe('toModelInfo', () => {
+  it('declares image input on both catalog and resolved model metadata', () => {
+    const model = { id: 'gemini-4-neon', name: 'Gemini 4 Neon', efforts: [] }
+    expect(toModelInfo('antigravity-acp', model).inputModalities).toEqual(['text', 'image'])
+    expect(toResolvedModelInfo('antigravity-acp', model).inputModalities).toEqual(['text', 'image'])
   })
 })
 

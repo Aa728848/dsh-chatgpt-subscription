@@ -201,7 +201,7 @@ export function defaultContextWindow(modelId: string): number {
  * @returns Harness-facing model info.
  */
 export function toModelInfo(provider: string, model: AntigravityAcpModelDto): LlmModelInfo {
-  return { provider, id: model.id, name: model.name }
+  return { provider, id: model.id, name: model.name, inputModalities: ['text', 'image'] }
 }
 
 /**
