@@ -23,7 +23,7 @@
  *   7. the stream is LINE-oriented (event: / data: pairs), and a stream that
  *      ends without message_stop is a severed reply, not a completed answer;
  *   8. the request carries cache_control breakpoints BY DEFAULT, on the last
- *      system block, the last block of the last user message and the last tool,
+ *      system block, the last blocks of the latest two user messages and the last tool,
  *      and never more than the wire's limit of four. The server caches nothing
  *      without a breakpoint, so an opt-in marker that the adapter forgets to
  *      turn on is exactly the bug these tests now lock out.
@@ -411,8 +411,8 @@ describe('Prompt-cache breakpoints', () => {
     const toolResult = messages[2]!.content[0]!
     expect(toolResult.type).toBe('tool_result')
     expect(toolResult.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
-    // The text turn BEFORE it is not marked: there is one message breakpoint.
-    expect(messages[0]!.content[0]!.cache_control).toBeUndefined()
+    // The text turn BEFORE it keeps the preceding breakpoint for the next read.
+    expect(messages[0]!.content[0]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
   })
 
   it('marks the block that SURVIVES the same-role merge, not the one it swallowed', () => {
@@ -457,13 +457,27 @@ describe('Prompt-cache breakpoints', () => {
     // "<= 3" assertion written by hand.
     expect(countClaudeCacheBreakpoints(built)).toBeLessThanOrEqual(MAX_CACHE_BREAKPOINTS)
     expect(MAX_CACHE_BREAKPOINTS).toBe(4)
-    // Exactly the three intended sites, and the image is the marked tail of the
-    // final user turn.
-    expect(countClaudeCacheBreakpoints(built)).toBe(3)
+    // System + tools + the latest two user turns saturate the four-marker budget.
+    expect(countClaudeCacheBreakpoints(built)).toBe(4)
     const messages = messagesOf(built)
     const lastBlock = messages[messages.length - 1]!.content.at(-1)!
     expect(lastBlock.type).toBe('image')
     expect(lastBlock.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
+  })
+
+  it('retains the preceding user breakpoint when an old foreign history advances', () => {
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'old Kimi question' }] },
+      { role: 'assistant', source: { kind: 'model', provider: 'kimi-code' }, content: [{ type: 'text', text: 'old answer' }] },
+      { role: 'user', content: [{ type: 'text', text: 'first Claude question' }] },
+    ]
+    const first = body({ messages: history })
+    const next = body({ messages: [...history, { role: 'assistant', content: [{ type: 'text', text: 'answer' }] }, { role: 'user', content: [{ type: 'text', text: 'next question' }] }] })
+    const firstTail = messagesOf(first).at(-1)!.content[0]!
+    const nextPrevious = messagesOf(next)[2]!.content[0]!
+    expect(firstTail.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
+    expect(nextPrevious).toEqual(firstTail)
+    expect(countClaudeCacheBreakpoints(next)).toBeLessThanOrEqual(MAX_CACHE_BREAKPOINTS)
   })
 
   it('leaves the request uncached with no marker anywhere when a caller opts out', () => {
@@ -483,9 +497,9 @@ describe('Prompt-cache breakpoints', () => {
     const messages = messagesOf(built)
     expect(messages.map(message => message.role)).toEqual(['user', 'assistant', 'user'])
     expect(messages.at(-1)!.content[0]!.text).toBe('Continue from where you left off.')
-    expect(messages[0]!.content[0]!.cache_control).toBeUndefined()
+    expect(messages[0]!.content[0]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
     expect(messages.at(-1)!.content[0]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
-    expect(countClaudeCacheBreakpoints(built)).toBe(2)
+    expect(countClaudeCacheBreakpoints(built)).toBe(3)
   })
 })
 
@@ -790,6 +804,24 @@ describe('Message projection', () => {
     // The image-free text content stays a plain string elsewhere; this is the
     // assistant turn, whose content is always blocks.
     expect(typeof messagesOf(built)[0]!.content).not.toBe('string')
+  })
+
+  it('normalizes a foreign Responses tool id consistently with its tool result', () => {
+    const foreign = 'call_4mt2LEbvc0DaBPCGP3dK5cvc|fc_0e3c3b45d14c8351016aea0c329d5887d2aa952cfd9841fc8c'
+    const built = buildClaudeRequestBody(options({
+      messages: [
+        { role: 'assistant', source: { kind: 'model', provider: 'sub2api', model: 'gpt-6-astra' }, content: [
+          { type: 'tool-call', id: foreign, name: 'read_file', arguments: '{"file_path":"a.txt"}' },
+        ] },
+        { role: 'user', source: { kind: 'tool', callId: foreign }, content: [
+          { type: 'tool-result', toolCallId: foreign, content: [{ type: 'text', text: 'contents' }] },
+        ] },
+      ],
+    }) as unknown as GenerateOptions)
+    const messages = messagesOf(built)
+    const toolUse = messages[0]!.content[0]!
+    expect(toolUse.id).toMatch(/^[a-zA-Z0-9_-]+$/)
+    expect(messages[1]!.content[0]).toMatchObject({ type: 'tool_result', tool_use_id: toolUse.id })
   })
 
   it('places a tool result in a USER message, because this wire has no tool role', () => {

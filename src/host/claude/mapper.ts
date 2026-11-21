@@ -205,7 +205,7 @@ import {
   type TokenUsage,
 } from '../common/llm-compat.ts'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import { toToolCallId } from '../common/brand-compat.ts'
+import { toClaudeToolUseId, toToolCallId } from '../common/brand-compat.ts'
 import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import {
   claudeFastModeFor,
@@ -1505,23 +1505,29 @@ export function buildClaudeSystemBlocks(
 }
 
 /**
- * The last block worth a cache breakpoint on the message list, if any.
+ * The latest two user tail blocks worth cache breakpoints on the message list.
  *
- * TRANSCRIBED from the reference, which marks the last block of the last USER
- * message and nothing else. Two guards come with it, and both are load-bearing:
- * the last message must be a user turn (a history ending on an assistant turn -
- * a prefill-shaped request - gets no message breakpoint rather than a marker
- * somewhere it was not asked for), and the block must be one the wire accepts a
- * marker on. An unmarkable block yields NO breakpoint rather than one moved
- * onto an earlier turn: an unmasked request is merely uncached, while a marker
- * on a block type the wire rejects fails the whole turn.
+ * The current tail and one preceding user tail keep the previous request's history
+ * breakpoint readable. Two guards are load-bearing: the last message must be a user
+ * turn (a history ending on an assistant turn gets no message breakpoint), and the
+ * latest block must be one the wire accepts. An unmarkable latest block yields NO
+ * breakpoint rather than moving it to an earlier turn; an earlier unmarkable block
+ * is skipped when selecting the preceding marker.
  */
-function lastCacheableUserBlock(messages: ReadonlyArray<ClaudeWireEntry>): AnthropicBlock | undefined {
+function lastCacheableUserBlocks(messages: ReadonlyArray<ClaudeWireEntry>): AnthropicBlock[] {
   const lastMessage = messages[messages.length - 1]
-  if (lastMessage === undefined || lastMessage.role !== 'user') return undefined
-  const block = lastMessage.content[lastMessage.content.length - 1]
-  if (block === undefined) return undefined
-  return CACHE_MARKABLE_BLOCK_TYPES.has(String(block.type)) ? block : undefined
+  if (lastMessage === undefined || lastMessage.role !== 'user') return []
+  const blocks: AnthropicBlock[] = []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== 'user') continue
+    const block = message.content[message.content.length - 1]
+    const markable = block !== undefined && CACHE_MARKABLE_BLOCK_TYPES.has(String(block.type))
+    if (index === messages.length - 1 && !markable) return []
+    if (markable) blocks.push(block)
+    if (blocks.length === 2) break
+  }
+  return blocks
 }
 
 /**
@@ -1555,8 +1561,8 @@ function markClaudeCacheBreakpoints(body: Record<string, unknown>, ttl: ClaudeCa
 
   const messages = body.messages as ClaudeWireEntry[] | undefined
   if (Array.isArray(messages)) {
-    const target = lastCacheableUserBlock(messages)
-    if (target !== undefined) {
+    const targets = lastCacheableUserBlocks(messages)
+    for (const target of targets) {
       target.cache_control = { ...marker }
       marked += 1
     }
@@ -1819,7 +1825,7 @@ function toolResultBlockFor(
   const rich = toolResultContent(resultBlocks, images)
   return {
     type: 'tool_result',
-    tool_use_id: toolUseId,
+    tool_use_id: toClaudeToolUseId(toolUseId),
     content: rich ?? toolResultText(resultBlocks),
     ...(isError ? { is_error: true } : {}),
   }
@@ -1895,7 +1901,7 @@ function claudeAssistantContent(message: Message, names: ClaudeToolNames): Anthr
       const parsed = safeJsonParse(toolCallArguments(block.arguments))
       blocks.push({
         type: 'tool_use',
-        id: typeof block.id === 'string' && block.id !== '' ? block.id : 'toolu_' + blocks.length,
+        id: toClaudeToolUseId(typeof block.id === 'string' && block.id !== '' ? block.id : 'toolu_' + blocks.length),
         name: claudeWireToolName(block.name, names),
         // The wire wants the parsed object, not the JSON string DSH carries.
         input: isRecord(parsed) ? parsed : {},

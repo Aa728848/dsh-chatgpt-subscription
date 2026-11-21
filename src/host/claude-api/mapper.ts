@@ -23,6 +23,7 @@ import {
   mergeClaudeCodeBetas,
   type ClaudeCodeFirstPartyContext,
 } from '../common/claude-code-first-party.ts'
+import { toClaudeToolUseId } from '../common/brand-compat.ts'
 import { cleanOrphanedToolCalls } from '../common/orphan-tool-calls.ts'
 import {
   imageBlockToInline,
@@ -278,7 +279,7 @@ function userContent(message: Message, images: ResolvedRequestImages, entry: Cla
       const rich = toolResultContent(block.content, images, entry)
       blocks.push({
         type: 'tool_result',
-        tool_use_id: block.toolCallId,
+        tool_use_id: toClaudeToolUseId(block.toolCallId),
         content: rich ?? toolResultText(block.content),
         ...(block.isError === true ? { is_error: true } : {}),
       })
@@ -330,7 +331,7 @@ function assistantContent(message: Message): Block[] {
     }
     if (block.type === 'tool-call') {
       const parsed = safeJson(argumentsText(block.arguments))
-      blocks.push({ type: 'tool_use', id: String(block.id), name: block.name, input: isRecord(parsed) ? parsed : {} })
+      blocks.push({ type: 'tool_use', id: toClaudeToolUseId(block.id), name: block.name, input: isRecord(parsed) ? parsed : {} })
       continue
     }
     if (block.type === 'reasoning') {
@@ -443,8 +444,8 @@ function cacheMarker(settings: ClaudeApiSettings): Block {
 const CACHE_MARKABLE_BLOCK_TYPES: ReadonlySet<string> = new Set(['text', 'image', 'tool_result'])
 
 /**
- * Cache breakpoints on the FINISHED body: the identity block, the system-prompt block,
- * the last block of the last user turn, and the last non-deferred tool - at most four.
+ * Cache breakpoints on the FINISHED body: the system-prompt block, the last blocks of
+ * the latest two user turns, and the last non-deferred tool - at most four.
  * '5m' writes { type: 'ephemeral' } with NO ttl field; deferred tools and clear_at
  * messages never carry a marker.
  */
@@ -461,22 +462,42 @@ function markCacheBreakpoints(body: Record<string, unknown>, settings: ClaudeApi
   }
   const messages = body.messages
   if (Array.isArray(messages)) {
-    // The last USER-role entry keeps the history breakpoint even when a turn-scoped or
-    // in-place system message ends the list; a clear_at message is never marked.
+    // Keep the previous USER breakpoint as well as the current one. Otherwise the next
+    // request can read only the system/tools cache: the cached history tail no longer
+    // carries the breakpoint under which it was written. If the latest user tail is not
+    // markable, preserve the existing no-message-marker behavior instead of moving it.
+    const historyBlocks: Block[] = []
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const entry = messages[index]
       if (!isRecord(entry) || entry.role !== 'user') continue
-      if (entry.clear_at === undefined && Array.isArray(entry.content)) {
-        const block = entry.content[entry.content.length - 1]
-        if (isRecord(block) && CACHE_MARKABLE_BLOCK_TYPES.has(String(block.type))) block.cache_control = { ...marker }
-      }
-      break
+      const block = entry.clear_at === undefined && Array.isArray(entry.content)
+        ? entry.content[entry.content.length - 1]
+        : undefined
+      const markable = isRecord(block) && CACHE_MARKABLE_BLOCK_TYPES.has(String(block.type))
+      if (historyBlocks.length === 0 && !markable) break
+      if (markable) historyBlocks.push(block)
+      if (historyBlocks.length === 2) break
     }
+    for (const block of historyBlocks) block.cache_control = { ...marker }
   }
   const tools = body.tools
   if (Array.isArray(tools)) {
     const last = [...tools].reverse().find(tool => isRecord(tool) && tool.defer_loading !== true)
     if (isRecord(last)) last.cache_control = { ...marker }
+  }
+
+  // Static global + dynamic system + tools + two history markers can total five. Keep the
+  // global head and both conversation markers; the non-global system tier is redundant once
+  // a history breakpoint covers it. Never demote the global marker to make room.
+  if (Array.isArray(system)) {
+    let excess = countClaudeApiCacheBreakpoints(body) - 4
+    for (const block of system.slice(2)) {
+      if (excess <= 0) break
+      if (!isRecord(block) || !isRecord(block.cache_control)) continue
+      if (block.cache_control.scope === 'global') continue
+      delete block.cache_control
+      excess -= 1
+    }
   }
 }
 

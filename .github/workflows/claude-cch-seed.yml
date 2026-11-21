@@ -1,0 +1,119 @@
+name: Claude Code cch seed
+
+on:
+  schedule:
+    # npm does not emit an event into this repository; poll upstream every six hours.
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Claude Code version to verify (empty means npm latest)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-code-cch-seed
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - id: resolve
+        shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          $requested = $env:REQUESTED_VERSION.Trim()
+          $version = if ($requested) { $requested } else { npm view @anthropic-ai/claude-code version }
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve the npm version' }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $version" }
+          $source = Get-Content src/host/common/claude-code-version.ts -Raw
+          $match = [regex]::Match($source, "CLAUDE_CODE_DEFAULT_CLI_VERSION = '([^']+)'")
+          if (-not $match.Success) { throw 'Unable to read the current Claude Code version' }
+          $skip = -not $requested -and $version -eq $match.Groups[1].Value
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "skip=$($skip.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          Write-Output "Resolved Claude Code $version; skip=$skip"
+
+      - name: Download the official Windows x64 package
+        if: steps.resolve.outputs.skip == 'false'
+        id: package
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'cch-package'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          npm pack "@anthropic-ai/claude-code-win32-x64@$env:VERSION" --pack-destination $destination
+          if ($LASTEXITCODE -ne 0) { throw 'npm pack failed' }
+          $archive = Get-ChildItem -Path $destination -Filter *.tgz | Select-Object -First 1
+          if ($null -eq $archive) { throw 'The npm tarball is missing' }
+          tar -xzf $archive.FullName -C $destination
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to unpack the npm tarball' }
+          $binary = Join-Path $destination 'package/claude.exe'
+          if (-not (Test-Path $binary)) { throw 'The Windows x64 binary is missing' }
+          "binary=$binary" >> $env:GITHUB_OUTPUT
+
+      - name: Capture three isolated loopback requests
+        if: steps.resolve.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          node scripts/claude-code-cch-seed.ts capture --binary $env:BINARY --out "$env:RUNNER_TEMP/cch-captures" --runs 3
+          if ($LASTEXITCODE -ne 0) { throw 'Claude Code capture failed' }
+
+      - name: Extract and verify the seed
+        if: steps.resolve.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          BINARY: ${{ steps.package.outputs.binary }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          node scripts/claude-code-cch-seed.ts find --binary $env:BINARY --captures "$env:RUNNER_TEMP/cch-captures" --version $env:VERSION --output "$env:RUNNER_TEMP/cch-result.json"
+          if ($LASTEXITCODE -ne 0) { throw 'No unique capture-verified seed was found' }
+
+      - name: Publish verification evidence
+        if: always() && steps.resolve.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-code-cch-${{ steps.resolve.outputs.version }}
+          path: ${{ runner.temp }}/cch-result.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Write the run summary
+        if: always()
+        shell: pwsh
+        env:
+          SKIP: ${{ steps.resolve.outputs.skip }}
+          RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          if ($env:SKIP -eq 'true') {
+            "Claude Code $env:RESOLVED_VERSION is already the registered default." >> $env:GITHUB_STEP_SUMMARY
+            return
+          }
+          $resultPath = Join-Path $env:RUNNER_TEMP 'cch-result.json'
+          if (Test-Path $resultPath) {
+            $result = Get-Content $resultPath -Raw | ConvertFrom-Json
+            "## Claude Code cch: $($result.status)" >> $env:GITHUB_STEP_SUMMARY
+            "" >> $env:GITHUB_STEP_SUMMARY
+            ('- Version: `{0}`' -f $result.version) >> $env:GITHUB_STEP_SUMMARY
+            ('- Seed: `{0}`' -f $result.seed) >> $env:GITHUB_STEP_SUMMARY
+            $verified = @($result.captures | Where-Object { $_.roundTrip }).Count
+            "- Captures: $($result.captures.Count); verified byte-for-byte round trips: $verified" >> $env:GITHUB_STEP_SUMMARY
+            "- Unique candidates: $($result.candidates)" >> $env:GITHUB_STEP_SUMMARY
+            ('- Binary SHA-256: `{0}`' -f $result.binary.sha256) >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "Claude Code cch extraction failed before producing a result; see the job log." >> $env:GITHUB_STEP_SUMMARY
+          }
