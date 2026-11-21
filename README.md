@@ -34,7 +34,7 @@
 | --- | --- | --- | --- | --- |
 | `codex-chatgpt` | ChatGPT（Plus / Pro / Business 等） | OpenAI Responses / Lite | 浏览器 OAuth（`:1455`）/ 设备码 / 只读导入 Codex CLI | 实时 `/backend-api/codex/models` + 随包兜底 |
 | `claude-subscription` | Claude Pro / Max | Anthropic Messages | PKCE 手动粘贴 `<code#state>` / loopback 回调 / 只读收编 Claude Code | 实时 `/v1/models` + 随包 17 模型能力表 |
-| `kimi-code` | Kimi Code 编程订阅 | OpenAI Chat Completions（可选 Anthropic） | RFC 8628 设备码授权（国区 / 国际区） | 实时 `/v1/models` + 随包兜底 |
+| `kimi-code` | Kimi Code 编程订阅 | OpenAI Chat Completions（可选 Anthropic） | RFC 8628 设备码授权（国区 / 国际区）/ 套餐 API Key | 实时 `/v1/models` + 随包兜底 |
 | `minimax-code` | MiniMax Code 编程订阅 | Anthropic Messages | 复用/导入本机桌面端 `auth.json` 或 RFC 8628 设备码 | 随包硬编码目录（上游未开放订阅侧 `/v1/models`） |
 | `command-code` | Command Code | Anthropic（`claude-*`）/ OpenAI（其余） | 浏览器 loopback OAuth（`:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 109 条能力表 |
 | `glm-coding-plan` | GLM Coding Plan（国区 BigModel / 国际区 Z.ai） | Anthropic Messages（套餐专用端点） | ZCode 浏览器轮询 OAuth / 手工粘贴 / 只读导入 ZCode | 随包目录（源自官方 `zcode-builtin.json`） |

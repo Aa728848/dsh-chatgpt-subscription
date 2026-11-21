@@ -61,6 +61,22 @@ export interface KimiCodeCredentials {
   planName?: string
   /** Unix milliseconds the credential was obtained. */
   authenticatedAt?: number
+  /**
+   * How this credential authenticates.
+   *
+   * Absent means the OAuth device-code pair this line has always stored, so
+   * every credential written before API keys existed reads back unchanged.
+   * `api-key` is a Kimi Code membership API key pasted from the Kimi Code
+   * console: it is sent exactly where an access token would be (bearer /
+   * `x-api-key`), it has no refresh token, and it does not expire on a clock —
+   * only a 401 from the service says it is no longer good.
+   */
+  authKind?: 'api-key'
+}
+
+/** Whether a stored credential is a pasted membership API key rather than an OAuth pair. */
+export function isKimiCodeApiKey(credentials: Pick<KimiCodeCredentials, 'authKind'>): boolean {
+  return credentials.authKind === 'api-key'
 }
 
 export interface KimiCodeCatalogModel {
@@ -258,11 +274,14 @@ export function parseKimiCodeCredentials(value: unknown): KimiCodeCredentials {
   if (typeof accessToken !== 'string' || accessToken === '') {
     throw new Error('Kimi Code credential is missing its access token')
   }
-  const refreshToken = record.refreshToken
-  if (typeof refreshToken !== 'string' || refreshToken === '') {
+  // An API key has no refresh token and no clock expiry; an OAuth pair must
+  // carry both, exactly as before.
+  const isApiKey = record.authKind === 'api-key'
+  const refreshToken = record.refreshToken ?? (isApiKey ? '' : undefined)
+  if (typeof refreshToken !== 'string' || (refreshToken === '' && !isApiKey)) {
     throw new Error('Kimi Code credential is missing its refresh token')
   }
-  const expiresAt = record.expiresAt
+  const expiresAt = record.expiresAt ?? (isApiKey ? 0 : undefined)
   if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
     throw new Error('Kimi Code credential expiry is invalid')
   }
@@ -278,6 +297,7 @@ export function parseKimiCodeCredentials(value: unknown): KimiCodeCredentials {
     oauthHost: safeHost(optionalString(record, 'oauthHost')) ?? oauthHost(region),
     baseUrl: safeHost(optionalString(record, 'baseUrl')) ?? codingBaseUrl(region),
   }
+  if (isApiKey) credentials.authKind = 'api-key'
   for (const key of ['scope', 'tokenType', 'userId', 'nickname', 'email', 'planName'] as const) {
     const parsed = optionalString(record, key)
     if (parsed !== undefined) credentials[key] = parsed

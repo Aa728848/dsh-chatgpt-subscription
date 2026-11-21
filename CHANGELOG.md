@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **[kimi-code] 新增「套餐 API Key」登录方式，与设备码登录并列**
+  - **入口**：账号管理标题行改为「添加账号」（设备码）+「API Key 登录」两个按钮；后者在账号列表下方展开一个密码输入框，粘贴 Kimi Code 控制台（kimi.com/code）创建的会员 API Key 即可入池。API Key 账号在卡片上标注「登录方式：套餐 API Key」。
+  - **宿主**（`src/host/kimi-code/{api-key,token-store,account-pool,oauth,routes,client}.ts`）：新增 `POST /kimi-code/api/login/api-key`（同源校验）。Key 先经 `GET /coding/v1/models` 验证（首选区域 401 时再试另一区域；`KIMI_CODE_BASE_URL` 固定时只试一个），再读一次 `/me` 取昵称与套餐，然后以 `authKind: 'api-key'` 写入加密号池；Key 不出现在任何应答与日志里。凭据无 refresh token、无过期时间，号池永不刷新它，按 Key 的 SHA-256 摘要去重（不按 `/me` 的用户 id，避免与同一会员的设备码账号互相覆盖）。
+  - **失效处理**：模型请求 401 仍按原逻辑标记该账号需重新登录；对 API Key 账号点「重新登录」会打开绑定到该行的粘贴框，换上新 Key 后保留别名与轮换位置。用量接口的 401 只显示为读取失败，不会把 Key 账号踢出轮换（Key 能否读 `/usages` / `/me` 未经实测）。
+  - **兼容**：旧凭据没有 `authKind` 字段，读回时行为与之前完全一致；OAuth 凭据仍强制要求 refresh token。
+  - **回归**：新增 `test/kimi-code-api-key.test.ts`（15 例：规范化、解析往返、单凭据路径不刷新、号池去重与不刷新、区域回退、路由成功 / 拒绝 / 跨源 / 替换 / 拒绝替换设备码账号）与 `test/kimi-code-api-key-ui.test.tsx`（3 例：标题行恰两个按钮、提交体与清空、Key 行重新登录走粘贴框）；把去重改回按用户 id 时对应用例变红。
+
 ## 0.80.5 - 2026-11-20
 
 - **[antigravity-acp] 修复切换到 ACP 模型必现 `MODEL_SWITCH_COMPACTION_FAILED`（[#119](https://github.com/Aa728848/dsh-chatgpt-subscription/issues/119)）**

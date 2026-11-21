@@ -15,6 +15,7 @@ import {
 import {
   FileCredentialStore,
   FileModelSettingsStore,
+  isKimiCodeApiKey,
   resolveRegion,
   type KimiCodeCatalogModel,
   type KimiCodeCredentials,
@@ -49,6 +50,12 @@ import {
   cacheWarmupUsageSessions,
 } from '../cache-warmup/index.ts'
 import { beginWebLogin, getWebLoginStatus, isRefreshTokenRejected, resetWebLogin } from './oauth.ts'
+import {
+  KimiCodeApiKeyError,
+  kimiCodeApiKeyCredentials,
+  normalizeKimiCodeApiKey,
+  verifyKimiCodeApiKey,
+} from './api-key.ts'
 import {
   KIMI_CODE_REASONING_EFFORTS,
   type KimiCodeAccount,
@@ -769,6 +776,64 @@ export function registerKimiCodeRoutes(
           if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
           resetWebLogin()
           return sendJson(response, 200, { ok: true, value: getWebLoginStatus() })
+        }
+
+        if (path === 'login/api-key') {
+          if (method !== 'POST') return sendMethodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return sendJson(response, 403, { ok: false, error: 'Cross-origin request rejected.' })
+          // The body carries a secret, so it is read here and nowhere else: the
+          // key lives in this handler's locals until it is verified and stored,
+          // and it never appears in an answer or a log line.
+          const body = await readRequestJson(request)
+          let apiKey: string
+          try {
+            apiKey = normalizeKimiCodeApiKey(body.apiKey)
+          } catch (error) {
+            if (error instanceof KimiCodeApiKeyError) return sendJson(response, error.status, { ok: false, error: error.message })
+            throw error
+          }
+          // Replacing a revoked key names its row, so the account keeps its alias
+          // and its place in the rotation. Only an API-key row can be replaced
+          // this way: a device-code account is restored by signing in again.
+          const replaceId = typeof body.accountId === 'string' ? body.accountId : undefined
+          if (replaceId !== undefined) {
+            if (accountPool === undefined) return sendJson(response, 400, { ok: false, error: 'Account pool is not installed.' })
+            const row = (await accountPool.read()).accounts.find((account) => account.id === replaceId)
+            if (row === undefined) {
+              return sendJson(response, 404, { ok: false, error: 'The account to replace is no longer in the pool; nothing was changed.' })
+            }
+            if (!isKimiCodeApiKey(row.credentials)) {
+              return sendJson(response, 400, { ok: false, error: 'This account signs in with the device code; use its re-sign-in instead of pasting a key.' })
+            }
+          }
+          let region: KimiCodeRegion
+          try {
+            region = await verifyKimiCodeApiKey(apiKey, {
+              fetchFn,
+              region: isRegion(body.region) ? body.region : await resolveRegion(),
+            })
+          } catch (error) {
+            if (error instanceof KimiCodeApiKeyError) return sendJson(response, error.status, { ok: false, error: error.message })
+            throw error
+          }
+          let credentials = kimiCodeApiKeyCredentials(apiKey, region)
+          // A key names nobody; `/me` may, and it also names the plan. Read once
+          // so the row is titled at once — a refusal here costs only the name.
+          const profile = await fetchProfile(store, { fetchFn, credentials }).catch(() => null)
+          if (profile !== null) credentials = credentialsWithProfile(credentials, profile)
+          if (accountPool === undefined) {
+            await store.write(credentials)
+          } else if (replaceId !== undefined) {
+            await accountPool.updateAccountCredentials(replaceId, credentials)
+            await accountPool.clearAuthFailed(replaceId)
+          } else {
+            await accountPool.addAccount(credentials)
+          }
+          // The replaced key's readings and catalog belong to a credential that
+          // is gone; a new account has none yet either way.
+          clearCachedQuota()
+          clearCachedCatalog()
+          return sendJson(response, 200, { ok: true, value: await readStatus() })
         }
 
         if (path === 'connection/test') {

@@ -441,6 +441,11 @@ export interface KimiCodeAccountSummaryDto extends PoolAccountSummaryDto {
   planName?: string
   /** Region the credential was issued in; a pool may hold several. */
   region?: KimiCodeRegion
+  /**
+   * How the account signs in: the OAuth device code, or a pasted membership API
+   * key. The card uses it to label the row and to offer the right re-sign-in.
+   */
+  authKind?: 'oauth' | 'api-key'
 }
 
 /** Live state of the device-code login flow the card polls. */

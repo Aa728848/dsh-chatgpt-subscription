@@ -33,6 +33,7 @@ import {
 import {
   FileCredentialStore,
   deviceIdPath,
+  isKimiCodeApiKey,
   persistRegion,
   resolveRegion,
   type KimiCodeCredentials,
@@ -674,6 +675,16 @@ export async function ensureAccessToken(
   const credentials = await store.read()
   if (credentials === null) {
     throw new KimiCodeUnauthorizedError('Not signed in to Kimi Code. Sign in from Settings > Kimi Code.')
+  }
+
+  // A pasted API key has nothing to refresh. A forced renewal is only ever
+  // asked for after the service refused the credential, and for a key that
+  // refusal is final: answer it as one instead of reporting the same key back.
+  if (isKimiCodeApiKey(credentials)) {
+    if (options.force === true) {
+      throw new KimiCodeUnauthorizedError('Kimi Code rejected the stored API key. Paste a new key from Settings > Kimi Code.')
+    }
+    return credentials
   }
 
   const threshold = refreshThresholdMs(credentials.expiresIn)

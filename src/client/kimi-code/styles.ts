@@ -140,6 +140,12 @@ const BASE = `
 .dsha-kq-foot-left>span{white-space:nowrap}
 .dsha-kq-expires{text-align:right;white-space:nowrap}
 .dsha-kq-blank{margin:12px 0 0}
+/* Two sign-in entries share the heading row: the device code and the pasted
+   membership API key. The key field opens below the list, never in the heading. */
+.dshkc-login-actions{display:flex;flex-wrap:wrap;gap:8px}
+.dshkc-apikey{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.dshkc-apikey-row{align-items:center;display:flex;flex-wrap:wrap;gap:8px}
+.dshkc-apikey-row input{flex:1 1 260px;min-width:200px}
 `
 
 /** Kimi-specific rules layered on top of the shared control styles. */

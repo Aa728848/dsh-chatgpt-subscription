@@ -36,7 +36,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `codex-chatgpt` | Codex（ChatGPT 订阅） | OpenAI Responses / Responses Lite | 浏览器 OAuth（`localhost:1455`）/ 设备码 / 只读导入 Codex CLI | 实时 `/backend-api/codex/models` + 随包兜底 | `/api/dsh-chatgpt-subscription` |
 | `claude-subscription` | Claude（订阅） | Anthropic Messages | PKCE 手动粘贴 `<code#state>` / loopback 回调 / 只读收编 Claude Code | 实时 `/v1/models` + 随包能力表 | `/claude/api` |
-| `kimi-code` | Kimi Code | OpenAI Chat Completions（可选 Anthropic Messages） | RFC 8628 设备码（`auth.kimi.com` / `.ai`） | 实时 `/v1/models` + 随包兜底 | `/kimi-code/api` |
+| `kimi-code` | Kimi Code | OpenAI Chat Completions（可选 Anthropic Messages） | RFC 8628 设备码（`auth.kimi.com` / `.ai`）/ 套餐 API Key | 实时 `/v1/models` + 随包兜底 | `/kimi-code/api` |
 | `minimax-code` | MiniMax Code（编程订阅） | Anthropic Messages | 复用/导入桌面端 `auth.json` 或 RFC 8628 设备码 | 随包硬编码目录（4 款模型） | `/minimax-code/api` |
 | `command-code` | Command Code | Anthropic Messages（`claude-*`）/ OpenAI Chat Completions（其余） | 浏览器 loopback OAuth（`127.0.0.1:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 109 条能力表 | `/command-code/api` |
 | `glm-coding-plan` | GLM（ZCode 账号） | Anthropic Messages（Coding Plan 端点） | ZCode 浏览器轮询 OAuth / 手工粘贴 / 只读导入 ZCode | 随包目录（转录自官方 `zcode-builtin.json`） | `/glm-coding-plan/api` |
@@ -160,6 +160,7 @@
   - 专用于 **Kimi Code 订阅**（`https://api.kimi.com/coding/v1`，与 Moonshot 按量开放平台互不通用）；
   - 采用 **RFC 8628 设备码登录**（默认中国大陆 `auth.kimi.com` / `api.kimi.com`；国际区可通过 `DSH_KIMI_CODE_OAUTH_HOST=https://auth.kimi.ai` 与 `DSH_KIMI_CODE_BASE_URL=https://api.kimi.ai/coding` 切换）；
   - 访问令牌提前续期、并发单飞；重新登录操作严格校验账号身份一致性，防止浏览器串号覆盖。
+  - 也可在账号卡点 **API Key 登录**，粘贴 Kimi Code 控制台创建的会员 API Key（`POST /kimi-code/api/login/api-key`）：先用 `GET /v1/models` 验证（首选区域 401 时再试另一区域），通过后加密入池；Key 不刷新、不过期，按摘要去重，失效后在该行「重新登录」粘贴新 Key 即可原位替换。Moonshot 开放平台的 Key 不可用。
 - **模型、思考与协议特性**：
   - 覆盖 `k3`、`k3-256k`、`kimi-for-coding`、`kimi-for-coding-highspeed`、`k3.1-pro`、`k3.1-pro-highspeed`，实时以 `GET /v1/models` 为准；默认走 OpenAI Chat Completions，实时目录声明支持时可走 Anthropic Messages（携带 `clear_thinking_20251015` 与尾部可缓存块 `ephemeral` 断点）；
   - 严格遵循 K3 规范：思考档位仅发模型声明集合（`low` / `high` / `max`；`k3.1-pro` 系列强制开启思考），开启思考时历史 assistant 消息必带 `reasoning_content`，不发 `temperature`，`stop` 裁剪至 ≤5 条且每条 ≤32 字节；

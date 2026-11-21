@@ -146,6 +146,12 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [savingModel, setSavingModel] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  // The pasted-key entry. The key lives only in this controlled field and in the
+  // submit handler's local, and is cleared whether the submit succeeds or not.
+  const [apiKeyOpen, setApiKeyOpen] = useState(false)
+  const [apiKeyValue, setApiKeyValue] = useState('')
+  // The API-key row a new key replaces, or null when the key adds an account.
+  const [apiKeyTarget, setApiKeyTarget] = useState<string | null>(null)
   // Result of an explicit connection test. The button used to end silently on
   // success, which is indistinguishable from a click that never registered.
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null)
@@ -336,13 +342,56 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
     }
   }
 
+  /** Open or close the API-key field for a NEW account. */
+  const toggleApiKey = () => {
+    setApiKeyOpen((open) => !open)
+    setApiKeyTarget(null)
+    setApiKeyValue('')
+  }
+
+  /** Verify a pasted key on the host and add it (or put it on the row it replaces). */
+  const handleSubmitApiKey = async () => {
+    const apiKey = apiKeyValue.trim()
+    if (apiKey === '') {
+      setError(t.apiKeyEmpty)
+      return
+    }
+    try {
+      setBusy('login-api-key')
+      setError(null)
+      const updated = await api.request<KimiCodeWebStatus>('/login/api-key', {
+        method: 'POST',
+        body: JSON.stringify(apiKeyTarget === null ? { apiKey } : { apiKey, accountId: apiKeyTarget }),
+      })
+      applyStatus(updated)
+      setContextDrafts(contextDraftsFor(updated))
+      setApiKeyOpen(false)
+      setApiKeyTarget(null)
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      // Submitted or refused, the key is not kept around in the page.
+      setApiKeyValue('')
+      setBusy(null)
+    }
+  }
+
   /**
    * Re-authorize one account.
    *
    * Nothing is deleted: the failure marker is cleared and the device-code flow
-   * runs again, so the account keeps its alias and place in the rotation.
+   * runs again, so the account keeps its alias and place in the rotation. An
+   * API-key account cannot be restored by a device-code sign-in (that would add
+   * a second, OAuth row), so it opens the key field bound to that row instead.
    */
   const handleRelogin = (accountId: string) => {
+    if (status?.accounts?.find((entry) => entry.id === accountId)?.authKind === 'api-key') {
+      setApiKeyTarget(accountId)
+      setApiKeyValue('')
+      setApiKeyOpen(true)
+      return
+    }
     void (async () => {
       try {
         const updated = await api.request<KimiCodeWebStatus>('/accounts', {
@@ -535,6 +584,9 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
   const models = status?.models ?? []
   const visibleCount = models.filter((model) => model.enabled).length || 0
   const loginPending = flow?.status === 'pending'
+  const apiKeyTargetAlias = apiKeyTarget === null
+    ? null
+    : (status?.accounts?.find((entry) => entry.id === apiKeyTarget)?.alias ?? apiKeyTarget)
   // The effort menu follows what the CHECKED models declare (see `labels.ts`),
   // so a model that only thinks simply leaves no "thinking off" to pick.
   const offeredEfforts = effortOptions(models)
@@ -553,8 +605,28 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
         rotationStrategy={status?.rotationStrategy ?? 'sequential'}
         busy={busy}
         labels={t}
-        loginBusyLabel={loginPending ? t.waitingAuthorization : busy === 'login' ? t.requestingCode : undefined}
         onLogin={() => void handleLogin()}
+        // Two ways in, side by side in the heading: the device code (primary)
+        // and a membership API key. The key field itself opens below the list.
+        renderLoginActions={() => (
+          <div className="dsha-account-add-actions dshkc-login-actions">
+            <button className="dsha-btn dsha-btn-primary" disabled={busy !== null} onClick={() => void handleLogin()}>
+              {loginPending ? t.waitingAuthorization : busy === 'login' ? t.requestingCode : t.addAccount}
+            </button>
+            <button
+              className="dsha-btn"
+              disabled={busy !== null}
+              aria-expanded={apiKeyOpen}
+              aria-controls="dshkc-apikey-body"
+              onClick={toggleApiKey}
+            >
+              {t.apiKeyLogin}
+            </button>
+          </div>
+        )}
+        renderDetails={(entry) => (entry.authKind === 'api-key'
+          ? <span>{t.authMethod}: {t.authMethodApiKey}</span>
+          : null)}
         onSetPrimary={(accountId) => void handleAccountAction('set-primary', accountId)}
         onDelete={(accountId) => void handleAccountAction('delete', accountId)}
         onClearCooldown={(accountId) => void handleAccountAction('clear-cooldown', accountId)}
@@ -615,6 +687,37 @@ export function KimiCodeSection({ onModelChange, loadModelDirectory }: Props): R
               )}
               <button className="dsha-btn" disabled={busy !== null} onClick={() => void handleCancelLogin()}>
                 {t.cancelSignIn}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {apiKeyOpen && (
+          <div className="dshkc-apikey" id="dshkc-apikey-body">
+            <p className="dsha-muted">
+              {apiKeyTargetAlias === null ? t.apiKeyHint : t.apiKeyReplaceHint.replace('{alias}', apiKeyTargetAlias)}
+            </p>
+            <div className="dshkc-apikey-row">
+              <input
+                type="password"
+                className="dsha-select"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label={t.apiKeyLogin}
+                placeholder={t.apiKeyPlaceholder}
+                value={apiKeyValue}
+                disabled={busy !== null}
+                onChange={(event) => setApiKeyValue(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void handleSubmitApiKey()
+                }}
+              />
+              <button
+                className="dsha-btn dsha-btn-primary"
+                disabled={busy !== null || apiKeyValue.trim() === ''}
+                onClick={() => void handleSubmitApiKey()}
+              >
+                {busy === 'login-api-key' ? t.apiKeySubmitting : t.apiKeySubmit}
               </button>
             </div>
           </div>

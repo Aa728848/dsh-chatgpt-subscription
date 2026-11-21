@@ -1347,9 +1347,9 @@ export async function fetchAccountQuota(
     // A rejected credential must be distinguishable from a transient outage:
     // callers surface the first and retry the second, so it carries the same
     // typed error the token layer uses.
-    throw new KimiCodeUnauthorizedError(
-      'Kimi Code rejected the stored credential (401). Sign in again from Settings > Kimi Code.',
-    )
+    throw new KimiCodeUnauthorizedError(credentials.authKind === 'api-key'
+      ? 'Kimi Code refused the API key on the usage endpoint (401). If model requests fail as well, paste a new key from Settings > Kimi Code.'
+      : 'Kimi Code rejected the stored credential (401). Sign in again from Settings > Kimi Code.')
   }
   if (response.status === 404) {
     throw new Error('The Kimi Code usage endpoint is unavailable for this account. Confirm the subscription is active.')

@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { dshHomeDir } from '../common/home.ts'
 import {
   AccountPoolCore,
@@ -12,6 +13,7 @@ import {
 import type { CredentialStore } from '../token-store.ts'
 import {
   FileCredentialStore,
+  isKimiCodeApiKey,
   parseKimiCodeCredentials,
   type KimiCodeCredentials,
 } from './token-store.ts'
@@ -61,6 +63,20 @@ const PLACEHOLDER_ALIAS = /^(?:账号|帐号|account)\s*\d*$|^主账号$|^primar
  */
 export function isPlaceholderAlias(alias: string): boolean {
   return PLACEHOLDER_ALIAS.test(alias.trim())
+}
+
+/**
+ * Pool identity of a pasted API key.
+ *
+ * A key names no account by itself, and the identity `/me` may later report is
+ * deliberately NOT used: an OAuth row and an API-key row of the same member are
+ * two different credentials, and keying both on the user id would let pasting a
+ * key silently overwrite the device-code sign-in (or the reverse). A digest of
+ * the key keeps pasting the same key twice idempotent without storing the key a
+ * second time in clear.
+ */
+export function kimiCodeApiKeyIdentity(apiKey: string): string {
+  return `api-key:${createHash('sha256').update(apiKey).digest('hex').slice(0, 24)}`
 }
 
 /** A field worth storing, or undefined when the service left it blank. */
@@ -198,7 +214,9 @@ export class KimiCodeAccountPool extends AccountPoolCore<
       parsePoolData: parseKimiCodePoolData,
       // Identity, never a token: the refresh token rotates, so keying on it
       // would make the same account look new after every refresh.
-      dedupeKey: (credentials) => credentials.userId ?? credentials.email,
+      dedupeKey: (credentials) => (isKimiCodeApiKey(credentials)
+        ? kimiCodeApiKeyIdentity(credentials.accessToken)
+        : credentials.userId ?? credentials.email),
       defaultAlias: (credentials, position) => credentials.email
         ?? credentials.nickname
         ?? `账号 ${position}`,
@@ -218,9 +236,21 @@ export class KimiCodeAccountPool extends AccountPoolCore<
         ...(credentials.planName === undefined ? {} : { planName: credentials.planName }),
         ...(credentials.region === undefined ? {} : { region: credentials.region }),
       }),
-      expiresAt: (credentials) => credentials.expiresAt,
-      needsRefresh: (credentials, now) => credentials.expiresAt - now <= refreshThresholdMs(credentials.expiresIn),
+      // An API key has no clock: it is neither shown with an expiry nor ever
+      // refreshed ahead of one.
+      expiresAt: (credentials) => (isKimiCodeApiKey(credentials) ? undefined : credentials.expiresAt),
+      needsRefresh: (credentials, now) => !isKimiCodeApiKey(credentials)
+        && credentials.expiresAt - now <= refreshThresholdMs(credentials.expiresIn),
       refresh: async (credentials, fetchFn, options) => {
+        if (isKimiCodeApiKey(credentials)) {
+          // Only a forced renewal reaches here (needsRefresh is false), and a key
+          // cannot be renewed. Deliberately a plain error rather than the typed
+          // unauthorized one: a refusal from an auxiliary endpoint (the usage
+          // reading) is not proof the key stopped working for chat, so the row
+          // must not be taken out of rotation on its account. A real 401 on a
+          // model request still marks it through the adapter.
+          throw new Error('A Kimi Code API key cannot be renewed. Paste a new key from Settings > Kimi Code if it was revoked.')
+        }
         // The refresh targets this account's own OAuth host and region, and the
         // rotated pair replaces only the token fields: an account from one region
         // must not silently become an account of another.
@@ -278,6 +308,7 @@ export class KimiCodeAccountPool extends AccountPoolCore<
         const nickname = account.nickname ?? account.credentials.nickname
         const planName = account.planName ?? account.credentials.planName
         const region = account.region ?? account.credentials.region
+        const authKind = isKimiCodeApiKey(account.credentials) ? 'api-key' as const : 'oauth' as const
         // The account's own newest snapshot, taken from the identity THIS row
         // carries. Quota follows the account, so the row draws its own reading;
         // absent means that account was never read, which is not "nothing used".
@@ -288,6 +319,7 @@ export class KimiCodeAccountPool extends AccountPoolCore<
           ...(nickname === undefined ? {} : { nickname }),
           ...(planName === undefined ? {} : { planName, planLabel: planName }),
           ...(region === undefined ? {} : { region }),
+          authKind,
           ...(account.userId === undefined ? {} : { userId: account.userId }),
           ...(quota === undefined ? {} : { quota }),
         }
