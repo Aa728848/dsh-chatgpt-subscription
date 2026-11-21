@@ -472,7 +472,7 @@ describe('Prompt-cache breakpoints', () => {
     expect(JSON.stringify(built)).not.toContain('cache_control')
   })
 
-  it('marks nothing on the message list when the history ends on an assistant turn', () => {
+  it('appends a wire-only user continuation when the history ends on an assistant turn', () => {
     const built = buildClaudeRequestBody(options({
       model: 'claude-opus-5-5',
       messages: [
@@ -481,10 +481,11 @@ describe('Prompt-cache breakpoints', () => {
       ],
     }) as unknown as GenerateOptions)
     const messages = messagesOf(built)
-    expect(messages[messages.length - 1]!.role).toBe('assistant')
+    expect(messages.map(message => message.role)).toEqual(['user', 'assistant', 'user'])
+    expect(messages.at(-1)!.content[0]!.text).toBe('Continue from where you left off.')
     expect(messages[0]!.content[0]!.cache_control).toBeUndefined()
-    // The system breakpoint is still there: it is independent of the message one.
-    expect(countClaudeCacheBreakpoints(built)).toBe(1)
+    expect(messages.at(-1)!.content[0]!.cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
+    expect(countClaudeCacheBreakpoints(built)).toBe(2)
   })
 })
 
@@ -1367,7 +1368,7 @@ describe('Mid-conversation system messages', () => {
   it('keeps a content-bearing system message between a user and an assistant', () => {
     const built = build([user('ask'), system('MID'), assistant('answer')], undefined, 'TOP LEVEL')
     const messages = messagesOf(built)
-    expect(messages.map(message => message.role)).toEqual(['user', 'system', 'assistant'])
+    expect(messages.map(message => message.role)).toEqual(['user', 'system', 'assistant', 'user'])
     expect(messages[1]?.content[0]?.text).toBe('MID')
     expect(systemBlocksOf(built).map(block => block.text)).toEqual([CLAUDE_CODE_IDENTITY_TEXT, 'TOP LEVEL'])
   })
@@ -1392,7 +1393,7 @@ describe('Mid-conversation system messages', () => {
 
   it('applies the same placement rule to an unknown current-model id', () => {
     const legal = build([user('ask'), system('MID'), assistant('answer')], 'claude-not-released-yet')
-    expect(messagesOf(legal).map(message => message.role)).toEqual(['user', 'system', 'assistant'])
+    expect(messagesOf(legal).map(message => message.role)).toEqual(['user', 'system', 'assistant', 'user'])
     const leading = build([system('LEADING'), user('ask')], 'claude-not-released-yet')
     expect(messagesOf(leading).map(message => message.role)).toEqual(['user'])
     expect(String(systemBlocksOf(leading).at(-1)?.text)).toContain('LEADING')

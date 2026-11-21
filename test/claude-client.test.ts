@@ -218,34 +218,28 @@ describe('subscription request headers', () => {
     expect(claudeUserAgent('cli')).toBe('claude-cli/' + claudeCliVersion() + ' (external, cli)')
   })
 
-  it('always sends the oauth and claude-code betas, and adds thinking only when asked', () => {
+  it('uses the captured first-party OAuth beta set on every Messages request', () => {
     const plain = buildClaudeHeaders(ACCESS_TOKEN, { model: 'claude-sonnet-4-6' })['anthropic-beta'].split(',')
     expect(plain).toContain(OAUTH_BETA)
     expect(plain).toContain(CLAUDE_CODE_BETA)
-    expect(plain).not.toContain(INTERLEAVED_THINKING_BETA)
-
-    const thinking = buildClaudeHeaders(ACCESS_TOKEN, { model: 'claude-sonnet-4-6', thinking: true })['anthropic-beta'].split(',')
-    expect(thinking).toContain(INTERLEAVED_THINKING_BETA)
-    expect(thinking).toContain(OAUTH_BETA)
+    expect(plain).toContain(INTERLEAVED_THINKING_BETA)
+    expect(plain).toContain('prompt-caching-scope-2026-01-05')
+    expect(plain).toContain('cache-diagnosis-2026-04-07')
+    expect(buildClaudeHeaders(ACCESS_TOKEN, { model: 'claude-sonnet-4-6' })['anthropic-beta'].split(',')).toEqual(plain)
   })
 
-  it('adds the thinking-binding beta only when the body carries block_binding', () => {
-    // block_binding without this beta is a documented 400 on every request.
-    expect(claudeBetas({ model: 'claude-sonnet-5-5', thinking: true, thinkingBinding: true }))
-      .toContain(THINKING_BINDING_CONTROLS_BETA)
-    expect(claudeBetas({ model: 'claude-sonnet-4-6', thinking: true })).not.toContain(THINKING_BINDING_CONTROLS_BETA)
-    expect(claudeBetas({ model: 'claude-sonnet-5-5', thinkingBinding: false })).not.toContain(THINKING_BINDING_CONTROLS_BETA)
+  it('keeps thinking-binding-controls in the first-party base set', () => {
+    expect(claudeBetas({ model: 'claude-sonnet-5-5' })).toContain(THINKING_BINDING_CONTROLS_BETA)
+    expect(claudeBetas({ model: 'claude-sonnet-4-6' })).toContain(THINKING_BINDING_CONTROLS_BETA)
+    expect(claudeBetas({ model: 'claude-sonnet-5-5' })).toContain(THINKING_BINDING_CONTROLS_BETA)
   })
 
-  it('withholds the claude-code beta from a haiku model, the reference own rule', () => {
+  it('keeps claude-code on haiku and matches the captured haiku ordering', () => {
     const haiku = claudeBetas({ model: 'claude-haiku-4-5' })
-    expect(haiku).not.toContain(CLAUDE_CODE_BETA)
-    // The oauth beta is unconditional: it is what makes the token usable at all.
-    expect(haiku).toContain(OAUTH_BETA)
-
-    // A dated haiku id is matched on the family token, not on an exact string.
-    expect(claudeBetas({ model: 'claude-haiku-4-5-20251001' })).not.toContain(CLAUDE_CODE_BETA)
-    // A request that names no model keeps the beta; the usage read is one.
+    expect(haiku).toContain(CLAUDE_CODE_BETA)
+    expect(haiku[0]).toBe(OAUTH_BETA)
+    expect(haiku.indexOf(CLAUDE_CODE_BETA)).toBeGreaterThan(3)
+    expect(claudeBetas({ model: 'claude-haiku-4-5-20251001' })).toContain(CLAUDE_CODE_BETA)
     expect(claudeBetas({})).toContain(CLAUDE_CODE_BETA)
     expect(claudeBetas({ model: 'claude-opus-4-7' })).toContain(CLAUDE_CODE_BETA)
   })

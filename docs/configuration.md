@@ -55,7 +55,7 @@
     mediaTools: true                      # 注册六个图片/视频工具（重载插件或重启后生效）
     cacheWarmup: true                     # 受控线路的大结果 ref:// 预览（热生效）
     cacheWarmupRetrieval: true            # 受控线路的导航检索大纲投影（热生效）
-    cacheWaitWarmup: true                 # 默认 Kimi 的等待续热；其他线路需显式策略（热生效）
+    cacheWaitWarmup: true                 # 等待子代理或后台任务期间的续热：Kimi 与 Claude API 1h 档默认启用（热生效）
     cacheAffinity: true                   # 轮换优先选前缀缓存仍热的账号（剩余额度 ≥20%，热生效）
     promptCacheOverrides: {}              # 部署级缓存语义覆盖；修改后重载插件
 ```
@@ -88,9 +88,9 @@
 | `cacheWarmup` | `boolean` | `true` | **热生效（volatile）** | 受控线路的命令/日志大结果 `ref://` 预览与 `cache_warmup_result` 补读 |
 | `cacheWarmupProviders` | `string[]` | 全部 controlled providers | **热生效（volatile）** | 允许产生新预览的线路；`[]` 关闭所有新投影，已有 ref 不受影响 |
 | `cacheWarmupRetrieval` | `boolean` | `true` | **热生效（volatile）** | 受控线路明确导航意图下的文件/网页检索结果大纲投影 |
-| `cacheWaitWarmup` | `boolean` | `true` | **热生效（volatile）** | 默认用于 Kimi 的等待期缓存保活；其他线路需 TTL 与显式策略 |
+| `cacheWaitWarmup` | `boolean` | `true` | **热生效（volatile）** | 等待期缓存保活，子代理与后台任务都算委派：默认用于 Kimi（空闲 20 分钟 / TTL 25 分钟）、Claude 订阅与 Claude API 的 1 小时缓存档（空闲 55 分钟 / TTL 60 分钟，5m 档不做）；其他线路需 TTL 与显式策略 |
 | `cacheAffinity` | `boolean` | `true` | **热生效（volatile）** | 轮换时优先选择该前缀缓存仍热且剩余额度 ≥20% 的账号 |
-| `promptCacheOverrides` | `Record<string, object>` | `{}` | **重载插件** | 覆盖线路缓存 TTL、账号作用域、冷启动、亲和、续热与提示；未知证据默认关闭 |
+| `promptCacheOverrides` | `Record<string, object>` | `{}` | **重载插件** | 覆盖线路缓存 TTL、账号作用域、冷启动、亲和、续热（`waitWarmup` / `waitJobs`）与提示；未知证据默认关闭 |
 
 #### `promptCacheOverrides` 示例
 
@@ -102,9 +102,16 @@ promptCacheOverrides:
     coldStart: warm      # warm 必须同时给出实测 ttlMs；in-flight 不需要 TTL
     ttlMs: 300000
     waitWarmup: false    # 不因有 TTL 就自动产生额外模型请求
+    waitJobs: false      # 后台任务是否也算委派；仅在 waitWarmup 开启时有意义
 ```
 
 `mode: none` 会强制关闭该线路的全部缓存优化；`affinity` 需要 `scope: account`；`coldStart: warm`、`waitWarmup`、`hint` 都要求正整数 `ttlMs`。未知字段、非法数值和矛盾组合会在启动时报错，而不是静默开启。
+
+**`waitJobs`（布尔，默认 `false`）**：等待续热是否把**运行中的后台任务**也算作委派，而不只是子代理。只在 `waitWarmup` 开启时有意义；只写 `waitWarmup: false` 关掉续热时不必同时改它。内置只有 `kimi-code`、`claude`（订阅，路由 id `claude-subscription`）与 `claude-api` 为 `true`，其余线路一律 `false`，行为与之前完全一致。任务证据来自宿主写进所有者会话的 `job/registered` / `job/settled` 事件；不发这两个事件的旧世代宿主上该开关自然失效。决策点对**所有线路**统一为 `ttlMs - 5 分钟`（导出纯函数 `cacheWaitDecisionMs(ttlMs)`，余量常量 `CACHE_WAIT_MARGIN_MS`）：Kimi 的 25 分钟 TTL 得到 20 分钟，Claude API 的 1 小时档得到 55 分钟。TTL ≤ 5 分钟时余量放不下，该线路**没有续热**：不排定时器、不产生请求，每进程每线路只告警一次；策略校验不变，这样的部署照常启动。
+
+**两条 Claude 线路的档位门**：`cacheWaitWarmup` 现在也管 Claude 订阅与 Claude API，但只在 **1 小时缓存档**生效（订阅线路的「跟随官方」留空即 1h）。适配器把每个主轮次实际写入的缓存寿命记进活动存储，控制器发现记录寿命与策略 `ttlMs`（3_600_000）不一致时对该会话不排定时器、不续热；5 分钟档因此从不产生续热请求。空闲时钟从请求**发出**时算起，流结束只补用量。订阅卡片另有默认关闭的 cache-keepalive：开启且实际为 1h 时，决策点先按上一响应的 request-id 调用 cache_touch，固定原账号；拒绝、404 或网络失败都在同次决策回退到原 steer 续热，5m 和 API 线路不使用 touch。
+
+**策略 id 与路由 id**：Claude 订阅线路自身代码按 `claude` 读策略，宿主路由 id 则是 `claude-subscription`。等待控制器按路由 id 解析，因此策略表带一份别名（`claude-subscription` → `claude`），两个 id 解析到同一份事实；活动记录按路由 id 写入。
 
 #### `reasoningCollapseGuard` 可选调参字段
 
@@ -180,7 +187,7 @@ promptCacheOverrides:
 $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queueTimeoutMs":120000}'
 ```
 
-- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`、`antigravity-acp`、`qianwen-token-plan`、`relayone`。
+- 支持键：`default`、`queueTimeoutMs`，以及任意线路键：`codex-chatgpt`、`claude`、`kimi-code`、`minimax-code`、`command-code`、`ollama`、`glm-coding-plan`、`step-code`、`cline-pass`、`qoder`、`opendesign`、`workbuddy-subscription`、`antigravity-acp`、`qianwen-token-plan`、`relayone`、`claude-api`。
 - `0` 或缺省表示不限制；非法 JSON 或未知字段会在启动时直接报错拒绝（fail-closed）。
 
 ### 脱敏请求诊断日志（`DSH_PROVIDER_DIAGNOSTICS`）
@@ -212,7 +219,7 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | | `DSH_CODEX_MAX_IMAGE_BYTES` | 单次请求图片负载字节上限（默认 `2097152`，即 2 MiB） |
 | | `DSH_CODEX_REMOTE_COMPACTION` | 默认开启 Codex remote-v2 原生压缩；设为 `0` 恢复 DSH 压缩与工具结果剪裁 |
 | **Claude** | `CLAUDE_CONFIG_DIR` | 本机 Claude Code 配置目录（默认 `~/.claude`） |
-| | `DSH_CLAUDE_CLI_VERSION` | 覆盖向 Anthropic 网关申报的客户端版本号 |
+| | `DSH_CLAUDE_CLI_VERSION` | 覆盖两条 Claude 线路共享的客户端版本；与 API 专用别名同时设置时必须一致。未知版本需同时给 `DSH_CLAUDE_CCH_SEED` |
 | | `DSH_CLAUDE_OAUTH_AUTHORIZE_URL` | 覆盖 Claude OAuth 授权入口 URL |
 | **Kimi Code** | `DSH_KIMI_CODE_OAUTH_HOST` / `KIMI_CODE_OAUTH_HOST` | 覆盖 OAuth 主机（国际区设为 `https://auth.kimi.ai`） |
 | | `DSH_KIMI_CODE_BASE_URL` / `KIMI_CODE_BASE_URL` | 覆盖模型接口基址（国际区设为 `https://api.kimi.ai/coding`） |
@@ -220,7 +227,7 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | | `DSH_KIMI_CODE_MAX_IMAGE_BYTES` | 覆盖粘性图片高水位预算（默认 20 MiB，低水位自动取其 50%） |
 | | `DSH_KIMI_CODE_BYTES_PER_TOKEN` | 可选提前压缩窗口折算系数（如 ASCII 取 `4`、混合 `8`、中文 `12`） |
 | | `DSH_KIMI_CODE_PRESERVE_THINKING` | 设为 `0` 关闭历史思考内容保留 |
-| | `DSH_KIMI_CODE_CACHE_WAIT_WARMUP` | 设为 `1` 允许大上下文主代理在等待子代理满 20 分钟时做单次轻量续热 |
+| | `DSH_KIMI_CODE_CACHE_WAIT_WARMUP` | 设为 `1` 允许主代理在等待子代理或后台任务时做轻量续热：Kimi 空闲满 20 分钟，Claude 订阅与 Claude API 的 1 小时档空闲满 55 分钟；`0` 关闭全部线路 |
 | | `DSH_KIMI_CODE_CACHE_AFFINITY` | 覆盖多账号轮换时的前缀缓存亲和选号开关（`1` / `0`） |
 | | `DSH_KIMI_CODE_TOOL_UPDATE` | 控制动态工具更新策略 |
 | | `KIMI_CODE_CUSTOM_HEADERS` | 追加换行分隔的 `Name: Value` 自定义最低优先级请求头 |
@@ -244,6 +251,8 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | **OpenDesign** | `OPENDESIGN_API_KEY` | 号池为空时自动投射为首要账号的静态 API Key（不落盘） |
 | **WorkBuddy** | `CODEBUDDY_AUTH_DIR` / `WORKBUDDY_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` | 覆盖本机 CodeBuddy / WorkBuddy 桌面端凭据与密钥目录 |
 | **Antigravity (ACP)** | `DSH_ANTIGRAVITY_ACP_BIN` | 显式覆盖官方 `agy` / `agy_acp_server` 可执行文件路径 |
+| **Claude API** | `DSH_CLAUDE_API_CLI_VERSION` | 两条 Claude 线路共享版本的兼容别名；与订阅变量冲突会报错。仅自动采用已有 cch 种子的 npm 版本，双方均超过各自缓存 TTL 后切换 |
+| | `DSH_CLAUDE_CCH_SEED` | 与未知版本的显式 pin 成对提供 cch 种子（64 位 hex）；没有种子的 pin 不会发出可能错误的签名 |
 
 ---
 
@@ -260,3 +269,9 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 RelayOne 在设置卡粘贴单个 API Key。保存后自动读取该 Key 当前分组可用的模型；无需手工填写分组或协议。可配置对话模型勾选、上下文窗口覆盖、默认推理等级、默认生图/视频模型和独立代理。
 
 `mediaTools: false` 会同时关闭 RelayOne 生图与视频工具；线路自身的启用开关在执行时仍会再次检查。目录快照只用于同一 Key 的冷启动，不会跨 Key 复用。
+
+## Claude API
+
+Claude API 在设置卡粘贴单个 API Key；端点默认官方地址，可改为任意 http/https origin。可配置对话模型勾选（未设置跟随目录、显式空选为全不启用）、上下文窗口覆盖、默认推理等级、缓存时长 5m/1h、快速模式、服务端压缩开关与独立代理。
+
+客户端版本由两条 Claude 线路共享。后台仍读取 npm latest，但只有代码已登记对应 cch 种子的版本才进入候选；未知版本继续使用最后的已验证组合。两条线路各自最近一次活动都超过其记住的缓存 TTL 后才切换，活跃线路会阻止另一线路单独升级。`DSH_CLAUDE_CLI_VERSION` / `DSH_CLAUDE_API_CLI_VERSION` 是同一 pin 的兼容别名，冲突时明确报错；未知 pin 需成对设置 `DSH_CLAUDE_CCH_SEED`。压缩块、版本缓存与模型能力记忆（`claude-api-capability-memory.json`，端点+模型为键、7 天过期）位于 `$DSH_HOME/storages`，属主可读写；服务端压缩对任何路由到本线路的压缩请求生效（含其他线路改派），上游拒绝时同调用退回客户端压缩。

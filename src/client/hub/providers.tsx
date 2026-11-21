@@ -40,6 +40,8 @@ import { QianwenTokenPlanSection } from '../qianwen-token-plan/QianwenTokenPlanS
 import { QIANWEN_TOKEN_PLAN_PROVIDER_NAME, QIANWEN_TOKEN_PLAN_ROUTE_PREFIX } from '../../shared/qianwen-token-plan-contracts.ts'
 import { RelayOneSection } from '../relayone/RelayOneSection.tsx'
 import { RELAYONE_PROVIDER_NAME, RELAYONE_ROUTE_PREFIX } from '../../shared/relayone-contracts.ts'
+import { ClaudeApiSection } from '../claude-api/ClaudeApiSection.tsx'
+import { CLAUDE_API_PROVIDER_NAME, CLAUDE_API_ROUTE_PREFIX } from '../../shared/claude-api-contracts.ts'
 import type { HubProviderId } from './brand-icons.tsx'
 
 /** What the detail page hands to a mounted section. */
@@ -160,6 +162,16 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     name: 'Claude',
     setEnabled: (enabled) => postLineSettings('/claude/api', { enabled }),
     renderDetail: ({ onModelChange }) => <ClaudeSection onModelChange={onModelChange} />,
+  },
+  {
+    // Claude API (single API key): the one entry placed mid-list on purpose, directly
+    // after `claude`, because the two cards share a vendor and a mark (a user decision).
+    // No other entry moved; every other line is still appended at the end.
+    id: 'claude-api',
+    proxyLine: 'claude-api',
+    name: CLAUDE_API_PROVIDER_NAME,
+    setEnabled: (enabled) => postLineSettings(CLAUDE_API_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <ClaudeApiSection onModelChange={onModelChange} />,
   },
   {
     id: 'ollama',

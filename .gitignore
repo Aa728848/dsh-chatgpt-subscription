@@ -31,3 +31,7 @@ Desktop.ini
 
 # Editor scratch copies (e.g. .tmp-index-current.ts) are not part of the tree.
 .tmp-*
+
+# Local agent-skill workspace: issue tracker files and per-repo skill config.
+.scratch/
+docs/agents/

@@ -62,7 +62,7 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
   const {
     login, cancelLogin, submitPaste, adopt, stopImporting, accountAction, setStrategy, relogin,
     refreshQuota, refreshCatalog, testConnection, toggleModel, setAllModels, updateEffort,
-    updateCacheTtl, saveContextWindow, resetContextWindow, resetAllContextWindows,
+    updateCacheTtl, updateFastMode, updateCacheKeepalive, saveContextWindow, resetContextWindow, resetAllContextWindows,
     updateContextDraft, setPasteValue,
   } = actions
 
@@ -329,6 +329,14 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
             <option value="1h">{t.cacheTtl1h}</option>
             <option value="5m">{t.cacheTtl5m}</option>
           </select>
+        </div>
+        <div className="dsha-pref-row">
+          <div><strong>{t.fastMode}</strong><p className="dsha-muted">{t.fastModeHint}</p></div>
+          <input type="checkbox" aria-label={t.fastMode} checked={status?.fastMode === true} disabled={busy !== null || status === null} onChange={event => { void updateFastMode(event.currentTarget.checked) }} />
+        </div>
+        <div className="dsha-pref-row">
+          <div><strong>{t.cacheKeepalive}</strong><p className="dsha-muted">{t.cacheKeepaliveHint}</p></div>
+          <input type="checkbox" aria-label={t.cacheKeepalive} checked={status?.cacheKeepalive === true} disabled={busy !== null || status === null} onChange={event => { void updateCacheKeepalive(event.currentTarget.checked) }} />
         </div>
         <p className="dsha-muted" style={{ paddingTop: 10 }}>{t.modelLadders}</p>
         {status?.models.map((model) => (

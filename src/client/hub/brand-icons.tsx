@@ -15,6 +15,7 @@ export type HubProviderId =
   | 'chatgpt' | 'command-code' | 'kimi-code'
   | 'minimax-code' | 'glm-coding-plan' | 'claude' | 'ollama'
   | 'step-code' | 'cline-pass' | 'qoder' | 'opendesign' | 'workbuddy' | 'antigravity-acp' | 'qianwen-token-plan' | 'relayone'
+  | 'claude-api'
 
 /**
  * GLM（ZCode 账号）这张卡自带的标记：智谱官方 logo.svg 里那个方形标记，逐字转录。
@@ -200,6 +201,9 @@ export const PROVIDER_BRANDS: Record<HubProviderId, ProviderBrand> = {
   // RelayOne official documentation mark: https://z1rry.cyou/docs/assets/logo.svg
   // Fetched 2026-11-18, HTTP 200, 716 bytes, sha256 5835660da03da1473399f224b36f8e9e9067bfe21727c9be2e7e73475042d05e.
   relayone: { image: { src: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNTYiIGhlaWdodD0iMjU2IiB2aWV3Qm94PSIwIDAgMjU2IDI1NiIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJSZWxheU9uZSBtYXJrIj4KICA8ZyBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPgogICAgPHJlY3QgeD0iMTAwIiB5PSI4MiIgd2lkdGg9IjY4IiBoZWlnaHQ9IjkyIiByeD0iMjAiIHN0cm9rZT0iIzNGNTEzNiIgc3Ryb2tlLXdpZHRoPSIxMiIvPgogICAgPHBhdGggZD0iTTI4IDEwNEgxMDBNMjggMTI4SDEwME0yOCAxNTJIMTAwIiBzdHJva2U9IiM3RDhGNkEiIHN0cm9rZS13aWR0aD0iNyIvPgogICAgPHBhdGggZD0iTTE2OCAxMjhIMjI4IiBzdHJva2U9IiNBOTY1NEIiIHN0cm9rZS13aWR0aD0iOSIvPgogICAgPGNpcmNsZSBjeD0iMjgiIGN5PSIxMDQiIHI9IjMuNSIgZmlsbD0iIzdEOEY2QSIgc3Ryb2tlPSJub25lIi8+CiAgICA8Y2lyY2xlIGN4PSIyOCIgY3k9IjEyOCIgcj0iMy41IiBmaWxsPSIjN0Q4RjZBIiBzdHJva2U9Im5vbmUiLz4KICAgIDxjaXJjbGUgY3g9IjI4IiBjeT0iMTUyIiByPSIzLjUiIGZpbGw9IiM3RDhGNkEiIHN0cm9rZT0ibm9uZSIvPgogICAgPGNpcmNsZSBjeD0iMTM0IiBjeT0iMTI4IiByPSI4IiBmaWxsPSIjQTk2NTRCIiBzdHJva2U9Im5vbmUiLz4KICA8L2c+Cjwvc3ZnPgo=', fit: 'contain' }, tile: '#E7EBDD' },
+  // Claude API: the same vendor as the `claude` card, so it repeats that entry's mark,
+  // color and tile verbatim (a user decision) - no second artwork and no monogram.
+  'claude-api': { mark: 'claude', color: '#D97757', tile: '#D97757' },
 }
 
 /** One brand mark at a given box size; the artwork is decorative. */

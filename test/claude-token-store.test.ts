@@ -599,6 +599,9 @@ describe('claude model settings', () => {
     expect(defaults.contextWindowOverrides).toEqual({})
     expect(defaults.defaultReasoningEffort).toBeNull()
     expect(defaults.selectedAccountId).toBeNull()
+    expect(defaults.fastMode).toBe(false)
+    expect(defaults.cacheKeepalive).toBe(false)
+    expect(defaults.deviceId).toBe('')
   })
 
   it('reads a document an earlier build left behind, unknown keys and all', async () => {
@@ -624,6 +627,9 @@ describe('claude model settings', () => {
       // A legacy document states no cache tier, and "no tier stored" is the
       // subscription default rather than a value the reader has to invent.
       cacheTtl: null,
+      fastMode: false,
+      cacheKeepalive: false,
+      deviceId: '',
       selectedAccountId: 'cl_0123456789abcdef0123',
     })
     // The unknown key is GONE from the parsed value rather than carried through:

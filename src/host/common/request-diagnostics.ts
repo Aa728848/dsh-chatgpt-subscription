@@ -44,6 +44,8 @@ export const DIAGNOSTIC_PROVIDERS = [
   'antigravity-acp',
   'qianwen-token-plan',
   'relayone',
+  // Claude API (API key): same registration point, appended at the end.
+  'claude-api',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

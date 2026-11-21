@@ -256,6 +256,7 @@ describe('PKCE material', () => {
     const authUrl = opened[0] ?? ''
     expect(authUrl).not.toBe('')
     expect(authUrl).toBe(flow.authUrl)
+    expect(new URL(authUrl).origin + new URL(authUrl).pathname).toBe('https://claude.com/cai/oauth/authorize')
     const params = new URL(authUrl).searchParams
     expect(params.get('code_challenge_method')).toBe('S256')
     expect(params.get('redirect_uri')).toBe(OAUTH_MANUAL_REDIRECT_URI)

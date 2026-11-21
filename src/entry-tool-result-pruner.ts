@@ -55,6 +55,13 @@ export const DEFAULT_SKIP_PROVIDERS: readonly string[] = deepFreeze([
   'kimi-code',
   'minimax-code',
   'qianwen-token-plan',
+  // Claude API: explicit cache breakpoints plus preserved thinking. Rewriting an earlier tool
+  // result invalidates the cached prefix from that point and fails the prefix check of every
+  // later thinking block (measured: appending keeps a 34572-token prefix as cache_read, editing
+  // an earlier block rewrites it), so history is never edited on this line either.
+  'claude-api',
+  'claude',
+  'claude-subscription',
 ])
 
 // ── 配置 ───────────────────────────────────────────────────────────────────

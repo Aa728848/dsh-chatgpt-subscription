@@ -70,6 +70,8 @@ import { installQianwenStyles } from './qianwen-token-plan/styles.ts'
 import { RelayOneComposerQuota } from './relayone/RelayOneComposerQuota.tsx'
 import { dictionaries as relayOneDicts, NS_RELAYONE, type RelayOneLocaleKey } from './relayone/locales.ts'
 import { installRelayOneStyles } from './relayone/styles.ts'
+import { dictionaries as claudeApiDicts, NS_CLAUDE_API, type ClaudeApiLocaleKey } from './claude-api/locales.ts'
+import { installClaudeApiStyles } from './claude-api/styles.ts'
 import { installSubagentSettingsCard } from './subagent/index.ts'
 import { installSubagentStyles } from './subagent/styles.ts'
 import { dictionaries as subagentDicts, NS_SUBAGENT, type SubagentLocaleKey } from './subagent/locales.ts'
@@ -109,6 +111,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-dispatch-ledger': DispatchLedgerLocaleKey
     'dsh-qianwen-token-plan': QianwenLocaleKey
     'dsh-relayone': RelayOneLocaleKey
+    'dsh-claude-api': ClaudeApiLocaleKey
   }
 }
 
@@ -207,6 +210,13 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     installRelayOneStyles()
     return () => {}
   }, 'dsh-relayone: styles')
+  // Claude API: dictionaries and styles only. The line has no quota badge, so it
+  // registers no conversation.input.right slot (a user decision).
+  ctx.effect(() => ctx.locale.register(NS_CLAUDE_API, claudeApiDicts), 'dsh-claude-api: dictionaries')
+  ctx.effect(() => {
+    installClaudeApiStyles()
+    return () => {}
+  }, 'dsh-claude-api: styles')
   // 「子智能体」设置卡：遮蔽宿主同名卡（同 id、priority -10），并在宿主的授权清单
   // 之外再记一份「全局默认 + 按主代理模型」的两级列表。样式表无条件安装，
   // 注册本身在 installSubagentSettingsCard 里按服务是否就绪决定。

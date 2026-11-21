@@ -265,7 +265,7 @@ describe('修剪配置', () => {
     expect(PRUNE_MARKER).toBe('\n\n[... tool result middle pruned ...]\n\n')
     expect(DEFAULTS).toEqual({ thresholdChars: 8192, headChars: 4096, tailChars: 1024 })
     expect(Object.isFrozen(DEFAULTS)).toBe(true)
-    expect(DEFAULT_SKIP_PROVIDERS).toEqual(['kimi-code', 'minimax-code', 'qianwen-token-plan'])
+    expect(DEFAULT_SKIP_PROVIDERS).toEqual(['kimi-code', 'minimax-code', 'qianwen-token-plan', 'claude-api', 'claude', 'claude-subscription'])
     expect(Object.isFrozen(DEFAULT_SKIP_PROVIDERS)).toBe(true)
     expect(PRUNER_SERVICE_NAME).toBe('toolResultPruner')
   })
@@ -468,7 +468,7 @@ describe('provider 感知的会话修剪', () => {
     expect(Object.isFrozen(message.content)).toBe(true)
   })
 
-  it.each(['opendesign', 'anthropic', 'claude'])('%s provider 也会照常修剪', (provider) => {
+  it.each(['opendesign', 'anthropic'])('%s provider 也会照常修剪', (provider) => {
     const pruner = createPruner()
     const mock = createMockSession({
       provider,
@@ -479,6 +479,16 @@ describe('provider 感知的会话修剪', () => {
     })
     expect(pruner.pruneSession(mock.session).pruned).toHaveLength(1)
     expect(mock.appended.map(event => event.type)).toEqual(['compaction/prune', 'tool/result'])
+  })
+
+  it.each(['claude', 'claude-subscription', 'claude-api'])('%s 的缓存前缀与 thinking 重放保持原样', (provider) => {
+    const pruner = createPruner()
+    const mock = createMockSession({
+      provider,
+      results: [{ callId: 'call-' + provider, content: [{ type: 'text', text: 'q'.repeat(120) }] }],
+    })
+    expect(pruner.pruneSession(mock.session).pruned).toHaveLength(0)
+    expect(mock.appended).toHaveLength(0)
   })
 
   it('跳过短结果，并在第二遍收敛', () => {

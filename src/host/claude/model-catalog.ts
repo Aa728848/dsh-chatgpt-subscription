@@ -340,6 +340,12 @@ export interface ClaudeModelEntry {
    * sends it. Absent means not documented as checking.
    */
   bindsThinkingToPrefix?: boolean
+  /** Subscription fast-mode support; absent falls back to the captured capability map. */
+  fastMode?: 'ga' | 'beta' | null
+  /** Official context_management clear_thinking support. Adaptive rows default true. */
+  contextEditing?: boolean
+  /** Runtime or binary override for in-place system messages. */
+  midConversationSystem?: boolean
 }
 
 /**
@@ -791,7 +797,19 @@ export const CLAUDE_CURRENT_MODEL_CAPABILITIES: Omit<ClaudeModelEntry, 'id' | 'n
   reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   canDisableThinking: false,
   bindsThinkingToPrefix: true,
+  fastMode: null,
+  contextEditing: true,
+  midConversationSystem: true,
 }
+
+/** Captured fast-mode capabilities; GA vs beta is an upstream entitlement distinction. */
+const CLAUDE_FAST_MODE_CAPABILITIES: Readonly<Record<string, 'ga' | 'beta'>> = Object.freeze({
+  'claude-fable-5-2': 'ga',
+  'claude-mythos-5-2': 'ga',
+  'claude-opus-5-5': 'ga',
+  'claude-opus-5': 'beta',
+  'claude-opus-4-8': 'beta',
+})
 
 /**
  * Look one model up, or receive the current-model template.
@@ -804,8 +822,7 @@ export const CLAUDE_CURRENT_MODEL_CAPABILITIES: Omit<ClaudeModelEntry, 'id' | 'n
  */
 export function resolveClaudeModel(modelId: string, catalog: readonly ClaudeModelEntry[] = CLAUDE_MODELS): ClaudeModelEntry {
   const known = catalog.find((model) => model.id === modelId)
-  if (known !== undefined) return known
-  return {
+  const resolved: ClaudeModelEntry = known ?? {
     id: modelId,
     name: modelId,
     ...CLAUDE_CURRENT_MODEL_CAPABILITIES,
@@ -813,6 +830,21 @@ export function resolveClaudeModel(modelId: string, catalog: readonly ClaudeMode
     // itself (the same reason {@link claudeReasoningEfforts} copies).
     reasoningEfforts: [...CLAUDE_CURRENT_MODEL_CAPABILITIES.reasoningEfforts],
   }
+  if (modelId === 'claude-mythos-5') {
+    // Binary catalog 2.1.330: no adaptive_thinking, effort, context_management or
+    // mid-conversation tool-change capability. Live availability remains unverified.
+    return {
+      ...resolved,
+      thinkingMode: 'budget',
+      reasoningEfforts: [],
+      canDisableThinking: true,
+      bindsThinkingToPrefix: false,
+      fastMode: null,
+      contextEditing: false,
+      midConversationSystem: false,
+    }
+  }
+  return resolved
 }
 
 /**
@@ -843,7 +875,6 @@ export const CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS: readonly string[]
   'claude-fable-5-1',
   'claude-mythos-5-1',
   'claude-fable-5',
-  'claude-mythos-5',
   'claude-mythos-preview',
   'claude-opus-5-5',
   'claude-opus-4-8',
@@ -875,9 +906,9 @@ export const CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS: readonly string[]
  * A model that IS known and is NOT on the list keeps the folded behaviour: the
  * top-level `system` field is the only place its instructions can live.
  */
-export function claudeSupportsMidConversationSystemMessages(modelId: string): boolean {
-  const known = CLAUDE_MODELS.find((model) => model.id === modelId)
-  if (known === undefined) return true
+export function claudeSupportsMidConversationSystemMessages(modelId: string, catalog?: readonly ClaudeModelEntry[]): boolean {
+  const entry = resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS)
+  if (entry.midConversationSystem !== undefined) return entry.midConversationSystem
   return CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS.includes(modelId)
 }
 
@@ -911,6 +942,16 @@ export function claudeModelSupportsImage(modelId: string, catalog?: readonly Cla
 /** Which thinking form one model needs. */
 export function claudeThinkingMode(modelId: string, catalog?: readonly ClaudeModelEntry[]): ClaudeModelEntry['thinkingMode'] {
   return resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS).thinkingMode
+}
+
+export function claudeFastModeFor(modelId: string, catalog?: readonly ClaudeModelEntry[]): 'ga' | 'beta' | null {
+  const entry = resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS)
+  return entry.fastMode ?? CLAUDE_FAST_MODE_CAPABILITIES[modelId] ?? null
+}
+
+export function claudeSupportsContextEditing(modelId: string, catalog?: readonly ClaudeModelEntry[]): boolean {
+  const entry = resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS)
+  return entry.contextEditing ?? (entry.thinkingMode === 'adaptive' || entry.thinkingMode === 'mid-convo')
 }
 
 /** Whether one model accepts a temperature. */

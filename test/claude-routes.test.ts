@@ -363,7 +363,7 @@ describe('Claude settings routes', () => {
       // And the settings document states no acceptance field of any kind.
       const raw = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as Record<string, unknown>
       expect(Object.keys(raw).sort()).toEqual([
-        'cacheTtl', 'contextWindowOverrides', 'defaultReasoningEffort', 'enabled', 'enabledModelIds', 'selectedAccountId',
+        'cacheKeepalive', 'cacheTtl', 'contextWindowOverrides', 'defaultReasoningEffort', 'deviceId', 'enabled', 'enabledModelIds', 'fastMode', 'selectedAccountId',
       ])
     })
 

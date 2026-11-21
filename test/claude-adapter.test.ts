@@ -74,6 +74,10 @@ import {
 import { classifyFailure } from '../src/host/claude/client.ts'
 import type { CredentialStore } from '../src/host/token-store.ts'
 import { StickyImageBudgetStore } from '../src/host/common/sticky-image-budget.ts'
+import { promptCacheActivityStore } from '../src/host/common/cache-activity.ts'
+import { promptCachePolicyOf } from '../src/host/common/prompt-cache-policy.ts'
+import { ClaudeCapabilityMemory } from '../src/host/common/claude-capability-memory.ts'
+import { claudeCodeCchToken } from '../src/host/common/claude-code-cch.ts'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -83,6 +87,7 @@ const temporaryDirs: string[] = []
 
 afterEach(async () => {
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   await Promise.all(temporaryDirs.splice(0).map(async (dir) => {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined)
   }))
@@ -167,12 +172,12 @@ const MESSAGE_START = { type: 'message_start', message: { id: 'msg_1', usage: { 
 const MESSAGE_STOP = { type: 'message_stop' }
 
 /** A complete, well-formed text answer. */
-function answerResponse(text = 'hi'): Response {
+function answerResponse(text = 'hi', headers: Record<string, string> = {}): Response {
   return new Response(sse([
     MESSAGE_START,
     { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
     { type: 'message_stop' },
-  ]), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  ]), { status: 200, headers: { 'content-type': 'text/event-stream', ...headers } })
 }
 
 function streamResponse(frames: unknown[]): Response {
@@ -219,6 +224,7 @@ function makeAdapter(
     accountPool?: ClaudeAccountPoolLike
     loadCatalog?: () => Promise<never[]>
     attachments?: { readImage: unknown; readImageRequest: unknown }
+    capabilityMemory?: ClaudeCapabilityMemory
   } = {},
 ): ClaudeAdapter {
   return new ClaudeAdapter(store, settings, undefined, {
@@ -226,6 +232,7 @@ function makeAdapter(
     loadCatalog: extra.loadCatalog ?? (async () => FALLBACK_MODELS as never[]),
     ...(extra.accountPool === undefined ? {} : { accountPool: extra.accountPool }),
     ...(extra.attachments === undefined ? {} : { attachments: extra.attachments as never }),
+    ...(extra.capabilityMemory === undefined ? {} : { capabilityMemory: extra.capabilityMemory }),
   })
 }
 
@@ -233,6 +240,7 @@ function makeAdapter(
 class FakePool implements ClaudeAccountPoolLike {
   readonly cooldowns: Array<{ id: string; ms: number; reason: string }> = []
   readonly authFailures: Array<{ id: string; reason: string }> = []
+  readonly freshRequests: string[] = []
 
   constructor(private readonly accounts: Array<{ id: string; credentials: ClaudeCredentials }>) {}
 
@@ -244,6 +252,13 @@ class FakePool implements ClaudeAccountPoolLike {
 
   async hasAnotherAvailableAccount(triedAccountIds: ReadonlySet<string>): Promise<boolean> {
     return this.accounts.some((account) => !triedAccountIds.has(account.id))
+  }
+
+  async getFreshCredential(accountId?: string): Promise<ClaudeCredentials> {
+    this.freshRequests.push(accountId ?? '')
+    const account = this.accounts.find(candidate => candidate.id === accountId)
+    if (account === undefined) throw new Error('unknown account')
+    return account.credentials
   }
 
   async markCooldown(accountId: string, durationMs: number, reason: string): Promise<void> {
@@ -444,7 +459,7 @@ describe('claude adapter request path', () => {
     expect(JSON.stringify(body).match(/"cache_control"/g)).toHaveLength(3)
   })
 
-  it('licenses block_binding with its beta on the real request, and only where the body sends it', async () => {
+  it('keeps the first-party thinking-binding beta whether or not this body binds thinking', async () => {
     // block_binding without thinking-binding-controls is a documented 400 on
     // every request, so the posted headers and posted bytes are read together.
     const { store, settings } = await mount()
@@ -457,7 +472,7 @@ describe('claude adapter request path', () => {
     expect((bound!.body.thinking as Record<string, unknown>).block_binding).toEqual({ prefix_mismatch_behavior: 'drop_block' })
     expect(bound!.headers['anthropic-beta'].split(',')).toContain('thinking-binding-controls-2026-08-01')
     expect((plain!.body.thinking as Record<string, unknown>).block_binding).toBeUndefined()
-    expect(plain!.headers['anthropic-beta']).not.toContain('thinking-binding-controls')
+    expect(plain!.headers['anthropic-beta']).toContain('thinking-binding-controls')
   })
 
   it('resolves Claude Sonnet 5.5 with its effort ladder instead of the stub', async () => {
@@ -468,12 +483,13 @@ describe('claude adapter request path', () => {
     expect(resolved.inputModalities).toEqual(['text', 'image'])
   })
 
-  it('omits the claude-code beta for a haiku model, from the real model id', async () => {
+  it('keeps claude-code on a haiku model, with the captured haiku beta order', async () => {
     const { store, settings } = await mount()
     const { fn, calls } = recordingFetch(() => answerResponse())
     const adapter = makeAdapter(store, settings, fn)
     await drain(adapter.stream(options('claude-haiku-4-5')))
-    expect(calls[0]!.headers['anthropic-beta']).not.toContain('claude-code-20250219')
+    expect(calls[0]!.headers['anthropic-beta'].split(',')[0]).toBe('oauth-2025-04-20')
+    expect(calls[0]!.headers['anthropic-beta']).toContain('claude-code-20250219')
     expect(calls[0]!.headers['anthropic-beta']).toContain('oauth-2025-04-20')
   })
 
@@ -555,6 +571,7 @@ describe('claude adapter failure codes', () => {
     try {
       // Simulates the pinned/environment version being too old — the state the
       // shipped 2.1.251 default was in for claude-opus-5-5.
+      vi.stubEnv('DSH_CLAUDE_CCH_SEED', '0x2a')
       setClaudeCliVersion('2.1.251')
       const error = await failureOf(adapter.stream(options('claude-opus-5-5'))) as { code: string; message: string }
 
@@ -629,6 +646,7 @@ describe('claude adapter failure codes', () => {
     })
 
     try {
+      vi.stubEnv('DSH_CLAUDE_CCH_SEED', '0x2a')
       setClaudeCliVersion('2.1.280')
       const error = await failureOf(adapter.stream(options('claude-live-only-9'))) as { code: string; message: string }
       expect(error.code).toBe('PROVIDER_ERROR')
@@ -1180,5 +1198,232 @@ describe('claude adapter request images', () => {
     expect(serialized).toContain('image/webp')
     // The scaled request version is what was read.
     expect(reads).toContain('request:fat')
+  })
+})
+
+describe('Claude subscription wait-time cache activity', () => {
+  const activityStore = promptCacheActivityStore(PROVIDER_ID)
+  const EXTENDED_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+  const sid = (value: string) => value as NonNullable<GenerateOptions['sessionId']>
+  function usageAnswer(): Response {
+    return streamResponse([
+      { type: 'message_start', message: { id: 'msg_1', usage: { input_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 } } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+      MESSAGE_STOP,
+    ])
+  }
+
+  it('records the 1h tier the request really sent, at issuance and again at stream end', async () => {
+    const { store, settings } = await mount()
+    let atIssuance: ReturnType<typeof activityStore.read>
+    const { fn, calls } = recordingFetch(() => { atIssuance = activityStore.read('claude-act-default'); return usageAnswer() })
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-default') })))
+    expect(promptCachePolicyOf(PROVIDER_ID).ttlMs).toBe(3_600_000)
+    // Nothing stored follows the official subscription tier, which is the hour.
+    expect(calls[0]!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
+    expect(atIssuance).toMatchObject({ ttlMs: 3_600_000 })
+    expect(atIssuance!.lastActiveAt).toBeGreaterThan(0)
+    expect(activityStore.read('claude-act-default')).toMatchObject({ ttlMs: 3_600_000, totalTokens: 112 })
+  })
+
+  it('records 300000 for a session that really sends the 5m tier', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheTtl: '5m' })
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-5m') })))
+    expect(calls[0]!.headers['anthropic-beta'] ?? '').not.toContain(EXTENDED_TTL_BETA)
+    expect(activityStore.read('claude-act-5m')).toMatchObject({ ttlMs: 300_000, totalTokens: 112 })
+  })
+
+  it('records 3600000 for an explicit 1h choice', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheTtl: '1h' })
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-1h') })))
+    expect(calls[0]!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
+    expect(activityStore.read('claude-act-1h')).toMatchObject({ ttlMs: 3_600_000, totalTokens: 112 })
+  })
+
+  it('keeps the issue time as lastActiveAt when the stream ends later', async () => {
+    const { store, settings } = await mount()
+    // Newer than every real record in this shared store, and still inside the
+    // credential's 24h validity so no refresh is triggered by the mocked clock.
+    const issuedAt = Date.now() + 60_000_000
+    let clock = issuedAt
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    try {
+      const { fn } = recordingFetch(() => usageAnswer())
+      const adapter = makeAdapter(store, settings, fn)
+      const chunks: StreamChunk[] = []
+      for await (const chunk of adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-issue') }))) {
+        chunks.push(chunk)
+        clock += 60_000
+      }
+      expect(chunks.length).toBeGreaterThan(0)
+      expect(clock).toBeGreaterThan(issuedAt)
+      expect(activityStore.read('claude-act-issue')).toMatchObject({
+        lastActiveAt: issuedAt, ttlMs: 3_600_000, totalTokens: 112,
+      })
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it('records nothing for an auxiliary purpose or without a session id', async () => {
+    const { store, settings } = await mount()
+    const { fn } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    // 'compaction' is the auxiliary purpose this harness generation types; the gate
+    // is "no purpose at all", so every named purpose is excluded the same way.
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-aux'), purpose: 'compaction' })))
+    expect(activityStore.read('claude-act-aux')).toBeUndefined()
+    const before = activityStore.read(undefined)
+    await drain(adapter.stream(options('claude-sonnet-4-6')))
+    expect(activityStore.read(undefined)).toEqual(before)
+  })
+})
+
+describe('Claude first-party protocol corrections', () => {
+  it('signs the exact final body and links headers, metadata and system context', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    await drain(makeAdapter(store, settings, fn).stream(options('claude-opus-5-5', { system: 'STATIC', sessionId: 'wire-session' as never })))
+    const call = calls[0]!
+    const body = call.body
+    const system = body.system as Array<{ text: string; cache_control?: Record<string, unknown> }>
+    expect(system).toHaveLength(3)
+    expect(system[0]!.text).toContain('cch=')
+    expect(system[1]!.cache_control).toBeUndefined()
+    expect(system[2]!).toMatchObject({ text: 'STATIC', cache_control: { type: 'ephemeral', ttl: '1h', scope: 'global' } })
+    const billing = system[0]!.text
+    const cch = billing.match(/cch=([0-9a-f]{5});/)?.[1]
+    const placeholder = JSON.stringify(body).replace(/cch=[0-9a-f]{5};/, 'cch=00000;')
+    expect(cch).toBe(claudeCodeCchToken(placeholder))
+    const promptId = billing.match(/cc_prompt_id=([^;]+)/)?.[1]
+    expect(call.headers['x-claude-code-prompt-id']).toBe(promptId)
+    expect(call.headers['x-claude-1p-request-class']).toBe('main')
+    expect(call.headers['x-client-request-id']).not.toBe('')
+    const metadata = JSON.parse((body.metadata as { user_id: string }).user_id) as Record<string, string>
+    expect(metadata.account_uuid).toBe('uuid-ACCESS-1')
+    expect(metadata.session_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(metadata.device_id).toMatch(/^[0-9a-f]{64}$/)
+    expect(body.diagnostics).toEqual({ previous_message_id: null })
+    expect(body.context_management).toEqual({ edits: [{ type: 'clear_thinking_20251015', keep: 'all' }] })
+  })
+
+  it('drops thinking-token-count on refusal and persists the conclusion across adapters', async () => {
+    const { store, settings } = await mount()
+    const dir = await scratchDir()
+    const file = path.join(dir, 'capability.json')
+    const refusal = () => errorResponse(400, { error: { message: 'Unexpected value(s) thinking-token-count-2026-05-13 for the anthropic-beta header' } })
+    const first = recordingFetch(() => refusal())
+    // Replace the first refusal with a complete stream on the second request.
+    first.mock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const index = first.calls.length
+      const headers = new Headers((init?.headers ?? {}) as HeadersInit)
+      const flat: Record<string, string> = {}
+      headers.forEach((value, key) => { flat[key] = value })
+      first.calls.push({ url: String(input), method: init?.method ?? 'GET', headers: flat, body: typeof init?.body === 'string' ? JSON.parse(init.body) : {} })
+      return index === 0 ? refusal() : answerResponse('ok')
+    })
+    await drain(makeAdapter(store, settings, first.fn, { capabilityMemory: new ClaudeCapabilityMemory(file) }).stream(options()))
+    expect(first.calls).toHaveLength(2)
+    expect(first.calls[0]!.headers['anthropic-beta']).toContain('thinking-token-count-2026-05-13')
+    expect(first.calls[1]!.headers['anthropic-beta']).not.toContain('thinking-token-count-2026-05-13')
+
+    const restarted = recordingFetch(() => answerResponse('ok'))
+    await drain(makeAdapter(store, settings, restarted.fn, { capabilityMemory: new ClaudeCapabilityMemory(file) }).stream(options()))
+    expect(restarted.calls).toHaveLength(1)
+    expect(restarted.calls[0]!.headers['anthropic-beta']).not.toContain('thinking-token-count-2026-05-13')
+  })
+
+  it('adds the fast-mode beta after the exact refusal without changing accounts', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ fastMode: true })
+    const pool = new FakePool([{ id: 'a', credentials: credentials('ACCESS-1') }, { id: 'b', credentials: credentials('ACCESS-2') }])
+    let index = 0
+    const { fn, calls } = recordingFetch(() => {
+      index += 1
+      return index === 1
+        ? errorResponse(400, { error: { message: 'To use speed, send anthropic-beta: fast-mode-2026-02-01' } })
+        : answerResponse('ok')
+    })
+    await drain(makeAdapter(store, settings, fn, { accountPool: pool }).stream(options('claude-opus-5-5')))
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.body.speed).toBe('fast')
+    expect(calls[1]!.headers['anthropic-beta']).toContain('fast-mode-2026-02-01')
+    expect(pool.authFailures).toHaveLength(0)
+    expect(pool.cooldowns).toHaveLength(0)
+  })
+
+  it('folds an in-place system role after refusal and retries on the same account', async () => {
+    const { store, settings } = await mount()
+    let index = 0
+    const { fn, calls } = recordingFetch(() => {
+      index += 1
+      return index === 1 ? errorResponse(400, { error: { message: "role 'system' is not supported for this model" } }) : answerResponse('ok')
+    })
+    const request = options('claude-opus-5-5', {
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+        { role: 'system', content: [{ type: 'text', text: 'MID' }] },
+      ],
+    } as Partial<GenerateOptions>)
+    await drain(makeAdapter(store, settings, fn).stream(request))
+    expect((calls[0]!.body.messages as Array<{ role: string }>).map(message => message.role)).toContain('system')
+    expect((calls[1]!.body.messages as Array<{ role: string }>).map(message => message.role)).not.toContain('system')
+    expect(JSON.stringify(calls[1]!.body.system)).toContain('MID')
+  })
+
+  it('uses the remembered main-turn effort for compaction', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: 'effort-session' as never, reasoningEffort: 'low' as never })))
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: 'effort-session' as never, purpose: 'compaction' })))
+    expect((calls[1]!.body.output_config as Record<string, unknown>).effort).toBe('low')
+  })
+
+  it('touches the last request through the same pool account', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheKeepalive: true })
+    const pool = new FakePool([{ id: 'a', credentials: credentials('ACCESS-1') }, { id: 'b', credentials: credentials('ACCESS-2') }])
+    const { fn, calls } = recordingFetch(call => call.url.endsWith('/cache_touch')
+      ? Response.json({ ok: true })
+      : answerResponse('ok', { 'request-id': 'req_abc' }))
+    const adapter = makeAdapter(store, settings, fn, { accountPool: pool })
+    await drain(adapter.stream(options('claude-opus-5-5', { sessionId: 'touch-session' as never })))
+    await expect(adapter.tryCacheTouch('touch-session')).resolves.toBe(true)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.url).toBe(API_BASE + '/v1/messages/cache_touch')
+    expect(calls[1]!.body).toEqual({ request_id: 'req_abc' })
+    expect(calls[1]!.headers['anthropic-beta']).toBe('oauth-2025-04-20,cache-keepalive-2026-09-03')
+    expect(calls[1]!.headers.authorization).toBe('Bearer ACCESS-1')
+    expect(pool.freshRequests).toEqual(['a'])
+  })
+
+  it('does not touch when the opt-in is off or the upstream request-id is absent', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', { sessionId: 'touch-off' as never })))
+    await expect(adapter.tryCacheTouch('touch-off')).resolves.toBe(false)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('passes through speed, service_tier and inference_geo on usage', async () => {
+    const { store, settings } = await mount()
+    const { fn } = recordingFetch(() => streamResponse([
+      { type: 'message_start', message: { id: 'msg_1', usage: { input_tokens: 7, speed: 'fast', service_tier: 'standard', inference_geo: 'test-region' } } },
+      { type: 'message_stop' },
+    ]))
+    const chunks = await drain(makeAdapter(store, settings, fn).stream(options()))
+    expect(chunks.find(chunk => chunk.type === 'usage')).toMatchObject({
+      usage: { speed: 'fast', service_tier: 'standard', inference_geo: 'test-region' },
+    })
   })
 })

@@ -86,7 +86,38 @@ describe('the OpenDesign card mark', () => {
   })
 })
 
+describe('the Claude API card', () => {
+  it('sits immediately after the Claude card', () => {
+    // The one deliberate mid-list insertion (a user decision): every other line
+    // is appended, this one belongs next to the card whose vendor it shares.
+    const ids = HUB_PROVIDERS.map((provider) => provider.id)
+    expect(ids.indexOf('claude')).toBeGreaterThanOrEqual(0)
+    expect(ids.indexOf('claude-api')).toBe(ids.indexOf('claude') + 1)
+  })
+
+  it('shares the Claude mark, color and tile instead of new artwork or a monogram', () => {
+    const markup = renderToStaticMarkup(<BrandTile id="claude-api" />)
+    expect(markup).toBe(renderToStaticMarkup(<BrandTile id="claude" />))
+    expect(markup).toContain('<svg')
+    expect(markup).toContain('#D97757')
+    expect(markup).not.toContain('dsh-hub-brand-mono')
+    expect(markup).not.toContain('dsh-hub-brand-image')
+  })
+})
+
 describe('HubOverview', () => {
+  function installMemoryStorage(): void {
+    const values = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      get length() { return values.size },
+      clear: () => { values.clear() },
+      getItem: (key: string) => values.get(key) ?? null,
+      key: (index: number) => [...values.keys()][index] ?? null,
+      removeItem: (key: string) => { values.delete(key) },
+      setItem: (key: string, value: string) => { values.set(key, String(value)) },
+    })
+  }
+
   let container: HTMLDivElement
   let root: ReturnType<typeof createRoot>
   const originalFetch = globalThis.fetch
@@ -95,6 +126,7 @@ describe('HubOverview', () => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     container = document.createElement('div')
     document.body.appendChild(container)
+    installMemoryStorage()
     root = createRoot(container)
     localStorage.clear()
   })
@@ -104,6 +136,7 @@ describe('HubOverview', () => {
     container.remove()
     globalThis.fetch = originalFetch
     localStorage.clear()
+    vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
 
@@ -137,22 +170,22 @@ describe('HubOverview', () => {
   it('renders one card per provider with its annotation and brand tile', async () => {
     mockFetch()
     await render()
-    expect(cards()).toHaveLength(15)
+    expect(cards()).toHaveLength(16)
     expect(cards().map((card) => card.querySelector('.dsh-hub-card-name')?.textContent))
-      .toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne'])
+      .toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Claude API', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne'])
     expect(cards()[0]!.textContent).toContain('2 个账号')
     expect(cards()[0]!.textContent).toContain('2/11 个模型可用')
     // A disabled line's card is marked and leads with the state.
     expect(cards()[1]!.dataset.enabled).toBe('false')
     expect(cards()[1]!.textContent).toContain('已停用')
     // Ollama has no switch; every other card does.
-    expect(cards()[6]!.querySelector('[role="switch"]')).toBeNull()
-    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(14)
-    // Every card renders its brand tile and drag handle. Antigravity's official
-    // CLI owns its networking, so only the other fourteen get a proxy select.
-    expect(container.querySelectorAll('.dsh-hub-brand-tile')).toHaveLength(15)
-    expect(container.querySelectorAll('.dsh-hub-drag-handle')).toHaveLength(15)
-    expect(container.querySelectorAll('.dsh-hub-proxy-select')).toHaveLength(14)
+    expect(cards()[7]!.querySelector('[role="switch"]')).toBeNull()
+    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(15)
+    // RelayOne stays present; upstream adds drag handles and per-line proxy shortcuts.
+    expect(container.querySelectorAll('.dsh-hub-brand-tile')).toHaveLength(16)
+    expect(container.querySelectorAll('.dsh-hub-drag-handle')).toHaveLength(16)
+    // Antigravity's official CLI owns networking, so the other fifteen get a proxy select.
+    expect(container.querySelectorAll('.dsh-hub-proxy-select')).toHaveLength(15)
     const antigravity = cards().find((card) => card.querySelector('.dsh-hub-card-name')?.textContent === 'Antigravity（ACP）')!
     expect(antigravity.querySelector('.dsh-hub-proxy-select')).toBeNull()
   })
@@ -221,7 +254,7 @@ describe('HubOverview', () => {
     // Recover on retry: swap the mock to a working overview before clicking.
     mockFetch()
     await act(async () => retry.click())
-    expect(cards()).toHaveLength(15)
+    expect(cards()).toHaveLength(16)
     expect(calls.some((call) => call.url.includes('/hub/overview'))).toBe(true)
   })
 
@@ -244,7 +277,7 @@ describe('HubOverview', () => {
     expect(cards().slice(0, 4).map((card) => card.querySelector('.dsh-hub-card-name')?.textContent))
       .toEqual(['Command Code', 'Kimi Code', 'ChatGPT', 'MiniMax Code'])
     expect(JSON.parse(localStorage.getItem(HUB_PROVIDER_ORDER_STORAGE_KEY)!)).toEqual([
-      'command-code', 'kimi-code', 'chatgpt', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama',
+      'command-code', 'kimi-code', 'chatgpt', 'minimax-code', 'glm-coding-plan', 'claude', 'claude-api', 'ollama',
       'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone',
     ])
     expect(dataTransfer.setData).toHaveBeenCalledWith('text/plain', 'chatgpt')
@@ -257,7 +290,7 @@ describe('HubOverview', () => {
     await render()
     const names = cards().map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)
     expect(names.slice(0, 3)).toEqual(['Kimi Code', 'ChatGPT', 'Command Code'])
-    expect(names).toHaveLength(15)
+    expect(names).toHaveLength(16)
   })
 
   it('falls back to registry order when the saved order is corrupt', async () => {
@@ -356,7 +389,7 @@ describe('HubOverview', () => {
       return Response.json({ ok: true, value: {} })
     }) as typeof fetch
     await render()
-    expect(cards()).toHaveLength(15)
+    expect(cards()).toHaveLength(16)
     expect(cards()[0]!.querySelector<HTMLSelectElement>('.dsh-hub-proxy-select')!.disabled).toBe(true)
     expect(cards()[0]!.querySelector('.dsh-hub-proxy-select')!.getAttribute('title')).toContain('proxy unavailable')
     expect(cards()[0]!.querySelector<HTMLButtonElement>('[role="switch"]')!.disabled).toBe(false)

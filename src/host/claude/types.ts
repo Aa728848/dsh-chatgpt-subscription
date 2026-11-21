@@ -20,6 +20,8 @@
  * at length.
  */
 
+import { setClaudeCodeVersionPin } from '../common/claude-code-version.ts'
+
 /** Provider id registered with DSH. */
 export const PROVIDER_ID = 'claude-subscription'
 /** Display name for the settings surface and the model picker. */
@@ -50,7 +52,7 @@ export const USAGE_PATH = '/api/oauth/usage'
  *
  * Overridable: see {@link oauthAuthorizeUrl}.
  */
-export const OAUTH_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
+export const OAUTH_AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize'
 /** Token endpoint for both the authorization-code grant and refresh. */
 export const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
 
@@ -218,7 +220,7 @@ export const ANTHROPIC_VERSION = '2023-06-01'
  * to raise it without waiting for a release. Read the effective value with
  * {@link claudeCliVersion}, pin one with {@link setClaudeCliVersion}.
  */
-export const CLAUDE_CLI_VERSION = '2.1.293'
+export const CLAUDE_CLI_VERSION = '2.1.330'
 
 /**
  * Loopback callback port the subscription flow defaults to.
@@ -407,6 +409,7 @@ export function claudeCliVersion(): string {
 export function setClaudeCliVersion(value: string | null): void {
   const normalized = (value ?? '').trim()
   cliVersionOverride = normalized === '' ? null : normalized
+  setClaudeCodeVersionPin(normalized)
 }
 
 /**

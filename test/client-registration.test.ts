@@ -266,6 +266,7 @@ describe('client registration', () => {
   it('contributes the tabbed subscription hub, composer quotas, and image toolview', () => {
     const injectedSlots: string[] = []
     const registrations: Array<Record<string, unknown>> = []
+    const localeNamespaces: string[] = []
     const disposers: Array<() => void> = []
     // The host's own `details-toolview` (packages/client/ui-tool .../toolviews/
     // details-row.tsx) occupies these two tool names in `tool.call.toolview` at the
@@ -285,7 +286,7 @@ describe('client registration', () => {
         if (typeof dispose === 'function') disposers.push(dispose)
       },
       locale: {
-        register() { return () => undefined },
+        register(ns: string) { localeNamespaces.push(ns); return () => undefined },
         bind() { return (key: keyof typeof zh) => zh[key] },
       },
       slots: {
@@ -311,6 +312,14 @@ describe('client registration', () => {
     }
 
     apply(ctx as never)
+
+    // Claude API registers its dictionaries and its sheet, and nothing else: the
+    // line has no quota badge (a user decision), so no composer slot carries its id.
+    expect(localeNamespaces).toContain('dsh-claude-api')
+    expect(document.getElementById('dsh-claude-api-settings-style')).not.toBeNull()
+    expect(registrations.some((registration) => registration.id === 'claude-api-quota')).toBe(false)
+    expect(registrations.filter((registration) => registration.name === 'conversation.input.right'
+      && String(registration.id).startsWith('claude'))).toEqual([expect.objectContaining({ id: 'claude-quota' })])
 
     expect(injectedSlots).toEqual([
       'settings.section',
@@ -416,7 +425,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone'] as const
+    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'claude-api', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -582,13 +591,13 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Claude API', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
       // no enable switch on the host, renders none. Step Code joins the toggleable
       // side (it posts enabled to its own /settings like every other line).
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(14)
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(15)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.

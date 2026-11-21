@@ -1147,13 +1147,12 @@ describe('claude model catalog / lookups', () => {
 describe('claude model catalog / mid-conversation system messages', () => {
   it('names exactly the models the vendor documents as accepting one', () => {
     // TRANSCRIBED from the vendor's own "Mid-conversation system messages and
-    // tool changes" page, whose supported-model list names these eleven models.
+    // tool changes" page, with mythos-5 removed by the newer 2.1.330 binary capability catalog.
     expect([...CLAUDE_MID_CONVERSATION_SYSTEM_MESSAGE_MODEL_IDS].sort()).toEqual([
       'claude-fable-5',
       'claude-fable-5-1',
       'claude-fable-5-2',
       'claude-haiku-5-5',
-      'claude-mythos-5',
       'claude-mythos-5-1',
       'claude-mythos-preview',
       'claude-opus-4-8',
