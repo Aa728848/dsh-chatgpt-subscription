@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
-import { createRoot } from 'react-dom/client'
+import { createRoot, type Root } from 'react-dom/client'
 import { OllamaSection } from '../src/client/ollama/OllamaSection.tsx'
 import { zh } from '../src/client/ollama/locales.ts'
 import { OLLAMA_REASONING_EFFORTS, type OllamaWebStatus } from '../src/shared/ollama-contracts.ts'
@@ -32,6 +32,16 @@ const STATUS: OllamaWebStatus = {
 }
 
 let container: HTMLDivElement | null = null
+// Every root a test mounts. The fixture holds a pooled key on cooldown, so each
+// mounted card runs a 1 Hz countdown; a root left mounted keeps ticking after the
+// jsdom environment is torn down and throws `window is not defined`.
+const roots: Root[] = []
+
+function mountRoot(): Root {
+  const root = createRoot(container as HTMLDivElement)
+  roots.push(root)
+  return root
+}
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(
@@ -42,7 +52,8 @@ beforeEach(() => {
   document.body.appendChild(container)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  for (const root of roots.splice(0)) await act(async () => root.unmount())
   vi.unstubAllGlobals()
   container?.remove()
   container = null
@@ -55,7 +66,7 @@ async function renderWith(
     ok: true,
     value: { ...STATUS, ...overrides },
   })))
-  const root = createRoot(container as HTMLDivElement)
+  const root = mountRoot()
   await act(async () => {
     root.render(<OllamaSection />)
   })
@@ -315,7 +326,7 @@ describe('OllamaSection', () => {
         const { defaultReasoningEffort: _omitted, ...withoutField } = STATUS
         return Response.json({ ok: true, value: withoutField })
       }))
-      const root = createRoot(container as HTMLDivElement)
+      const root = mountRoot()
       await act(async () => {
         root.render(<OllamaSection />)
       })
