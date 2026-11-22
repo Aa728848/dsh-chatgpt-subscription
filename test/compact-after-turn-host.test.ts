@@ -120,6 +120,9 @@ describe('CompactAfterTurnController', () => {
     expect(controller.setArmed('s1', true).phase).toBe('armed')
 
     const none = setup(null)
+    // Before any agent of the session was seen there is no scope to ask.
+    expect(none.controller.state('s1').available).toBe(true)
+    none.controller.onStatus(AGENT, 'running')
     expect(none.controller.state('s1').available).toBe(false)
     expect(() => none.controller.setArmed('s1', true)).toThrow(expect.objectContaining({ code: 'unavailable' }))
   })
@@ -192,6 +195,38 @@ describe('compact-after-turn route', () => {
 })
 
 describe('installCompactAfterTurn', () => {
+  it('turns off with a failure when the agent turns out to have no engine', async () => {
+    const { controller, flush } = setup(null)
+    controller.setArmed('s1', true)
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(controller.state('s1')).toMatchObject({ phase: 'off', available: false, last: { kind: 'failed' } })
+  })
+})
+
+describe('installCompactAfterTurn engine lookup', () => {
+  it('reads the engine from the agent scope its preset loaded it into', async () => {
+    const compactNow = vi.fn(async () => ({ id: 'c1' }))
+    const listeners = new Map<string, (...args: any[]) => void>()
+    let route: { handler: (req: IncomingMessage, res: ServerResponse) => unknown } | undefined
+    installCompactAfterTurn({
+      on: (event, listener) => { listeners.set(event, listener); return () => undefined },
+      get: () => undefined,
+      webServer: { register: (entry) => { route = entry; return () => undefined } },
+    })
+    const agent = { session: SESSION, ctx: { get: (name: string) => name === 'compaction' ? { compactNow } : undefined } }
+    listeners.get('agent/status')!({ agent, status: 'running' })
+    const read = response()
+    await route!.handler(request('GET', `${COMPACT_AFTER_TURN_PATH}?session=s1`), read)
+    expect(JSON.parse(read.body).value.available).toBe(true)
+    await route!.handler(request('POST', COMPACT_AFTER_TURN_PATH, { sessionId: 's1', armed: true }), response())
+    listeners.get('session/event')!(SESSION, turnEnd('completed'))
+    listeners.get('agent/status')!({ agent, status: 'idle' })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(compactNow).toHaveBeenCalledWith(agent, expect.any(AbortSignal))
+  })
+
   it('prefers the engine the caller tracks over a plain lookup', async () => {
     const compactNow = vi.fn(async () => ({ id: 'c1' }))
     const listeners = new Map<string, (...args: any[]) => void>()

@@ -1071,10 +1071,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   }, 'dsh-chatgpt-subscription: Kimi cache wait')
 
   // One-shot "compact when this turn ends", armed from the composer's model menu.
-  // `compaction` is not in `inject` (declaring it would keep the whole plugin
-  // from mounting on a Host without an engine), and an undeclared service is
-  // not readable through a plain `get`; an optional `inject` scope tracks it
-  // instead, and a Host without one reports the switch as unavailable.
+  // An agent preset loads the compaction engine inside the agent's own scope,
+  // which is where the controller reads it (`agent.ctx`). A root-level engine
+  // is tracked here as well, through an optional `inject` scope: declaring
+  // `compaction` in `inject` would keep the whole plugin from mounting on a
+  // Host that composes none at the root.
   let compactionEngine: unknown
   ctx.inject(['compaction'], scoped => {
     compactionEngine = scoped.get('compaction')

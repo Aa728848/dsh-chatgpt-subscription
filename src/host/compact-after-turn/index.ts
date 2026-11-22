@@ -44,6 +44,11 @@ const MAX_BODY_BYTES = 4 * 1024
 /** The slice of an Agent this controller reads. */
 export interface CompactAfterTurnAgent {
   readonly session?: { readonly id?: unknown } | undefined
+  /**
+   * The agent's own scope. A preset loads its compaction engine inside it, so
+   * the engine is read from here rather than from the plugin's root scope.
+   */
+  readonly ctx?: { get?(name: string): unknown } | undefined
 }
 
 /** The slice of a session event this controller reads. */
@@ -54,10 +59,10 @@ export interface CompactAfterTurnEvent {
 
 export interface CompactAfterTurnDeps {
   /**
-   * Run one manual compaction; resolves `null` when nothing was compacted.
-   * Absent (or returning undefined) when the Host has no compaction engine.
+   * The compaction entry for one agent (or for the Host, before any agent of
+   * the session was seen); undefined when there is no engine to call.
    */
-  readonly compactor: () => CompactNow | undefined
+  readonly compactor: (agent: CompactAfterTurnAgent | undefined) => CompactNow | undefined
   readonly now?: () => number
   readonly logger?: { warn(message: string): void; info?(message: string): void } | undefined
   /** Defers the compaction out of the status listener; tests run it inline. */
@@ -84,6 +89,8 @@ export class CompactAfterTurnError extends Error {
 
 export class CompactAfterTurnController {
   private readonly sessions = new Map<string, SessionState>()
+  /** The latest agent seen per session; its scope is where the engine lives. */
+  private readonly agents = new Map<string, CompactAfterTurnAgent>()
   private readonly now: () => number
   private readonly defer: (task: () => void) => void
   private disposed = false
@@ -93,8 +100,14 @@ export class CompactAfterTurnController {
     this.defer = deps.defer ?? ((task) => { setTimeout(task, 0) })
   }
 
-  get available(): boolean {
-    return this.deps.compactor() !== undefined
+  /**
+   * Whether the session can compact. A session whose agent was seen answers by
+   * that agent's scope; one not seen yet (no turn since the Host started) is
+   * taken as able, and an attempt without an engine is recorded as a failure.
+   */
+  available(sessionId: string): boolean {
+    const agent = this.agents.get(sessionId)
+    return agent === undefined || this.deps.compactor(agent) !== undefined
   }
 
   state(sessionId: string): CompactAfterTurnStateDto {
@@ -102,7 +115,7 @@ export class CompactAfterTurnController {
     return {
       sessionId,
       phase: state?.phase ?? 'off',
-      available: this.available,
+      available: this.available(sessionId),
       last: state?.last ?? null,
     }
   }
@@ -113,7 +126,7 @@ export class CompactAfterTurnController {
       throw new CompactAfterTurnError('busy', 'A compaction is running for this session.')
     }
     if (armed) {
-      if (!this.available) throw new CompactAfterTurnError('unavailable', 'This host has no compaction engine.')
+      if (!this.available(sessionId)) throw new CompactAfterTurnError('unavailable', 'This session has no compaction engine.')
       const state = this.ensure(sessionId)
       state.phase = 'armed'
       state.lastTurnEnd = null
@@ -136,9 +149,11 @@ export class CompactAfterTurnController {
 
   /** `agent/status` listener: an armed session that just went idle compacts once. */
   onStatus(agent: CompactAfterTurnAgent | undefined, status: unknown): void {
-    if (this.disposed || status !== 'idle' || agent === undefined) return
+    if (this.disposed || agent === undefined) return
     const id = sessionIdOf(agent.session)
     if (id === undefined) return
+    this.agents.set(id, agent)
+    if (status !== 'idle') return
     const state = this.sessions.get(id)
     // No turn has ended since the switch was armed: arming while idle waits for
     // the next turn instead of compacting on the spot.
@@ -147,8 +162,13 @@ export class CompactAfterTurnController {
       state.lastTurnEnd = null
       return
     }
-    const compactNow = this.deps.compactor()
-    if (compactNow === undefined) return
+    const compactNow = this.deps.compactor(agent)
+    if (compactNow === undefined) {
+      state.phase = 'off'
+      state.lastTurnEnd = null
+      state.last = { kind: 'failed', detail: 'This session has no compaction engine.', at: this.now() }
+      return
+    }
     state.phase = 'compacting'
     state.lastTurnEnd = null
     const abort = new AbortController()
@@ -161,12 +181,14 @@ export class CompactAfterTurnController {
     const id = sessionIdOf(agent?.session)
     if (id === undefined) return
     this.sessions.get(id)?.abort?.abort(new Error('agent disposed'))
+    if (this.agents.get(id) === agent) this.agents.delete(id)
   }
 
   dispose(): void {
     this.disposed = true
     for (const state of this.sessions.values()) state.abort?.abort(new Error('plugin unloaded'))
     this.sessions.clear()
+    this.agents.clear()
   }
 
   private async run(
@@ -256,10 +278,10 @@ export interface CompactAfterTurnOptions {
  * Resolve the Host compaction engine lazily: it may load after this plugin and
  * may be replaced on a profile reload.
  */
-function compactorOf(host: CompactAfterTurnHost, options: CompactAfterTurnOptions): CompactNow | undefined {
+function compactorOf(host: CompactAfterTurnHost, options: CompactAfterTurnOptions, agent: CompactAfterTurnAgent | undefined): CompactNow | undefined {
   let engine: unknown
   try {
-    engine = options.engine?.() ?? host.get?.('compaction')
+    engine = agent?.ctx?.get?.('compaction') ?? options.engine?.() ?? host.get?.('compaction')
   } catch {
     // A context that refuses the lookup has no engine for this plugin.
     return undefined
@@ -272,7 +294,7 @@ function compactorOf(host: CompactAfterTurnHost, options: CompactAfterTurnOption
 /** Install the listeners and the route; returns the disposer (undefined on a Host without an event bus). */
 export function installCompactAfterTurn(host: CompactAfterTurnHost, options: CompactAfterTurnOptions = {}): (() => void) | undefined {
   if (typeof host.on !== 'function') return undefined
-  const controller = new CompactAfterTurnController({ compactor: () => compactorOf(host, options), logger: host.logger })
+  const controller = new CompactAfterTurnController({ compactor: (agent) => compactorOf(host, options, agent), logger: host.logger })
   const handles = [
     host.on('session/event', (session: { id?: unknown }, event: CompactAfterTurnEvent) => controller.observe(session, event)),
     host.on('agent/status', (payload: { agent?: CompactAfterTurnAgent; status?: unknown } | undefined) => controller.onStatus(payload?.agent, payload?.status)),
