@@ -52,7 +52,8 @@ export class QuickExecutionBroker{
    const body=JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}') as {name?:unknown;arguments?:unknown}
    if(typeof body.name!=='string'||!body.name)return send(400,failure('Missing tool name.'))
    const name=dshName(body.name);const callKey=key(name,body.arguments??{})
-   const matched=[...this.pending.values()].find((item)=>item.key===callKey)
+   // Identical concurrent calls share a key; claim each WSS call at most once.
+   const matched=[...this.pending.values()].find((item)=>item.key===callKey&&item.answer===undefined)
    const result=await new Promise<{content:QuickResultContent[];isError?:boolean}>((resolve)=>{
     if(matched){matched.answer=resolve;return}
     const waiter:Waiting={key:callKey,answer:resolve,timer:setTimeout(()=>{this.waiting.delete(waiter);resolve(failure('No active Quick WSS tool call matched this MCP request.'))},10_000)}

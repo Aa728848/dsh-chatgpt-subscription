@@ -55,4 +55,18 @@ describe('AWS Quick stdio tool bridge',()=>{
   const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile:path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')})
   try{const catalog=await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}]);expect(catalog.resolve('mcp__dsh_quick__read')).toBe('read');expect(catalog.resolve('other')).toBeNull()}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
+ it('keeps identical concurrent MCP requests attached to distinct Quick WSS calls',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-concurrent-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')
+  const outpost={mcp:async(action:string)=>action==='list'?{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,transport:'stdio',command:process.execPath,args:[entryFile,statePath],tools:[{name:'dsh_quick__read'}]}]}:{success:true},outpostId:async()=> 'outpost'} as unknown as AwsQuickOutpost
+  const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile});const client=new Client({name:'test-client',version:'1.0.0'})
+  try{
+   await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}])
+   await client.connect(new StdioClientTransport({command:process.execPath,args:['--experimental-transform-types',entryFile,statePath],stderr:'pipe'}))
+   bridge.track({id:'call-1',name:'read',argumentsText:'{"path":"same.ts"}'});bridge.track({id:'call-2',name:'read',argumentsText:'{"path":"same.ts"}'})
+   const first=client.callTool({name:'dsh_quick__read',arguments:{path:'same.ts'}});const second=client.callTool({name:'dsh_quick__read',arguments:{path:'same.ts'}})
+   await vi.waitFor(()=>{expect((bridge as never as {broker:{matchedCount:number}}).broker.matchedCount).toBe(2)},{timeout:5000,interval:10})
+   bridge.settle('call-1',[{type:'text',text:'first'}]);bridge.settle('call-2',[{type:'text',text:'second'}])
+   await expect(first).resolves.toMatchObject({content:[{type:'text',text:'first'}]});await expect(second).resolves.toMatchObject({content:[{type:'text',text:'second'}]})
+  }finally{await client.close();await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
+ })
 })
