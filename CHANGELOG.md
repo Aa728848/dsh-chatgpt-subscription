@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.81.2 - 2026-11-22
+
+- **[aws-quick] 修复慢速 CI 的 MCP 测试竞态**：工具桥测试等待真实 WSS/MCP 匹配条件，不再依赖固定 50ms；不改变生产执行协议。
+
 ## 0.81.1 - 2026-11-22
 
 - **[aws-quick] 修复连接器重启持久化与 CI 跨平台测试**：线路卸载保留 DeepSeek Harness 连接器和工具 schema，仅回收 broker/outpost 并清除失效的临时 execution 凭据；协议测试改用生产平台 surface 常量，消除 Windows/macOS 差异。
