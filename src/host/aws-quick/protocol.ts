@@ -5,7 +5,7 @@ import type { QuickImageAttachment } from './images.ts'
 
 export const QUICK_CHAT_WS_PATH = '/streaming/quickwork-chat-bidirectional-stream'
 export const QUICK_DESKTOP_SURFACE = process.platform === 'win32' ? 'QUICK_WORK_DESKTOP_WINDOWS' : 'QUICK_WORK_DESKTOP_MAC'
-export const QUICK_DSH_TOOL_POLICY = 'This turn is owned by DeepSeek Harness (DSH). Use DSH-provided tools exposed through the DeepSeek Harness connector for coding, shell, repository and filesystem work. Do not substitute Quick device Python, run_python tools, or other Quick local sandbox tools for them. Quick load_skill/load_tools discovery is allowed when needed to discover DSH tools. If a needed DSH tool is unavailable, say so instead of using the Quick device sandbox.'
+export const QUICK_DSH_TOOL_POLICY = 'This turn uses DeepSeek Harness (DSH). Prefer tools exposed by the DeepSeek Harness connector for coding, shell, repository and filesystem work. Quick load_skill/load_tools may be used for discovery. Keep every tool call subject to the normal DSH and Quick permission rules. If a required DSH tool is unavailable, report that capability clearly.'
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 // Current Smithy types name these toUtf8/fromUtf8 but declare bytes→string first.

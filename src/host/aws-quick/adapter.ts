@@ -20,7 +20,8 @@ interface LiveTurn{connection:QuickConnection;state:ThreadState;catalog?:QuickTo
 function blockText(block:ContentBlock):string{const b=block as unknown as Record<string,unknown>;if(b.type==='text'&&typeof b.text==='string')return b.text;if(b.type==='tool-call')return `[Tool call ${String(b.name??'unknown')}: ${String(b.arguments??'')}]`;if(b.type==='tool-result'&&Array.isArray(b.content))return `[Tool result]\n${(b.content as ContentBlock[]).map(blockText).filter(Boolean).join('\n')}`;if(b.type==='image')return quickImageLabel(block);if(b.type==='image-url')throw new LlmError('AWS Quick requires an admitted DSH image attachment, not a remote image URL.','INVALID_REQUEST');return ''}
 function messageText(message:Message):string{return message.content.map(blockText).filter(Boolean).join('\n')}
 function renderMessage(message:Message):string{return `<${message.role}>\n${messageText(message)}\n</${message.role}>`}
-function renderTranscript(messages:Message[]):string{return `The following is the complete DSH conversation. Continue from its latest user request; do not repeat earlier tasks.\n\n${messages.map(renderMessage).join('\n\n')}`}
+function renderTranscript(messages:Message[]):string{const conversation=messages.filter((message)=>message.role!=='system'&&message.role!=='developer');return `The following is the complete DSH conversation. Continue from its latest user request; do not repeat earlier tasks.\n\n${conversation.map(renderMessage).join('\n\n')}`}
+function systemContext(messages:Message[]):string{return messages.filter((message)=>message.role==='system'||message.role==='developer').map(messageText).filter((text)=>text.trim()).join('\n\n')}
 function fingerprint(messages:Message[],covered:number):string{return JSON.stringify(messages.slice(0,covered).map((m)=>[m.role,messageText(m),m.content.filter((block)=>block.type==='image').map((block)=>(block as unknown as {attachment?:unknown}).attachment)]))}
 function assertSupported(options:GenerateOptions):void{const unsupported:string[]=[];if(options.temperature!==undefined)unsupported.push('temperature');if(options.stop!==undefined)unsupported.push('stop');if(unsupported.length)throw new LlmError(`AWS Quick cannot express ${unsupported.join(', ')}.`,'UNSUPPORTED_OPTION')}
 function collectResults(messages:Message[],images:Awaited<ReturnType<typeof resolveRequestImages>>):Array<{id:string;content:QuickResultContent[];isError:boolean}>{
@@ -68,7 +69,8 @@ export class AwsQuickAdapter extends LlmAdapter{
     const images=await resolveRequestImages({...options,messages:outboundMessages},this.options.attachments,signal);const attachments=quickImageAttachments(outboundMessages,images)
     const connection=await open({outpost:this.options.outpost,threadId,outpostId:catalog?.outpostId,preApprovedTools:tools.map((tool)=>'dsh_quick__'+tool.name),signal,activity})
     turn={connection,catalog,pending:new Map(),state:{threadId,covered:0,fingerprint:'',model:modelState.id,...(effort?{effort}:{}),...(catalog?{toolFingerprint:catalog.fingerprint}:{})}}
-    connection.sendUser(text,modelState.mode,effort,attachments,tools.length>0?QUICK_DSH_TOOL_POLICY:undefined)
+    const customPrompt=[systemContext(options.messages),tools.length>0?QUICK_DSH_TOOL_POLICY:''].filter(Boolean).join('\n\n')||undefined
+    connection.sendUser(text,modelState.mode,effort,attachments,customPrompt)
    }
    if(!turn)throw new LlmError('AWS Quick failed to initialize its connection.','SERVER')
    const currentTurn=turn
@@ -77,7 +79,7 @@ export class AwsQuickAdapter extends LlmAdapter{
    for await(const event of currentTurn.connection.events()){
     if(event.kind==='tool-call'){
      const original=currentTurn.catalog?.resolve(event.call.name)??null
-     if(!original){currentTurn.connection.answerTool(event.call,'This tool is not offered by the current DSH session.',true);continue}
+     if(!original){currentTurn.connection.answerTool(event.call,'This tool is not part of the active DSH catalog. Use an available DeepSeek Harness tool or report the missing capability.',true);continue}
      const call={...event.call,name:original};currentTurn.pending.set(call.id,call);this.options.toolBridge?.track(call)
      const closing=close();if(closing)yield closing
      const toolIndex=index++;yield{type:'block-start',index:toolIndex,blockType:'tool-call'} as StreamChunk
