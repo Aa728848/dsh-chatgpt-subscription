@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto'
+import {LlmError} from '../common/llm-compat.ts'
 import {WebSocket} from 'undici'
 import type {QuickSession,AwsQuickOutpost} from './outpost.ts'
 import {decodeQuickOutput,encodeQuickInput,isQuickChatHost,QUICK_CHAT_WS_PATH,quickSessionConnect,quickStopGeneration,quickUserMessage,unwrapQuickToolArguments,type QuickWireEvent} from './protocol.ts'
@@ -26,12 +27,12 @@ export class QuickConnection{
  private constructor(private readonly socket:WebSocket,private readonly outpost:AwsQuickOutpost,private readonly threadId:string,private readonly preApprovedTools?:string[],private readonly invokingOutpostId?:string,private readonly appVersion?:string,private readonly rawObserver?:QuickRawObserver){
   this.keepalive=setInterval(()=>this.send({type:'ping',payload:{timestamp:Date.now()}}),25_000)
   this.refresh=setInterval(()=>{void this.outpost.session(true).then((fresh)=>this.send({type:'token_refresh',token:fresh.jwt})).catch(()=>undefined)},60_000)
-  socket.onerror=()=>{if(!this.done)this.queue.fail(new Error('AWS Quick WebSocket failed.'))}
-  socket.onclose=(event)=>{if(!this.done&&!this.closed)this.queue.fail(new Error(`AWS Quick WebSocket closed before completion (code ${event.code}).`))}
-  socket.onmessage=(message)=>{void this.receive(message.data).catch((error)=>this.queue.fail(error))}
+  socket.onerror=()=>{if(!this.done)this.queue.fail(new LlmError('AWS Quick WebSocket transport failed.','TRANSPORT'))}
+  socket.onclose=(event)=>{if(!this.done&&!this.closed)this.queue.fail(new LlmError(`AWS Quick WebSocket closed before completion (code ${event.code}).`,'STREAM_CLOSED'))}
+  socket.onmessage=(message)=>{void this.receive(message.data).catch((error)=>this.queue.fail(error instanceof LlmError?error:new LlmError('AWS Quick returned an unreadable stream event: '+(error instanceof Error?error.message:String(error)),'INVALID_RESPONSE',{cause:error})))}
  }
  static async open(input:{outpost:AwsQuickOutpost;threadId:string;outpostId?:string;workingSessionId?:string;preApprovedTools?:string[];signal?:AbortSignal;activity?:{pulse():void};onRawEvent?:QuickRawObserver}):Promise<QuickConnection>{
-  if(input.signal?.aborted)throw new Error('AWS Quick turn was cancelled before connecting.')
+  if(input.signal?.aborted)throw new LlmError('AWS Quick turn was cancelled before connecting.','ABORTED')
   const session=await input.outpost.session(true)
   if(!isQuickChatHost(session.wsHost))throw new Error(`Refusing untrusted AWS Quick WebSocket host: ${session.wsHost}`)
   if(session.provider==='gateway'||session.provider==='social_gateway')throw new Error('This AWS Quick account selected the legacy Gateway transport; this line supports the current AIDP transport.')
@@ -39,8 +40,8 @@ export class QuickConnection{
   const url=new URL(`wss://${session.wsHost}${session.wsPath||QUICK_CHAT_WS_PATH}`);url.searchParams.set('surfaceType',session.surface);url.searchParams.set('outpostId',outpostId);url.searchParams.set('workingSessionId',workingSessionId);url.searchParams.set('channel','prod');if(session.provider!=='enterprise')url.searchParams.set('token',session.jwt)
   const socket=new WebSocket(url,{headers:{Authorization:`Bearer ${session.jwt}`,'X-Surface-Type':session.surface,'X-Agent-Service-Type':'UNIFIED_QUICK','X-Outpost-Id':outpostId,'X-Working-Session-Id':workingSessionId,'X-Channel':'prod'}});socket.binaryType='arraybuffer'
   const connection=new QuickConnection(socket,input.outpost,input.threadId,input.preApprovedTools,outpostId,session.appVersion,input.onRawEvent);connection.setSignal(input.signal);connection.activity=input.activity
-  await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{reject(new Error('AWS Quick WebSocket connection timed out.'));connection.close()},30_000);socket.onopen=()=>{clearTimeout(timer);connection.send(quickSessionConnect(session.actorArn,outpostId,session.appVersion));resolve()};socket.onerror=()=>{clearTimeout(timer);reject(new Error('AWS Quick WebSocket failed during connection.'))}})
-  await Promise.race([connection.connected,new Promise<never>((_,reject)=>{const timer=setTimeout(()=>{connection.close();reject(new Error('AWS Quick did not confirm the connected session.'))},30_000);void connection.connected.finally(()=>clearTimeout(timer)).catch(()=>undefined)})])
+  await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{reject(new LlmError('AWS Quick WebSocket connection timed out.','TIMEOUT'));connection.close()},30_000);socket.onopen=()=>{clearTimeout(timer);connection.send(quickSessionConnect(session.actorArn,outpostId,session.appVersion));resolve()};socket.onerror=()=>{clearTimeout(timer);reject(new LlmError('AWS Quick WebSocket failed during connection.','TRANSPORT'))}})
+  await Promise.race([connection.connected,new Promise<never>((_,reject)=>{const timer=setTimeout(()=>{connection.close();reject(new LlmError('AWS Quick did not confirm the connected session.','TIMEOUT'))},30_000);void connection.connected.finally(()=>clearTimeout(timer)).catch(()=>undefined)})])
   if(input.outpostId)await input.outpost.invokeAgentCapabilities(session,workingSessionId,outpostId)
   return connection
  }
@@ -48,8 +49,8 @@ export class QuickConnection{
  setActivity(activity:{pulse():void}|undefined):void{this.activity=activity}
  private readonly onAbort=()=>{if(this.assistantMessageId)this.send(quickStopGeneration(this.threadId,this.assistantMessageId));this.finish('cancelled');this.close()}
  private send(value:unknown):void{if(this.socket.readyState===WebSocket.OPEN)this.socket.send(encodeQuickInput(value))}
- sendUser(text:string,mode:AwsQuickMode,effort?:AwsQuickEffort,attachments?:QuickImageAttachment[],customPrompt?:string):void{if(this.done||this.closed)throw new Error('Quick connection is closed.');this.send(quickUserMessage({text,threadId:this.threadId,mode,effort,preApprovedTools:this.preApprovedTools,invokingOutpostId:this.invokingOutpostId,appVersion:this.appVersion,attachments,customPrompt,userLocale:Intl.DateTimeFormat().resolvedOptions().locale,userTimezone:Intl.DateTimeFormat().resolvedOptions().timeZone}))}
- answerTool(call:QuickToolCall,result:string|QuickResultContent[],isError=false):void{const content=typeof result==='string'?[{type:'text' as const,text:result}]:result;this.send({type:'tool_result',payload:{tool_call_id:call.id,result:{content},error:isError?(typeof result==='string'?result:'Tool execution failed.'):null}})}
+ sendUser(text:string,mode:AwsQuickMode,effort?:AwsQuickEffort,attachments?:QuickImageAttachment[],customPrompt?:string):void{if(this.done||this.closed)throw new LlmError('Quick connection is closed.','STREAM_CLOSED');this.send(quickUserMessage({text,threadId:this.threadId,mode,effort,preApprovedTools:this.preApprovedTools,invokingOutpostId:this.invokingOutpostId,appVersion:this.appVersion,attachments,customPrompt,userLocale:Intl.DateTimeFormat().resolvedOptions().locale,userTimezone:Intl.DateTimeFormat().resolvedOptions().timeZone}))}
+ answerTool(call:QuickToolCall,result:string|QuickResultContent[],isError=false):void{if(this.done||this.closed||this.socket.readyState!==WebSocket.OPEN)throw new LlmError('Quick tool result cannot be sent because the connection is closed.','STREAM_CLOSED');const content=typeof result==='string'?[{type:'text' as const,text:result}]:result;this.send({type:'tool_result',payload:{tool_call_id:call.id,result:{content},error:isError?(typeof result==='string'?result:'Tool execution failed.'):null}})}
  events():AsyncIterable<QuickStreamEvent>{return this.queue}
  private finish(reason:'stop'|'cancelled'):void{if(this.done)return;this.done=true;this.queue.push({kind:'done',reason});this.queue.close()}
  private async receive(data:unknown):Promise<void>{
@@ -66,7 +67,7 @@ export class QuickConnection{
   }
   if(type==='turn_aborted'){this.finish('cancelled');return}
   if(type==='message_complete'||type==='stream_ended'){this.finish('stop');return}
-  if(type==='error'||type==='guardrail_blocked')this.queue.fail(new Error(textField(event,'message')??textField(event,'error')??'AWS Quick returned an error.'))
+  if(type==='error'||type==='guardrail_blocked')this.queue.fail(new LlmError(textField(event,'message')??textField(event,'error')??'AWS Quick returned an error.',type==='guardrail_blocked'?'INVALID_REQUEST':'SERVER'))
  }
  close():void{if(this.closed)return;this.closed=true;clearInterval(this.keepalive);clearInterval(this.refresh);this.signal?.removeEventListener('abort',this.onAbort);this.queue.close();if(this.socket.readyState===WebSocket.OPEN||this.socket.readyState===WebSocket.CONNECTING)this.socket.close(1000,'Complete')}
 }

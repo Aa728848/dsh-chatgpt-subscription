@@ -13,7 +13,8 @@ import {QUICK_DSH_TOOL_POLICY} from './protocol.ts'
 import type {AwsQuickOutpost} from './outpost.ts'
 import type {AwsQuickToolBridge,QuickToolCatalog} from './tool-bridge.ts'
 
-const RETRY_POLICY=resolveRetryPolicy({mode:'normal',maxRetries:2,retryableCodes:['TRANSPORT','SERVER','TIMEOUT','STREAM_CLOSED'],backoff:{initialDelayMs:1500,maxDelayMs:15000,jitterRatio:0.2}},'aws-quick.retry')
+const QUICK_STREAM_IDLE_TIMEOUT_MS=600_000
+const RETRY_POLICY=resolveRetryPolicy({mode:'normal',maxRetries:2,retryableCodes:['TRANSPORT','SERVER','TIMEOUT','STREAM_CLOSED',STREAM_IDLE_TIMEOUT_CODE],backoff:{initialDelayMs:1500,maxDelayMs:15000,jitterRatio:0.2}},'aws-quick.retry')
 interface ThreadState{threadId:string;covered:number;fingerprint:string;model:string;effort?:string;toolFingerprint?:string}
 interface LiveTurn{connection:QuickConnection;state:ThreadState;catalog?:QuickToolCatalog;pending:Map<string,QuickToolCall>}
 function blockText(block:ContentBlock):string{const b=block as unknown as Record<string,unknown>;if(b.type==='text'&&typeof b.text==='string')return b.text;if(b.type==='tool-call')return `[Tool call ${String(b.name??'unknown')}: ${String(b.arguments??'')}]`;if(b.type==='tool-result'&&Array.isArray(b.content))return `[Tool result]\n${(b.content as ContentBlock[]).map(blockText).filter(Boolean).join('\n')}`;if(b.type==='image')return quickImageLabel(block);if(b.type==='image-url')throw new LlmError('AWS Quick requires an admitted DSH image attachment, not a remote image URL.','INVALID_REQUEST');return ''}
@@ -36,7 +37,7 @@ export class AwsQuickAdapter extends LlmAdapter{
  async listModels(provider:string):Promise<readonly LlmModelInfo[]>{const settings=await this.options.settings.read();if(!settings.enabled)return[];const enabled=settings.enabledModelIds;return QUICK_MODELS.filter((m)=>enabled===null||enabled.includes(m.id)).map((m)=>toQuickModelInfo(provider,m))}
  async resolveModel(provider:string,model:string):Promise<LlmResolvedModelInfo>{return toQuickResolvedModel(provider,findQuickModel(model))}
  async prepareCall(provider:string,model:string):Promise<PreparedAdapterCall>{return{model:await this.resolveModel(provider,model),stream:(options)=>this.stream(options)}}
- stream(options:HarnessGenerateOptions):AsyncIterable<StreamChunk>{return wrapStreamWithWatchdog((signal,activity)=>this.run(options,signal,activity),options.signal,STREAM_IDLE_TIMEOUT_MS,STREAM_IDLE_TIMEOUT_CODE,PROVIDER_NAME,240_000)}
+ stream(options:HarnessGenerateOptions):AsyncIterable<StreamChunk>{return wrapStreamWithWatchdog((signal,activity)=>this.run(options,signal,activity),options.signal,QUICK_STREAM_IDLE_TIMEOUT_MS,STREAM_IDLE_TIMEOUT_CODE,PROVIDER_NAME,QUICK_STREAM_IDLE_TIMEOUT_MS)}
  private compatible(state:ThreadState,options:GenerateOptions,model:string,effort:string|undefined,toolFingerprint:string|undefined):boolean{return state.model===model&&state.effort===effort&&state.toolFingerprint===toolFingerprint&&fingerprint(options.messages,state.covered)===state.fingerprint}
  private async *run(raw:HarnessGenerateOptions,signal:AbortSignal,activity:{pulse():void}):AsyncGenerator<StreamChunk>{
   const options=normalizeGenerateOptions(raw);assertSupported(options)

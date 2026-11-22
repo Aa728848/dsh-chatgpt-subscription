@@ -46,6 +46,7 @@ SDK 当前列出 327 个命令；Agent/Flow 为管理操作，没有发送聊天
 - outpost 通过官方组件复用 Quick Desktop 的 `~/.quickwork` 配置与系统凭据库，并在线路卸载时回收；插件不直接读取凭据。
 - stdio MCP 条目固定为 DeepSeek Harness（内部 id `dsh-quick`）。自有 `0600` 状态文件携带工具 schema、随机 loopback 地址和临时 Bearer，不含长期凭据；不进入 Web DTO。卸载保留连接器与 schema，仅清除失效的 execution 地址和 Bearer。`tools/call` 只匹配合法的活动 WSS 调用并停放，实际工具由所属 DSH turn 审批执行，真实结果共享给 WSS 与 MCP。Quick 的确认 nonce 不伪造、不写确认文件。
 - `finish(tool-calls)` 前解除本轮 watchdog signal，避免其正常清理的 `consumer.abort()` 关闭留用 socket；下一轮重新绑定取消信号。
+- Smart high 的工具后长思考使用 10 分钟空闲预算；WebSocket 传输、连接关闭、Quick 上游错误与不可读事件使用明确 `LlmError` 分类，可恢复故障仅进入既有限额重试。
 
 ## 验证记录
 
