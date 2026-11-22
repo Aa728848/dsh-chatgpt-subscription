@@ -25,6 +25,7 @@ export class QuickExecutionBroker{
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',()=>{server.off('error',reject);resolve()})})
   this.endpoint='http://127.0.0.1:'+(server.address() as AddressInfo).port+'/call';return{url:this.endpoint,token:this.token}
  }
+ get matchedCount():number{return[...this.pending.values()].filter((item)=>item.answer!==undefined).length}
  track(call:Call):void{
   const item:Pending={call,key:key(call.name,parse(call.argumentsText))};this.pending.set(call.id,item)
   for(const waiter of [...this.waiting])if(waiter.key===item.key){clearTimeout(waiter.timer);this.waiting.delete(waiter);item.answer=waiter.answer;break}

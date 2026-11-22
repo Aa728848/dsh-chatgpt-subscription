@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1000" viewBox="0 0 1500 1000" role="img" aria-labelledby="title desc">
+<title id="title">AWS Quick 与 DeepSeek Harness 集成架构</title>
+<desc id="desc">展示 DSH 调用 Quick 订阅的主链路、WSS 与 MCP 工具双路径、图片输入、首次使用和持久化边界。</desc>
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#08111c"/><stop offset="1" stop-color="#101828"/></linearGradient>
+  <linearGradient id="aws" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#30210b"/><stop offset="1" stop-color="#1c1b17"/></linearGradient>
+  <linearGradient id="dsh" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0c2d35"/><stop offset="1" stop-color="#11232d"/></linearGradient>
+  <linearGradient id="local" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1a2542"/><stop offset="1" stop-color="#151d31"/></linearGradient>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#000" flood-opacity=".24"/></filter>
+  <marker id="arrow-cyan" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#55d6e8"/></marker>
+  <marker id="arrow-amber" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#f6c76c"/></marker>
+  <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#77dfa6"/></marker>
+  <style>
+    text{font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;fill:#e8eef6}
+    .muted{fill:#9cacbf}.small{font-size:14px}.label{font-size:15px}.box-title{font-size:20px;font-weight:650}.box-sub{font-size:14px;fill:#a9b8c9}.num{font-size:13px;font-weight:700;fill:#071018}
+    .box{stroke-width:1.3;filter:url(#shadow)}.flow{fill:none;stroke-width:2.2;marker-end:url(#arrow-cyan)}.tool{fill:none;stroke:#f6c76c;stroke-width:2.2;marker-end:url(#arrow-amber)}.result{fill:none;stroke:#77dfa6;stroke-width:2.2;marker-end:url(#arrow-green)}
+  </style>
+</defs>
+<rect width="1500" height="1000" fill="url(#bg)"/>
+<circle cx="1380" cy="65" r="180" fill="#e6a43b" opacity=".035"/><circle cx="100" cy="900" r="250" fill="#42c7dc" opacity=".035"/>
+<text x="40" y="52" font-size="30" font-weight="700">AWS Quick × DeepSeek Harness</text>
+<text x="40" y="82" class="muted" font-size="16">DSH 直接调用 Quick 订阅：官方 outpost 提供身份，AIDP 提供流式对话，工具仍由 DSH 审批与执行</text>
+<rect x="40" y="105" width="1420" height="38" rx="12" fill="#111d2b" stroke="#253449"/>
+<text x="60" y="130" class="small" fill="#a9c7d9">主方向：DSH → Quick　·　不是把 Quick ACP 当作 DSH 的上游模型代理</text>
+
+<!-- Primary request flow -->
+<rect class="box" x="40" y="175" width="300" height="126" rx="18" fill="url(#dsh)" stroke="#2b7080"/>
+<circle cx="66" cy="201" r="12" fill="#55d6e8"/><text class="num" x="66" y="206" text-anchor="middle">1</text>
+<text x="88" y="207" class="box-title">用户请求 / DSH 历史</text>
+<text x="62" y="240" class="box-sub">文本 · ImageBlock · 工具 schema</text>
+<text x="62" y="265" class="box-sub">持久历史由 DSH 持有</text>
+
+<rect class="box" x="400" y="175" width="330" height="126" rx="18" fill="url(#dsh)" stroke="#2b7080"/>
+<circle cx="426" cy="201" r="12" fill="#55d6e8"/><text class="num" x="426" y="206" text-anchor="middle">2</text>
+<text x="448" y="207" class="box-title">AwsQuickAdapter</text>
+<text x="422" y="240" class="box-sub">模式 / 推理强度 / 消息映射</text>
+<text x="422" y="265" class="box-sub">历史指纹与 thread 续用</text>
+
+<rect class="box" x="800" y="175" width="300" height="126" rx="18" fill="url(#local)" stroke="#526da6"/>
+<circle cx="826" cy="201" r="12" fill="#91a8ff"/><text class="num" x="826" y="206" text-anchor="middle">3</text>
+<text x="848" y="207" class="box-title">官方 Quick outpost</text>
+<text x="822" y="240" class="box-sub">/auth/sncs-session</text>
+<text x="822" y="265" class="box-sub">复用 profile 与系统凭据库</text>
+
+<rect class="box" x="1150" y="175" width="310" height="126" rx="18" fill="url(#aws)" stroke="#b87b2c"/>
+<circle cx="1176" cy="201" r="12" fill="#f6c76c"/><text class="num" x="1176" y="206" text-anchor="middle">4</text>
+<text x="1198" y="207" class="box-title">Quick AIDP runtime</text>
+<text x="1172" y="240" class="box-sub">双向 WebSocket</text>
+<text x="1172" y="265" class="box-sub">文本 · 思考 · tool_call</text>
+
+<path class="flow" d="M340 228 H400"/><path class="flow" d="M730 228 H800"/><path class="flow" d="M1100 228 H1150"/>
+<text x="352" y="215" class="small muted">请求</text><text x="737" y="215" class="small muted">会话</text><text x="1110" y="215" class="small muted">连接</text>
+<path class="result" d="M1150 318 H1100 V333 H730"/>
+<text x="876" y="326" class="small" fill="#77dfa6">流式 text / reasoning / finish</text>
+
+<!-- Tool execution -->
+<rect class="box" x="400" y="410" width="330" height="142" rx="18" fill="#102c26" stroke="#3b8b68"/>
+<circle cx="426" cy="438" r="12" fill="#77dfa6"/><text class="num" x="426" y="443" text-anchor="middle">5</text>
+<text x="448" y="444" class="box-title">DSH 权限与工具执行</text>
+<text x="422" y="477" class="box-sub">工具只执行一次</text>
+<text x="422" y="502" class="box-sub">真实结果 / 图片 / 错误</text>
+<text x="422" y="527" class="box-sub">不绕过 DSH 权限与沙盒</text>
+
+<rect class="box" x="800" y="397" width="300" height="98" rx="18" fill="url(#local)" stroke="#526da6"/>
+<text x="822" y="430" class="box-title">DeepSeek Harness</text>
+<text x="822" y="457" class="box-sub">稳定 stdio MCP 工具目录</text>
+<text x="822" y="480" class="box-sub">读取 0600 自有状态文件</text>
+
+<rect class="box" x="800" y="530" width="300" height="116" rx="18" fill="#272217" stroke="#a5813d"/>
+<text x="822" y="563" class="box-title">Execution Broker</text>
+<text x="822" y="590" class="box-sub">随机 Bearer · Host / Origin 校验</text>
+<text x="822" y="615" class="box-sub">按工具名与参数匹配并停放</text>
+
+<path class="tool" d="M1150 375 H1118 V397 H730 V410"/>
+<text x="925" y="386" class="small" fill="#f6c76c">WSS tool_call</text>
+<path class="tool" d="M1150 422 H1130 V446 H1100"/>
+<text x="1110" y="471" class="small" fill="#f6c76c">自动 MCP</text>
+<path class="tool" d="M950 495 V530"/>
+<path class="tool" d="M800 588 H730 V520"/>
+<text x="716" y="580" class="small" fill="#f6c76c" text-anchor="end">匹配活动调用</text>
+<path class="result" d="M730 552 H770 V646 H1150 V301"/>
+<text x="970" y="638" class="small" fill="#77dfa6">同一真实结果回传 WSS / MCP</text>
+
+<!-- Bottom capability cards -->
+<rect class="box" x="40" y="720" width="430" height="212" rx="18" fill="#111d2b" stroke="#304259"/>
+<text x="64" y="756" class="box-title">首次使用</text>
+<text x="64" y="790" class="box-sub">① 官方下载 Quick Desktop</text>
+<text x="64" y="818" class="box-sub">② 免费注册 / 登录（无需 AWS 账户）</text>
+<text x="64" y="846" class="box-sub">③ 预初始化 DeepSeek Harness</text>
+<text x="64" y="874" class="box-sub">④ Quick 原生批准一次，不伪造 nonce</text>
+<text x="64" y="907" class="small" fill="#77dfa6">无账号池 · 无虚构配额</text>
+
+<rect class="box" x="495" y="720" width="430" height="212" rx="18" fill="#111d2b" stroke="#304259"/>
+<text x="519" y="756" class="box-title">图片输入</text>
+<text x="519" y="790" class="box-sub">ImageBlock → DSH 附件服务</text>
+<text x="519" y="818" class="box-sub">读取 / 缩放请求版本</text>
+<text x="519" y="846" class="box-sub">Quick 内联附件：mimeType + data URI</text>
+<text x="519" y="874" class="box-sub">工具结果同时支持 MCP image content</text>
+<text x="519" y="907" class="small" fill="#f6c76c">不可读图片明确报错，不静默丢弃</text>
+
+<rect class="box" x="950" y="720" width="510" height="212" rx="18" fill="#111d2b" stroke="#304259"/>
+<text x="974" y="756" class="box-title">生命周期与持久化</text>
+<text x="974" y="790" class="box-sub">进程内：保留 thread / live connection，增量续聊</text>
+<text x="974" y="818" class="box-sub">重启后：从 DSH 历史重建 Quick 会话</text>
+<text x="974" y="846" class="box-sub">保留：连接器、原生批准、工具 schema</text>
+<text x="974" y="874" class="box-sub">回收：broker / outpost / 临时 execution 凭据</text>
+<text x="974" y="907" class="small" fill="#91a8ff">长期凭据始终由官方 Quick 组件保管</text>
+
+<text x="40" y="974" class="small muted">协议边界：非公开 Quick 桌面数据面可能随版本升级变化；实现与实机证据见 docs/aws-quick-line-plan.md</text>
+</svg>

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import {describe,expect,it} from 'vitest'
+import {describe,expect,it,vi} from 'vitest'
 import {Client} from '@modelcontextprotocol/sdk/client/index.js'
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js'
 import {AwsQuickToolBridge} from '../src/host/aws-quick/tool-bridge.ts'
@@ -32,7 +32,7 @@ describe('AWS Quick stdio tool bridge',()=>{
    expect(listed.tools).toEqual([{name:'read',description:'Read file',inputSchema:{type:'object',properties:{path:{type:'string'}}}}])
    bridge.track({id:'call-1',name:'read',argumentsText:'{"path":"a.ts"}'})
    const pending=client.callTool({name:'dsh_quick__read',arguments:{path:'a.ts'}})
-   await new Promise((resolve)=>setTimeout(resolve,50));bridge.settle('call-1',[{type:'text',text:'file body'}])
+   await vi.waitFor(()=>{expect((bridge as never as {broker:{matchedCount:number}}).broker.matchedCount).toBe(1)},{timeout:5000,interval:10});bridge.settle('call-1',[{type:'text',text:'file body'}])
    await expect(pending).resolves.toMatchObject({content:[{type:'text',text:'file body'}]})
    await client.close()
   }finally{await bridge.dispose();expect(calls.some((call)=>call.action==='remove')).toBe(false);const persisted=JSON.parse(await fs.readFile(statePath,'utf8'));expect(persisted.tools).toEqual([{name:'read',description:'Read file',parameters:{type:'object',properties:{path:{type:'string'}}}}]);expect(persisted.execution).toBeUndefined();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
