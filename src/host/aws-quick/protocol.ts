@@ -5,7 +5,7 @@ import type { QuickImageAttachment } from './images.ts'
 
 export const QUICK_CHAT_WS_PATH = '/streaming/quickwork-chat-bidirectional-stream'
 export const QUICK_DESKTOP_SURFACE = process.platform === 'win32' ? 'QUICK_WORK_DESKTOP_WINDOWS' : 'QUICK_WORK_DESKTOP_MAC'
-export const QUICK_DSH_CLIENT_POLICY = 'This conversation is shown in DeepSeek Harness (DSH), not in the Quick app, so Quick interface markup such as <decision>, <decisions> and <sources> is not rendered. To ask the user a question or offer choices, call the DSH ask_user_question tool when it is available; otherwise ask in plain text with numbered options. For planning, follow the DSH plan-mode instructions in this context and submit the plan with the DSH exit_plan_mode tool when it is available.'
+export const QUICK_DSH_CLIENT_POLICY = 'To ask the user a question or offer choices, call the ask_user_question tool when it is available; otherwise ask in plain text with numbered options. For planning, follow the plan-mode instructions in this context and submit the plan with the exit_plan_mode tool when it is available.'
 
 /** Fields Quick sends with a connector permission request (`status` payload `permission_request`). */
 export interface QuickPermissionRequest{connectorId:string;actionId:string;toolName?:string;sessionId:string;params?:string;paramsHash?:string;agentId?:string;conversationId?:string;toolUseId?:string}
