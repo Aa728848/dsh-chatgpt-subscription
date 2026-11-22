@@ -24,9 +24,9 @@ describe('AWS Quick stdio tool bridge',()=>{
   try{
    const catalog=await bridge.ensure([{name:'read',description:'Read file',parameters:{type:'object',properties:{path:{type:'string'}}}}])
    const add=calls.find((call)=>call.action==='add')!.body as {name:string;transport:string;command:string;args:string[];url?:string}
-   expect(add).toMatchObject({name:'DeepSeek Harness',transport:'stdio',command:process.execPath});expect(add.url).toBeUndefined()
+   expect(add).toMatchObject({name:'DeepSeek Harness',transport:'stdio',command:process.execPath,env:{ELECTRON_RUN_AS_NODE:'1'}});expect(add.url).toBeUndefined()
    const client=new Client({name:'test-client',version:'1.0.0'})
-   const transport=new StdioClientTransport({command:process.execPath,args:['--experimental-transform-types',entryFile,statePath],stderr:'pipe'})
+   const transport=new StdioClientTransport({command:process.execPath,args:[entryFile,statePath],stderr:'pipe'})
    await client.connect(transport)
    const listed=await client.listTools()
    expect(listed.tools).toEqual([{name:'read',description:'Read file',inputSchema:{type:'object',properties:{path:{type:'string'}}}}])
@@ -36,6 +36,17 @@ describe('AWS Quick stdio tool bridge',()=>{
    await expect(pending).resolves.toMatchObject({content:[{type:'text',text:'file body'}]})
    await client.close()
   }finally{await bridge.dispose();expect(calls.some((call)=>call.action==='remove')).toBe(false);const persisted=JSON.parse(await fs.readFile(statePath,'utf8'));expect(persisted.tools).toEqual([{name:'read',description:'Read file',parameters:{type:'object',properties:{path:{type:'string'}}}}]);expect(persisted.execution).toBeUndefined();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
+ })
+ it('forces Electron Node mode and upgrades an existing connector that lacks it',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-node-mode-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')
+  const updates:Record<string,unknown>[]=[];let env:Record<string,string>|undefined
+  const outpost={mcp:async(action:string,body:Record<string,unknown>)=>{
+   if(action==='update'){updates.push(body);env=body.env as Record<string,string>}
+   if(action==='list')return{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,status:'connected',transport:'stdio',command:process.execPath,args:[entryFile,statePath],...(env?{env}:{}),tools:[]}]}
+   return{success:true}
+  }} as unknown as AwsQuickOutpost
+  const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile})
+  try{await expect(bridge.prepare()).resolves.toEqual({state:'ready'});expect(updates).toHaveLength(1);expect(env).toEqual({ELECTRON_RUN_AS_NODE:'1'})}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
  it('prepares a connector before any tool request and reports native approval without bypassing it',async()=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-prepare-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts');let added=false
@@ -61,7 +72,7 @@ describe('AWS Quick stdio tool bridge',()=>{
   const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile});const client=new Client({name:'test-client',version:'1.0.0'})
   try{
    await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}])
-   await client.connect(new StdioClientTransport({command:process.execPath,args:['--experimental-transform-types',entryFile,statePath],stderr:'pipe'}))
+   await client.connect(new StdioClientTransport({command:process.execPath,args:[entryFile,statePath],stderr:'pipe'}))
    bridge.track({id:'call-1',name:'read',argumentsText:'{"path":"same.ts"}'});bridge.track({id:'call-2',name:'read',argumentsText:'{"path":"same.ts"}'})
    const first=client.callTool({name:'dsh_quick__read',arguments:{path:'same.ts'}});const second=client.callTool({name:'dsh_quick__read',arguments:{path:'same.ts'}})
    await vi.waitFor(()=>{expect((bridge as never as {broker:{matchedCount:number}}).broker.matchedCount).toBe(2)},{timeout:5000,interval:10})

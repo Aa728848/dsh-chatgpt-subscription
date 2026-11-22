@@ -11,7 +11,7 @@ import {QuickExecutionBroker} from './execution-broker.ts'
 import type {QuickResultContent} from './images.ts'
 type Tool=NonNullable<GenerateOptions['tools']>[number]
 export interface QuickToolCatalog{id:string;fingerprint:string;outpostId:string;resolve(name:string):string|null}
-interface QuickMcpEntry{id?:string;name?:string;enabled?:boolean;transport?:string;command?:string;args?:unknown[];tools?:unknown[];status?:string;error?:string}
+interface QuickMcpEntry{id?:string;name?:string;enabled?:boolean;transport?:string;command?:string;args?:unknown[];env?:Record<string,string>;tools?:unknown[];status?:string;error?:string}
 function fingerprint(tools:Tool[]):string{return createHash('sha256').update(JSON.stringify(tools.map((tool)=>[tool.name,tool.description,tool.parameters]))).digest('hex').slice(0,16)}
 function control(result:unknown,action:string):void{if(typeof result==='object'&&result&&(result as {success?:boolean}).success===false)throw new Error('Quick MCP '+action+' failed: '+String((result as {error?:unknown}).error??'unknown error'))}
 export class AwsQuickToolBridge{
@@ -38,10 +38,10 @@ export class AwsQuickToolBridge{
   this.tools={state:'pending'}
   try{
    await this.writeState()
-   const config={id:'dsh-quick',name:'DeepSeek Harness',description:'DSH tools exposed by DeepSeek Harness',transport:'stdio',command:process.execPath,args:[this.entryPath(),this.statePath],enabled:true}
+   const config={id:'dsh-quick',name:'DeepSeek Harness',description:'DSH tools exposed by DeepSeek Harness',transport:'stdio',command:process.execPath,args:[this.entryPath(),this.statePath],env:{ELECTRON_RUN_AS_NODE:'1'},enabled:true}
    let listed=await this.outpost.mcp<{servers?:QuickMcpEntry[]}>('list')
    let registered=listed.servers?.find((entry)=>entry.id===config.id)
-   const compatible=registered?.transport==='stdio'&&registered.name===config.name&&registered.command===config.command&&JSON.stringify(registered.args??[])===JSON.stringify(config.args)
+   const compatible=registered?.transport==='stdio'&&registered.name===config.name&&registered.command===config.command&&JSON.stringify(registered.args??[])===JSON.stringify(config.args)&&registered.env?.ELECTRON_RUN_AS_NODE==='1'
    if(registered&&!compatible&&registered.enabled===false){control(await this.outpost.mcp('remove',{id:config.id}),'remove');registered=undefined}
    if(!registered){control(await this.outpost.mcp('add',config),'add')}else if(!compatible){control(await this.outpost.mcp('update',{...config}),'update')}
    listed=await this.outpost.mcp<{servers?:QuickMcpEntry[]}>('list');registered=listed.servers?.find((entry)=>entry.id===config.id)
