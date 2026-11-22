@@ -70,6 +70,9 @@ import { installQianwenStyles } from './qianwen-token-plan/styles.ts'
 import { RelayOneComposerQuota } from './relayone/RelayOneComposerQuota.tsx'
 import { dictionaries as relayOneDicts, NS_RELAYONE, type RelayOneLocaleKey } from './relayone/locales.ts'
 import { installRelayOneStyles } from './relayone/styles.ts'
+import { CompactAfterTurnToggle, type CompactAfterTurnToggleProps } from './compact-after-turn/CompactAfterTurnToggle.tsx'
+import { dictionaries as compactAfterTurnDicts, NS_COMPACT_AFTER_TURN, type CompactAfterTurnLocaleKey } from './compact-after-turn/locales.ts'
+import { installCompactAfterTurnStyles } from './compact-after-turn/styles.ts'
 import { dictionaries as claudeApiDicts, NS_CLAUDE_API, type ClaudeApiLocaleKey } from './claude-api/locales.ts'
 import { installClaudeApiStyles } from './claude-api/styles.ts'
 import { dictionaries as awsQuickDicts, NS_AWS_QUICK, type AwsQuickLocaleKey } from './aws-quick/locales.ts'
@@ -115,6 +118,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-relayone': RelayOneLocaleKey
     'dsh-claude-api': ClaudeApiLocaleKey
     'dsh-aws-quick': AwsQuickLocaleKey
+    'dsh-compact-after-turn': CompactAfterTurnLocaleKey
   }
 }
 
@@ -213,6 +217,8 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     installRelayOneStyles()
     return () => {}
   }, 'dsh-relayone: styles')
+  ctx.effect(() => ctx.locale.register(NS_COMPACT_AFTER_TURN, compactAfterTurnDicts), 'dsh-compact-after-turn: dictionaries')
+  ctx.effect(() => installCompactAfterTurnStyles(), 'dsh-compact-after-turn: styles')
   // Claude API: dictionaries and styles only. The line has no quota badge, so it
   // registers no conversation.input.right slot (a user decision).
   ctx.effect(() => ctx.locale.register(NS_CLAUDE_API, claudeApiDicts), 'dsh-claude-api: dictionaries')
@@ -342,6 +348,21 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     name: 'conversation.input.right', id: 'relayone-quota', order: 50, locale: NS_RELAYONE,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, RelayOneComposerQuota))
+  // One-shot "compact after this turn" row in the composer's model menu. The
+  // slot arrived in DSH 0.2.2-rc.2; on an older harness it is never provided,
+  // so this registration simply never runs (and a refusal must not fail apply).
+  ctx.slots.inject('conversation.input.model.options', () => {
+    try {
+      return ctx.slots.register({
+        name: 'conversation.input.model.options',
+        id: 'compact-after-turn',
+        locale: NS_COMPACT_AFTER_TURN,
+        inject: (sessionId): Pick<CompactAfterTurnToggleProps, 'sessionId'> => ({ sessionId: String(sessionId) }),
+      }, CompactAfterTurnToggle)
+    } catch {
+      return () => {}
+    }
+  })
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: CODEX_IMAGE_TOOL_NAME,

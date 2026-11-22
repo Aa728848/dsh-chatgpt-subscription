@@ -347,6 +347,8 @@ describe('client registration', () => {
       'conversation.input.right',
       // RelayOne：order 50。
       'conversation.input.right',
+      // 模型菜单里的「本轮结束后压缩」一次性开关。
+      'conversation.input.model.options',
       'tool.call.toolview',
       // MiniMax 生成视频：第二个媒体工具卡片，同一个 keyed 槽，按工具名再注册一次。
       'tool.call.toolview',
@@ -395,6 +397,9 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'antigravity-acp-quota', order: 48 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'qianwen-token-plan-quota', order: 49 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'relayone-quota', order: 50 }),
+    ])
+    expect(registrations.filter((registration) => registration.name === 'conversation.input.model.options')).toEqual([
+      expect.objectContaining({ name: 'conversation.input.model.options', id: 'compact-after-turn', locale: 'dsh-compact-after-turn' }),
     ])
     // 视频参数弹窗的那一格：与设置卡片同一种「插件自己的一格」写法，插在输入框
     // 浮层里、排在那条反馈弹窗（order 2）之后。

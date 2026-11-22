@@ -38,6 +38,7 @@ import { ResponsesClient } from './host/responses-client.ts'
 import { registerHubOverviewRoutes, type HubSummarySource } from './host/hub-overview.ts'
 import { registerUpdateRoutes } from './host/update-check.ts'
 import { registerRoutes } from './host/routes.ts'
+import { installCompactAfterTurn, type CompactAfterTurnHost } from './host/compact-after-turn/index.ts'
 import { CODEX_MODEL_CATALOG } from './shared/model-catalog.ts'
 import { createPlatformTokenStore } from './host/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
@@ -1068,6 +1069,25 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     }
     return dispose
   }, 'dsh-chatgpt-subscription: Kimi cache wait')
+
+  // One-shot "compact when this turn ends", armed from the composer's model menu.
+  // `compaction` is not in `inject` (declaring it would keep the whole plugin
+  // from mounting on a Host without an engine), and an undeclared service is
+  // not readable through a plain `get`; an optional `inject` scope tracks it
+  // instead, and a Host without one reports the switch as unavailable.
+  let compactionEngine: unknown
+  ctx.inject(['compaction'], scoped => {
+    compactionEngine = scoped.get('compaction')
+    scoped.effect(() => () => { compactionEngine = undefined }, 'dsh-chatgpt-subscription: compaction engine')
+  })
+  ctx.effect(() => {
+    const dispose = installCompactAfterTurn(ctx as unknown as CompactAfterTurnHost, { engine: () => compactionEngine })
+    if (dispose === undefined) {
+      ctx.logger.warn('[dsh-chatgpt-subscription] compact-after-turn skipped: this harness exposes no event bus')
+      return () => undefined
+    }
+    return dispose
+  }, 'dsh-chatgpt-subscription: compact after turn')
 
   // One read-only diagnostic probe, inert unless the deployment enables it.
   // It answers "what did the parent side do with the child's completion

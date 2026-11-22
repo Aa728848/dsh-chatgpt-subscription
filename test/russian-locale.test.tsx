@@ -55,6 +55,8 @@ import { dictionary as qianwenRu } from '../src/client/locales-ru/qianwen-token-
 import { dictionary as relayOneRu } from '../src/client/locales-ru/relayone.ts'
 import { dictionary as claudeApiRu } from '../src/client/locales-ru/claude-api.ts'
 import { dictionary as awsQuickRu } from '../src/client/locales-ru/aws-quick.ts'
+import { dictionaries as compactAfterTurnDicts, NS_COMPACT_AFTER_TURN } from '../src/client/compact-after-turn/locales.ts'
+import { dictionary as compactAfterTurnRu } from '../src/client/locales-ru/compact-after-turn.ts'
 
 /** Every namespace this pack covers, with all three dictionaries beside each other. */
 const NAMESPACES = [
@@ -80,6 +82,7 @@ const NAMESPACES = [
   { ns: NS_RELAYONE, zh: relayOneDicts.zh as Record<string, string>, en: relayOneDicts.en as Record<string, string>, ru: relayOneRu },
   { ns: NS_CLAUDE_API, zh: claudeApiDicts.zh as Record<string, string>, en: claudeApiDicts.en as Record<string, string>, ru: claudeApiRu },
   { ns: NS_AWS_QUICK, zh: awsQuickDicts.zh as Record<string, string>, en: awsQuickDicts.en as Record<string, string>, ru: awsQuickRu },
+  { ns: NS_COMPACT_AFTER_TURN, zh: compactAfterTurnDicts.zh as Record<string, string>, en: compactAfterTurnDicts.en as Record<string, string>, ru: compactAfterTurnRu },
 ]
 
 /** `{name}` placeholders in a template, in the order they appear. */

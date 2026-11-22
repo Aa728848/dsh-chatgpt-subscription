@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[compact-after-turn] 模型菜单新增「本轮结束后压缩」一次性开关**：开启后，这一轮对话结束、agent 空闲时，通过 `compaction.compactNow` 压缩一次上下文，压缩结束后开关自动关闭。手动停止的那一轮不触发，开关保留到下一轮结束；压缩进行中开关锁定，其余时候可随时开关。需要 DSH 0.2.2-rc.2 及以上（提供 `conversation.input.model.options` 插槽），更旧的版本不显示该开关。
+
 - **[client] 重新设计输入框额度胶囊**：所有线路共用一个 `QuotaCapsule` 组件，Codex 不再单独维护一份样式。胶囊最左边显示健康度：已知剩余比例的线路（Codex、OpenDesign）显示迷你环形进度，其余线路显示带光晕的状态点，按绿 / 琥珀 / 红区分；告急时胶囊带浅红底色。刷新时保留原数字、只让左侧指示闪烁，不再换成「…」导致宽度跳动；可点击刷新的胶囊支持键盘聚焦，按 Enter / Space 刷新。
 
 - **[aws-quick] 转换 Quick 提问卡片、计划上下文与工具授权**：流式识别 Quick `<decision>` / `<decisions>` 标记并投影为 DSH `ask_user_question`，回答以 Quick 原生 `<decision_response>` 回到同一线程；无提问工具时降级为编号选项文本；剥离 `<sources>` 内部引用。Quick `permission_request` / `approval_requested` 不再无人应答：DSH 目录内工具按官方 `tool_approval`（ALLOW_ONCE）放行、实际执行仍走 DSH 权限，目录外工具回 `permission_denied`。工具续传时一并送达 DSH 在工具后追加的计划模式提示等上下文，客户端提示改为引导使用 DSH 提问与计划工具。
