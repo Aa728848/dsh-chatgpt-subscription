@@ -1,6 +1,6 @@
 import {describe,expect,it} from 'vitest'
 import {EventStreamCodec} from '@smithy/eventstream-codec'
-import {decodeQuickOutput,encodeQuickInput,isQuickChatHost,quickStopGeneration,quickUserMessage,unwrapQuickToolArguments} from '../src/host/aws-quick/protocol.ts'
+import {decodeQuickOutput,encodeQuickInput,isQuickChatHost,quickStopGeneration,quickUserMessage,unwrapQuickToolArguments,QUICK_DESKTOP_SURFACE} from '../src/host/aws-quick/protocol.ts'
 const encoder=new TextEncoder();const decoder=new TextDecoder()
 const codec=new EventStreamCodec((value)=>decoder.decode(value),(value)=>encoder.encode(value))
 function frame(value:unknown):Uint8Array{
@@ -18,7 +18,7 @@ describe('AWS Quick AIDP wire protocol',()=>{
  })
  it('binds every user message to the official desktop outpost session',()=>{
   const value=quickUserMessage({text:'run',threadId:'thread',mode:'balanced',invokingOutpostId:'outpost-1',appVersion:'1.2.4660',customPrompt:'Use DSH tools'})
-  expect(value).toMatchObject({type:'user_message',payload:{outpostId:'outpost-1',invokingOutpostId:'outpost-1',surfaceType:'QUICK_WORK_DESKTOP_WINDOWS',appVersion:'1.2.4660',custom_prompt:'Use DSH tools',self_registering_connectors:1,external_agent_sign_in:1,recents_promotion:1}})
+  expect(value).toMatchObject({type:'user_message',payload:{outpostId:'outpost-1',invokingOutpostId:'outpost-1',surfaceType:QUICK_DESKTOP_SURFACE,appVersion:'1.2.4660',custom_prompt:'Use DSH tools',self_registering_connectors:1,external_agent_sign_in:1,recents_promotion:1}})
  })
  it('serializes admitted image attachments without dropping their bytes',()=>{
   const attachments=[{type:'image' as const,name:'pixel.png',size:4,mimeType:'image/png',data:'data:image/png;base64,AQIDBA=='}]

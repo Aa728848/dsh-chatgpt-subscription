@@ -35,26 +35,24 @@ describe('AWS Quick stdio tool bridge',()=>{
    await new Promise((resolve)=>setTimeout(resolve,50));bridge.settle('call-1',[{type:'text',text:'file body'}])
    await expect(pending).resolves.toMatchObject({content:[{type:'text',text:'file body'}]})
    await client.close()
-  }finally{await bridge.dispose();await fs.rmdir(dir).catch(()=>undefined)}
-  expect(calls.some((call)=>call.action==='remove')).toBe(true)
-  await expect(fs.stat(statePath)).rejects.toThrow()
+  }finally{await bridge.dispose();expect(calls.some((call)=>call.action==='remove')).toBe(false);const persisted=JSON.parse(await fs.readFile(statePath,'utf8'));expect(persisted.tools).toEqual([{name:'read',description:'Read file',parameters:{type:'object',properties:{path:{type:'string'}}}}]);expect(persisted.execution).toBeUndefined();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
  it('prepares a connector before any tool request and reports native approval without bypassing it',async()=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-prepare-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts');let added=false
   const outpost={mcp:async(action:string)=>{if(action==='add'){added=true;return{success:true}}if(action==='list')return{servers:added?[{id:'dsh-quick',name:'DeepSeek Harness',enabled:false,transport:'stdio',command:process.execPath,args:[entryFile,statePath]}]:[]};return{success:true}}} as unknown as AwsQuickOutpost
   const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile})
-  try{await expect(bridge.prepare()).resolves.toEqual({state:'approval_required'});expect(added).toBe(true);expect(JSON.parse(await fs.readFile(statePath,'utf8'))).toMatchObject({version:1,tools:[],execution:{url:expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/call$/),token:expect.any(String)}})}finally{await bridge.dispose();await fs.rmdir(dir).catch(()=>undefined)}
+  try{await expect(bridge.prepare()).resolves.toEqual({state:'approval_required'});expect(added).toBe(true);expect(JSON.parse(await fs.readFile(statePath,'utf8'))).toMatchObject({version:1,tools:[],execution:{url:expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/call$/),token:expect.any(String)}})}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
  it('marks an already approved connector ready even before it exposes tools',async()=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-ready-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')
   let published=false;const outpost={mcp:async(action:string)=>{if(action==='reload')published=true;return action==='list'?{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,status:'connected',transport:'stdio',command:process.execPath,args:[entryFile,statePath],tools:published?[{name:'dsh_quick__read'}]:[]}]}:{success:true}},outpostId:async()=> 'outpost'} as unknown as AwsQuickOutpost
   const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile})
-  try{await expect(bridge.prepare()).resolves.toEqual({state:'ready'});expect(bridge.status()).toEqual({state:'ready'});const catalog=await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}]);expect(published).toBe(true);expect(catalog.resolve('dsh_quick__read')).toBe('read')}finally{await bridge.dispose();await fs.rmdir(dir).catch(()=>undefined)}
+  try{await expect(bridge.prepare()).resolves.toEqual({state:'ready'});expect(bridge.status()).toEqual({state:'ready'});const catalog=await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}]);expect(published).toBe(true);expect(catalog.resolve('dsh_quick__read')).toBe('read')}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
  it('maps Quick MCP-qualified tool names back to the DSH name',async()=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-names-'));const statePath=path.join(dir,'tools.json')
   const outpost={mcp:async(action:string)=>action==='list'?{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,tools:[{name:'read'}]}]}:{success:true},outpostId:async()=> 'outpost'} as unknown as AwsQuickOutpost
   const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile:path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')})
-  try{const catalog=await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}]);expect(catalog.resolve('mcp__dsh_quick__read')).toBe('read');expect(catalog.resolve('other')).toBeNull()}finally{await bridge.dispose();await fs.rmdir(dir).catch(()=>undefined)}
+  try{const catalog=await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}]);expect(catalog.resolve('mcp__dsh_quick__read')).toBe('read');expect(catalog.resolve('other')).toBeNull()}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
 })

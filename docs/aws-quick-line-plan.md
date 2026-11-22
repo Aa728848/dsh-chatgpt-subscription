@@ -44,7 +44,7 @@ SDK 当前列出 327 个命令；Agent/Flow 为管理操作，没有发送聊天
 - 状态 DTO 不包含 JWT。WebSocket 主机使用严格后缀与端口拒绝规则。
 - 设置写入采用临时文件 + rename；模型选择 `null` 与 `[]` 保持三态语义。
 - outpost 通过官方组件复用 Quick Desktop 的 `~/.quickwork` 配置与系统凭据库，并在线路卸载时回收；插件不直接读取凭据。
-- stdio MCP 条目固定为 DeepSeek Harness（内部 id `dsh-quick`）。自有 `0600` 状态文件携带工具 schema、随机 loopback 地址和临时 Bearer，不含长期凭据；不进入 Web DTO。`tools/call` 只匹配合法的活动 WSS 调用并停放，实际工具由所属 DSH turn 审批执行，真实结果共享给 WSS 与 MCP。Quick 的确认 nonce 不伪造、不写确认文件。
+- stdio MCP 条目固定为 DeepSeek Harness（内部 id `dsh-quick`）。自有 `0600` 状态文件携带工具 schema、随机 loopback 地址和临时 Bearer，不含长期凭据；不进入 Web DTO。卸载保留连接器与 schema，仅清除失效的 execution 地址和 Bearer。`tools/call` 只匹配合法的活动 WSS 调用并停放，实际工具由所属 DSH turn 审批执行，真实结果共享给 WSS 与 MCP。Quick 的确认 nonce 不伪造、不写确认文件。
 - `finish(tool-calls)` 前解除本轮 watchdog signal，避免其正常清理的 `consumer.abort()` 关闭留用 socket；下一轮重新绑定取消信号。
 
 ## 验证记录
@@ -77,4 +77,5 @@ SDK 当前列出 327 个命令；Agent/Flow 为管理操作，没有发送聊天
 - Quick 更新后 `provider` 是否仍分别为 social / enterprise；legacy gateway 当前明确拒绝。
 - 多工具并发、长工具结果截断和 Quick 更新后的工具事件兼容性；单工具闭环已实测。
 - DSH Shell 路由实测：模型生成 `gh issue list --state open` 并调用 DSH `win_bash`，没有 `run_python`；同连接返回模拟 issue 后最终文本列出 `#123`，退出码 0。
+- 生产 `dispose()` 实测：DeepSeek Harness 仍存在且启用，stdio 配置与工具 schema 保留，execution 字段被移除；探针退出码 0。
 - Quick Desktop 重启后的双客户端一致性已实测通过：WSS 登记 1 次、MCP loopback 调用 1 次、DSH 回传 1 次，原始状态 `complete`，最终文本确认 `ok:true / AWS_QUICK_TOOL_OK`，探针退出码 0；连接器保留启用，探针单独回收 broker。

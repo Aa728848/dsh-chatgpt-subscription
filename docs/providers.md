@@ -400,7 +400,7 @@
 ## 19. AWS Quick：`aws-quick`
 
 - **官方组件**：自动发现 Quick Desktop 随附的 `quickwork-agent`，以独立端口启动 outpost，并通过官方组件复用 Quick Desktop 默认配置与系统凭据库。随机实例令牌只经 stdin 传入并驻内存；长期登录凭据由官方组件保管。
-- **首次使用**：设置卡在未安装时链接到 [Quick 官方下载页](https://aws.amazon.com/quick/download/)；个人可免费注册，不需要 AWS 账户。登录后可先初始化 DeepSeek Harness 连接器并完成 Quick 原生批准，再开始编码。
+- **首次使用**：设置卡在未安装时链接到 [Quick 官方下载页](https://aws.amazon.com/quick/download/)；个人可免费注册，不需要 AWS 账户。登录后可先初始化 DeepSeek Harness 连接器并完成 Quick 原生批准，再开始编码；线路卸载保留该连接器和工具目录，不因宿主重启重复添加或清除批准。
 - **单账号**：个人 `social` 与企业 `enterprise` 共用登录状态机；企业可指定区域。没有账号池、账号轮换或账号导入。
 - **协议**：当前 AIDP 双向 WebSocket。出站 JSON 经 UTF-8 + Base64 放入 `rawInputEvent`；入站使用 AWS event-stream `rawOutputEvent`，再 Base64 解出聊天事件。旧 Gateway 通道明确拒绝。
 - **模型与思考**：Quick 未公开底层模型 ID，因此只列 Fast / Balanced / Smart 三种官方响应模式；Balanced 与 Smart 提供 off / low / medium / high，Fast 固定 off。上下文 131072 是保守的 DSH 调度预算，不是上游公布值。

@@ -23,12 +23,12 @@ export class AwsQuickToolBridge{
  private readonly broker=new QuickExecutionBroker()
  constructor(private readonly outpost:AwsQuickOutpost,options:{statePath?:string;entryFile?:string}={}){this.statePath=options.statePath??path.join(dshHomeDir(),'storages','aws-quick-tools.json');this.entryFile=options.entryFile}
  private entryPath():string{if(this.entryFile)return this.entryFile;const moduleDir=path.dirname(fileURLToPath(import.meta.url));const bundled=path.join(moduleDir,'aws-quick-mcp.js');return existsSync(bundled)?bundled:path.resolve(moduleDir,'../../../lib/aws-quick-mcp.js')}
- private async writeState():Promise<void>{
+ private async writeState(includeExecution=true):Promise<void>{
   await fs.mkdir(path.dirname(this.statePath),{recursive:true})
   const temp=this.statePath+'.tmp.'+process.pid+'.'+Date.now()
   const tools=[...this.union.values()].map((tool)=>({name:tool.name,description:tool.description,parameters:tool.parameters??{type:'object',properties:{}}}))
-  const execution=await this.broker.start()
-  await fs.writeFile(temp,JSON.stringify({version:1,tools,execution},null,2),{encoding:'utf8',mode:0o600});await fs.rename(temp,this.statePath)
+  const execution=includeExecution?await this.broker.start():undefined
+  await fs.writeFile(temp,JSON.stringify({version:1,tools,...(execution?{execution}:{})},null,2),{encoding:'utf8',mode:0o600});await fs.rename(temp,this.statePath)
  }
  status():AwsQuickToolsDto{return{...this.tools}}
  track(call:{id:string;name:string;argumentsText:string}):void{this.broker.track(call)}
@@ -75,5 +75,5 @@ export class AwsQuickToolBridge{
   this.catalogs.set(digest,catalog);return catalog
  }
 
- async dispose():Promise<void>{await this.outpost.mcp('remove',{id:'dsh-quick'}).catch(()=>undefined);this.catalogs.clear();this.union.clear();this.tools={state:'not_initialized'};await this.broker.close();await fs.unlink(this.statePath).catch(()=>undefined)}
+ async dispose():Promise<void>{await this.broker.close();await this.writeState(false).catch(()=>undefined);this.catalogs.clear();this.union.clear();this.tools={state:'not_initialized'}}
 }
