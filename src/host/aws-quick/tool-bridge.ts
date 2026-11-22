@@ -31,9 +31,20 @@ export class AwsQuickToolBridge{
   await fs.writeFile(temp,JSON.stringify({version:1,tools,...(execution?{execution}:{})},null,2),{encoding:'utf8',mode:0o600});await fs.rename(temp,this.statePath)
  }
  status():AwsQuickToolsDto{return{...this.tools}}
+ private async restoreTools():Promise<void>{
+  try{
+   const state=JSON.parse(await fs.readFile(this.statePath,'utf8')) as {tools?:unknown}
+   if(!Array.isArray(state.tools))return
+   for(const candidate of state.tools){
+    if(!candidate||typeof candidate!=='object')continue
+    const tool=candidate as Partial<Tool>
+    if(typeof tool.name==='string'&&tool.name&&typeof tool.description==='string'&&!this.union.has(tool.name))this.union.set(tool.name,tool as Tool)
+   }
+  }catch{}
+ }
  track(call:{id:string;name:string;argumentsText:string}):void{this.broker.track(call)}
  settle(id:string,content:QuickResultContent[],isError=false):void{this.broker.settle(id,content,isError)}
- async prepare():Promise<AwsQuickToolsDto>{await this.register(false);return this.status()}
+ async prepare():Promise<AwsQuickToolsDto>{await this.restoreTools();await this.register(false);return this.status()}
  private async register(requireTools:boolean):Promise<void>{
   this.tools={state:'pending'}
   try{

@@ -48,6 +48,14 @@ describe('AWS Quick stdio tool bridge',()=>{
   const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile})
   try{await expect(bridge.prepare()).resolves.toEqual({state:'ready'});expect(updates).toHaveLength(1);expect(env).toEqual({ELECTRON_RUN_AS_NODE:'1'})}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
+ it('restores persisted tool schemas when preparing after a host restart',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-restore-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')
+  const tool={name:'read',description:'Read file',parameters:{type:'object',properties:{path:{type:'string'}}}}
+  await fs.writeFile(statePath,JSON.stringify({version:1,tools:[tool]}))
+  const outpost={mcp:async(action:string)=>action==='list'?{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,status:'connected',transport:'stdio',command:process.execPath,args:[entryFile,statePath],env:{ELECTRON_RUN_AS_NODE:'1'},tools:[{name:'read'}]}]}:{success:true}} as unknown as AwsQuickOutpost
+  const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile})
+  try{await expect(bridge.prepare()).resolves.toEqual({state:'ready'});expect(JSON.parse(await fs.readFile(statePath,'utf8')).tools).toEqual([tool])}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
+ })
  it('prepares a connector before any tool request and reports native approval without bypassing it',async()=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-prepare-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts');let added=false
   const outpost={mcp:async(action:string)=>{if(action==='add'){added=true;return{success:true}}if(action==='list')return{servers:added?[{id:'dsh-quick',name:'DeepSeek Harness',enabled:false,transport:'stdio',command:process.execPath,args:[entryFile,statePath]}]:[]};return{success:true}}} as unknown as AwsQuickOutpost
