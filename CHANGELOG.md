@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[aws-quick] 转换 Quick 提问卡片、计划上下文与工具授权**：流式识别 Quick `<decision>` / `<decisions>` 标记并投影为 DSH `ask_user_question`，回答以 Quick 原生 `<decision_response>` 回到同一线程；无提问工具时降级为编号选项文本；剥离 `<sources>` 内部引用。Quick `permission_request` / `approval_requested` 不再无人应答：DSH 目录内工具按官方 `tool_approval`（ALLOW_ONCE）放行、实际执行仍走 DSH 权限，目录外工具回 `permission_denied`。工具续传时一并送达 DSH 在工具后追加的计划模式提示等上下文，客户端提示改为引导使用 DSH 提问与计划工具。
+
 ## 0.81.3 - 2026-11-22
 
 - **[aws-quick] 降低 Quick 安全机制误判**：DSH 系统/开发者上下文不再混入用户消息，而是通过官方 `custom_prompt` 传递；工具路由改为中性、权限兼容的表述，不修改 Quick 的 guardrail。

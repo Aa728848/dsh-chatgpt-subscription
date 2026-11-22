@@ -5,6 +5,29 @@ import type { QuickImageAttachment } from './images.ts'
 
 export const QUICK_CHAT_WS_PATH = '/streaming/quickwork-chat-bidirectional-stream'
 export const QUICK_DESKTOP_SURFACE = process.platform === 'win32' ? 'QUICK_WORK_DESKTOP_WINDOWS' : 'QUICK_WORK_DESKTOP_MAC'
+export const QUICK_DSH_CLIENT_POLICY = 'This conversation is shown in DeepSeek Harness (DSH), not in the Quick app, so Quick interface markup such as <decision>, <decisions> and <sources> is not rendered. To ask the user a question or offer choices, call the DSH ask_user_question tool when it is available; otherwise ask in plain text with numbered options. For planning, follow the DSH plan-mode instructions in this context and submit the plan with the DSH exit_plan_mode tool when it is available.'
+
+/** Fields Quick sends with a connector permission request (`status` payload `permission_request`). */
+export interface QuickPermissionRequest{connectorId:string;actionId:string;toolName?:string;sessionId:string;params?:string;paramsHash?:string;agentId?:string;conversationId?:string;toolUseId?:string}
+function optionalString(record:Record<string,unknown>,snake:string,camel:string):string|undefined{const value=record[snake]??record[camel];return typeof value==='string'&&value?value:undefined}
+/** Normalize a Quick `permission_request` payload the way the official renderer does. */
+export function readQuickPermissionRequest(payload:Record<string,unknown>,threadId:string):QuickPermissionRequest{
+ const bodyJson=payload.request_body_json??payload.requestBodyJson;const body=payload.request_body??payload.requestBody
+ const params=typeof bodyJson==='string'&&bodyJson?bodyJson:body!==undefined&&body!==null?JSON.stringify(body):undefined
+ const toolName=optionalString(payload,'tool_name','toolName');const paramsHash=optionalString(payload,'params_hash','paramsHash');const agentId=optionalString(payload,'agent_id','agentId');const conversationId=optionalString(payload,'conversation_id','conversationId');const toolUseId=optionalString(payload,'call_tool_use_id','callToolUseId')??optionalString(payload,'tool_use_id','toolUseId')
+ return{connectorId:optionalString(payload,'connector_id','connectorId')??'',actionId:optionalString(payload,'action_id','actionId')??'',sessionId:optionalString(payload,'thread_id','threadId')??threadId,...(toolName?{toolName}:{}),...(params&&params.length<=8192?{params}:{}),...(paramsHash?{paramsHash}:{}),...(agentId?{agentId}:{}),...(conversationId?{conversationId}:{}),...(toolUseId?{toolUseId}:{})}
+}
+/** Official reply to a permission request: `tool_approval` (scope ALLOW_ONCE) or `permission_denied`. */
+export function quickPermissionReply(request:QuickPermissionRequest,approved:boolean):Record<string,unknown>{
+ const common={connectorId:request.connectorId,actionId:request.actionId,sessionId:request.sessionId,...(request.params?{params:request.params}:{}),...(request.paramsHash?{paramsHash:request.paramsHash}:{}),...(request.agentId?{agentId:request.agentId}:{}),...(request.conversationId?{conversationId:request.conversationId}:{}),...(request.toolUseId?{toolUseId:request.toolUseId}:{})}
+ return approved?{type:'tool_approval',...common,scope:'ALLOW_ONCE'}:{type:'permission_denied',...common}
+}
+/** Official reply to a generic `approval_requested` event. */
+export function quickApprovalDecision(payload:Record<string,unknown>,threadId:string,approved:boolean):Record<string,unknown>|null{
+ const approvalId=optionalString(payload,'approval_id','approvalId');if(!approvalId)return null
+ return{type:'approval_decision',payload:{approval_id:approvalId,decision:approved?'approved_once':'denied',session_id:optionalString(payload,'session_id','sessionId')??threadId}}
+}
+
 export const QUICK_DSH_TOOL_POLICY = 'This turn uses DeepSeek Harness (DSH). Prefer tools exposed by the DeepSeek Harness connector for coding, shell, repository and filesystem work. Quick load_skill/load_tools may be used for discovery. Keep every tool call subject to the normal DSH and Quick permission rules. If a required DSH tool is unavailable, report that capability clearly.'
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()

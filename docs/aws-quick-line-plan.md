@@ -46,6 +46,9 @@ SDK 当前列出 327 个命令；Agent/Flow 为管理操作，没有发送聊天
 - outpost 通过官方组件复用 Quick Desktop 的 `~/.quickwork` 配置与系统凭据库，并在线路卸载时回收；插件不直接读取凭据。
 - stdio MCP 条目固定为 DeepSeek Harness（内部 id `dsh-quick`）。自有 `0600` 状态文件携带工具 schema、随机 loopback 地址和临时 Bearer，不含长期凭据；不进入 Web DTO。卸载保留连接器与 schema，仅清除失效的 execution 地址和 Bearer。`tools/call` 只匹配合法的活动 WSS 调用并停放，实际工具由所属 DSH turn 审批执行，真实结果共享给 WSS 与 MCP。Quick 的确认 nonce 不伪造、不写确认文件。
 - `finish(tool-calls)` 前解除本轮 watchdog signal，避免其正常清理的 `consumer.abort()` 关闭留用 socket；下一轮重新绑定取消信号。
+- Quick 提问卡片是文本内 `<decision question=… multi=…><option description=…>标签</option></decision>`（可包在 `<decisions>` 中），回答为 `<decision_response>问题: 标签</decision_response>`（renderer `tr()`、`Zue()`、`$ue()`）；适配器流式过滤后投影为 DSH `ask_user_question`，无该工具时降级为编号文本，`<sources>` 直接剥离。
+- Quick 审批：`status` 载荷 `permission_request`（connector/action/params_hash/call_tool_use_id，renderer `jZ()`）需回 `tool_approval`（scope `ALLOW_ONCE`）或 `permission_denied`；`approval_requested` 需回 `approval_decision{approval_id,decision,session_id}`。DSH 目录内工具放行（执行仍走 DSH 权限），其余拒绝，避免回合挂起。
+- 工具续传时，DSH 在工具结果之后追加的非工具上下文（计划模式提示、提醒、插话）附在最后一个工具结果中送达。
 - DSH 系统/开发者上下文通过 Quick 官方 `custom_prompt` 与对话正文分离；工具策略使用中性、权限兼容表述，避免把控制文本当作用户输入而触发 guardrail。
 - Smart high 的工具后长思考使用 10 分钟空闲预算；WebSocket 传输、连接关闭、Quick 上游错误与不可读事件使用明确 `LlmError` 分类，可恢复故障仅进入既有限额重试。
 

@@ -2,11 +2,13 @@ import {randomUUID} from 'node:crypto'
 import {LlmError} from '../common/llm-compat.ts'
 import {WebSocket} from 'undici'
 import type {QuickSession,AwsQuickOutpost} from './outpost.ts'
-import {decodeQuickOutput,encodeQuickInput,isQuickChatHost,QUICK_CHAT_WS_PATH,quickSessionConnect,quickStopGeneration,quickUserMessage,unwrapQuickToolArguments,type QuickWireEvent} from './protocol.ts'
+import {decodeQuickOutput,encodeQuickInput,isQuickChatHost,QUICK_CHAT_WS_PATH,quickSessionConnect,quickStopGeneration,quickUserMessage,unwrapQuickToolArguments,quickApprovalDecision,quickPermissionReply,readQuickPermissionRequest,type QuickWireEvent} from './protocol.ts'
 import type {AwsQuickEffort,AwsQuickMode} from '../../shared/aws-quick-contracts.ts'
 import type {QuickImageAttachment,QuickResultContent} from './images.ts'
 
 export type QuickRawObserver=(event:QuickWireEvent)=>void
+/** Decides whether a Quick-side approval request concerns a tool DSH owns (and will permission itself). */
+export type QuickApprovalResolver=(request:{toolName?:string;actionId?:string;connectorId?:string})=>boolean
 export interface QuickToolCall{id:string;name:string;argumentsText:string}
 export type QuickStreamEvent={kind:'text'|'reasoning';delta:string}|{kind:'tool-call';call:QuickToolCall}|{kind:'done';reason:'stop'|'cancelled'}
 interface Pending<T>{resolve(value:T):void;reject(error:Error):void}
@@ -21,7 +23,7 @@ function payload(event:QuickWireEvent):Record<string,unknown>{return typeof even
 function textField(event:QuickWireEvent,key:string):string|undefined{const value=payload(event)[key];return typeof value==='string'&&value?value:undefined}
 async function bytes(data:unknown):Promise<Uint8Array|string|null>{if(typeof data==='string')return data;if(data instanceof ArrayBuffer)return new Uint8Array(data);if(ArrayBuffer.isView(data))return new Uint8Array(data.buffer,data.byteOffset,data.byteLength);if(typeof Blob!=='undefined'&&data instanceof Blob)return new Uint8Array(await data.arrayBuffer());return null}
 export class QuickConnection{
- private readonly queue=new EventQueue();private assistantMessageId:string|undefined;private done=false;private closed=false;private signal:AbortSignal|undefined;private activity:{pulse():void}|undefined
+ private readonly queue=new EventQueue();private assistantMessageId:string|undefined;private done=false;private closed=false;private signal:AbortSignal|undefined;private activity:{pulse():void}|undefined;private approvalResolver:QuickApprovalResolver|undefined
  private connectedResolve:()=>void=()=>{};private readonly connected=new Promise<void>((resolve)=>{this.connectedResolve=resolve})
  private readonly keepalive:ReturnType<typeof setInterval>;private readonly refresh:ReturnType<typeof setInterval>
  private constructor(private readonly socket:WebSocket,private readonly outpost:AwsQuickOutpost,private readonly threadId:string,private readonly preApprovedTools?:string[],private readonly invokingOutpostId?:string,private readonly appVersion?:string,private readonly rawObserver?:QuickRawObserver){
@@ -47,6 +49,8 @@ export class QuickConnection{
  }
  setSignal(signal:AbortSignal|undefined):void{if(this.signal===signal)return;this.signal?.removeEventListener('abort',this.onAbort);this.signal=signal;this.signal?.addEventListener('abort',this.onAbort,{once:true})}
  setActivity(activity:{pulse():void}|undefined):void{this.activity=activity}
+ setApprovalResolver(resolver:QuickApprovalResolver|undefined):void{this.approvalResolver=resolver}
+ private approves(request:{toolName?:string;actionId?:string;connectorId?:string}):boolean{try{return this.approvalResolver?.(request)===true}catch{return false}}
  private readonly onAbort=()=>{if(this.assistantMessageId)this.send(quickStopGeneration(this.threadId,this.assistantMessageId));this.finish('cancelled');this.close()}
  private send(value:unknown):void{if(this.socket.readyState===WebSocket.OPEN)this.socket.send(encodeQuickInput(value))}
  sendUser(text:string,mode:AwsQuickMode,effort?:AwsQuickEffort,attachments?:QuickImageAttachment[],customPrompt?:string):void{if(this.done||this.closed)throw new LlmError('Quick connection is closed.','STREAM_CLOSED');this.send(quickUserMessage({text,threadId:this.threadId,mode,effort,preApprovedTools:this.preApprovedTools,invokingOutpostId:this.invokingOutpostId,appVersion:this.appVersion,attachments,customPrompt,userLocale:Intl.DateTimeFormat().resolvedOptions().locale,userTimezone:Intl.DateTimeFormat().resolvedOptions().timeZone}))}
@@ -58,6 +62,18 @@ export class QuickConnection{
   const event=typeof raw==='string'?JSON.parse(raw) as QuickWireEvent:decodeQuickOutput(raw);if(!event)return;this.rawObserver?.(event);this.activity?.pulse()
   const thread=textField(event,'thread_id')??event.thread_id;if(thread&&thread!==this.threadId)return
   const type=event.type
+  const body=payload(event)
+  if((type==='status'&&body.type==='permission_request')||type==='permission_request'){
+   // Quick waits for an answer before it emits the tool call. DSH-owned tools are
+   // approved once here because DSH applies its own permission prompt when it runs
+   // them; anything else is declined so the turn moves on instead of hanging.
+   const request=readQuickPermissionRequest(body,this.threadId)
+   this.send(quickPermissionReply(request,this.approves({...(request.toolName?{toolName:request.toolName}:{}),actionId:request.actionId,connectorId:request.connectorId})));return
+  }
+  if(type==='approval_requested'){
+   const toolName=typeof body.tool_name==='string'?body.tool_name:typeof body.toolName==='string'?body.toolName:undefined
+   const reply=quickApprovalDecision(body,this.threadId,this.approves(toolName?{toolName}:{}));if(reply)this.send(reply);return
+  }
   if(type==='connected'){const user=payload(event).user;this.send({type:'federate_status',payload:{user}});this.connectedResolve()}
   if(type==='message_start')this.assistantMessageId=textField(event,'message_id')??event.message_id??this.assistantMessageId
   if(type==='text_delta'||type==='thinking_delta'){const delta=textField(event,'delta');if(delta)this.queue.push({kind:type==='text_delta'?'text':'reasoning',delta});return}

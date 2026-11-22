@@ -53,6 +53,43 @@ describe('AWS Quick adapter',()=>{
    await expect(collect(missing.stream(req as never))).rejects.toThrow(/could not read/);await adapter.dispose();await missing.dispose()
   }finally{await cleanup(file)}
  })
+ it('turns a Quick decision card into DSH ask_user_question and answers on the same thread',async()=>{
+  const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-decision-')),'settings.json')
+  try{
+   const ask={name:'ask_user_question',description:'Ask',parameters:{type:'object',properties:{}}}
+   const bridge={ensure:async()=>({id:'dsh-quick',fingerprint:'tools',outpostId:'o',resolve:()=>null}),track:()=>{},settle:()=>{},dispose:async()=>{}} as unknown as AwsQuickToolBridge
+   const opened:{threadId:string;state:{sent:string}}[]=[]
+   const batches=[[{kind:'text',delta:'Lint 已修复。\n<decision question="下一步?">'},{kind:'text',delta:'<option description="触发 CI">推送</option><option>不推送</option></decision>'},{kind:'done',reason:'stop'}],[{kind:'text',delta:'已推送'},{kind:'done',reason:'stop'}]] as QuickStreamEvent[][]
+   const adapter=new AwsQuickAdapter({settings:new AwsQuickSettingsStore(file),outpost,toolBridge:bridge,openConnection:async(input)=>{const fake=fakeConnection([batches.shift()!]);opened.push({threadId:input.threadId,state:fake.state});return fake.connection}})
+   const first=await collect(adapter.stream(request('修复 lint',[ask]) as never))
+   const text=first.filter((c)=>c.type==='text-delta').map((c)=>(c as {text:string}).text).join('');expect(text).toBe('Lint 已修复。\n');expect(text).not.toContain('<decision')
+   const call=first.find((c)=>c.type==='tool-call-delta') as unknown as {id:string;name:string;argumentsDelta:string};expect(call.name).toBe('ask_user_question')
+   expect(JSON.parse(call.argumentsDelta)).toEqual({questions:[{id:'q1',question:'下一步?',options:[{label:'推送',description:'触发 CI'},{label:'不推送'}]}]});expect(first.at(-1)).toMatchObject({reason:{kind:'tool-calls'}})
+   const next=request('unused',[ask]) as {messages:Record<string,unknown>[]};next.messages=[{role:'user',content:[{type:'text',text:'修复 lint'}]},{role:'assistant',content:[{type:'text',text:'Lint 已修复。\n'},{type:'tool-call',id:call.id,name:'ask_user_question',arguments:call.argumentsDelta}]},{role:'user',content:[{type:'tool-result',toolCallId:call.id,content:[{type:'text',text:JSON.stringify({answers:[{id:'q1',selected:['推送']}]})}]}]}]
+   await collect(adapter.stream(next as never));expect(opened[1].threadId).toBe(opened[0].threadId);expect(opened[1].state.sent).toBe('<decision_response>下一步?: 推送</decision_response>');await adapter.dispose()
+  }finally{await cleanup(file)}
+ })
+ it('falls back to numbered text when the session offers no question tool',async()=>{
+  const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-decision-text-')),'settings.json')
+  try{
+   const fake=fakeConnection([[{kind:'text',delta:'选一个：<decision question="模式?"><option description="快">A</option><option>B</option></decision>'},{kind:'done',reason:'stop'}]])
+   const adapter=new AwsQuickAdapter({settings:new AwsQuickSettingsStore(file),outpost,openConnection:async()=>fake.connection})
+   const chunks=await collect(adapter.stream(request('q') as never));const text=chunks.filter((c)=>c.type==='text-delta').map((c)=>(c as {text:string}).text).join('')
+   expect(text).toBe('选一个：\n\n**模式?**\n1. A — 快\n2. B');expect(chunks.at(-1)).toMatchObject({reason:{kind:'stop'}});expect(fake.state.policy).toContain('ask_user_question');await adapter.dispose()
+  }finally{await cleanup(file)}
+ })
+ it('carries context DSH appended after a tool round together with the tool result',async()=>{
+  const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-extra-')),'settings.json')
+  try{
+   const tool={name:'enter_plan_mode',description:'Plan',parameters:{type:'object',properties:{}}}
+   const fake=fakeConnection([[{kind:'tool-call',call:{id:'call-p',name:'dsh_quick__enter_plan_mode',argumentsText:'{}'}}],[{kind:'text',delta:'ok'},{kind:'done',reason:'stop'}]])
+   const bridge={ensure:async()=>({id:'dsh-quick',fingerprint:'tools',outpostId:'o',resolve:(name:string)=>name==='dsh_quick__enter_plan_mode'?'enter_plan_mode':null}),track:()=>{},settle:()=>{},dispose:async()=>{}} as unknown as AwsQuickToolBridge
+   const adapter=new AwsQuickAdapter({settings:new AwsQuickSettingsStore(file),outpost,toolBridge:bridge,openConnection:async()=>fake.connection})
+   await collect(adapter.stream(request('plan it',[tool]) as never))
+   const next=request('unused',[tool]) as {messages:Record<string,unknown>[]};next.messages=[{role:'user',content:[{type:'text',text:'plan it'}]},{role:'assistant',content:[{type:'tool-call',id:'call-p',name:'enter_plan_mode',arguments:'{}'}]},{role:'user',content:[{type:'tool-result',toolCallId:'call-p',content:[{type:'text',text:'entered'}]}]},{role:'user',content:[{type:'text',text:'Plan mode is active: submit with exit_plan_mode.'}]}]
+   await collect(adapter.stream(next as never));expect(fake.state.answers).toHaveLength(1);expect(fake.state.answers[0].result).toEqual([{type:'text',text:'entered'},{type:'text',text:'[DSH context added after this tool call]\nPlan mode is active: submit with exit_plan_mode.'}]);await adapter.dispose()
+  }finally{await cleanup(file)}
+ })
  it('rejects unsupported sampling controls without starting a connection',async()=>{
   const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-sampling-')),'settings.json')
   try{const adapter=new AwsQuickAdapter({settings:new AwsQuickSettingsStore(file),outpost,openConnection:async()=>{throw new Error('must not start')}});const req=request('x');req.temperature=0.2;await expect(collect(adapter.stream(req as never))).rejects.toThrow(/cannot express.*temperature/);await adapter.dispose()}finally{await cleanup(file)}

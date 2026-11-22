@@ -9,7 +9,8 @@ import {quickImageAttachments,quickImageLabel,quickToolResultContent,type QuickR
 import type {AwsQuickSettingsStore} from './settings.ts'
 import {findQuickModel,normalizeQuickEffort,PROVIDER_NAME,QUICK_MODELS,toQuickModelInfo,toQuickResolvedModel} from './types.ts'
 import {QuickConnection,type QuickToolCall} from './client.ts'
-import {QUICK_DSH_TOOL_POLICY} from './protocol.ts'
+import {QUICK_DSH_CLIENT_POLICY,QUICK_DSH_TOOL_POLICY} from './protocol.ts'
+import {decisionResponseText,decisionsToAskArguments,QuickMarkupFilter,renderDecisionsAsText,type QuickDecision} from './markup.ts'
 import type {AwsQuickOutpost} from './outpost.ts'
 import type {AwsQuickToolBridge,QuickToolCatalog} from './tool-bridge.ts'
 
@@ -23,6 +24,12 @@ function renderMessage(message:Message):string{return `<${message.role}>\n${mess
 function renderTranscript(messages:Message[]):string{const conversation=messages.filter((message)=>message.role!=='system'&&message.role!=='developer');return `The following is the complete DSH conversation. Continue from its latest user request; do not repeat earlier tasks.\n\n${conversation.map(renderMessage).join('\n\n')}`}
 function systemContext(messages:Message[]):string{return messages.filter((message)=>message.role==='system'||message.role==='developer').map(messageText).filter((text)=>text.trim()).join('\n\n')}
 function fingerprint(messages:Message[],covered:number):string{return JSON.stringify(messages.slice(0,covered).map((m)=>[m.role,messageText(m),m.content.filter((block)=>block.type==='image').map((block)=>(block as unknown as {attachment?:unknown}).attachment)]))}
+/** DSH tool that renders a question card; Quick decisions are projected onto it. */
+const ASK_TOOL='ask_user_question'
+const MAX_DECISION_CALLS=64
+function resultText(block:ToolResultBlock):string{return block.content.map((item)=>item.type==='text'?item.text:'').filter(Boolean).join('\n')}
+/** Text DSH appended after a tool round (plan-mode notices, reminders, steering) that is not itself a tool result. */
+function extraContext(messages:Message[]):string{return messages.filter((message)=>message.role!=='assistant').map((message)=>message.content.filter((block)=>block.type!=='tool-result').map(blockText).filter(Boolean).join('\n')).filter((text)=>text.trim()).join('\n\n')}
 function assertSupported(options:GenerateOptions):void{const unsupported:string[]=[];if(options.temperature!==undefined)unsupported.push('temperature');if(options.stop!==undefined)unsupported.push('stop');if(unsupported.length)throw new LlmError(`AWS Quick cannot express ${unsupported.join(', ')}.`,'UNSUPPORTED_OPTION')}
 function collectResults(messages:Message[],images:Awaited<ReturnType<typeof resolveRequestImages>>):Array<{id:string;content:QuickResultContent[];isError:boolean}>{
  const out:Array<{id:string;content:QuickResultContent[];isError:boolean}>=[]
@@ -30,7 +37,7 @@ function collectResults(messages:Message[],images:Awaited<ReturnType<typeof reso
  return out
 }
 export class AwsQuickAdapter extends LlmAdapter{
- private readonly threads=new Map<string,ThreadState>();private readonly live=new Map<string,LiveTurn>();private readonly active=new Set<string>()
+ private readonly threads=new Map<string,ThreadState>();private readonly live=new Map<string,LiveTurn>();private readonly active=new Set<string>();private readonly decisionCalls=new Map<string,QuickDecision[]>()
  constructor(private readonly options:{settings:AwsQuickSettingsStore;outpost:AwsQuickOutpost;toolBridge?:AwsQuickToolBridge;attachments?:AttachmentImageReader;openConnection?:typeof QuickConnection.open}){super()}
  imageRequestTarget(_provider:string,_model:string,image:ImageAttachmentRef){return requestImageTargetOrOriginal(image)}
  providerInfo(provider:string):LlmProviderInfo{return{id:provider,name:localizedProviderName(provider,PROVIDER_NAME)}}
@@ -39,6 +46,10 @@ export class AwsQuickAdapter extends LlmAdapter{
  async resolveModel(provider:string,model:string):Promise<LlmResolvedModelInfo>{return toQuickResolvedModel(provider,findQuickModel(model))}
  async prepareCall(provider:string,model:string):Promise<PreparedAdapterCall>{return{model:await this.resolveModel(provider,model),stream:(options)=>this.stream(options)}}
  stream(options:HarnessGenerateOptions):AsyncIterable<StreamChunk>{return wrapStreamWithWatchdog((signal,activity)=>this.run(options,signal,activity),options.signal,QUICK_STREAM_IDLE_TIMEOUT_MS,STREAM_IDLE_TIMEOUT_CODE,PROVIDER_NAME,QUICK_STREAM_IDLE_TIMEOUT_MS)}
+ private approvalResolver(catalog:QuickToolCatalog|undefined){return(request:{toolName?:string;actionId?:string}):boolean=>!!catalog&&[request.toolName,request.actionId].some((name)=>!!name&&catalog.resolve(name)!==null)}
+ private rememberDecision(id:string,decisions:QuickDecision[]):void{this.decisionCalls.set(id,decisions);while(this.decisionCalls.size>MAX_DECISION_CALLS){const oldest=this.decisionCalls.keys().next().value;if(oldest===undefined)break;this.decisionCalls.delete(oldest)}}
+ /** Quick-native answer text when the message answers a projected decision; undefined otherwise. */
+ private decisionAnswer(message:Message):string|undefined{const parts:string[]=[];for(const block of message.content){if(block.type!=='tool-result')continue;const result=block as ToolResultBlock;const decisions=this.decisionCalls.get(result.toolCallId);if(!decisions)continue;this.decisionCalls.delete(result.toolCallId);parts.push(decisionResponseText(decisions,resultText(result)))}return parts.length?parts.join('\n'):undefined}
  private compatible(state:ThreadState,options:GenerateOptions,model:string,effort:string|undefined,toolFingerprint:string|undefined):boolean{return state.model===model&&state.effort===effort&&state.toolFingerprint===toolFingerprint&&fingerprint(options.messages,state.covered)===state.fingerprint}
  private async *run(raw:HarnessGenerateOptions,signal:AbortSignal,activity:{pulse():void}):AsyncGenerator<StreamChunk>{
   const options=normalizeGenerateOptions(raw);assertSupported(options)
@@ -51,33 +62,39 @@ export class AwsQuickAdapter extends LlmAdapter{
    if(tools.length>0&&!catalog)throw new LlmError('AWS Quick DSH tool bridge is not configured.','PROVIDER_DISABLED')
    const previous=options.purpose?undefined:this.live.get(sessionId)
    if(previous&&this.compatible(previous.state,options,model.id,effort,catalog?.fingerprint)){
-    turn=previous;turn.catalog=catalog;turn.connection.setSignal(signal);turn.connection.setActivity(activity)
+    turn=previous;turn.catalog=catalog;turn.connection.setSignal(signal);turn.connection.setActivity(activity);turn.connection.setApprovalResolver?.(this.approvalResolver(catalog))
     const freshMessages=options.messages.slice(previous.state.covered);const images=await resolveRequestImages({...options,messages:freshMessages},this.options.attachments,signal)
     const results=collectResults(freshMessages,images)
     if(results.length===0&&previous.pending.size>0)throw new LlmError('AWS Quick tool continuation requires the DSH tool result.','INVALID_REQUEST')
+    const extra=extraContext(freshMessages);const last=results.at(-1);if(extra&&last)last.content=[...last.content,{type:'text',text:'[DSH context added after this tool call]\n'+extra}]
     for(const result of results){const call=previous.pending.get(result.id);if(!call)throw new LlmError(`Unknown Quick tool result id: ${result.id}`,'INVALID_REQUEST');this.options.toolBridge?.settle(call.id,result.content,result.isError);turn.connection.answerTool(call,result.content,result.isError);previous.pending.delete(result.id)}
    }else{
     if(previous){previous.connection.close();this.live.delete(sessionId)}
     const modelState=findQuickModel(options.model)
     let threadId:string=randomUUID();let text='';let outboundMessages=options.messages;const dormant=options.purpose?undefined:this.threads.get(sessionId)
     if(dormant&&this.compatible(dormant,options,modelState.id,effort,catalog?.fingerprint)){
-     const latest=options.messages.slice(dormant.covered).filter((m)=>m.role==='user').at(-1);if(latest&&messageText(latest).trim()){threadId=dormant.threadId;text=messageText(latest);outboundMessages=[latest]}
+     const latest=options.messages.slice(dormant.covered).filter((m)=>m.role==='user').at(-1);if(latest&&messageText(latest).trim()){threadId=dormant.threadId;text=this.decisionAnswer(latest)??messageText(latest);outboundMessages=[latest]}
     }
     if(!text)text=renderTranscript(options.messages)
     if(!options.messages.some((message)=>messageText(message).trim()))throw new LlmError('AWS Quick received an empty prompt.','INVALID_REQUEST')
     const open=this.options.openConnection??QuickConnection.open
     const images=await resolveRequestImages({...options,messages:outboundMessages},this.options.attachments,signal);const attachments=quickImageAttachments(outboundMessages,images)
     const connection=await open({outpost:this.options.outpost,threadId,outpostId:catalog?.outpostId,preApprovedTools:tools.map((tool)=>'dsh_quick__'+tool.name),signal,activity})
+    connection.setApprovalResolver?.(this.approvalResolver(catalog))
     turn={connection,catalog,pending:new Map(),state:{threadId,covered:0,fingerprint:'',model:modelState.id,...(effort?{effort}:{}),...(catalog?{toolFingerprint:catalog.fingerprint}:{})}}
-    const customPrompt=[systemContext(options.messages),tools.length>0?QUICK_DSH_TOOL_POLICY:''].filter(Boolean).join('\n\n')||undefined
+    const customPrompt=[systemContext(options.messages),QUICK_DSH_CLIENT_POLICY,tools.length>0?QUICK_DSH_TOOL_POLICY:''].filter(Boolean).join('\n\n')||undefined
     connection.sendUser(text,modelState.mode,effort,attachments,customPrompt)
    }
    if(!turn)throw new LlmError('AWS Quick failed to initialize its connection.','SERVER')
    const currentTurn=turn
    let open:{index:number;kind:'text'|'reasoning';text:string}|null=null;let index=0
    const close=():StreamChunk|undefined=>{if(!open)return undefined;const current=open;open=null;return{type:'block-end',index:current.index,block:current.kind==='text'?{type:'text',text:current.text}:{type:'reasoning',text:current.text}} as StreamChunk}
+   const filter=new QuickMarkupFilter()
+   const emit=function*(kind:'text'|'reasoning',delta:string):Generator<StreamChunk>{if(!delta)return;const currentOpen=open as {index:number;kind:'text'|'reasoning';text:string}|null;if(currentOpen?.kind!==kind){const closing=close();if(closing)yield closing;open={kind,index:index++,text:''};yield{type:'block-start',index:open.index,blockType:kind} as StreamChunk}open!.text+=delta;yield{type:kind==='text'?'text-delta':'reasoning-delta',index:open!.index,text:delta} as StreamChunk}
+   const separator=():string=>{const current=open as {kind:'text'|'reasoning';text:string}|null;return current?.kind==='text'&&current.text.trim()?'\n\n':''}
    for await(const event of currentTurn.connection.events()){
     if(event.kind==='tool-call'){
+     yield* emit('text',filter.flush());const early=filter.decisions.splice(0);if(early.length)yield* emit('text',separator()+renderDecisionsAsText(early))
      const original=currentTurn.catalog?.resolve(event.call.name)??null
      if(!original){currentTurn.connection.answerTool(event.call,'This tool is not part of the active DSH catalog. Use an available DeepSeek Harness tool or report the missing capability.',true);continue}
      const call={...event.call,name:original};currentTurn.pending.set(call.id,call);this.options.toolBridge?.track(call)
@@ -93,6 +110,25 @@ export class AwsQuickAdapter extends LlmAdapter{
      return
     }
     if(event.kind==='done'){
+     yield* emit('text',filter.flush())
+     const decisions=filter.decisions.splice(0)
+     if(decisions.length&&event.reason!=='cancelled'){
+      if(tools.some((tool)=>tool.name===ASK_TOOL)){
+       // Quick ended its turn on a choice card; DSH asks through its own question tool and
+       // the answer returns to the same Quick thread as a native <decision_response>.
+       const closing=close();if(closing)yield closing
+       const id='quick-decision-'+randomUUID();const args=JSON.stringify(decisionsToAskArguments(decisions));const toolIndex=index++
+       yield{type:'block-start',index:toolIndex,blockType:'tool-call'} as StreamChunk
+       yield{type:'tool-call-delta',index:toolIndex,id,name:ASK_TOOL,argumentsDelta:args} as StreamChunk
+       yield{type:'block-end',index:toolIndex,block:{type:'tool-call',id,name:ASK_TOOL,arguments:args}} as StreamChunk
+       this.rememberDecision(id,decisions)
+       yield{type:'finish',reason:{kind:'tool-calls'}}
+       if(options.purpose===undefined){this.threads.set(sessionId,{...currentTurn.state,covered:options.messages.length,fingerprint:fingerprint(options.messages,options.messages.length)});this.live.delete(sessionId)}
+       await this.options.settings.update({lastTurnAt:Date.now()})
+       return
+      }
+      yield* emit('text',separator()+renderDecisionsAsText(decisions))
+     }
      const closing=close();if(closing)yield closing
      if(event.reason==='cancelled')throw new LlmError('AWS Quick turn was cancelled.','ABORTED')
      yield{type:'finish',reason:{kind:'stop'}}
@@ -100,9 +136,7 @@ export class AwsQuickAdapter extends LlmAdapter{
      await this.options.settings.update({lastTurnAt:Date.now()})
      return
     }
-    const currentOpen=open as {index:number;kind:'text'|'reasoning';text:string}|null
-    if(currentOpen?.kind!==event.kind){const closing=close();if(closing)yield closing;open={kind:event.kind,index:index++,text:''};yield{type:'block-start',index:open.index,blockType:event.kind} as StreamChunk}
-    open!.text+=event.delta;yield{type:event.kind==='text'?'text-delta':'reasoning-delta',index:open!.index,text:event.delta} as StreamChunk
+    yield* emit(event.kind,event.kind==='text'?filter.push(event.delta):event.delta)
    }
    throw new LlmError('AWS Quick ended without a terminal event.','INVALID_RESPONSE')
   }finally{
