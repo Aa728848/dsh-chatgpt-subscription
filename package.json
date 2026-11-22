@@ -172,6 +172,8 @@
     "typecheck": "tsc -b --pretty false && tsc -p test/tsconfig.json --pretty false && tsc -p scripts/tsconfig.json --pretty false"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@smithy/eventstream-codec": "^4.5.2",
     "katex": "^0.18.7",
     "mermaid": "^11.17.2",
     "undici": "^8.10.0",

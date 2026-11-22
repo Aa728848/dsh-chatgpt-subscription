@@ -244,6 +244,7 @@ export const dictionary: Record<LocaleKey, string> = {
   'cardName.qianwen-token-plan': 'Qwen Token Plan',
   'cardName.relayone': 'RelayOne',
   'cardName.claude-api': 'Claude API',
+  'cardName.aws-quick': 'AWS Quick',
   modelChecklistCount: 'Включено {count}/{total}',
   codeRunTitle: 'Код',
   codeRunOutput: 'Вывод',

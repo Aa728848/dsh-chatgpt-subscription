@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[aws-quick] 新增 AWS Quick 单账号线路**：使用官方 Quick Desktop outpost，支持个人/企业登录、Fast/Balanced/Smart、推理强度、AIDP 流式文本与思考、会话续用、取消、JWT 刷新及安全进程回收；新增 stdio MCP 工具目录与 DSH 工具调用/结果闭环，支持图片输入和 MCP 图片结果；工具轮次禁止 Quick 设备沙盒替代 DSH Shell；提供 Quick 官方下载、免费注册提示与连接器预初始化，遵守 Quick 原生批准；不做账号池和配额显示。协议证据、文本能力边界与实机待验项记录于 `docs/aws-quick-line-plan.md`。
+
 - **[claude / claude-api] 对齐 Claude Code 2.1.330 第一方请求与 cch 签名**
   - 两条线路共享版本与种子；未知 npm 版本不再直接采用，双方会话均超过各自缓存 TTL 后才切换。最终序列化 body 统一经过 xxHash64 cch 签名，所有纠正和重试重新计算。
   - 新增第一方头、计费上下文、diagnostics、认证对应的 beta/system/cache_control；两条线路处理尾部 assistant、thinking-token-count 拒绝、Mythos 5 能力和新增 usage 元数据。订阅授权入口改用 claude.com 新域。

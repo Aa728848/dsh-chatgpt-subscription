@@ -2,7 +2,7 @@
 
 面向 **DeepSeek Harness（DSH）** 的多平台订阅接入与智能体运行时增强插件包。
 
-插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **16 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
+插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **17 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
 
 - **跨平台支持**：Windows、macOS、Linux（含无桌面密钥环的远程服务器部署模式）
 - **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.3** 全系列版本
@@ -28,7 +28,7 @@
 
 ## 供应线路总览
 
-插件同时注册 **16 条相互隔离的供应线路**。每条线路拥有独立的 Provider ID、凭据存储、模型目录与上下文窗口覆盖；支持账号池的线路另有独立轮换策略。任意一条线路限流或故障均不影响其它线路。
+插件同时注册 **17 条相互隔离的供应线路**。每条线路拥有独立的 Provider ID、凭据存储、模型目录与上下文窗口覆盖；支持账号池的线路另有独立轮换策略。任意一条线路限流或故障均不影响其它线路。
 
 | Provider ID | 订阅 / 服务 | 传输协议 | 登录与凭据方式 | 模型目录来源 |
 | --- | --- | --- | --- | --- |
@@ -48,11 +48,13 @@
 | `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个套餐专属 API Key（主机加密存储，无账号池） | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 |
 | `relayone` | RelayOne 中转站 | Responses / Chat Completions / Anthropic Messages 自动选择 | 单个 API Key（主机加密存储，无账号池） | 当前 Key `/v1/models` + 公开分组/协议元数据 + 隔离快照 |
 | `claude-api` | Claude API（Anthropic Messages） | Anthropic Messages（官方 Claude Code 客户端请求形态） | 单个 API Key（主机加密存储，无账号池） | 当前 Key `/v1/models` + 随包能力表 + 凭据隔离快照 |
+| `aws-quick` | AWS Quick Free / Plus / Max / Enterprise | Quick AIDP 双向 WebSocket + event-stream + stdio MCP 工具目录 | 官方 Quick Desktop outpost 单账号登录；无号池，本插件不持有长期凭据 | Fast / Balanced / Smart 官方响应模式（无虚构底层模型 ID） |
 
 > **合规与风险提示**：
 > - `claude-subscription` 通过订阅 OAuth 凭据模拟官方 CLI 身份转发请求，与 Anthropic 现行服务条款存在冲突，未获官方授权，存在账号被限制或封禁的风险。
 > - `workbuddy-subscription`、`qoder` 等线路部分依赖非公开或逆向协议契约；`step-code` 额度面板使用非公开开发者中心接口（与对话请求完全隔离）。
 > - **`antigravity-acp` 的合规风险不是技术风险，而是条款风险**：它运行的是 Google 官方 `agy` 与其官方 ACP 服务器（协议、凭据、网络全部由官方程序负责，与旧的逆向 `antigravity` 线路有本质区别），但 Google 的 Antigravity FAQ 明确写着：*使用第三方软件、工具或服务访问 Antigravity 违反其服务条款*，且 *把 `agy` 包在第三方编码 Agent/应用中、或自动化账号轮换，在消费者套餐下不受支持*，可能导致账号被暂停或终止。Google 同时公开推荐了 ACP 接入编辑器的方式，两者之间存在解释空间。**该线路默认启用**，可在「订阅服务」总览页的卡片上随时关闭（关闭后不再启动 `agy`、不再出现在模型选择器，子代理也拒绝委派）；是否继续使用由使用者自行判断并承担账号风险。Gemini Enterprise / AI Studio API Key 是 Google 官方指引中风险最低的替代路径。
+> - `aws-quick` 使用 Quick Desktop 的非公开 AIDP 数据面，未获公开聊天 API 的稳定性承诺；支持文本、思考、图片输入与 DSH 工具闭环（含 MCP 图片结果）；设置卡提供官方下载、免费注册提示和连接器预初始化，不显示未经证实的配额。实机验证状态与协议证据见 `docs/aws-quick-line-plan.md`。
 > - 各线路详细的鉴权细节、验证置信度分档与宿主 API 路由请参阅 **[供应线路完整指南（docs/providers.md）](docs/providers.md)**。
 
 ---

@@ -1,6 +1,6 @@
 # 供应线路完整指南与接口参考
 
-本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **16 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
+本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **17 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
 
 > 跨线路共用的号池调度、存储后端（`poolStorage`）、统一网络代理与环境变量详见 [部署配置与安全参考](configuration.md)。
 
@@ -26,6 +26,7 @@
 16. [Qwen Token Plan（千问）：`qianwen-token-plan`](#16-qwen-token-plan千问qianwen-token-plan)
 17. [RelayOne：`relayone`](#17-relayonerelayone)
 18. [Claude API：`claude-api`](#18-claude-apiclaude-api)
+19. [AWS Quick：`aws-quick`](#19-aws-quickaws-quick)
 
 ---
 
@@ -393,3 +394,17 @@
 - **不做**：额度显示与输入框徽章、账号池、原生 API 形态、阈值压缩、媒体工具、任务预算。
 - **路由**：`GET status`、`POST settings`、`POST key`、`DELETE key`、`POST test`、`POST catalog/refresh`；写操作全部同源校验。
 - **验证边界**：第一方字段和 cch 有抓包/算法及离线最终 body 验证；旧能力曾兼容网关实测。新形态未直连官方端点实测，真实订阅 cache_touch、交互式多轮计数器、部分模型快速模式和 Mythos 可用性未验证。详见 [线路设计与证据](claude-api-line-plan.md)。
+
+---
+
+## 19. AWS Quick：`aws-quick`
+
+- **官方组件**：自动发现 Quick Desktop 随附的 `quickwork-agent`，以独立端口启动 outpost，并通过官方组件复用 Quick Desktop 默认配置与系统凭据库。随机实例令牌只经 stdin 传入并驻内存；长期登录凭据由官方组件保管。
+- **首次使用**：设置卡在未安装时链接到 [Quick 官方下载页](https://aws.amazon.com/quick/download/)；个人可免费注册，不需要 AWS 账户。登录后可先初始化 DeepSeek Harness 连接器并完成 Quick 原生批准，再开始编码。
+- **单账号**：个人 `social` 与企业 `enterprise` 共用登录状态机；企业可指定区域。没有账号池、账号轮换或账号导入。
+- **协议**：当前 AIDP 双向 WebSocket。出站 JSON 经 UTF-8 + Base64 放入 `rawInputEvent`；入站使用 AWS event-stream `rawOutputEvent`，再 Base64 解出聊天事件。旧 Gateway 通道明确拒绝。
+- **模型与思考**：Quick 未公开底层模型 ID，因此只列 Fast / Balanced / Smart 三种官方响应模式；Balanced 与 Smart 提供 off / low / medium / high，Fast 固定 off。上下文 131072 是保守的 DSH 调度预算，不是上游公布值。
+- **会话**：正常 DSH 会话按历史前缀续用 Quick `thread_id`；历史编辑、模型/档位变化或辅助标题/压缩请求使用独立会话。支持文本、思考、停止、JWT 刷新与退出。
+- **工具与边界**：DSH 工具 schema 通过稳定 stdio MCP 发布；Quick 的 `tool_call` 进入 DSH 审批与执行，下一趟调用按 `toolCallId` 回写结果；自动 MCP 调用通过随机 Bearer 的 loopback 停放器匹配同一活动调用，共享同一真实结果。带 DSH 工具的轮次通过官方 `custom_prompt` 明确禁止用 Quick 设备 Python 沙盒替代 DSH Shell；实测模型会调用 DSH `win_bash`。首次需在 Quick 连接器页面原生启用一次 DeepSeek Harness；插件不伪造确认 nonce。支持 DSH 图片附件与工具结果中的 MCP 图片；远程图片 URL 和不可读附件明确拒绝。没有可靠剩余配额接口，故无配额 DTO、Composer 徽章或 widget。
+- **风险**：桌面数据面是非公开契约，Quick 升级可能需要同步适配；离线通过不等于真实账号验收。个人 social 账号已于 2026-11-21/22 实测通过 Fast 流式对话、真实 Adapter 分块、取消与回收，以及 Quick 本机工具可见性、Quick 工具调用 → DSH 结果 → 同连接最终文本闭环和真实图片识别（红色 PNG → `Red, square.`）；企业账号、新浏览器登录 UI 和自然到期刷新仍待验。逐常量来源见 [线路实现记录](aws-quick-line-plan.md)。
+- **路由**：`GET status|settings|models|login/status` · `POST settings|login/start|login/cancel|logout|refresh|tools/prepare`；所有写操作执行 Origin + Host 同源校验。

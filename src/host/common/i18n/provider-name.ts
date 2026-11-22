@@ -22,6 +22,7 @@ const NAME_KEYS: ReadonlyMap<string, HostLocaleKey> = new Map<string, HostLocale
   ['qoder', 'provider.qoder'],
   ['step-code', 'provider.step-code'],
   ['antigravity-acp', 'provider.antigravity-acp'],
+  ['aws-quick', 'provider.aws-quick'],
 ])
 
 /**

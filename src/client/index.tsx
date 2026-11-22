@@ -72,6 +72,8 @@ import { dictionaries as relayOneDicts, NS_RELAYONE, type RelayOneLocaleKey } fr
 import { installRelayOneStyles } from './relayone/styles.ts'
 import { dictionaries as claudeApiDicts, NS_CLAUDE_API, type ClaudeApiLocaleKey } from './claude-api/locales.ts'
 import { installClaudeApiStyles } from './claude-api/styles.ts'
+import { dictionaries as awsQuickDicts, NS_AWS_QUICK, type AwsQuickLocaleKey } from './aws-quick/locales.ts'
+import { installAwsQuickStyles } from './aws-quick/styles.ts'
 import { installSubagentSettingsCard } from './subagent/index.ts'
 import { installSubagentStyles } from './subagent/styles.ts'
 import { dictionaries as subagentDicts, NS_SUBAGENT, type SubagentLocaleKey } from './subagent/locales.ts'
@@ -112,6 +114,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-qianwen-token-plan': QianwenLocaleKey
     'dsh-relayone': RelayOneLocaleKey
     'dsh-claude-api': ClaudeApiLocaleKey
+    'dsh-aws-quick': AwsQuickLocaleKey
   }
 }
 
@@ -217,6 +220,9 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     installClaudeApiStyles()
     return () => {}
   }, 'dsh-claude-api: styles')
+  // AWS Quick: no account-pool or quota slot; settings dictionary and styles only.
+  ctx.effect(() => ctx.locale.register(NS_AWS_QUICK, awsQuickDicts), 'dsh-aws-quick: dictionaries')
+  ctx.effect(() => { installAwsQuickStyles(); return () => {} }, 'dsh-aws-quick: styles')
   // 「子智能体」设置卡：遮蔽宿主同名卡（同 id、priority -10），并在宿主的授权清单
   // 之外再记一份「全局默认 + 按主代理模型」的两级列表。样式表无条件安装，
   // 注册本身在 installSubagentSettingsCard 里按服务是否就绪决定。

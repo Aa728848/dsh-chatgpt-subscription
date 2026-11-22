@@ -30,6 +30,7 @@ import { NS_WORKBUDDY } from '../workbuddy/locales.ts'
 import { NS_QIANWEN } from '../qianwen-token-plan/locales.ts'
 import { NS_RELAYONE } from '../relayone/locales.ts'
 import { NS_CLAUDE_API } from '../claude-api/locales.ts'
+import { NS_AWS_QUICK } from '../aws-quick/locales.ts'
 import { NS } from '../locales.ts'
 import { dictionary as claude } from './claude.ts'
 import { dictionary as clinePass } from './cline-pass.ts'
@@ -49,6 +50,7 @@ import { dictionary as workbuddy } from './workbuddy.ts'
 import { dictionary as qianwen } from './qianwen-token-plan.ts'
 import { dictionary as relayOne } from './relayone.ts'
 import { dictionary as claudeApi } from './claude-api.ts'
+import { dictionary as awsQuick } from './aws-quick.ts'
 
 /** Language id of this pack: the value stored as `locale.preference`. */
 export const RU_LOCALE = 'ru'
@@ -105,6 +107,7 @@ export function installRussianLocale(ctx: ClientContext): void {
     [NS_QIANWEN, qianwen],
     [NS_RELAYONE, relayOne],
     [NS_CLAUDE_API, claudeApi],
+    [NS_AWS_QUICK, awsQuick],
   ]
 
   for (const [ns, dictionary] of dictionaries) {

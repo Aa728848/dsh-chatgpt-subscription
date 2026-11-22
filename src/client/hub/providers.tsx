@@ -28,6 +28,7 @@ import { GlmCodingPlanSection } from '../glm-coding-plan/GlmCodingPlanSection.ts
 import { ClaudeSection } from '../claude/ClaudeSection.tsx'
 import { OllamaSection } from '../ollama/OllamaSection.tsx'
 import { AntigravityAcpSection } from '../antigravity-acp/AntigravityAcpSection.tsx'
+import { AwsQuickSection } from '../aws-quick/AwsQuickSection.tsx'
 import { StepCodeSection } from '../step-code/StepCodeSection.tsx'
 import { ClinePassSection } from '../cline-pass/ClinePassSection.tsx'
 import { CLINE_PASS_PROVIDER_NAME, CLINE_PASS_ROUTE_PREFIX } from '../../shared/cline-pass-contracts.ts'
@@ -242,6 +243,11 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     id: 'relayone', proxyLine: 'relayone', name: RELAYONE_PROVIDER_NAME,
     setEnabled: (enabled) => postLineSettings(RELAYONE_ROUTE_PREFIX, { enabled }),
     renderDetail: ({ onModelChange }) => <RelayOneSection onModelChange={onModelChange} />,
+  },
+  {
+    id: 'aws-quick', proxyLine: null, name: 'AWS Quick',
+    setEnabled: (enabled) => postLineSettings('/aws-quick/api', { enabled }),
+    renderDetail: ({ onModelChange }) => <AwsQuickSection onModelChange={onModelChange} />,
   },
 ]
 

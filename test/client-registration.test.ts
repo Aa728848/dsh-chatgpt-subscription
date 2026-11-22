@@ -591,13 +591,13 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Claude API', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Claude API', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne', 'AWS Quick'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
       // no enable switch on the host, renders none. Step Code joins the toggleable
       // side (it posts enabled to its own /settings like every other line).
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(15)
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(16)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.

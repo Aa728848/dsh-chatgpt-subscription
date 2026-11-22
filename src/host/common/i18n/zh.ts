@@ -179,6 +179,7 @@ export const zh = {
   'provider.qianwen-token-plan': 'Qwen Token Plan（千问）',
   'provider.relayone': 'RelayOne',
   'provider.claude-api': 'Claude API',
+  'provider.aws-quick': 'AWS Quick',
   'qwen.notConfigured': '请先在设置页配置 Qwen Token Plan API Key。',
   'qwen.invalidApiKey': 'Qwen Token Plan API Key 为空或长度无效。',
   'qwen.responseMissingChoices': '千问上游应答缺少 choices。',

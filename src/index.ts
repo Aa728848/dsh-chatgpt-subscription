@@ -73,6 +73,12 @@ import { runDoctor } from './host/antigravity-acp/doctor.ts'
 import { readCatalogFrom } from './host/antigravity-acp/catalog.ts'
 import { registerAntigravityAcpSubagent } from './host/antigravity-acp/subagent.ts'
 import { PROVIDER_ID as ANTIGRAVITY_ACP_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_ACP_PROVIDER_NAME, AUTH_REQUIRED_MESSAGE } from './host/antigravity-acp/types.ts'
+import { AwsQuickAdapter } from './host/aws-quick/adapter.ts'
+import { AwsQuickSettingsStore } from './host/aws-quick/settings.ts'
+import { AwsQuickOutpost } from './host/aws-quick/outpost.ts'
+import { AwsQuickToolBridge } from './host/aws-quick/tool-bridge.ts'
+import { registerAwsQuickRoutes } from './host/aws-quick/routes.ts'
+import { PROVIDER_ID as AWS_QUICK_PROVIDER_ID, PROVIDER_NAME as AWS_QUICK_PROVIDER_NAME, QUICK_MODELS } from './host/aws-quick/types.ts'
 import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
 import { KimiCodeAccountPool } from './host/kimi-code/account-pool.ts'
 import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
@@ -1651,6 +1657,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     })
     void warmClaudeApiCatalogOnStartup(claudeApiCatalog).catch(() => undefined)
 
+    // AWS Quick: one official outpost and one account. No pool and no invented quota.
+    const awsQuickSettings = new AwsQuickSettingsStore()
+    const awsQuickOutpost = new AwsQuickOutpost(awsQuickSettings)
+    const awsQuickToolBridge = new AwsQuickToolBridge(awsQuickOutpost)
+    const awsQuickAdapter = new AwsQuickAdapter({ settings: awsQuickSettings, outpost: awsQuickOutpost, toolBridge: awsQuickToolBridge, attachments: ctx.attachments })
+    const awsQuickClaim = claimProviderRoute(ctx, {
+      providerId: AWS_QUICK_PROVIDER_ID, label: AWS_QUICK_PROVIDER_NAME, adapter: awsQuickAdapter,
+    })
+    const disposeAwsQuickRoutes = registerAwsQuickRoutes(ctx, {
+      settings: awsQuickSettings, outpost: awsQuickOutpost, tools: awsQuickToolBridge, conflict: () => awsQuickClaim.conflict(),
+    })
+
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as
     // the primary account and nothing has to be migrated up front.
@@ -2141,6 +2159,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           }
         },
       },
+      {
+        id: 'aws-quick', providerId: AWS_QUICK_PROVIDER_ID, canToggle: true,
+        read: async () => {
+          const current = await awsQuickSettings.read()
+          const auth = awsQuickOutpost.cachedAuth()
+          const enabledCount = current.enabledModelIds === null ? QUICK_MODELS.length : current.enabledModelIds.length
+          return { enabled: current.enabled, accountCount: auth.authenticated ? 1 : 0, authenticated: auth.authenticated, enabledModelCount: enabledCount, totalModelCount: QUICK_MODELS.length }
+        },
+      },
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     // 概览页右端的「检测更新 / 更新插件」。注册在这里而不是 routes.ts：它不属于任何
@@ -2298,6 +2325,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeClaudeApiRoutes()
       claudeApiClaim.dispose()
       stopClaudeApiVersion()
+      disposeAwsQuickRoutes()
+      awsQuickClaim.dispose()
+      void awsQuickAdapter.dispose().catch(() => undefined)
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }

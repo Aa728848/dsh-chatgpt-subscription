@@ -168,6 +168,7 @@ export const ru: Record<HostLocaleKey, string> = {
   'provider.qianwen-token-plan': 'Qwen Token Plan',
   'provider.relayone': 'RelayOne',
   'provider.claude-api': 'Claude API',
+  'provider.aws-quick': 'AWS Quick',
   'qwen.notConfigured': 'Сначала укажите API-ключ Qwen Token Plan в настройках.',
   'qwen.invalidApiKey': 'API-ключ Qwen Token Plan пуст или слишком длинный.',
   'qwen.responseMissingChoices': 'В ответе Qianwen отсутствует choices.',

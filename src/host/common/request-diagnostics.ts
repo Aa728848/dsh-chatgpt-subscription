@@ -46,6 +46,7 @@ export const DIAGNOSTIC_PROVIDERS = [
   'relayone',
   // Claude API (API key): same registration point, appended at the end.
   'claude-api',
+  'aws-quick',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

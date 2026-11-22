@@ -21,6 +21,7 @@ const host: UserConfig = {
     'plan-mode': 'src/entry-plan-mode.ts',
     'tool-result-pruner': 'src/entry-tool-result-pruner.ts',
     codemode: 'src/entry-codemode.ts',
+    'aws-quick-mcp': 'src/entry-aws-quick-mcp.ts',
   },
   outDir: 'lib',
   format: ['esm'],
