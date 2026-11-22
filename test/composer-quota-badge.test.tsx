@@ -78,28 +78,47 @@ describe('ComposerQuotaBadge', () => {
     expect(readStatus).toHaveBeenLastCalledWith(true)
   })
 
-  it('draws the remaining share as a mini meter beside the number', async () => {
+  it('leads with a ring gauge of the remaining share when the line states one', async () => {
     const { render } = mount()
     await act(async () => render({
       selectFacts: (status: Status | null): ComposerQuotaFacts | null => status === null
         ? null
         : { text: `${status.left}%`, tooltip: 'left 42%', level: 'normal', percent: 37.5 },
     }))
-    const meter = container.querySelector<HTMLElement>('.dsha-composer-quota-meter')
-    expect(meter).not.toBeNull()
-    // The number and the tooltip already say it, so the bar is decorative.
-    expect(meter!.getAttribute('aria-hidden')).toBe('true')
-    expect(meter!.querySelector<HTMLElement>('.dsha-composer-quota-meter-fill')!.style.width).toBe('37.5%')
+    const ring = container.querySelector('.dsha-composer-quota-ring')
+    expect(ring).not.toBeNull()
+    // The number and the tooltip already say it, so the ring is decorative.
+    expect(ring!.getAttribute('aria-hidden')).toBe('true')
+    expect(container.querySelector('.dsha-composer-quota-ring-fill')!.getAttribute('stroke-dasharray')).toBe('37.5 100')
+    expect(container.querySelector('.dsha-composer-quota-dot')).toBeNull()
   })
 
-  it('adds no meter node for a line that reports a number without a share', async () => {
+  it('leads with a plain status dot — never a guessed ring — for a number without a share', async () => {
     const { render } = mount({ selectFacts: facts })
     await act(async () => render())
-    expect(container.querySelector('.dsha-composer-quota-meter')).toBeNull()
-    // Other lines keep the markup they had, byte for byte: label, then number.
+    expect(container.querySelector('.dsha-composer-quota-ring')).toBeNull()
     const badge = container.querySelector<HTMLElement>('.dsha-composer-quota')!
-    expect([...badge.children].map((child) => child.className))
-      .toEqual(['dsha-composer-quota-label', 'dsha-composer-quota-val'])
+    expect([...badge.children].map((child) => child.getAttribute('class')))
+      .toEqual(['dsha-composer-quota-dot', 'dsha-composer-quota-label', 'dsha-composer-quota-val'])
+    expect(badge.querySelector('.dsha-composer-quota-dot')!.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('refreshes from the keyboard too, and keeps the last number on screen while it does', async () => {
+    let resolve: (value: Status) => void = () => undefined
+    const { readStatus, render } = mount()
+    await act(async () => render())
+    const badge = container.querySelector<HTMLElement>('.dsha-composer-quota')!
+    expect(badge.getAttribute('role')).toBe('button')
+    expect(badge.tabIndex).toBe(0)
+    readStatus.mockImplementationOnce(() => new Promise<Status>((done) => { resolve = done }))
+    await act(async () => badge.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+    expect(readStatus).toHaveBeenLastCalledWith(true)
+    expect(badge.getAttribute('data-loading')).toBe('true')
+    // No ellipsis swap: the capsule must not change width on every refresh.
+    expect(badge.querySelector('.dsha-composer-quota-val')?.textContent).toBe('42%')
+    await act(async () => resolve({ authenticated: true, left: 40 }))
+    expect(badge.hasAttribute('data-loading')).toBe(false)
+    expect(badge.querySelector('.dsha-composer-quota-val')?.textContent).toBe('40%')
   })
 
   it('does not restart its poll when the caller re-renders with fresh callbacks', async () => {

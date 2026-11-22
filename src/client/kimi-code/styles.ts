@@ -64,11 +64,27 @@ const BASE = `
 .dsha-mini-btn:hover{text-decoration:underline}
 .dsha-empty{border:0.5px dashed var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-tertiary);font-size:12px;margin:12px 0 0;padding:16px;text-align:center}
 .dsha-error{color:var(--dsw-alias-label-danger,#d94b4b);font-size:12px;margin:8px 0 0}
-.dsha-composer-quota{align-items:center;background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;corner-shape:round;color:var(--dsw-alias-label-secondary);cursor:pointer;display:inline-flex;font-size:11px;gap:6px;height:28px;line-height:1;max-width:160px;padding:0 9px;white-space:nowrap;user-select:none;transition:all .15s ease}
-.dsha-composer-quota:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l1,var(--dsw-alias-border-l2))}
-.dsha-composer-quota strong{color:var(--dsw-alias-label-primary);font-size:11px;font-weight:650}
-.dsha-composer-quota[data-level=warning] strong{color:var(--dsw-alias-label-warning,#d58a24)}
-.dsha-composer-quota[data-level=danger] strong{color:var(--dsw-alias-label-danger,#d94b4b)}
+/* Composer quota capsule (QuotaCapsule): a health indicator in the level's tone
+   (ring gauge when the remaining share is known, status dot otherwise), a quiet
+   label and a tabular number. --dsha-q-tone carries the level to every part. */
+.dsha-composer-quota{--dsha-q-tone:var(--dsw-alias-label-success,#10b981);align-items:center;background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;corner-shape:round;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));display:inline-flex;font-size:11px;font-variant-numeric:tabular-nums;gap:6px;height:26px;line-height:1;max-width:180px;outline:none;padding:0 10px 0 8px;white-space:nowrap;user-select:none;transition:background-color .15s ease,border-color .15s ease,box-shadow .15s ease}
+.dsha-composer-quota[data-level=warning]{--dsha-q-tone:var(--dsw-alias-label-warning,#d58a24)}
+.dsha-composer-quota[data-level=danger]{--dsha-q-tone:var(--dsw-alias-label-danger,#d94b4b);background:color-mix(in srgb,var(--dsha-q-tone) 10%,var(--dsw-alias-bg-layer-2,transparent));border-color:color-mix(in srgb,var(--dsha-q-tone) 40%,transparent)}
+.dsha-composer-quota[role=button]{cursor:pointer}
+.dsha-composer-quota[role=button]:hover{background:var(--dsw-alias-interactive-bg-hover);border-color:var(--dsw-alias-border-l1,var(--dsw-alias-border-l2))}
+.dsha-composer-quota[data-level=danger][role=button]:hover{background:color-mix(in srgb,var(--dsha-q-tone) 16%,var(--dsw-alias-bg-layer-2,transparent))}
+.dsha-composer-quota:focus-visible{box-shadow:0 0 0 2px color-mix(in srgb,var(--dsw-alias-button-info-fill,#397ee8) 55%,transparent)}
+.dsha-composer-quota-dot{background:var(--dsha-q-tone);border-radius:50%;box-shadow:0 0 0 2.5px color-mix(in srgb,var(--dsha-q-tone) 22%,transparent);display:block;flex:none;height:6px;margin:0 1px;width:6px}
+.dsha-composer-quota-ring{display:block;flex:none;height:14px;transform:rotate(-90deg);width:14px}
+.dsha-composer-quota-ring circle{fill:none;stroke-width:2.25}
+.dsha-composer-quota-ring-track{stroke:color-mix(in srgb,var(--dsha-q-tone) 22%,transparent)}
+.dsha-composer-quota-ring-fill{stroke:var(--dsha-q-tone);transition:stroke-dasharray .35s ease}
+.dsha-composer-quota-label{font-weight:500;overflow:hidden;text-overflow:ellipsis}
+.dsha-composer-quota-val{color:var(--dsw-alias-label-primary);flex:none;font-size:12px;font-weight:650;letter-spacing:-.01em}
+.dsha-composer-quota[data-level=warning] .dsha-composer-quota-val,.dsha-composer-quota[data-level=danger] .dsha-composer-quota-val{color:var(--dsha-q-tone)}
+.dsha-composer-quota[data-loading=true] .dsha-composer-quota-dot,.dsha-composer-quota[data-loading=true] .dsha-composer-quota-ring{animation:dsha-q-pulse 1s ease-in-out infinite}
+@keyframes dsha-q-pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.dsha-composer-quota[data-loading=true] .dsha-composer-quota-dot,.dsha-composer-quota[data-loading=true] .dsha-composer-quota-ring{animation:none;opacity:.5}.dsha-composer-quota-ring-fill{transition:none}}
 
 .dsha-device-box{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:flex;flex-direction:column;gap:10px;margin-top:12px;padding:12px}
 .dsha-code-row{align-items:center;display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between}

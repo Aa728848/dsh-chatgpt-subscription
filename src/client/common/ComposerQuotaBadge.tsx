@@ -29,10 +29,10 @@ export interface ComposerQuotaFacts {
   tooltip: string
   level: 'normal' | 'warning' | 'danger'
   /**
-   * The remaining share (0–100) to draw beside the number, for a line whose
-   * status states one. It is optional on purpose: most lines report only a
-   * number, and the badge then renders exactly the markup it always did — the
-   * bar exists for the lines that can state a remaining share, not as a default.
+   * The remaining share (0–100) to draw as a ring gauge, for a line whose status
+   * states one. It is optional on purpose: most lines report only a number, and
+   * the capsule then leads with a plain status dot — the ring exists for the
+   * lines that can state a remaining share, never as a guess.
    */
   percent?: number | null
 }
@@ -122,21 +122,74 @@ export function ComposerQuotaBadge<Status extends { authenticated: boolean }>(
   // per line and six of them must never be visible at once.
   if (!isSelected || status === null || !status.authenticated || facts === null) return null
 
+  return <QuotaCapsule
+    label={label}
+    text={facts.text}
+    tooltip={facts.tooltip}
+    level={facts.level}
+    percent={facts.percent}
+    loading={loading}
+    onRefresh={() => void fetchStatus(true)}
+  />
+}
+
+export interface QuotaCapsuleProps {
+  label: string
+  text: string
+  tooltip: string
+  level: ComposerQuotaFacts['level']
+  percent?: number | null
+  /** A refresh is in flight: the last number stays put and the indicator pulses. */
+  loading?: boolean
+  /** Present for a capsule that refreshes on click (and on Enter / Space). */
+  onRefresh?: () => void
+}
+
+/**
+ * The capsule itself, shared by every line's badge and by the Codex one.
+ *
+ * It leads with a health indicator in the level's tone: a ring gauge for a line
+ * that states its remaining share, a status dot for one that only reports a
+ * number. Both repeat what the tooltip already says in words, so they stay out
+ * of the accessibility tree. A refresh keeps the previous number on screen —
+ * swapping it for an ellipsis made the capsule change width on every poll.
+ */
+export function QuotaCapsule({ label, text, tooltip, level, percent, loading = false, onRefresh }: QuotaCapsuleProps): React.JSX.Element {
+  const share = typeof percent === 'number' && Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : null
+  const interactive = onRefresh !== undefined
   return <span
     className="dsha-composer-quota"
-    data-level={facts.level}
-    title={facts.tooltip}
-    aria-label={facts.tooltip}
-    onClick={() => void fetchStatus(true)}
+    data-level={level}
+    data-loading={loading ? 'true' : undefined}
+    aria-busy={loading || undefined}
+    title={tooltip}
+    aria-label={tooltip}
+    role={interactive ? 'button' : undefined}
+    tabIndex={interactive ? 0 : undefined}
+    onClick={onRefresh}
+    onKeyDown={interactive
+      ? (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          onRefresh()
+        }
+      : undefined}
   >
+    {share === null
+      ? <i className="dsha-composer-quota-dot" aria-hidden="true" />
+      : <svg className="dsha-composer-quota-ring" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle className="dsha-composer-quota-ring-track" cx="8" cy="8" r="6" pathLength={100} />
+          <circle
+            className="dsha-composer-quota-ring-fill"
+            cx="8"
+            cy="8"
+            r="6"
+            pathLength={100}
+            strokeDasharray={`${share} 100`}
+            strokeLinecap={share > 0 ? 'round' : 'butt'}
+          />
+        </svg>}
     <span className="dsha-composer-quota-label">{label}</span>
-    <strong className="dsha-composer-quota-val">{loading ? '…' : facts.text}</strong>
-    {/* The tooltip already states the share in words, so the bar is decoration
-        for sighted users only and stays out of the accessibility tree. */}
-    {typeof facts.percent === 'number' && Number.isFinite(facts.percent) && (
-      <span className="dsha-composer-quota-meter" aria-hidden="true">
-        <i className="dsha-composer-quota-meter-fill" style={{ width: `${Math.min(100, Math.max(0, facts.percent))}%` }} />
-      </span>
-    )}
+    <strong className="dsha-composer-quota-val">{text}</strong>
   </span>
 }

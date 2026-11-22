@@ -48,8 +48,6 @@ export function installOpenDesignStyles(): void {
 .dshod-plan-resets{color:var(--dsw-alias-label-tertiary);font-size:11px}
 .dshod-meter-track{background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;display:block;height:6px;overflow:hidden}
 .dshod-meter-fill{background:var(--dsw-alias-brand-primary);display:block;height:100%;transition:width .2s ease}
-.dsha-composer-quota-meter{align-self:center;background:var(--dsw-alias-border-l2);border-radius:999px;display:inline-block;flex:none;height:3px;overflow:hidden;width:24px}
-.dsha-composer-quota-meter-fill{background:var(--dsw-alias-brand-primary);display:block;height:100%}
 .dshod-adv-control{width:240px;max-width:100%;flex:none}
 .dshod-adv-control.dsha-select{max-width:240px;min-width:240px;width:240px}
 .dshod-adv-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}

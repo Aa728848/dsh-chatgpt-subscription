@@ -99,10 +99,6 @@ const CSS = `
 .dsh-codex-skeleton span{animation:dsh-codex-pulse 1.4s ease-in-out infinite;background:var(--dsw-alias-bg-layer-2);border-radius:5px;height:42px}
 .dsh-codex-skeleton span:nth-child(2){animation-delay:.12s}.dsh-codex-skeleton span:nth-child(3){animation-delay:.24s}
 .dsh-codex-sr{height:1px;margin:-1px;overflow:hidden;padding:0;position:absolute;width:1px;clip:rect(0 0 0 0);white-space:nowrap}
-.dsh-codex-composer-quota{align-items:center;background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:999px;corner-shape:round;color:var(--dsw-alias-label-secondary);display:inline-flex;font-size:11px;gap:6px;height:28px;line-height:1;max-width:160px;padding:0 9px;white-space:nowrap}
-.dsh-codex-composer-quota strong{color:var(--dsw-alias-label-primary);font-size:11px;font-weight:650}
-.dsh-codex-composer-quota[data-level=warning] strong{color:var(--dsw-alias-label-warning,#d58a24)}
-.dsh-codex-composer-quota[data-level=danger] strong{color:var(--dsw-alias-label-danger,#d94b4b)}
 .dsh-codex-image-tool{border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;display:flex;flex-direction:column;gap:8px;margin:4px 0 4px 4px;max-width:520px;padding:10px 12px}
 /* One line, always. In a 320px column the label used to be squeezed until it
    stacked one character per row, which reads as broken text rather than a card.

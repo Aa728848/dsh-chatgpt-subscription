@@ -4,6 +4,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import { CODEX_CHATGPT_PROVIDER_ID } from '../compat.ts'
 import type { PluginStatusDto } from '../shared/contracts.ts'
 import { SubscriptionApi } from './api.ts'
+import { QuotaCapsule, quotaLevel } from './common/ComposerQuotaBadge.tsx'
 import { useStore } from './common/use-store.ts'
 import { NS } from './locales.ts'
 import { selectQuotaForModel } from './quota.ts'
@@ -60,17 +61,14 @@ export function CodexComposerQuota({ api, directory, loadModelDirectory, t }: Pr
 
   const quota = useMemo(() => selectQuotaForModel(status?.quota, selected?.model), [selected?.model, status?.quota])
   if (!isCodex || status?.preferences.quickQuotaVisible !== true) return null
-  const level = quota === null
-    ? 'normal'
-    : quota.remainingPercent <= 5
-      ? 'danger'
-      : quota.remainingPercent <= 20
-        ? 'warning'
-        : 'normal'
-  return <span className="dsh-codex-composer-quota" data-level={level} aria-label={quota === null ? t('quickQuotaLoading') : `${t('quickQuotaLabel')}: ${formatPercent(quota.remainingPercent)}`}>
-    <span>{t('quickQuotaLabel')}</span>
-    <strong>{quota === null ? (loading ? t('quickQuotaLoading') : '—') : formatPercent(quota.remainingPercent)}</strong>
-  </span>
+  return <QuotaCapsule
+    label={t('quickQuotaLabel')}
+    text={quota === null ? (loading ? t('quickQuotaLoading') : '—') : formatPercent(quota.remainingPercent)}
+    tooltip={quota === null ? t('quickQuotaLoading') : `${t('quickQuotaLabel')}: ${formatPercent(quota.remainingPercent)}`}
+    level={quota === null ? 'normal' : quotaLevel(quota.remainingPercent)}
+    percent={quota?.remainingPercent ?? null}
+    loading={loading && quota !== null}
+  />
 }
 
 function formatPercent(value: number): string {
