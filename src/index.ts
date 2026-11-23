@@ -235,6 +235,10 @@ import {
   type CompactionStreamOptions,
 } from './host/compaction-route/index.ts'
 import {
+  installSessionTitleGuard,
+  type SessionTitleGuardContext,
+} from './host/session-title-guard/index.ts'
+import {
   installNoAnswerResume,
   type NoAnswerResumeContext,
   type NoAnswerResumeOptions,
@@ -257,6 +261,7 @@ import {
 import {
   CACHE_WARMUP_SETTING_DESCRIPTION,
   CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION,
+  readCacheWarmupConfigField,
   resolveCacheWarmupSettings,
 } from './host/cache-warmup/settings.ts'
 import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
@@ -411,6 +416,13 @@ export interface Config {
   cacheWarmup?: Volatile<boolean>
   /** 允许产生新结果预览的线路；默认覆盖 controlled providers，空数组表示全部关闭。 */
   cacheWarmupProviders?: Volatile<readonly string[]>
+  /**
+   * 跳过本插件自有线路上的自动会话标题请求：DSH 会在首条消息后再发一次辅助
+   * `llm/stream`（`purpose: 'session-title'`）走会话当前线路、花同一份额度；
+   * 开启后在 `llm/stream` 瀑布层短路这次请求（不触达适配器、零消耗），标题改用
+   * DSH 的确定性首条消息回退标题。默认开启。
+   */
+  skipSessionTitle?: Volatile<boolean>
   /**
    * 检索型结果投影独立开关：默认开启，只影响明确导航任务之后的新结果。
    *
@@ -646,6 +658,11 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description(CACHE_WARMUP_SETTING_DESCRIPTION),
   cacheWarmupProviders: z.array(z.string()).default(CONTROLLED_PROVIDERS as unknown as string[]).volatile()
     .description('允许产生新结果预览的线路；默认覆盖全部受控线路，空数组表示关闭所有新投影。'),
+  // 会话标题的额外一次模型请求由 DSH 内置 title provider 在首条消息后发出，走会话当前线路，
+  // 花的是同一条额度。这里在本插件自有线路上一律短路掉这次请求（不触达适配器、零消耗），
+  // 标题回退到 DSH 的确定性首条消息标题。volatile：设置卡保存即生效，无需重挂。
+  skipSessionTitle: z.boolean().default(true).volatile()
+    .description('在本插件自有线路上跳过自动会话标题的额外一次模型请求（不触达模型、零消耗），标题改用首条消息的确定性回退标题；默认开启。'),
   cacheWarmupRetrieval: z.boolean().default(true).volatile()
     .description(CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION),
   cacheWaitWarmup: z.boolean().default(true).volatile()
@@ -778,6 +795,24 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     })
     return () => handle?.dispose()
   }, 'dsh-chatgpt-subscription: compaction prompt')
+
+  // The automatic session-title request is one extra model call on the session's
+  // own line, charged to that line's quota. On this plugin's lines the user does
+  // not want it: short-circuit it at `llm/stream` so the adapter is never
+  // dispatched (no request, no spend) and the title falls back to DSH's
+  // deterministic first-message title. Other providers keep their titles.
+  ctx.effect(() => {
+    const handle = installSessionTitleGuard(
+      {
+        on: (event, listener, options) => (ctx as unknown as SessionTitleGuardContext).on?.(event, listener, options),
+      },
+      {
+        providers: CONTROLLED_PROVIDERS,
+        enabled: () => readCacheWarmupConfigField(pluginConfig.skipSessionTitle) !== false,
+      },
+    )
+    return () => handle?.dispose()
+  }, 'dsh-chatgpt-subscription: session title guard')
 
   // The four host-plane guards below extend the forked preset services to the
   // presets this package does NOT own (the built-in standard / ptc / cordis
