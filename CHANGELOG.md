@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.82.2 - 2026-11-23
+
+- **[aws-quick] 修复 Windows 桌面端 MCP stdio 注册了 Electron 可执行文件导致初始化失败**：Quick 连接器改用 `resolveQuickNode()` 启动——纯 Node 宿主沿用 `process.execPath`，Electron 桌面宿主改为使用随附的 `runtime/primary-runtime/dependencies/node`（再退回 PATH 上的 node），都找不到时报清晰错误；不再用 `DeepSeek Harness.exe` 启动 stdio 子进程污染 JSON-RPC 握手。新增 Windows 回归测试 (#126)。
+
+- **[aws-quick] 按 Quick 64 KB 单条请求上限预算外发消息**：新增 `budgetQuickRequest()`，发送前按 UTF-8 字节裁剪——保留最新用户输入与工具/客户端授权策略，把超大 system 上下文截断到剩余空间并加标记，会话过大时保留 transcript 尾部；无法压缩时抛出不可重试的 `INVALID_REQUEST`。Quick 的 64 KB 体积拒绝也归为不可重试，不再当作 `SERVER` 反复重试。新增回归测试 (#127)。
+
+- **[antigravity-acp] 修复上下文用量虚报**：`readUsage()` 不再把 ACP `session/prompt` 里整段会话累计的 `cachedReadTokens` 当作本轮 `cacheReadTokens` 上报，避免上下文表盘把累计缓存当成当前占用（实测 2 轮即报 94% / 983K，真实约 65K）。`inputTokens` 仍按次保留，真实占用继续走 `usage_update` / `lastOccupancy`。新增回归测试 (#125)。
+
 ## 0.82.1 - 2026-11-23
 
 - **[aws-quick] 修复相同参数的并发工具调用串线**：Quick 同时发起两次参数完全相同的工具调用时，MCP 请求不再全部认领到第一个 WSS 调用上；每个待处理调用最多被认领一次，两个结果分别回到各自的调用。新增并发同参调用回归测试。
