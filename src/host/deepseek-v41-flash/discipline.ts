@@ -155,11 +155,10 @@ export function installDeepSeekV41FlashDiscipline(
       text: DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT,
       interpolate: false,
     }
-    const warmupIndex = sections.findIndex(section => section?.name === 'plugin:cache-warmup')
-    const nextSections = warmupIndex >= 0
-      ? [...sections.slice(0, warmupIndex + 1), entry, ...sections.slice(warmupIndex + 1)]
-      : [...sections, entry]
-    return { ...result, sections: nextSections }
+    // 始终追加在系统提示词末尾：
+    // 1. 不移动前方人设、工具说明与 `tools:sdk`，最大化前缀缓存共享；
+    // 2. 紧接对话历史之前，显著提升可读性与执行纪律的遵循度。
+    return { ...result, sections: [...sections, entry] }
   }
 
   const off = subscribeAssemble(host, onAssemble)

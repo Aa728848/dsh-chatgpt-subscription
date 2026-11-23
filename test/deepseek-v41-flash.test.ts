@@ -168,25 +168,27 @@ describe('DeepSeek V4.1 Flash discipline section', () => {
       sections: [
         { name: 'persona', text: 'base persona' },
         { name: 'plugin:cache-warmup', text: 'warmup guidance' },
+        { name: 'tools:sdk', text: 'sdk declarations' },
       ],
     }
 
-    // 1. 官方 deepseek-flash 命中，插入在 cache-warmup 后且 interpolate: false
+    // 1. 官方 deepseek-flash 命中，始终追加到系统提示词最末尾（在 tools:sdk 之后）且 interpolate: false
     const flashAgent = makeAgent('deepseek-official', 'deepseek-flash')
     const out1 = await emitWaterfall('system-prompt/assemble', [base, { scope: flashAgent }], () => base)
     const out2 = await emitWaterfall('system-prompt/assemble', [base, { scope: flashAgent }], () => base)
     expect(out1.sections.map(s => s.name)).toEqual([
       'persona',
       'plugin:cache-warmup',
+      'tools:sdk',
       DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION,
     ])
-    expect(out1.sections[2]).toEqual({
+    expect(out1.sections[3]).toEqual({
       name: DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION,
       text: DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT,
       interpolate: false,
     })
     // 前缀稳定性：连续装配结果逐字节一致
-    expect(out2.sections[2]?.text).toBe(out1.sections[2]?.text)
+    expect(out2.sections[3]?.text).toBe(out1.sections[3]?.text)
     // 包含面向人类的输出可读性指导，且示范清爽排版（不使用密集加粗列表腔，避免模型格式镜像）
     expect(DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT).toContain('### Readable final responses')
     expect(DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT).toContain('without reducing internal reasoning depth')
