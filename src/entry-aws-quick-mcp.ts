@@ -14,16 +14,20 @@ server.setRequestHandler(ListToolsRequestSchema,async()=>{
 let forwarding:Promise<void>=Promise.resolve()
 server.setRequestHandler(CallToolRequestSchema,async(request)=>{
  try{
-  // Preserve MCP receipt order until fetch starts, but never serialize tool execution.
-  const started=forwarding.then(()=>fs.readFile(statePath,'utf8').then(raw=>{
-   const state=JSON.parse(raw) as {execution?:{url?:string;token?:string}}
-   const execution=state.execution;if(!execution?.url||!execution.token)throw new Error('The DSH execution bridge is not ready.')
-   const response=fetch(execution.url,{method:'POST',headers:{Authorization:'Bearer '+execution.token,'Content-Type':'application/json'},body:JSON.stringify({name:request.params.name,arguments:request.params.arguments??{}}),signal:AbortSignal.timeout(310_000)})
-   return{response}
-  }))
-  forwarding=started.then(()=>undefined,()=>undefined)
-  const {response:pendingResponse}=await started
-  const response=await pendingResponse
+  // The broker flushes headers once it has queued this call. The body can finish independently.
+  const accepted=forwarding.then(async()=>{
+   const state=JSON.parse(await fs.readFile(statePath,'utf8')) as {execution?:{url?:string;token?:string}}
+   const execution=state.execution
+   if(!execution?.url||!execution.token)throw new Error('The DSH execution bridge is not ready.')
+   return fetch(execution.url,{
+    method:'POST',
+    headers:{Authorization:'Bearer '+execution.token,'Content-Type':'application/json'},
+    body:JSON.stringify({name:request.params.name,arguments:request.params.arguments??{}}),
+    signal:AbortSignal.timeout(310_000),
+   })
+  })
+  forwarding=accepted.then(()=>undefined,()=>undefined)
+  const response=await accepted
   const result=await response.json() as {content?:unknown;isError?:boolean}
   if(!response.ok||!Array.isArray(result.content))throw new Error('The DSH execution bridge returned an invalid result.')
   return result as {content:[];isError?:boolean}

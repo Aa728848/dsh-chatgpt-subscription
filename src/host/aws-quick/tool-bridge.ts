@@ -17,6 +17,8 @@ function control(result:unknown,action:string):void{if(typeof result==='object'&
 export class AwsQuickToolBridge{
  private readonly catalogs=new Map<string,QuickToolCatalog>()
  private readonly union=new Map<string,Tool>()
+ private lifecycle:Promise<void>=Promise.resolve()
+ private publishedState=false
  private readonly statePath:string
  private readonly entryFile:string|undefined
  private tools:AwsQuickToolsDto={state:'not_initialized'}
@@ -30,31 +32,48 @@ export class AwsQuickToolBridge{
   const execution=includeExecution?await this.broker.start():undefined
   await fs.writeFile(temp,JSON.stringify({version:1,tools,...(execution?{execution}:{})},null,2),{encoding:'utf8',mode:0o600});await fs.rename(temp,this.statePath)
  }
+ // Quick has one connector and one state file shared by all host sessions.
+ private inOrder<T>(operation:()=>Promise<T>):Promise<T>{
+  const result=this.lifecycle.then(operation)
+  this.lifecycle=result.then(()=>undefined,()=>undefined)
+  return result
+ }
  status():AwsQuickToolsDto{return{...this.tools}}
  private async restoreTools():Promise<void>{
   try{
    const state=JSON.parse(await fs.readFile(this.statePath,'utf8')) as {tools?:unknown}
-   if(!Array.isArray(state.tools))return
+   if(!Array.isArray(state?.tools))return
    for(const candidate of state.tools){
     if(!candidate||typeof candidate!=='object')continue
     const tool=candidate as Partial<Tool>
     if(typeof tool.name==='string'&&tool.name&&typeof tool.description==='string'&&!this.union.has(tool.name))this.union.set(tool.name,tool as Tool)
    }
-  }catch{}
+  }catch(error){
+   if(!(error instanceof SyntaxError)&&(error as NodeJS.ErrnoException).code!=='ENOENT')throw error
+  }
  }
  track(call:{id:string;name:string;argumentsText:string}):void{this.broker.track(call)}
  settle(id:string,content:QuickResultContent[],isError=false):void{this.broker.settle(id,content,isError)}
- async prepare():Promise<AwsQuickToolsDto>{await this.restoreTools();await this.register(false);return this.status()}
+ prepare():Promise<AwsQuickToolsDto>{
+  return this.inOrder(async()=>{await this.register(false);return this.status()})
+ }
  private async register(requireTools:boolean):Promise<void>{
   this.tools={state:'pending'}
   try{
+   if(!this.publishedState)await this.restoreTools()
    await this.writeState()
-   const config={id:'dsh-quick',name:'DeepSeek Harness',description:'DSH tools exposed by DeepSeek Harness',transport:'stdio',command:process.execPath,args:[this.entryPath(),this.statePath],env:{ELECTRON_RUN_AS_NODE:'1'},enabled:true}
+   this.publishedState=true
+   const id='dsh-quick'
    let listed=await this.outpost.mcp<{servers?:QuickMcpEntry[]}>('list')
-   let registered=listed.servers?.find((entry)=>entry.id===config.id)
-   const compatible=registered?.transport==='stdio'&&registered.name===config.name&&registered.command===config.command&&JSON.stringify(registered.args??[])===JSON.stringify(config.args)&&registered.env?.ELECTRON_RUN_AS_NODE==='1'
-   if(registered&&!compatible&&registered.enabled===false){control(await this.outpost.mcp('remove',{id:config.id}),'remove');registered=undefined}
-   if(!registered){control(await this.outpost.mcp('add',config),'add')}else if(!compatible){control(await this.outpost.mcp('update',{...config}),'update')}
+   let registered=listed.servers?.find((entry)=>entry.id===id)
+   const config={id,name:'DeepSeek Harness',description:'DSH tools exposed by DeepSeek Harness',transport:'stdio',command:process.execPath,args:[this.entryPath(),this.statePath],env:{...registered?.env,ELECTRON_RUN_AS_NODE:'1'},enabled:true}
+   const sameLauncher=registered?.transport==='stdio'&&registered.name===config.name&&registered.command===config.command&&JSON.stringify(registered.args??[])===JSON.stringify(config.args)
+   if(registered?.enabled===false){
+    if(sameLauncher){this.tools={state:'approval_required'};return}
+    control(await this.outpost.mcp('remove',{id}),'remove');registered=undefined
+   }
+   if(!registered)control(await this.outpost.mcp('add',config),'add')
+   else if(!sameLauncher||registered.env?.ELECTRON_RUN_AS_NODE!=='1')control(await this.outpost.mcp('update',config),'update')
    listed=await this.outpost.mcp<{servers?:QuickMcpEntry[]}>('list');registered=listed.servers?.find((entry)=>entry.id===config.id)
    if(!registered||registered.enabled===false){this.tools={state:'approval_required'};return}
    const deadline=Date.now()+45_000;let reloaded=false
@@ -72,7 +91,8 @@ export class AwsQuickToolBridge{
    }
   }catch(error){this.tools={state:'error',detail:error instanceof Error?error.message:String(error)};throw error}
  }
- async ensure(tools:Tool[]):Promise<QuickToolCatalog>{
+ ensure(tools:Tool[]):Promise<QuickToolCatalog>{return this.inOrder(()=>this.ensureCatalog(tools))}
+ private async ensureCatalog(tools:Tool[]):Promise<QuickToolCatalog>{
   if(tools.length===0)throw new Error('Cannot register an empty Quick tool catalog.')
   const digest=fingerprint(tools);const existing=this.catalogs.get(digest);if(existing)return existing
   for(const tool of tools)this.union.set(tool.name,tool)
@@ -86,5 +106,12 @@ export class AwsQuickToolBridge{
   this.catalogs.set(digest,catalog);return catalog
  }
 
- async dispose():Promise<void>{await this.broker.close();await this.writeState(false).catch(()=>undefined);this.catalogs.clear();this.union.clear();this.tools={state:'not_initialized'}}
+ dispose():Promise<void>{
+  return this.inOrder(async()=>{
+   await this.broker.close()
+   if(this.publishedState)await this.writeState(false).catch(()=>undefined)
+   this.publishedState=false
+   this.catalogs.clear();this.union.clear();this.tools={state:'not_initialized'}
+  })
+ }
 }
