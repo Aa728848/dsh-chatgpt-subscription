@@ -124,16 +124,21 @@ describe('AWS Quick stdio tool bridge',()=>{
   try{const catalog=await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}]);expect(catalog.resolve('mcp__dsh_quick__read')).toBe('read');expect(catalog.resolve('other')).toBeNull()}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
  it('runs the MCP bridge on bundled Node, never the Electron app, under a desktop host (issue #126)',()=>{
-  const electron={platform:'win32' as const,execPath:'C:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe',resourcesPath:'C:\\Program Files\\DeepSeek Harness\\resources',isElectron:true}
-  const bundled='C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\primary-runtime\\dependencies\\node\\bin\\node.exe'
+  // Paths are built with the host's own sep so this runs on Windows and POSIX CI alike.
+  const isWin=process.platform==='win32';const bin=isWin?'node.exe':'node'
+  const root=path.join(path.parse(process.cwd()).root,'DeepSeek Harness')
+  const resources=path.join(root,'resources')
+  const execPath=path.join(root,isWin?'DeepSeek Harness.exe':'DeepSeek Harness')
+  const bundled=path.join(resources,'runtime','primary-runtime','dependencies','node','bin',bin)
+  const electron={platform:process.platform as NodeJS.Platform,execPath,resourcesPath:resources,isElectron:true}
   const exists=(file:string)=>file===bundled
   // The bundled primary-runtime node wins over the Electron executable.
   expect(resolveQuickNode({...electron,exists,pathEnv:''})).toBe(bundled)
   // With no bundled node the executable-adjacent resources dir is tried next.
   expect(resolveQuickNode({...electron,resourcesPath:undefined,exists,pathEnv:''})).toBe(bundled)
   // A PATH node is the last resort when the bundled runtime is absent.
-  const pathNode='C:\\Program Files\\nodejs\\node.exe'
-  expect(resolveQuickNode({...electron,resourcesPath:undefined,exists:(f)=>f===pathNode,pathEnv:'C:\\Program Files\\nodejs'})).toBe(pathNode)
+  const pathDir=path.join(path.parse(process.cwd()).root,'nodejs');const pathNode=path.join(pathDir,bin)
+  expect(resolveQuickNode({...electron,resourcesPath:undefined,exists:(f)=>f===pathNode,pathEnv:pathDir})).toBe(pathNode)
   // A plain Node host keeps process.execPath exactly as before.
   expect(resolveQuickNode({platform:'linux',execPath:'/usr/bin/node',isElectron:false,exists:()=>false,pathEnv:''})).toBe('/usr/bin/node')
   // Nothing usable is a clear error, not a silent fall back to Electron.
