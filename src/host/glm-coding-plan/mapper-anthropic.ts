@@ -86,6 +86,7 @@
  * 4. `cache_control` 在本线路上是否真的命中缓存、命中比例多少。本轮无实机账号
  *    （计划 D9），只按 Anthropic 公开协议与官方客户端的用法发形状。
  */
+import { createHash } from 'node:crypto'
 import {
   LlmError,
   type ContentBlock,
@@ -112,6 +113,7 @@ import {
   CHAT_PATH_ANTHROPIC,
   DEFAULT_MAX_TOKENS,
   ERROR_CODE,
+  PROVIDER_ID,
   PROVIDER_NAME,
   USER_AGENT,
   apiBaseForRegion,
@@ -424,22 +426,111 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
   return blocks
 }
 
+/** 签名思考块回放的来源绑定范围。 */
+export interface GlmAnthropicReplayScope {
+  readonly provider?: string
+  readonly route?: string
+  readonly model: string
+}
+
+function computeVisibleContentHash(blocks: unknown): string {
+  if (!Array.isArray(blocks)) return ''
+  const canonical = blocks.map((b) => {
+    if (!isRecord(b)) return null
+    const type = asString(b.type) ?? ''
+    if (type === 'text' || type === 'reasoning') return [type, sanitizeText(asString(b.text) ?? '')]
+    if (type === 'tool-call') {
+      const raw = typeof b.arguments === 'string' ? b.arguments : safeStringify(b.arguments)
+      return [type, asString(b.id) ?? '', asString(b.name) ?? '', raw]
+    }
+    return [type]
+  })
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 32)
+}
+
+/**
+ * 仅当历史消息携带上游原发、带有效 `signature`（或 `redacted_thinking.data`）且
+ * `provider/route/model/visibleContentHash` 全部精确匹配的 `replayState` 时，原样回放
+ * 思考块以支持 GLM-5.2/5.3 的 Preserved / Interleaved Thinking；任何无签名或跨模型/
+ * 跨线路/已被改写的块一律静默跳过，绝不发出无签名 thinking 块引发 400。
+ */
+function replayedGlmThinkingBlock(
+  message: Message,
+  index: number,
+  expectedScope?: GlmAnthropicReplayScope,
+  block?: Record<string, unknown>,
+): AnthropicBlock | undefined {
+  if (expectedScope === undefined) return undefined
+  const source = message.source
+  if (source === undefined || source === null || !isRecord(source)) return undefined
+  if (source.provider && source.provider !== PROVIDER_ID && source.provider !== 'dsh-chatgpt-subscription') {
+    return undefined
+  }
+  if (source.model && source.model !== expectedScope.model) return undefined
+  const state = source.replayState
+  if (!isRecord(state)) return undefined
+  const resp = isRecord(state.response) ? state.response : state
+  const stateRoute = asString(resp.route) ?? asString(resp.provider)
+  const stateModel = asString(resp.model)
+  if (!stateRoute || !stateModel) return undefined
+  const expectedRoute = expectedScope.route ?? expectedScope.provider ?? PROVIDER_ID
+  if (stateRoute !== expectedRoute || stateModel !== expectedScope.model) return undefined
+
+  const rawBlocks = Array.isArray(state.blocks)
+    ? state.blocks
+    : Array.isArray(resp.blocks)
+      ? resp.blocks
+      : undefined
+  if (rawBlocks === undefined || rawBlocks.length !== message.content.length) return undefined
+  const candidate = rawBlocks[index]
+  if (!isRecord(candidate)) return undefined
+
+  const stateHash = asString(resp.visibleContentHash)
+  if (!stateHash || stateHash.trim() === '') return undefined
+  if (computeVisibleContentHash(message.content) !== stateHash) return undefined
+
+  const visibleText = asString(block?.text) ?? ''
+  if (candidate.type === 'redacted_thinking') {
+    if (visibleText !== '') return undefined
+    const data = asString(candidate.data)
+    if (!data || data.trim() === '') return undefined
+    return { type: 'redacted_thinking', data }
+  }
+  if (candidate.type === 'thinking') {
+    const nativeThinking = asString(candidate.thinking) ?? ''
+    if (sanitizeText(nativeThinking) !== sanitizeText(visibleText)) return undefined
+    const signature = asString(candidate.signature)
+    if (!signature || signature.trim() === '') return undefined
+    return { type: 'thinking', thinking: nativeThinking, signature }
+  }
+  return undefined
+}
+
 /**
  * 一个 assistant 轮要回放的内容块。
  *
- * **reasoning 块不回放**：历史同族实现 `7e40fce` 逐字写明「Reasoning blocks are never
- * replayed: the endpoint does not accept a thinking block without the signature that
- * produced it」，而本线路的思考块是否带签名、是否必须回放都没有实测样本（**未验证**，
- * 见文件头第五节）。这里选与同族实现相同的「不回放」，并在注释里点名它是一个待验证决定。
+ * **有签名才回放**：当上游下发了带 `signature` 的 `thinking` 块（或 `redacted_thinking`）
+ * 并随消息存入 `replayState` 且来源/内容指纹全部匹配时原样回放，以维持 GLM-5.2/5.3
+ * 的 Preserved / Interleaved Thinking；未携带有效签名的普通 reasoning 块保持不回放，
+ * 避免向网关发送无签名 thinking 块。
  *
  * tool-call 的 `input` 是**解析后**的对象：Messages 线上它就是 JSON 对象；
  * DSH 那边保持原始串（协议义务在响应侧），回放侧这里只需要对象。
  */
-function anthropicAssistantContent(message: Message): AnthropicBlock[] {
+function anthropicAssistantContent(
+  message: Message,
+  replayScope?: GlmAnthropicReplayScope,
+): AnthropicBlock[] {
   const blocks: AnthropicBlock[] = []
   if (!Array.isArray(message.content)) return blocks
-  for (const block of message.content) {
+  for (let i = 0; i < message.content.length; i += 1) {
+    const block = message.content[i]
     if (!isRecord(block)) continue
+    if (block.type === 'reasoning') {
+      const replayed = replayedGlmThinkingBlock(message, i, replayScope, block)
+      if (replayed !== undefined) blocks.push(replayed)
+      continue
+    }
     if (block.type === 'text' && typeof block.text === 'string') {
       const text = sanitizeText(block.text)
       if (text !== '') blocks.push({ type: 'text', text })
@@ -621,6 +712,8 @@ export interface GlmAnthropicRequestOptions {
   thinkingDisableable?: boolean
   /** 调用方不指定输出上限时用的值，默认 `./types.ts` 的 `DEFAULT_MAX_TOKENS`。 */
   defaultMaxTokens?: number
+  /** 已签名思考块回放校验范围（可选；缺省时自动按当前 `PROVIDER_ID` + `options.model` 匹配）。 */
+  replayScope?: GlmAnthropicReplayScope
 }
 
 /**
@@ -665,13 +758,18 @@ export function buildGlmAnthropicRequest(
     }
   }
 
+  const replayScope: GlmAnthropicReplayScope = request.replayScope ?? {
+    provider: PROVIDER_ID,
+    route: PROVIDER_ID,
+    model: options.model,
+  }
   const entries: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = []
   for (const message of nonSystemMessages(options)) {
     if (isToolResultMessage(message) || message.role !== 'assistant') {
       entries.push({ role: 'user', content: anthropicUserContent(message, images) })
       continue
     }
-    entries.push({ role: 'assistant', content: anthropicAssistantContent(message) })
+    entries.push({ role: 'assistant', content: anthropicAssistantContent(message, replayScope) })
   }
 
   const system = glmAnthropicSystemBlocks(options)
@@ -743,6 +841,10 @@ interface PendingThinking {
 export interface GlmAnthropicStreamState {
   /** 按 DSH 下标排列的已发块；块一开就占位。 */
   blocks: OutboundContentBlock[]
+  /** 与 `blocks` 下标对齐的原生已签名思考块（无签名块为 null）。 */
+  replayBlocks: Array<AnthropicBlock | null>
+  /** 本次响应的来源绑定（用于写出可验证的 replayState）。 */
+  provenance?: GlmAnthropicReplayScope
   /** wire content index -> 正在接收文本的那个块。 */
   openText: Map<number, { index: number; text: string }>
   /** wire content index -> 累积中的工具调用。 */
@@ -767,9 +869,13 @@ export interface GlmAnthropicStreamState {
 }
 
 /** 新的一次响应的流状态。 */
-export function createGlmAnthropicStreamState(): GlmAnthropicStreamState {
+export function createGlmAnthropicStreamState(
+  provenance?: GlmAnthropicReplayScope,
+): GlmAnthropicStreamState {
   return {
     blocks: [],
+    replayBlocks: [],
+    ...(provenance === undefined ? {} : { provenance }),
     openText: new Map(),
     toolCalls: new Map(),
     pending: new Map(),
@@ -870,6 +976,17 @@ function closeThinkingBlock(state: GlmAnthropicStreamState, contentIndex: number
   const text = pending.kind === 'thinking' ? pending.text : ''
   const block: OutboundContentBlock = { type: 'reasoning', text }
   state.blocks[pending.index] = block
+  if (pending.kind === 'redacted_thinking' && pending.data.trim() !== '') {
+    state.replayBlocks[pending.index] = { type: 'redacted_thinking', data: pending.data }
+  } else if (pending.kind === 'thinking' && pending.signature.trim() !== '') {
+    state.replayBlocks[pending.index] = {
+      type: 'thinking',
+      thinking: pending.text,
+      signature: pending.signature,
+    }
+  } else {
+    state.replayBlocks[pending.index] = null
+  }
   state.hasContent = true
   return [{ type: 'block-end', index: pending.index, block }]
 }
@@ -932,7 +1049,24 @@ export function closeGlmAnthropicStream(state: GlmAnthropicStreamState): StreamC
   state.finished = true
   const out = flushOpenBlocks(state)
   if (state.sawUsage) out.push({ type: 'usage', usage: tokenUsage(state) })
-  out.push({ type: 'finish', reason: finishReasonFor(state) })
+  const paddedBlocks = state.blocks.map((_, i) => state.replayBlocks[i] ?? null)
+  const hasReplay = paddedBlocks.some((block) => block !== null)
+  const replayState = hasReplay && state.provenance !== undefined
+    ? {
+        response: {
+          provider: state.provenance.provider ?? PROVIDER_ID,
+          route: state.provenance.route ?? PROVIDER_ID,
+          model: state.provenance.model,
+          visibleContentHash: computeVisibleContentHash(state.blocks),
+        },
+        blocks: paddedBlocks,
+      }
+    : undefined
+  out.push({
+    type: 'finish',
+    reason: finishReasonFor(state),
+    ...(replayState === undefined ? {} : { replayState }),
+  })
   return out
 }
 

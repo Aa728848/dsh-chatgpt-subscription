@@ -112,7 +112,14 @@ describe('resolveTimelineCacheGuardEnabled', () => {
   })
 
   it('protects every line that bills for prefix cache', () => {
-    expect([...DEFAULT_TIMELINE_CACHE_PROVIDERS]).toEqual(['kimi-code', 'minimax-code', 'qianwen-token-plan'])
+    expect([...DEFAULT_TIMELINE_CACHE_PROVIDERS]).toEqual([
+      'kimi-code',
+      'minimax-code',
+      'qianwen-token-plan',
+      'glm-coding-plan',
+      'step-code',
+      'ollama',
+    ])
   })
 })
 

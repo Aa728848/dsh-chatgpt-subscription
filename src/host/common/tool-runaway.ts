@@ -101,6 +101,7 @@ export type ToolRunawaySignalKind =
   | 'same_error_family'
   | 'polling_repeat'
   | 'abab_action_cycle'
+  | 'read_only_spin'
 
 /** 一次工具执行的可观察事实。 */
 export interface ToolRunawayObservation {
@@ -156,6 +157,8 @@ export interface ToolRunawayGuard {
 export interface ToolRunawayGuardOptions {
   /** 连击多少次才提醒（默认 3）。 */
   readonly remindAfterOccurrences?: number
+  /** 检测到 A-B-A-B 交替工具循环时是否也触发温和提醒（默认 false，保持向后兼容）。 */
+  readonly remindOnAbabCycle?: boolean
 }
 
 /** 失控守卫的默认连击阈值：第三次重复/同族报错/不变轮询时给出提醒。 */
@@ -163,6 +166,18 @@ export const DEFAULT_REMIND_AFTER_OCCURRENCES = 3
 
 /** 轮询类工具名（后台任务的结果读取）。 */
 export const POLLING_TOOL_NAMES: readonly string[] = Object.freeze(['job_output', 'task_output'])
+
+/** 典型纯只读探测工具集合（用于检测 Kimi K3/K3.1 等长上下文模型“读而不改”空转）。 */
+export const READ_ONLY_INSPECTION_TOOLS: ReadonlySet<string> = new Set([
+  'read',
+  'grep',
+  'glob',
+  'code_tools_list',
+  'code_tools_search',
+  'code_tools_describe',
+  'list_dir',
+  'find_by_name',
+])
 
 const TURN_ONLY_SUFFIX =
   ' This is a temporary runtime reminder for the current Turn only, not a user preference or a durable rule; do not save this reminder or generalize it into Memory, Skills, or other persistent instruction files for future Turns or sessions.'
@@ -175,6 +190,56 @@ export function renderExactActionRepeatReminder(occurrences: number): string {
 /** 渲染「同一族错误连续发生」提醒。 */
 export function renderSameErrorFamilyReminder(occurrences: number): string {
   return `[runaway guard] The same tool error family has now occurred ${occurrences} times in a row. Do not retry the same route unchanged. Diagnose the cause, change one controlled variable or switch route. Do not infer that the entire task has failed from this signal.${TURN_ONLY_SUFFIX}`
+}
+
+/** 渲染「A-B-A-B 交替空转循环」提醒。 */
+export function renderAbabActionCycleReminder(occurrences: number): string {
+  return `[runaway guard] An alternating A-B-A-B tool loop has occurred ${occurrences} times without state change. Stop cycling between the same two calls; synthesize the evidence already gathered and either execute a distinct state-changing step or report the concrete blocker.${TURN_ONLY_SUFFIX}`
+}
+
+/** 渲染「变参连续只读空转（Read-vs-Edit 陷阱）」提醒。 */
+export function renderReadOnlySpinReminder(streak: number): string {
+  return [
+    '<system-reminder>',
+    `You have issued ${streak} consecutive read-only inspection calls without any write, command execution, or final response.`,
+    'Pause and synthesize the evidence you already collected: if you have enough context, execute the edit/change or answer the user now; if one specific missing fact remains, batch the check into one targeted read or run_code call rather than continuing one-by-one reads.',
+    'This reminder applies only to the current Turn. Do not save or generalize it into Memory, Skills, or persistent instructions.',
+    '</system-reminder>',
+  ].join('\n')
+}
+
+export interface ReadOnlySpinTracker {
+  /** 记录一次工具调用；返回当前连续只读计数（非只读/写操作归零，协调工具不计数不归零）。 */
+  observe(toolName: string): number
+  current(): number
+  reset(): void
+}
+
+/**
+ * 追踪单个会话中的连续纯只读探测连击（用于防 Kimi K3/K3.1 等长上下文模型的 Read-vs-Edit 陷阱）。
+ * 协调类工具（如 progress_update / todo_write）既不累加也不清零；任何写/执行类工具立即清零。
+ */
+export function createReadOnlySpinTracker(
+  readOnlyTools: ReadonlySet<string> = READ_ONLY_INSPECTION_TOOLS,
+): ReadOnlySpinTracker {
+  let streak = 0
+  return {
+    observe(toolName: string): number {
+      if (isToolRunawayExemptTool(toolName)) return streak
+      if (readOnlyTools.has(toolName)) {
+        streak += 1
+        return streak
+      }
+      streak = 0
+      return 0
+    },
+    current(): number {
+      return streak
+    },
+    reset(): void {
+      streak = 0
+    },
+  }
 }
 
 /** 渲染「反复轮询同一个后台任务」提醒。 */
@@ -367,6 +432,14 @@ export function createToolRunawayGuard(options: ToolRunawayGuardOptions = {}): T
           kind: 'polling_repeat',
           occurrences: pollingCandidate.count,
           text: renderPollingRepeatReminder(pollingCandidate.count),
+        }
+      }
+      if (options.remindOnAbabCycle === true && activeAbabKey !== undefined) {
+        reminderAttempted = true
+        return {
+          kind: 'abab_action_cycle',
+          occurrences: 2,
+          text: renderAbabActionCycleReminder(2),
         }
       }
       return undefined

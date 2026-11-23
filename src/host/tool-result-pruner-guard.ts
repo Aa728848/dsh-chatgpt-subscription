@@ -61,6 +61,11 @@ export interface ToolResultPrunerGuardOptions {
    * 50x 前缀缓存。接受活引用读取器；默认开启。
    */
   skipDeepSeekV41Flash?: () => boolean
+  /**
+   * 未显式替换 `skipProviders` 时，是否额外按模型跳过跨线路主力开源模型以保护
+   * 前缀缓存。接受活引用读取器；默认开启。
+   */
+  skipOpenModels?: () => boolean
 }
 
 /** 守卫句柄。 */
@@ -145,6 +150,15 @@ export function installToolResultPrunerGuard(
       return false
     }
   }
+  const shouldSkipOpenModels = (): boolean => {
+    if (options.skipProviders !== undefined) return false
+    if (options.skipOpenModels === undefined) return true
+    try {
+      return options.skipOpenModels() !== false
+    } catch {
+      return false
+    }
+  }
   /** 已包装过的实例（幂等标记）。 */
   const alreadyWrapped = new WeakSet<object>()
   /** 已包装过的「方法宿主 + 方法名」：同一个原型不叠第二层包装。 */
@@ -202,7 +216,7 @@ export function installToolResultPrunerGuard(
     }
     const original = target.original as PruneSessionMethod
     const replacement = function (this: unknown, session: unknown): unknown {
-      if (shouldSkipPruningForSession(session, skipSet, shouldSkipDeepSeekV41Flash())) {
+      if (shouldSkipPruningForSession(session, skipSet, shouldSkipDeepSeekV41Flash(), shouldSkipOpenModels())) {
         return { pruned: [], charsRemoved: 0 }
       }
       // receiver 用**调用方**的 this：服务里的 this.ctx 留在调用方那一层作用域。

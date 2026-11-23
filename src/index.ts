@@ -228,6 +228,12 @@ import {
   resolveDeepSeekV41FlashOptimizationEnabled,
 } from './host/deepseek-v41-flash/index.ts'
 import {
+  installOpenModelsOptimizations,
+  isOpenModelCacheWarmupProtected,
+  isOpenModelPrefixCacheProtected,
+  resolveOpenModelsOptimizationEnabled,
+} from './host/open-models/index.ts'
+import {
   installCompactionRoute,
   type CompactionChunk,
   type CompactionModelInfo,
@@ -404,6 +410,13 @@ export interface Config {
    */
   deepseekV41FlashOptimization?: Volatile<boolean>
   /**
+   * 面向项目内各大开源模型（Kimi K3/K3.1、GLM-5.x、DeepSeek-V4 Pro/Flash、MiniMax M3/M3.1/M2.7、
+   * Qwen 3.5–4、Step 3.5–5、MiMo V2.6、Ling 3.1、Hunyuan Hy4、LongCat 2.0 及 Ollama 本地推理模型）
+   * 的运行时专项优化总开关：按架构阵营提供尾部静态纪律、零改前缀状态锚、入库前观测头、Kimi 只读空转
+   * 提醒与 ESC ANSI 清洗、跨线路前缀缓存守护与无损推理坍塌熔断。严格按模型隔离，绝不影响闭源模型。
+   */
+  openModelsOptimization?: Volatile<boolean>
+  /**
    * 「结果预览」总开关：受控线路上超大的 `run_code` / `code_run` 与日志工具结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
    *
@@ -566,6 +579,8 @@ export interface ConfigInput {
   timelineCacheGuard?: boolean
   /** 仅针对 DeepSeek V4.1 Flash 的专项优化总开关（默认开启，严格按模型隔离）。 */
   deepseekV41FlashOptimization?: boolean
+  /** 面向各主力开源模型家族的运行时专项优化总开关（默认开启，严格按模型隔离，不影响闭源模型）。 */
+  openModelsOptimization?: boolean
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmup?: boolean
   /** 允许产生新结果预览的线路；默认覆盖 controlled providers。 */
@@ -650,6 +665,12 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 零影响其它线路与其它模型；volatile 活引用，关闭后下一步立刻旁路。
   deepseekV41FlashOptimization: z.boolean().default(true).volatile()
     .description('仅针对 DeepSeek V4.1 Flash（含 1017 与官方 deepseek-flash）的专项优化：静态思考与可读性排版纪律、128-token 尾部状态锚、入库前观测头、无损推理坍塌守卫与 50x 前缀缓存保护；不影响其它线路与模型。默认开启。'),
+
+  // 主力开源模型运行时专项优化（Kimi K3/K3.1、GLM-5.x、DeepSeek-V4 Pro/Flash、MiniMax M3/M3.1、
+  // Qwen 3.5–4、Step 3.5–5、MiMo V2.6、Ling 3.1、Hunyuan Hy4、LongCat 2.0、Ollama 本地推理）：
+  // 严格按模型门控，零影响闭源模型；volatile 活引用，关闭后下一步立刻旁路。
+  openModelsOptimization: z.boolean().default(true).volatile()
+    .description('面向各大开源模型（Kimi K3/K3.1、GLM-5.x、DeepSeek-V4 Pro/Flash、MiniMax M3/M3.1、Qwen 3.5–4、Step 3.5–5、MiMo V2.6、Ling 3.1、Hunyuan Hy4、LongCat 2.0 等）的专项运行时优化：尾部纪律、零改前缀状态锚、入库前观测头、Kimi 只读空转提醒与 ESC ANSI 清洗、跨线路前缀缓存守护与无损推理坍塌熔断；绝不影响闭源模型。默认开启。'),
 
   // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
   // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
@@ -828,12 +849,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // tool (the tool layer has no "edit one registered entry" API), so a late
   // install only warns.
   const deepSeekV41FlashEnabled = (): boolean => resolveDeepSeekV41FlashOptimizationEnabled(pluginConfig)
-  const matchDeepSeekV41FlashScope = (scope: unknown, modelSelection?: unknown): boolean =>
-    deepSeekV41FlashEnabled() && isDeepSeekV41FlashScope(scope, modelSelection)
+  const openModelsEnabled = (): boolean => resolveOpenModelsOptimizationEnabled(pluginConfig)
+  const matchProtectedModelScope = (scope: unknown, modelSelection?: unknown): boolean =>
+    (deepSeekV41FlashEnabled() && isDeepSeekV41FlashScope(scope, modelSelection))
+    || (openModelsEnabled() && isOpenModelPrefixCacheProtected(scope, modelSelection))
 
   ctx.effect(() => {
     const guard = installToolResultPrunerGuard(ctx, {
       skipDeepSeekV41Flash: deepSeekV41FlashEnabled,
+      skipOpenModels: openModelsEnabled,
     })
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: tool result pruner guard')
@@ -845,7 +869,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
 
   ctx.effect(() => {
     const guard = installPtcSdkCacheGuard(ctx, {
-      matchScope: matchDeepSeekV41FlashScope,
+      matchScope: matchProtectedModelScope,
     })
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: PTC SDK cache guard')
@@ -872,7 +896,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => {
     const guard = installTimelineCacheGuard(ctx, {
       enabled: () => resolveTimelineCacheGuardEnabled(pluginConfig),
-      matchScope: matchDeepSeekV41FlashScope,
+      matchScope: matchProtectedModelScope,
     })
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: timeline cache guard')
@@ -893,6 +917,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     })
     return () => handle.dispose()
   }, 'dsh-chatgpt-subscription: DeepSeek V4.1 Flash optimizations')
+
+  // 其余主力开源模型（Kimi K3/K3.1、GLM-5.x、DeepSeek-V4 Pro/Flash、MiniMax M3/M3.1、
+  // Qwen 3.5–4、Step 3.5–5、MiMo V2.6、Ling 3.1、Hunyuan Hy4、LongCat 2.0、Ollama 本地推理）
+  // 专属运行时优化总成：严格按模型门控，排除 V4.1 Flash 与全部闭源模型。
+  ctx.effect(() => {
+    const handle = installOpenModelsOptimizations(ctx, {
+      enabled: openModelsEnabled,
+      runawayEnabled: () => resolveToolRunawayGuardEnabled(pluginConfig),
+      skipCollapseGuard: pluginConfig.reasoningCollapseGuard !== false,
+    })
+    return () => handle.dispose()
+  }, 'dsh-chatgpt-subscription: open-models runtime optimizations')
 
   // MiniMax Code 的运行时增强：参数修复（edits 的 JSON 字符串、数字/布尔字符串、
   // {"item": [...]} 拆包）、PTC 直调提醒、工具级失控守卫。三样都只对 MiniMax
@@ -1113,7 +1149,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => installCacheWarmup(ctx as unknown as CacheWarmupContext, {
     // 函数而不是快照：设置卡保存后就地写新值，不重挂插件行。
     settings: () => resolveCacheWarmupSettings(pluginConfig),
-    admitRoute: route => deepSeekV41FlashEnabled() && isDeepSeekV41Flash(route.model, route.provider),
+    admitRoute: route =>
+      (deepSeekV41FlashEnabled() && isDeepSeekV41Flash(route.model, route.provider))
+      || (openModelsEnabled() && isOpenModelCacheWarmupProtected(route.model, route.provider)),
     durableHint: (sessionId, provider) => {
       if (provider !== undefined && provider !== KIMI_CODE_PROVIDER_ID) return undefined
       const record = sessionCacheState.read(sessionId)
@@ -2515,6 +2553,47 @@ export type {
   DetectedRoute,
   StateAnchorOptions,
 } from './host/deepseek-v41-flash/index.ts'
+export {
+  OPEN_MODEL_ANCHOR_PREFIX,
+  OPEN_MODEL_ANCHOR_SOURCE_KIND,
+  OPEN_MODEL_CONSECUTIVE_ERROR_THRESHOLD,
+  OPEN_MODEL_GUARD_NOTICE_SOURCE_KIND,
+  OPEN_MODEL_PROFILES,
+  READ_ONLY_SPIN_HIGH_CONTEXT_TOKENS,
+  bareOpenModelId,
+  installOpenModelDiscipline,
+  installOpenModelObservationGuard,
+  installOpenModelStateAnchor,
+  installOpenModelsOptimizations,
+  isDeepSeekV4NonV41Model,
+  isGlm5OpenModel,
+  isKimiOpenModel,
+  isLongSparseOpenModel,
+  isMimoOpenModel,
+  isMinimaxOpenModel,
+  isOpenModelCacheWarmupProtected,
+  isOpenModelPrefixCacheProtected,
+  isOpenModelSessionPrefixCacheProtected,
+  isQwenOpenModel,
+  isStepOpenModel,
+  matchOpenModelProfile,
+  matchOpenModelScope,
+  matchOpenModelSession,
+  renderOpenModelStateAnchorText,
+  resolveOpenModelsOptimizationEnabled,
+  stripEscAnsiSequences,
+} from './host/open-models/index.ts'
+export type {
+  AttentionArchitectureCamp,
+  OpenModelDisciplineOptions,
+  OpenModelFamily,
+  OpenModelObservationGuardOptions,
+  OpenModelProfile,
+  OpenModelStateAnchorOptions,
+  OpenModelsOptimizationConfigFields,
+  OpenModelsOptimizationHandle,
+  OpenModelsOptimizationOptions,
+} from './host/open-models/index.ts'
 export type {
   GuardAgentLike,
   GuardChunk,

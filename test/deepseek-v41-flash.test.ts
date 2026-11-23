@@ -459,7 +459,9 @@ describe('Existing prefix-cache & compaction guards isolated to DeepSeek V4.1 Fl
     })
     expect(shouldSkipPruningForSession(mkSession('deepseek-official', 'deepseek-flash'))).toBe(true)
     expect(shouldSkipPruningForSession(mkSession('opendesign', 'deepseek-v4.1-flash-1017'))).toBe(true)
-    expect(shouldSkipPruningForSession(mkSession('deepseek-official', 'deepseek-v4-pro'))).toBe(false)
+    // 单独考察 V4.1 Flash 门控（关闭 open-models 门控）时，兄弟模型 deepseek-v4-pro 不被 V4.1 Flash 误匹配
+    expect(shouldSkipPruningForSession(mkSession('deepseek-official', 'deepseek-v4-pro'), undefined, true, false)).toBe(false)
+    expect(shouldSkipPruningForSession(mkSession('deepseek-official', 'deepseek-chat'))).toBe(false)
     expect(shouldSkipPruningForSession(mkSession('opendesign', 'gpt-6.1-sol'))).toBe(false)
     expect(shouldSkipPruningForSession(mkSession('qoder', 'DeepSeek-Flash'))).toBe(false)
 

@@ -265,7 +265,17 @@ describe('修剪配置', () => {
     expect(PRUNE_MARKER).toBe('\n\n[... tool result middle pruned ...]\n\n')
     expect(DEFAULTS).toEqual({ thresholdChars: 8192, headChars: 4096, tailChars: 1024 })
     expect(Object.isFrozen(DEFAULTS)).toBe(true)
-    expect(DEFAULT_SKIP_PROVIDERS).toEqual(['kimi-code', 'minimax-code', 'qianwen-token-plan', 'claude-api', 'claude', 'claude-subscription'])
+    expect(DEFAULT_SKIP_PROVIDERS).toEqual([
+      'kimi-code',
+      'minimax-code',
+      'qianwen-token-plan',
+      'glm-coding-plan',
+      'step-code',
+      'ollama',
+      'claude-api',
+      'claude',
+      'claude-subscription',
+    ])
     expect(Object.isFrozen(DEFAULT_SKIP_PROVIDERS)).toBe(true)
     expect(PRUNER_SERVICE_NAME).toBe('toolResultPruner')
   })
@@ -925,6 +935,9 @@ describe('PTC SDK 段缓存守卫的默认受保护线路', () => {
       KIMI_CODE_PROVIDER,
       MINIMAX_CODE_PROVIDER,
       'qianwen-token-plan',
+      'glm-coding-plan',
+      'step-code',
+      'ollama',
     ])
     expect(Object.isFrozen(DEFAULT_PTC_SDK_CACHE_PROVIDERS)).toBe(true)
   })

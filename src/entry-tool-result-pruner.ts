@@ -31,6 +31,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { codexRemoteCompactionEnabled } from './host/codex-remote-compaction.ts'
 import { isDeepSeekV41FlashSession } from './host/deepseek-v41-flash/match.ts'
+import { isOpenModelSessionPrefixCacheProtected } from './host/open-models/profiles.ts'
 
 // ── 冻结契约 ───────────────────────────────────────────────────────────────
 
@@ -56,6 +57,12 @@ export const DEFAULT_SKIP_PROVIDERS: readonly string[] = deepFreeze([
   'kimi-code',
   'minimax-code',
   'qianwen-token-plan',
+  // GLM Coding Plan (Anthropic wire emits explicit ephemeral cache_control breakpoints),
+  // Step Code (automatic >=256-token prefix cache on 92-layer deep Step-5 / SWA models),
+  // and Ollama (local KV cache where re-evaluating long prefills is expensive).
+  'glm-coding-plan',
+  'step-code',
+  'ollama',
   // Claude API: explicit cache breakpoints plus preserved thinking. Rewriting an earlier tool
   // result invalidates the cached prefix from that point and fails the prefix check of every
   // later thinking block (measured: appending keeps a 34572-token prefix as cache_read, editing
@@ -321,6 +328,7 @@ export function shouldSkipPruningForSession(
   session: unknown,
   skipProviders: ReadonlySet<string> = defaultSkipProviders(),
   skipDeepSeekV41Flash: boolean = skipProviders === defaultSkipProviderSet,
+  skipOpenModels: boolean = skipProviders === defaultSkipProviderSet,
 ): boolean {
   const provider = readSessionProvider(session)
   if (provider !== undefined) {
@@ -328,6 +336,7 @@ export function shouldSkipPruningForSession(
     if (skipProviders.has(provider)) return true
   }
   if (skipDeepSeekV41Flash && isDeepSeekV41FlashSession(session)) return true
+  if (skipOpenModels && isOpenModelSessionPrefixCacheProtected(session)) return true
   return false
 }
 
@@ -432,6 +441,9 @@ export class ToolResultPruner extends Service {
   /** 未显式覆写跳过名单时，默认按模型跳过 DeepSeek V4.1 Flash 以保护 50x 前缀缓存。 */
   readonly skipDeepSeekV41Flash: boolean
 
+  /** 未显式覆写跳过名单时，默认按模型跳过跨线路主力开源模型以保护前缀缓存。 */
+  readonly skipOpenModels: boolean
+
   /**
    * @param ctx - 宿主上下文（服务自注册为 `toolResultPruner`）。
    * @param config - 原始配置。
@@ -441,6 +453,7 @@ export class ToolResultPruner extends Service {
     this.config = resolveConfig(config)
     this.skipProviders = resolveSkipProviders(config.skipProviders)
     this.skipDeepSeekV41Flash = config.skipProviders === undefined
+    this.skipOpenModels = config.skipProviders === undefined
   }
 
   /**
@@ -519,7 +532,7 @@ export class ToolResultPruner extends Service {
    * @returns 已落地的替换与合计省下的码点数。
    */
   pruneSession(session: SessionLike): PruneResult {
-    if (shouldSkipPruningForSession(session, this.skipProviders, this.skipDeepSeekV41Flash)) {
+    if (shouldSkipPruningForSession(session, this.skipProviders, this.skipDeepSeekV41Flash, this.skipOpenModels)) {
       return { pruned: [], charsRemoved: 0 }
     }
 

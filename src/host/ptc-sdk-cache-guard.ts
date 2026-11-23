@@ -33,6 +33,7 @@
  */
 
 import { isDeepSeekV41FlashScope } from './deepseek-v41-flash/match.ts'
+import { isOpenModelPrefixCacheProtected } from './open-models/profiles.ts'
 
 /** 受保护的 provider：Kimi Code 线路。 */
 export const KIMI_CODE_PROVIDER = 'kimi-code'
@@ -43,13 +44,16 @@ export const MINIMAX_CODE_PROVIDER = 'minimax-code'
 /**
  * 默认受保护的 provider 名单。
  *
- * `kimi-code` 与 `minimax-code` 都按前缀缓存计费：`tools:sdk` 段一旦被改写，
- * 前缀缓存从改写处起全部作废，所以这两条线路默认都要冻结 SDK 段。
+ * 这些线路均依赖前缀缓存（显式 `cache_control` 断点、服务端自动前缀缓存或本地长 KV 缓存）：
+ * `tools:sdk` 段一旦被改写，前缀缓存从改写处起全部作废，所以默认冻结 SDK 段。
  */
 export const DEFAULT_PTC_SDK_CACHE_PROVIDERS: readonly string[] = Object.freeze([
   KIMI_CODE_PROVIDER,
   MINIMAX_CODE_PROVIDER,
   'qianwen-token-plan',
+  'glm-coding-plan',
+  'step-code',
+  'ollama',
 ])
 
 /** PTC 生成的 SDK 段名。 */
@@ -215,7 +219,13 @@ export function installPtcSdkCacheGuard(
 ): PtcSdkCacheGuard {
   const host = isRecord(ctx) ? (ctx as Record<string, unknown>) : undefined
   const providers = new Set<string>(options.providers ?? DEFAULT_PTC_SDK_CACHE_PROVIDERS)
-  const matchScope = options.matchScope ?? (options.providers === undefined ? isDeepSeekV41FlashScope : undefined)
+  const matchScope = options.matchScope ?? (
+    options.providers === undefined
+      ? (scope: unknown, modelSelection?: unknown): boolean =>
+          isDeepSeekV41FlashScope(scope, modelSelection)
+          || isOpenModelPrefixCacheProtected(scope, modelSelection)
+      : undefined
+  )
   const isProtected = (scope: unknown, modelSelection?: unknown): boolean => {
     const provider = readScopeProvider(scope)
     if (provider !== undefined && providers.has(provider)) return true

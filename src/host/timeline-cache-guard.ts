@@ -48,6 +48,7 @@
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { isDeepSeekV41FlashScope } from './deepseek-v41-flash/match.ts'
+import { isOpenModelPrefixCacheProtected } from './open-models/profiles.ts'
 import { KIMI_CODE_PROVIDER, MINIMAX_CODE_PROVIDER, readScopeProvider } from './ptc-sdk-cache-guard.ts'
 
 /** Timeline 的规划指引段名。 */
@@ -59,13 +60,15 @@ export const TIMELINE_TASK_TOOL = 'timeline_tasks'
 /**
  * 默认受保护的 provider 名单。
  *
- * `kimi-code` 与 `minimax-code` 都按前缀缓存计费，而且都没有声明
- * `systemPromptUpdate: 'in-history'`：系统段一改就是整段重建。
+ * 这些线路都依赖前缀缓存且未声明 `systemPromptUpdate: 'in-history'`：系统段一改就是整段重建。
  */
 export const DEFAULT_TIMELINE_CACHE_PROVIDERS: readonly string[] = Object.freeze([
   KIMI_CODE_PROVIDER,
   MINIMAX_CODE_PROVIDER,
   'qianwen-token-plan',
+  'glm-coding-plan',
+  'step-code',
+  'ollama',
 ])
 
 /** 尾部通知的来源 kind（本包自有）。 */
@@ -272,7 +275,13 @@ export function installTimelineCacheGuard(
   options: TimelineCacheGuardOptions = {},
 ): TimelineCacheGuard {
   const providers = new Set<string>(options.providers ?? DEFAULT_TIMELINE_CACHE_PROVIDERS)
-  const matchScope = options.matchScope ?? (options.providers === undefined ? isDeepSeekV41FlashScope : undefined)
+  const matchScope = options.matchScope ?? (
+    options.providers === undefined
+      ? (scope: unknown, modelSelection?: unknown): boolean =>
+          isDeepSeekV41FlashScope(scope, modelSelection)
+          || isOpenModelPrefixCacheProtected(scope, modelSelection)
+      : undefined
+  )
   const isProtected = (scope: unknown, modelSelection?: unknown): boolean => {
     const provider = readScopeProvider(scope)
     if (provider !== undefined && providers.has(provider)) return true

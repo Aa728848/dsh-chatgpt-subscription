@@ -250,6 +250,11 @@ export function buildGlmRequestPlan(
         thinkingDisableable: request.entry.thinkingDisableable,
         ...(request.images === undefined ? {} : { images: request.images }),
         defaultMaxTokens: request.entry.defaultMaxTokens,
+        replayScope: {
+          provider: PROVIDER_ID,
+          route: PROVIDER_ID,
+          model: options.model,
+        },
       }),
     }
   }
@@ -582,7 +587,11 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
     let buffer = ''
 
     if (settled.wire === 'anthropic') {
-      const state = createGlmAnthropicStreamState()
+      const state = createGlmAnthropicStreamState({
+        provider: PROVIDER_ID,
+        route: PROVIDER_ID,
+        model: options.model,
+      })
       try {
         while (true) {
           const { done, value } = await reader.read()

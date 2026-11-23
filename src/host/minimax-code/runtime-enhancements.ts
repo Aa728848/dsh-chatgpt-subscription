@@ -51,6 +51,7 @@ import {
   type ToolRunawaySignal,
   type ToolRunawaySignalKind,
 } from '../common/tool-runaway.ts'
+import { isMinimaxOpenModel } from '../open-models/profiles.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -97,6 +98,8 @@ function stringOf(value: unknown): string | undefined {
 export interface MinimaxSessionRoute {
   /** 当前会话被路由到的 provider id。 */
   readonly provider?: string
+  /** 当前会话被路由到的 model id。 */
+  readonly model?: string
   /** 当前会话标识。 */
   readonly sessionId?: string
 }
@@ -107,11 +110,11 @@ interface AgentLike {
   readonly session?: {
     readonly header?: { readonly id?: unknown }
     /** 会话当前被路由到的模型线路。老宿主上可能没有这个方法。 */
-    requestHeader?(): { readonly config?: { readonly provider?: unknown } } | undefined
+    requestHeader?(): { readonly config?: { readonly provider?: unknown; readonly model?: unknown } } | undefined
   }
   /** 宿主的模型选择面：先给已记录的选择，没有记录时才退回 agent 选项。 */
-  readonly model?: { current?(): { readonly provider?: unknown } | undefined }
-  readonly options?: { readonly provider?: unknown }
+  readonly model?: { current?(): { readonly provider?: unknown; readonly model?: unknown } | undefined }
+  readonly options?: { readonly provider?: unknown; readonly model?: unknown }
   readonly provider?: unknown
 }
 
@@ -134,26 +137,34 @@ export function minimaxSessionRouteOf(agent: unknown): MinimaxSessionRoute {
   const session = record?.session
 
   let provider: string | undefined
+  let model: string | undefined
   try {
-    provider = stringOf(session?.requestHeader?.()?.config?.provider)
+    const config = session?.requestHeader?.()?.config
+    provider = stringOf(config?.provider)
+    model = stringOf(config?.model)
   } catch {
     // 会话正在拆除、或这一代宿主没有 requestHeader：退回下一个来源。
     provider = undefined
+    model = undefined
   }
-  if (provider === undefined) {
+  if (provider === undefined || model === undefined) {
     try {
-      provider = stringOf(record?.model?.current?.()?.provider)
+      const current = record?.model?.current?.()
+      provider ??= stringOf(current?.provider)
+      model ??= stringOf(current?.model)
     } catch {
-      provider = undefined
+      // 忽略读取失败。
     }
   }
   if (provider === undefined) provider = stringOf(record?.options?.provider)
   if (provider === undefined) provider = stringOf(record?.provider)
+  if (model === undefined) model = stringOf(record?.options?.model)
 
   // 会话 id 只认会话头，退一步才用 agent 自己的 id：前者是日志与引用归属的真名。
   const sessionId = stringOf(session?.header?.id) ?? stringOf(record?.id)
   return {
     ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
     ...(sessionId === undefined ? {} : { sessionId }),
   }
 }
@@ -165,6 +176,18 @@ export function minimaxSessionRouteOf(agent: unknown): MinimaxSessionRoute {
  */
 export function isMinimaxSession(agent: unknown): boolean {
   return minimaxSessionRouteOf(agent).provider === MINIMAX_CODE_PROVIDER
+}
+
+/**
+ * 判断一次工具调用是否应启用 MiniMax 无损参数强转修复。
+ *
+ * 覆盖 `minimax-code` 整条线路，以及任意聚合线路（如 `command-code`、`workbuddy`）
+ * 上正在运行 MiniMax M2.5/M2.7/M3/M3.1 模型的会话。
+ */
+export function isMinimaxArgumentRepairSession(agent: unknown): boolean {
+  const route = minimaxSessionRouteOf(agent)
+  if (route.provider === MINIMAX_CODE_PROVIDER) return true
+  return isMinimaxOpenModel(route.model)
 }
 
 /** 无损的数字字符串：允许小数、指数、前导负号。 */
@@ -806,13 +829,13 @@ export function installMinimaxRuntimeEnhancements(
     return created
   }
 
-  // 1) 参数修复：守卫面。守卫**永远不拦**，只改参数。
+  // 1) 参数修复：守卫面。守卫**永远不拦**，只改参数（覆盖 minimax-code 与跨线路 MiniMax 模型）。
   track(() => {
     if (typeof tools?.guard !== 'function') return () => undefined
     const dispose = tools.guard((execution: unknown) => {
       try {
         const agent = isRecord(execution) ? execution['agent'] : undefined
-        if (!isMinimaxSession(agent)) return undefined
+        if (!isMinimaxArgumentRepairSession(agent)) return undefined
         repairExecutionArguments(execution, tools)
       } catch {
         // 修复失败不该让这一次工具调用失败。
@@ -822,14 +845,14 @@ export function installMinimaxRuntimeEnhancements(
     return () => { dispose?.() }
   }, 'dsh-chatgpt-subscription: minimax argument repair guard')
 
-  // 2) 参数修复：pre-execute 面（同一份修复，早一步做）。
+  // 2) 参数修复：pre-execute 面（同一份修复，早一步做；覆盖 minimax-code 与跨线路 MiniMax 模型）。
   const disposePreExecute = ctx.on?.('tools/pre-execute', (async (
     exec: ToolExecution,
     next: () => Promise<unknown>,
   ): Promise<unknown> => {
     // 先修再转交：后来的 pre-execute 监听器看到的应该是修好的参数。
     try {
-      if (isMinimaxSession((exec as { agent?: unknown }).agent)) {
+      if (isMinimaxArgumentRepairSession((exec as { agent?: unknown }).agent)) {
         repairExecutionArguments(exec, tools)
       }
     } catch {
