@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.82.3 - 2026-11-24
+
+- **[aws-quick] 修复已获批连接器每次启动触发 "Invalid or missing confirmation nonce"**：Quick 的 `/local/mcp/update` 需要一次性 UI 确认 nonce，而旧逻辑只要已获批连接器缺少 `ELECTRON_RUN_AS_NODE` 环境变量就发 `update`，导致每次启动报 nonce 错误。现在命令/参数一致的已获批连接器原样复用、不再发 `update`；仅当启动器（command/args）真正变化时才更新，且 Quick 因缺 nonce 拒绝时降级为 `approval_required`（指引在 Quick 内原生批准一次），不再把裸 nonce 错误抛给用户。真机 agent 实测确认 `add` 会把新连接器置为未启用，故重建连接器无益。重写对应单测。
+
 ## 0.82.2 - 2026-11-23
 
 - **[aws-quick] 修复 Windows 桌面端 MCP stdio 注册了 Electron 可执行文件导致初始化失败**：Quick 连接器改用 `resolveQuickNode()` 启动——纯 Node 宿主沿用 `process.execPath`，Electron 桌面宿主改为使用随附的 `runtime/primary-runtime/dependencies/node`（再退回 PATH 上的 node），都找不到时报清晰错误；不再用 `DeepSeek Harness.exe` 启动 stdio 子进程污染 JSON-RPC 握手。新增 Windows 回归测试 (#126)。
