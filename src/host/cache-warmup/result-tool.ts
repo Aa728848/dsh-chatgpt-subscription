@@ -95,6 +95,8 @@ export interface CacheWarmupResultToolDeps {
   readonly provider: string
   /** 多线路安装时按当前路由判定；与“是否产生新预览”的设置无关。 */
   readonly allowProvider?: (provider: string) => boolean
+  /** 可选的模型级路由放行（例如官方 DeepSeek 线路仅放行 DeepSeek V4.1 Flash）。 */
+  readonly allowRoute?: (route: CacheWarmupRoute) => boolean
   /** 读一次执行所属的线路；每次执行重读，不缓存。 */
   readonly routeOf: (exec: unknown) => CacheWarmupRoute
   /** 结果引用存储；缺席时工具照常存在，只是每次都返回结构化错误。 */
@@ -355,7 +357,10 @@ export function createCacheWarmupResultTool(deps: CacheWarmupResultToolDeps): To
       // 1. 路由校验只回答“这是不是一个受支持的宿主线路”。是否产生新预览
       //    由另一份设置决定；已有 ref 不因线路切换或投影开关而失去补读能力。
       const providerAllowed = route.provider !== undefined
-        && (deps.allowProvider?.(route.provider) ?? route.provider === deps.provider)
+        && (
+          deps.allowRoute?.(route) === true
+          || (deps.allowProvider?.(route.provider) ?? route.provider === deps.provider)
+        )
       if (!providerAllowed) {
         return failure(
           action,

@@ -56,6 +56,7 @@ import { createCacheWarmupResultTool } from './result-tool.ts'
 import { CACHE_WARMUP_RETRIEVAL_TOOLS, cacheWarmupNavigationIntentOf } from './retrieval-intent.ts'
 import type { CacheWarmupSettings } from './settings.ts'
 import { CONTROLLED_PROVIDERS, type ControlledProvider } from '../common/model-request-control.ts'
+import { readScopeRoute } from '../deepseek-v41-flash/match.ts'
 
 /**
  * 本模块服务的线路。
@@ -132,6 +133,8 @@ export function cacheWarmupSectionText(): () => string {
 export interface CacheWarmupRoute {
   /** 当前会话被路由到的 provider id。 */
   readonly provider?: string
+  /** 当前会话被路由到的 model id。 */
+  readonly model?: string
   /** 当前会话标识；引用归属、预算与命中率都按它记账。 */
   readonly sessionId?: string
 }
@@ -166,10 +169,14 @@ export function cacheWarmupRouteOf(agent: unknown): CacheWarmupRoute {
     provider = undefined
   }
   if (provider === undefined) provider = stringOf(record?.options?.provider)
+  const detected = readScopeRoute(agent)
+  if (provider === undefined) provider = detected.provider
+  const model = detected.model
   // 会话 id 只认会话头，退一步才用 agent 自己的 id：前者是日志与引用归属的真名。
   const sessionId = stringOf(session?.header?.id) ?? stringOf(record?.id)
   return {
     ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
     ...(sessionId === undefined ? {} : { sessionId }),
   }
 }
@@ -194,6 +201,12 @@ export interface CacheWarmupOptions {
    * 进程重启后尚无内存报告时的持久化预热状态回退读取器（可选）。
    */
   durableHint?: (sessionId: string, provider?: string) => CacheWarmupDurableHint | undefined
+  /**
+   * 可选的模型级路由准入谓词：允许将单个模型（如官方线路的 DeepSeek V4.1 Flash）
+   * 纳入入库前结果预览与 `cache_warmup_result` 补读，而不放开同线路或其它线路的
+   * 其它模型。显式配置空 `providers: []` 全局关闭时仍保持关闭。
+   */
+  admitRoute?: (route: CacheWarmupRoute) => boolean
 }
 
 /** 本模块读得到的宿主上下文（Cordis Context 结构上满足；测试可用假对象）。 */
@@ -396,6 +409,7 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     return tools.register(createCacheWarmupResultTool({
       provider: CACHE_WARMUP_PROVIDER,
       allowProvider: provider => CONTROLLED_PROVIDERS.includes(provider as ControlledProvider),
+      ...(options.admitRoute === undefined ? {} : { allowRoute: options.admitRoute }),
       routeOf: exec => cacheWarmupRouteOf((exec as { agent?: unknown } | undefined)?.agent),
       store: storeOf,
       log,
@@ -499,7 +513,11 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     if (sourceTool && !settings.enabled && navigation !== true) return decision
     const route = cacheWarmupRouteOf(exec.agent)
     const admittedProviders = settings.providers ?? [CACHE_WARMUP_PROVIDER]
-    if (route.provider === undefined || !admittedProviders.includes(route.provider)) return decision
+    const routeAdmitted = route.provider !== undefined && (
+      admittedProviders.includes(route.provider)
+      || (admittedProviders.length > 0 && options.admitRoute?.(route) === true)
+    )
+    if (!routeAdmitted) return decision
     const sessionId = route.sessionId
     // 会话拿不到就不投影：refId 的归属、预算与命中率都按会话记账，猜一个桶名
     // 会让两个会话互相看不见彼此的引用。

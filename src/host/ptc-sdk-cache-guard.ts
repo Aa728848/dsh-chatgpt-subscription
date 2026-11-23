@@ -32,6 +32,8 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/host/ptc-sdk-cache-guard
  */
 
+import { isDeepSeekV41FlashScope } from './deepseek-v41-flash/match.ts'
+
 /** 受保护的 provider：Kimi Code 线路。 */
 export const KIMI_CODE_PROVIDER = 'kimi-code'
 
@@ -61,6 +63,11 @@ export interface PtcSdkCacheGuardOptions {
    * 省略时用 `['kimi-code', 'minimax-code']`。
    */
   providers?: readonly string[]
+  /**
+   * 可选的模型/作用域级准入谓词（用于按单个模型精准开启冻结而不影响同线路其它模型）。
+   * 省略且未显式覆盖 `providers` 时，默认额外覆盖 DeepSeek V4.1 Flash。
+   */
+  matchScope?: (scope: unknown, modelSelection?: unknown) => boolean
 }
 
 /** 守卫句柄。 */
@@ -111,6 +118,8 @@ interface AssembleContextLike {
   scope?: unknown
   /** 装配发起方 agent（部分宿主直接给 agent）。 */
   agent?: unknown
+  /** 当步模型选择（首步或刚切模型时尚未写入 requestHeader）。 */
+  modelSelection?: unknown
 }
 
 /** 一个会话桶里缓存的 SDK 段。 */
@@ -206,6 +215,17 @@ export function installPtcSdkCacheGuard(
 ): PtcSdkCacheGuard {
   const host = isRecord(ctx) ? (ctx as Record<string, unknown>) : undefined
   const providers = new Set<string>(options.providers ?? DEFAULT_PTC_SDK_CACHE_PROVIDERS)
+  const matchScope = options.matchScope ?? (options.providers === undefined ? isDeepSeekV41FlashScope : undefined)
+  const isProtected = (scope: unknown, modelSelection?: unknown): boolean => {
+    const provider = readScopeProvider(scope)
+    if (provider !== undefined && providers.has(provider)) return true
+    if (matchScope === undefined) return false
+    try {
+      return matchScope(scope, modelSelection) === true
+    } catch {
+      return false
+    }
+  }
   /** 已包装过的实例（幂等标记）。 */
   const alreadyWrapped = new WeakSet<object>()
   /** 已包装过的「方法宿主 + 方法名」：同一个原型不叠第二层包装。 */
@@ -277,9 +297,8 @@ export function installPtcSdkCacheGuard(
       // receiver 用**调用方**的 this：服务里的 this.ctx 留在调用方那一层作用域。
       const receiver = this ?? tools
       if (toolSet !== undefined) {
-        const provider = readScopeProvider(scope)
-        if (provider !== undefined && providers.has(provider)) {
-          // 受保护线路：忽略步骤级过滤，工具表逐步恒定。
+        if (isProtected(scope)) {
+          // 受保护线路或模型：忽略步骤级过滤，工具表逐步恒定。
           return original.call(receiver, scope, undefined)
         }
       }
@@ -324,8 +343,7 @@ export function installPtcSdkCacheGuard(
     const sections = Array.isArray(result?.sections) ? result.sections : undefined
     if (sections === undefined) return result
     const scope = context?.scope ?? context?.agent
-    const provider = readScopeProvider(scope)
-    if (provider === undefined || !providers.has(provider)) return result
+    if (!isProtected(scope, context?.modelSelection)) return result
     const index = sections.findIndex(section => section?.name === PTC_SDK_SECTION_NAME)
     if (index < 0) return result
     const section = sections[index]

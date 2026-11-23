@@ -56,6 +56,11 @@ export interface ToolResultPrunerGuardOptions {
    * 省略时用入口模块的默认值（`['kimi-code', 'minimax-code']`）。
    */
   skipProviders?: readonly string[]
+  /**
+   * 未显式替换 `skipProviders` 时，是否额外按模型跳过 DeepSeek V4.1 Flash 以保护
+   * 50x 前缀缓存。接受活引用读取器；默认开启。
+   */
+  skipDeepSeekV41Flash?: () => boolean
 }
 
 /** 守卫句柄。 */
@@ -131,6 +136,15 @@ export function installToolResultPrunerGuard(
 ): ToolResultPrunerGuard {
   const host = isRecord(ctx) ? (ctx as HostContextLike) : undefined
   const skipSet = resolveSkipProviders(options.skipProviders ?? DEFAULT_SKIP_PROVIDERS)
+  const shouldSkipDeepSeekV41Flash = (): boolean => {
+    if (options.skipProviders !== undefined) return false
+    if (options.skipDeepSeekV41Flash === undefined) return true
+    try {
+      return options.skipDeepSeekV41Flash() !== false
+    } catch {
+      return false
+    }
+  }
   /** 已包装过的实例（幂等标记）。 */
   const alreadyWrapped = new WeakSet<object>()
   /** 已包装过的「方法宿主 + 方法名」：同一个原型不叠第二层包装。 */
@@ -188,7 +202,7 @@ export function installToolResultPrunerGuard(
     }
     const original = target.original as PruneSessionMethod
     const replacement = function (this: unknown, session: unknown): unknown {
-      if (shouldSkipPruningForSession(session, skipSet)) {
+      if (shouldSkipPruningForSession(session, skipSet, shouldSkipDeepSeekV41Flash())) {
         return { pruned: [], charsRemoved: 0 }
       }
       // receiver 用**调用方**的 this：服务里的 this.ctx 留在调用方那一层作用域。

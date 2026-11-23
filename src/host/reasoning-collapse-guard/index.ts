@@ -74,6 +74,7 @@ import { PLUGIN_MESSAGE_SOURCE_KIND } from '../common/llm-compat.ts'
  * the guard adds no generation-bound named import to learn them.
  */
 export interface GuardStreamOptions {
+  readonly provider?: string | undefined
   readonly model?: string | undefined
   readonly signal?: AbortSignal | undefined
   /** Stamped by the agent loop on every request it builds. */
@@ -161,6 +162,8 @@ export interface GuardOptions {
   cooldownMs?: number
   /** Model ids to watch; empty watches every model. */
   includeModels?: string[]
+  /** Optional predicate narrowing which streams this guard instance watches. */
+  matchRequest?: ((request: GuardStreamOptions) => boolean) | undefined
   /**
    * Recurrence score at or above which the semantic signal is considered to
    * hold (default 0.35).
@@ -259,6 +262,7 @@ export interface ResolvedGuardOptions {
   maxBreaksPerTurn: number
   cooldownMs: number
   includeModels: string[]
+  matchRequest?: ((request: GuardStreamOptions) => boolean) | undefined
   semanticThreshold: number
   semanticLag: number
   semanticMinChars: number
@@ -370,6 +374,9 @@ export function resolveGuardOptions(options: GuardOptions = {}): ResolvedGuardOp
 
   if (!Array.isArray(resolved.includeModels) || resolved.includeModels.some(entry => typeof entry !== 'string')) {
     throw new Error('reasoning-collapse-guard: includeModels must be an array of strings')
+  }
+  if (resolved.matchRequest !== undefined && typeof resolved.matchRequest !== 'function') {
+    throw new Error('reasoning-collapse-guard: matchRequest must be a function')
   }
   if (typeof resolved.now !== 'function') {
     throw new Error('reasoning-collapse-guard: now must be a function')
@@ -925,7 +932,12 @@ export function installReasoningCollapseGuard(
     // that carries no signal.
     const key: object = request.signal ?? STATIC_KEY
     const state = breakerFor(key)
-    if (state.exhausted || !watchedModel(request.model) || !conversationCall(request)) return next()
+    if (
+      state.exhausted
+      || !watchedModel(request.model)
+      || (resolved.matchRequest !== undefined && !resolved.matchRequest(request))
+      || !conversationCall(request)
+    ) return next()
     // Resolved once per attempt: the owning Agent is a property of the
     // request, so it cannot change between chunks of one stream.
     const agent = resolveAgent(request.sessionId)

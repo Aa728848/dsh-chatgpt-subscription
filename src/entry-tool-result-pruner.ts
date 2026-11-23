@@ -30,6 +30,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { codexRemoteCompactionEnabled } from './host/codex-remote-compaction.ts'
+import { isDeepSeekV41FlashSession } from './host/deepseek-v41-flash/match.ts'
 
 // ── 冻结契约 ───────────────────────────────────────────────────────────────
 
@@ -319,11 +320,15 @@ export function readSessionProvider(session: unknown): string | undefined {
 export function shouldSkipPruningForSession(
   session: unknown,
   skipProviders: ReadonlySet<string> = defaultSkipProviders(),
+  skipDeepSeekV41Flash: boolean = skipProviders === defaultSkipProviderSet,
 ): boolean {
   const provider = readSessionProvider(session)
-  if (provider === undefined) return false
-  if (provider === 'codex-chatgpt' && codexRemoteCompactionEnabled()) return true
-  return skipProviders.has(provider)
+  if (provider !== undefined) {
+    if (provider === 'codex-chatgpt' && codexRemoteCompactionEnabled()) return true
+    if (skipProviders.has(provider)) return true
+  }
+  if (skipDeepSeekV41Flash && isDeepSeekV41FlashSession(session)) return true
+  return false
 }
 
 /**
@@ -424,6 +429,9 @@ export class ToolResultPruner extends Service {
   /** 命中即整场跳过的 provider 集合。 */
   readonly skipProviders: ReadonlySet<string>
 
+  /** 未显式覆写跳过名单时，默认按模型跳过 DeepSeek V4.1 Flash 以保护 50x 前缀缓存。 */
+  readonly skipDeepSeekV41Flash: boolean
+
   /**
    * @param ctx - 宿主上下文（服务自注册为 `toolResultPruner`）。
    * @param config - 原始配置。
@@ -432,6 +440,7 @@ export class ToolResultPruner extends Service {
     super(ctx, PRUNER_SERVICE_NAME)
     this.config = resolveConfig(config)
     this.skipProviders = resolveSkipProviders(config.skipProviders)
+    this.skipDeepSeekV41Flash = config.skipProviders === undefined
   }
 
   /**
@@ -510,7 +519,7 @@ export class ToolResultPruner extends Service {
    * @returns 已落地的替换与合计省下的码点数。
    */
   pruneSession(session: SessionLike): PruneResult {
-    if (shouldSkipPruningForSession(session, this.skipProviders)) {
+    if (shouldSkipPruningForSession(session, this.skipProviders, this.skipDeepSeekV41Flash)) {
       return { pruned: [], charsRemoved: 0 }
     }
 

@@ -86,8 +86,8 @@ export function cacheWarmupNavigationIntentOf(agent: unknown): boolean {
     const event = events[index]!
     if (event.type !== 'user/message') continue
     const rawText = messageText(event.data)
-    // DSH 可能在真实用户请求后附系统提醒、运行时上下文与仓库指引；这些不是意图。
-    const reminderAt = rawText.search(/<system-reminder\b|Current runtime context\./)
+    // DSH 可能在真实用户请求后附系统提醒、运行时上下文、状态锚点与仓库指引；这些不是意图。
+    const reminderAt = rawText.search(/<system-reminder\b|Current runtime context\.|\[V4\.1-Flash State Anchor/)
     const text = (reminderAt < 0 ? rawText : rawText.slice(0, reminderAt)).trim()
     // DSH 会在真实请求后追加 reminder-only 的 user/message；跳过它继续向前找。
     if (text === '') continue

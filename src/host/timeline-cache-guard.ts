@@ -47,6 +47,7 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/host/timeline-cache-guard
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { isDeepSeekV41FlashScope } from './deepseek-v41-flash/match.ts'
 import { KIMI_CODE_PROVIDER, MINIMAX_CODE_PROVIDER, readScopeProvider } from './ptc-sdk-cache-guard.ts'
 
 /** Timeline 的规划指引段名。 */
@@ -89,6 +90,11 @@ export interface TimelineCacheGuardOptions {
   readonly enabled?: () => boolean
   /** 命中即冻结的 provider 名单；省略时用 {@link DEFAULT_TIMELINE_CACHE_PROVIDERS}。 */
   readonly providers?: readonly string[]
+  /**
+   * 可选的模型/作用域级准入谓词。省略且未显式覆盖 `providers` 时，默认额外覆盖
+   * DeepSeek V4.1 Flash，绝不影响同线路其它模型。
+   */
+  readonly matchScope?: (scope: unknown, modelSelection?: unknown) => boolean
 }
 
 /**
@@ -150,6 +156,8 @@ interface AssembleContextLike {
   scope?: unknown
   /** 装配发起方 agent（部分宿主直接给 agent）。 */
   agent?: unknown
+  /** 当步模型选择（首步或刚切模型时尚未写入 requestHeader）。 */
+  modelSelection?: unknown
 }
 
 /** 一条 pre-step 决策。 */
@@ -264,6 +272,17 @@ export function installTimelineCacheGuard(
   options: TimelineCacheGuardOptions = {},
 ): TimelineCacheGuard {
   const providers = new Set<string>(options.providers ?? DEFAULT_TIMELINE_CACHE_PROVIDERS)
+  const matchScope = options.matchScope ?? (options.providers === undefined ? isDeepSeekV41FlashScope : undefined)
+  const isProtected = (scope: unknown, modelSelection?: unknown): boolean => {
+    const provider = readScopeProvider(scope)
+    if (provider !== undefined && providers.has(provider)) return true
+    if (matchScope === undefined) return false
+    try {
+      return matchScope(scope, modelSelection) === true
+    } catch {
+      return false
+    }
+  }
   const states = new WeakMap<object, GuardState>()
   const stats: GuardStats = { seen: false, warned: false, warnedTools: false }
   const restores: (() => void)[] = []
@@ -301,8 +320,7 @@ export function installTimelineCacheGuard(
     const result = await next()
     if (disposed || !enabled()) return result
     const scope = context?.scope ?? context?.agent
-    const provider = readScopeProvider(scope)
-    if (provider === undefined || !providers.has(provider)) return result
+    if (!isProtected(scope, context?.modelSelection)) return result
     const sections = Array.isArray(result?.sections) ? result.sections : undefined
     if (sections === undefined) return result
     const index = sections.findIndex(section => section?.name === TIMELINE_SECTION)
@@ -469,8 +487,7 @@ export function installTimelineCacheGuard(
       const receiver = this ?? tools
       const list = original.call(receiver, scope, toolSet)
       if (!Array.isArray(list) || disposed || !enabled()) return list
-      const provider = readScopeProvider(scope)
-      if (provider === undefined || !providers.has(provider)) return list
+      if (!isProtected(scope)) return list
       return freezeDefinitions(scope, list)
     }
     try {

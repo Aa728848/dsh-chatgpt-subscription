@@ -222,6 +222,12 @@ import {
   type ReasoningCollapseContext,
 } from './host/reasoning-collapse-guard/index.ts'
 import {
+  installDeepSeekV41FlashOptimizations,
+  isDeepSeekV41Flash,
+  isDeepSeekV41FlashScope,
+  resolveDeepSeekV41FlashOptimizationEnabled,
+} from './host/deepseek-v41-flash/index.ts'
+import {
   installCompactionRoute,
   type CompactionChunk,
   type CompactionModelInfo,
@@ -384,7 +390,14 @@ export interface Config {
    * 同时冻结 `timeline_tasks` 的描述。只在真正出现该段时才动手，没装 timeline 时
    * 完全静默。volatile：设置保存后下一步就生效。
    */
+  /** 「Timeline 规划段」缓存守卫（默认开启）：冻结系统段与任务工具描述，变更改为尾部投递。 */
   timelineCacheGuard?: Volatile<boolean>
+  /**
+   * 仅针对 DeepSeek V4.1 Flash（含 1017 快照与官方 `deepseek-flash`）的专项优化总开关：
+   * 静态思考纪律、128-token 尾部状态锚、入库前观测头、无损双信号推理坍塌守卫与
+   * 50x 前缀缓存保护。严格按模型隔离，绝不影响其它线路与模型。
+   */
+  deepseekV41FlashOptimization?: Volatile<boolean>
   /**
    * 「结果预览」总开关：受控线路上超大的 `run_code` / `code_run` 与日志工具结果会被换成带 `ref://`
    * 引用的预览，原文由 `cache_warmup_result` 精确补读。默认开启。
@@ -539,6 +552,8 @@ export interface ConfigInput {
   teamPolicyCacheGuard?: boolean
   /** 「Timeline 规划段」缓存守卫（默认开启）：冻结系统段与任务工具描述，变更改为尾部投递。 */
   timelineCacheGuard?: boolean
+  /** 仅针对 DeepSeek V4.1 Flash 的专项优化总开关（默认开启，严格按模型隔离）。 */
+  deepseekV41FlashOptimization?: boolean
   /** 「结果预览」总开关（默认开启；只影响之后产生的新结果）。 */
   cacheWarmup?: boolean
   /** 允许产生新结果预览的线路；默认覆盖 controlled providers。 */
@@ -618,6 +633,11 @@ export const Config: z<ConfigInput, Config> = z.object({
   // 这条守卫完全静默（只有一次「没见过该段」的 warn）。
   timelineCacheGuard: z.boolean().default(true).volatile()
     .description('冻结实验性 Timeline 插件的规划段与任务工具描述，变更改为尾部用户消息投递，避免中途改语言/写作提示词时刷掉 Kimi/MiniMax 的整段前缀缓存；默认开启。'),
+
+  // DeepSeek V4.1 Flash 专项优化（arXiv:2609.19969 & 1017）：严格按模型门控，
+  // 零影响其它线路与其它模型；volatile 活引用，关闭后下一步立刻旁路。
+  deepseekV41FlashOptimization: z.boolean().default(true).volatile()
+    .description('仅针对 DeepSeek V4.1 Flash（含 1017 与官方 deepseek-flash）的专项优化：静态思考纪律、128-token 尾部状态锚、入库前观测头、无损推理坍塌守卫与 50x 前缀缓存保护；不影响其它线路与模型。默认开启。'),
 
   // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
   // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
@@ -772,8 +792,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // guard has to be installed BEFORE the official plan-mode row registers its
   // tool (the tool layer has no "edit one registered entry" API), so a late
   // install only warns.
+  const deepSeekV41FlashEnabled = (): boolean => resolveDeepSeekV41FlashOptimizationEnabled(pluginConfig)
+  const matchDeepSeekV41FlashScope = (scope: unknown, modelSelection?: unknown): boolean =>
+    deepSeekV41FlashEnabled() && isDeepSeekV41FlashScope(scope, modelSelection)
+
   ctx.effect(() => {
-    const guard = installToolResultPrunerGuard(ctx)
+    const guard = installToolResultPrunerGuard(ctx, {
+      skipDeepSeekV41Flash: deepSeekV41FlashEnabled,
+    })
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: tool result pruner guard')
 
@@ -783,7 +809,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   }, 'dsh-chatgpt-subscription: plan mode cache guard')
 
   ctx.effect(() => {
-    const guard = installPtcSdkCacheGuard(ctx)
+    const guard = installPtcSdkCacheGuard(ctx, {
+      matchScope: matchDeepSeekV41FlashScope,
+    })
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: PTC SDK cache guard')
 
@@ -809,6 +837,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => {
     const guard = installTimelineCacheGuard(ctx, {
       enabled: () => resolveTimelineCacheGuardEnabled(pluginConfig),
+      matchScope: matchDeepSeekV41FlashScope,
     })
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: timeline cache guard')
@@ -817,6 +846,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const guard = installCompactionPolicyGuard(ctx)
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: compaction policy guard')
+
+  // DeepSeek V4.1 Flash（含 1017）专属运行时优化总成：严格按模型门控，绝不触碰
+  // 其它线路与其它模型。当全局 `reasoningCollapseGuard` 已显式启用时跳过内置坍塌
+  // 守卫，避免同一流上叠两层监听器。
+  ctx.effect(() => {
+    const handle = installDeepSeekV41FlashOptimizations(ctx, {
+      enabled: deepSeekV41FlashEnabled,
+      runawayEnabled: () => resolveToolRunawayGuardEnabled(pluginConfig),
+      skipCollapseGuard: pluginConfig.reasoningCollapseGuard !== false,
+    })
+    return () => handle.dispose()
+  }, 'dsh-chatgpt-subscription: DeepSeek V4.1 Flash optimizations')
 
   // MiniMax Code 的运行时增强：参数修复（edits 的 JSON 字符串、数字/布尔字符串、
   // {"item": [...]} 拆包）、PTC 直调提醒、工具级失控守卫。三样都只对 MiniMax
@@ -1037,6 +1078,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   ctx.effect(() => installCacheWarmup(ctx as unknown as CacheWarmupContext, {
     // 函数而不是快照：设置卡保存后就地写新值，不重挂插件行。
     settings: () => resolveCacheWarmupSettings(pluginConfig),
+    admitRoute: route => deepSeekV41FlashEnabled() && isDeepSeekV41Flash(route.model, route.provider),
     durableHint: (sessionId, provider) => {
       if (provider !== undefined && provider !== KIMI_CODE_PROVIDER_ID) return undefined
       const record = sessionCacheState.read(sessionId)
@@ -2403,6 +2445,41 @@ export {
   installReasoningCollapseGuard,
   resolveGuardOptions,
 } from './host/reasoning-collapse-guard/index.ts'
+export {
+  ANCHOR_CONSECUTIVE_ERROR_THRESHOLD,
+  ANCHOR_CONTEXT_WATERMARKS,
+  ANCHOR_STEP_INTERVAL,
+  DEEPSEEK_OFFICIAL_PROVIDERS,
+  DEEPSEEK_V41_FLASH_ANCHOR_PREFIX,
+  DEEPSEEK_V41_FLASH_ANCHOR_SOURCE_KIND,
+  DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION,
+  DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT,
+  DEEPSEEK_V41_FLASH_RUNAWAY_SOURCE_KIND,
+  EFFORT_DRIFT_WARN_MIN_TOKENS,
+  OBSERVATION_HEADER_PREFIX,
+  OBSERVATION_TAG_MIN_CHARS,
+  OBSERVATION_TAG_TOOLS,
+  buildObservationHeader,
+  compactGoalSummary,
+  installDeepSeekV41FlashDiscipline,
+  installDeepSeekV41FlashObservationTagger,
+  installDeepSeekV41FlashOptimizations,
+  installDeepSeekV41FlashStateAnchor,
+  isDeepSeekV41Flash,
+  isDeepSeekV41FlashScope,
+  isDeepSeekV41FlashSession,
+  readScopeRoute,
+  readSessionRoute,
+  renderStateAnchorText,
+  resolveDeepSeekV41FlashOptimizationEnabled,
+} from './host/deepseek-v41-flash/index.ts'
+export type {
+  DeepSeekV41FlashConfigFields,
+  DeepSeekV41FlashOptimizationHandle,
+  DeepSeekV41FlashOptimizationOptions,
+  DetectedRoute,
+  StateAnchorOptions,
+} from './host/deepseek-v41-flash/index.ts'
 export type {
   GuardAgentLike,
   GuardChunk,
