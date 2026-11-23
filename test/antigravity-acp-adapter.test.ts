@@ -222,6 +222,26 @@ describe('AntigravityAcpAdapter', () => {
     }
   })
 
+  it('does not report the cumulative cachedReadTokens as this turn cache reads (issue #125)', async () => {
+    // The fake server answers session/prompt with cachedReadTokens:3. ACP reports
+    // that field cumulatively across the session, so the adapter must not surface
+    // it as this turn's cacheReadTokens - doing so inflated context pressure.
+    const harness = adapterHarness()
+    try {
+      const chunks = await collect(harness.adapter.stream(optionsOf() as never))
+      const usage = chunks.find((chunk) => chunk.type === 'usage') as
+        { usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number } } | undefined
+      expect(usage?.usage.inputTokens).toBe(11)
+      expect(usage?.usage.outputTokens).toBe(7)
+      expect(usage?.usage.cacheReadTokens).toBeUndefined()
+      // The harness-facing status card reads the same sample.
+      expect(harness.adapter.usage()?.cacheReadTokens).toBeUndefined()
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
   it('declares a context window even when the catalogue cannot be read', async () => {
     // The bug behind #119: an ACP model resolved without a `context` made every
     // switch into the line fail with MODEL_SWITCH_COMPACTION_FAILED before the

@@ -1470,12 +1470,20 @@ function readUsage(raw: Record<string, unknown>): TokenUsage | undefined {
   const input = numberField(raw.inputTokens)
   const output = numberField(raw.outputTokens)
   if (input === undefined || output === undefined) return undefined
-  const cached = numberField(raw.cachedReadTokens)
+  // `cachedReadTokens` in a `session/prompt` response is CUMULATIVE across the
+  // whole ACP session, not the cache reads of this one request: on the live
+  // server it grows every step and equals the sum of every step's prompt size
+  // (issue #125 measured 942,591 over 24 steps of ~40k each). Reporting it as
+  // this turn's `cacheReadTokens` made the harness's context meter add it to
+  // the per-request `inputTokens` (see dsh-token-meter's `pressureFrom` =
+  // input + cacheRead + cacheWrite) and show ~94% used when the real window was
+  // ~6% full. The field is deliberately dropped here: `inputTokens` is already
+  // per-request, and true occupancy comes from `usage_update` (`lastOccupancy`),
+  // not from this billable sample.
   const thought = numberField(raw.thoughtTokens)
   return {
     inputTokens: input,
     outputTokens: output,
-    ...(cached === undefined ? {} : { cacheReadTokens: cached }),
     ...(thought === undefined ? {} : { reasoningTokens: thought }),
     ...(numberField(raw.totalTokens) === undefined ? {} : { totalTokens: numberField(raw.totalTokens) }),
   }
