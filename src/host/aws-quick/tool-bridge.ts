@@ -98,13 +98,26 @@ export class AwsQuickToolBridge{
    let listed=await this.outpost.mcp<{servers?:QuickMcpEntry[]}>('list')
    let registered=listed.servers?.find((entry)=>entry.id===id)
    const config={id,name:'DeepSeek Harness',description:'DSH tools exposed by DeepSeek Harness',transport:'stdio',command:resolveQuickNode(),args:[this.entryPath(),this.statePath],env:{...registered?.env,ELECTRON_RUN_AS_NODE:'1'},enabled:true}
+   // Quick gates `update` behind a one-time confirmation nonce that only the Quick UI produces.
+   // An already-approved connector whose launched command/args still match must be reused as-is:
+   // firing `update` on every start (e.g. just to add ELECTRON_RUN_AS_NODE) fails with
+   // "Invalid or missing confirmation nonce". Only a real launcher change justifies an update,
+   // and if Quick still rejects it we surface native approval instead of a bare error.
    const sameLauncher=registered?.transport==='stdio'&&registered.name===config.name&&registered.command===config.command&&JSON.stringify(registered.args??[])===JSON.stringify(config.args)
    if(registered?.enabled===false){
     if(sameLauncher){this.tools={state:'approval_required'};return}
     control(await this.outpost.mcp('remove',{id}),'remove');registered=undefined
    }
    if(!registered)control(await this.outpost.mcp('add',config),'add')
-   else if(!sameLauncher||registered.env?.ELECTRON_RUN_AS_NODE!=='1')control(await this.outpost.mcp('update',config),'update')
+   else if(!sameLauncher){
+    // The launched command/args genuinely changed (e.g. migrating off the Electron launcher).
+    // Quick gates `update` behind a UI confirmation nonce the plugin cannot mint; when it refuses,
+    // fall back to native approval rather than throwing the raw nonce error at the user.
+    const ok=await this.outpost.mcp<{success?:boolean;error?:string}>('update',config)
+    if(ok.success===false){this.tools={state:'approval_required',detail:ok.error};return}
+   }
+   // A matching, already-approved connector is reused as-is: no `update` is fired. Even a missing
+   // ELECTRON_RUN_AS_NODE is left alone because the live connector already launches correctly.
    listed=await this.outpost.mcp<{servers?:QuickMcpEntry[]}>('list');registered=listed.servers?.find((entry)=>entry.id===config.id)
    if(!registered||registered.enabled===false){this.tools={state:'approval_required'};return}
    const deadline=Date.now()+45_000;let reloaded=false

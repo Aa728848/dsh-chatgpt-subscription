@@ -38,19 +38,29 @@ describe('AWS Quick stdio tool bridge',()=>{
    await client.close()
   }finally{await bridge.dispose();expect(calls.some((call)=>call.action==='remove')).toBe(false);const persisted=JSON.parse(await fs.readFile(statePath,'utf8'));expect(persisted.tools).toEqual([{name:'read',description:'Read file',parameters:{type:'object',properties:{path:{type:'string'}}}}]);expect(persisted.execution).toBeUndefined();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
- it('forces Electron Node mode and upgrades an existing connector that lacks it',async()=>{
-  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-node-mode-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')
-  const updates:Record<string,unknown>[]=[];let env:Record<string,string>={QUICK_PROFILE:'work'}
-  const outpost={mcp:async(action:string,body:Record<string,unknown>)=>{
-   if(action==='update'){updates.push(body);env=body.env as Record<string,string>}
-   if(action==='list')return{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,status:'connected',transport:'stdio',command:process.execPath,args:[entryFile,statePath],...(env?{env}:{}),tools:[]}]}
-   return{success:true}
-  }} as unknown as AwsQuickOutpost
+ it('reuses an approved connector as-is and never fires a nonce-gated update for it',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-reuse-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')
+  const actions:string[]=[]
+  const outpost={mcp:async(action:string)=>{actions.push(action);return action==='list'?{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,status:'connected',transport:'stdio',command:process.execPath,args:[entryFile,statePath],tools:[]}]}:{success:true}}} as unknown as AwsQuickOutpost
   const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile})
   try{
    await expect(Promise.all([bridge.prepare(),bridge.prepare()])).resolves.toEqual([{state:'ready'},{state:'ready'}])
-   expect(env).toEqual({QUICK_PROFILE:'work',ELECTRON_RUN_AS_NODE:'1'})
-   expect(updates).toHaveLength(1)
+   // A matching launcher must never be updated: Quick's update requires a UI confirmation nonce,
+   // so firing one on every start is exactly the "Invalid or missing confirmation nonce" regression.
+   expect(actions).not.toContain('update')
+  }finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
+ })
+ it('falls back to native approval when a real launcher change is refused for the confirmation nonce',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-approval-nonce-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')
+  let updated=false
+  const outpost={mcp:async(action:string)=>{
+   if(action==='update'){updated=true;return{success:false,error:'Invalid or missing confirmation nonce'}}
+   return action==='list'?{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,status:'connected',transport:'stdio',command:'C:/old/node.exe',args:[entryFile,statePath],tools:[]}]}:{success:true}
+  }} as unknown as AwsQuickOutpost
+  const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile})
+  try{
+   await expect(bridge.prepare()).resolves.toMatchObject({state:'approval_required'})
+   expect(updated).toBe(true)
   }finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
  })
  it('restores persisted tool schemas when preparing after a host restart',async()=>{
