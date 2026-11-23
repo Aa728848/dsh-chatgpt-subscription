@@ -14,6 +14,37 @@ export interface QuickToolCatalog{id:string;fingerprint:string;outpostId:string;
 interface QuickMcpEntry{id?:string;name?:string;enabled?:boolean;transport?:string;command?:string;args?:unknown[];env?:Record<string,string>;tools?:unknown[];status?:string;error?:string}
 function fingerprint(tools:Tool[]):string{return createHash('sha256').update(JSON.stringify(tools.map((tool)=>[tool.name,tool.description,tool.parameters]))).digest('hex').slice(0,16)}
 function control(result:unknown,action:string):void{if(typeof result==='object'&&result&&(result as {success?:boolean}).success===false)throw new Error('Quick MCP '+action+' failed: '+String((result as {error?:unknown}).error??'unknown error'))}
+/** Inputs for {@link resolveQuickNode}; all optional so tests can drive it without touching process globals. */
+export interface QuickNodeResolveOptions{platform?:NodeJS.Platform;execPath?:string;resourcesPath?:string;isElectron?:boolean;exists?(candidate:string):boolean;pathEnv?:string}
+/**
+ * The Node executable Quick should spawn for the stdio MCP entry.
+ *
+ * Quick launches the registered `command` directly and parses its stdout as
+ * JSON-RPC. In the Desktop build `process.execPath` is the Electron app
+ * (`DeepSeek Harness.exe`); launching it prints the desktop shell's own startup
+ * output onto that pipe and the MCP handshake dies with `Invalid JSON: EOF while
+ * parsing a value` (issue #126). Under a plain Node host `process.execPath` is
+ * already node, so it is returned unchanged; under Electron the DSH-installed
+ * `runtime/primary-runtime/dependencies/node` binary, then a PATH node, is
+ * preferred. When none is found a clear error is raised rather than silently
+ * resurrecting the broken Electron launcher.
+ */
+export function resolveQuickNode(opts:QuickNodeResolveOptions={}):string{
+ const platform=opts.platform??process.platform
+ const execPath=opts.execPath??process.execPath
+ const isElectron=opts.isElectron??Boolean(process.versions.electron)
+ if(!isElectron)return execPath
+ const exists=opts.exists??((candidate:string)=>existsSync(candidate))
+ const bin=platform==='win32'?'node.exe':'node'
+ const roots=new Set<string>()
+ const resourcesPath=opts.resourcesPath??(process as {resourcesPath?:string}).resourcesPath
+ if(resourcesPath)roots.add(resourcesPath)
+ roots.add(path.join(path.dirname(execPath),'resources'))
+ for(const root of roots){const candidate=path.join(root,'runtime','primary-runtime','dependencies','node','bin',bin);if(exists(candidate))return candidate}
+ const pathEnv=opts.pathEnv??process.env.PATH??process.env.Path??''
+ for(const dir of pathEnv.split(path.delimiter)){if(!dir)continue;const candidate=path.join(dir,bin);if(exists(candidate))return candidate}
+ throw new Error('AWS Quick could not find a Node executable to run the DeepSeek Harness MCP bridge. Run DeepSeek Harness from its desktop installer (which bundles Node), or put a node executable on PATH.')
+}
 export class AwsQuickToolBridge{
  private readonly catalogs=new Map<string,QuickToolCatalog>()
  private readonly union=new Map<string,Tool>()
@@ -66,7 +97,7 @@ export class AwsQuickToolBridge{
    const id='dsh-quick'
    let listed=await this.outpost.mcp<{servers?:QuickMcpEntry[]}>('list')
    let registered=listed.servers?.find((entry)=>entry.id===id)
-   const config={id,name:'DeepSeek Harness',description:'DSH tools exposed by DeepSeek Harness',transport:'stdio',command:process.execPath,args:[this.entryPath(),this.statePath],env:{...registered?.env,ELECTRON_RUN_AS_NODE:'1'},enabled:true}
+   const config={id,name:'DeepSeek Harness',description:'DSH tools exposed by DeepSeek Harness',transport:'stdio',command:resolveQuickNode(),args:[this.entryPath(),this.statePath],env:{...registered?.env,ELECTRON_RUN_AS_NODE:'1'},enabled:true}
    const sameLauncher=registered?.transport==='stdio'&&registered.name===config.name&&registered.command===config.command&&JSON.stringify(registered.args??[])===JSON.stringify(config.args)
    if(registered?.enabled===false){
     if(sameLauncher){this.tools={state:'approval_required'};return}

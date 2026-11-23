@@ -5,7 +5,7 @@ import path from 'node:path'
 import {describe,expect,it,vi} from 'vitest'
 import {Client} from '@modelcontextprotocol/sdk/client/index.js'
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js'
-import {AwsQuickToolBridge} from '../src/host/aws-quick/tool-bridge.ts'
+import {AwsQuickToolBridge,resolveQuickNode} from '../src/host/aws-quick/tool-bridge.ts'
 import type {AwsQuickOutpost} from '../src/host/aws-quick/outpost.ts'
 describe('AWS Quick stdio tool bridge',()=>{
  it('publishes DSH schemas through a real stdio MCP client and uses a stable named connector',async()=>{
@@ -122,6 +122,22 @@ describe('AWS Quick stdio tool bridge',()=>{
   const outpost={mcp:async(action:string)=>action==='list'?{servers:[{id:'dsh-quick',name:'DeepSeek Harness',enabled:true,tools:[{name:'read'}]}]}:{success:true},outpostId:async()=> 'outpost'} as unknown as AwsQuickOutpost
   const bridge=new AwsQuickToolBridge(outpost,{statePath,entryFile:path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')})
   try{const catalog=await bridge.ensure([{name:'read',description:'Read',parameters:{type:'object'}}]);expect(catalog.resolve('mcp__dsh_quick__read')).toBe('read');expect(catalog.resolve('other')).toBeNull()}finally{await bridge.dispose();await fs.unlink(statePath).catch(()=>undefined);await fs.rmdir(dir).catch(()=>undefined)}
+ })
+ it('runs the MCP bridge on bundled Node, never the Electron app, under a desktop host (issue #126)',()=>{
+  const electron={platform:'win32' as const,execPath:'C:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe',resourcesPath:'C:\\Program Files\\DeepSeek Harness\\resources',isElectron:true}
+  const bundled='C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\primary-runtime\\dependencies\\node\\bin\\node.exe'
+  const exists=(file:string)=>file===bundled
+  // The bundled primary-runtime node wins over the Electron executable.
+  expect(resolveQuickNode({...electron,exists,pathEnv:''})).toBe(bundled)
+  // With no bundled node the executable-adjacent resources dir is tried next.
+  expect(resolveQuickNode({...electron,resourcesPath:undefined,exists,pathEnv:''})).toBe(bundled)
+  // A PATH node is the last resort when the bundled runtime is absent.
+  const pathNode='C:\\Program Files\\nodejs\\node.exe'
+  expect(resolveQuickNode({...electron,resourcesPath:undefined,exists:(f)=>f===pathNode,pathEnv:'C:\\Program Files\\nodejs'})).toBe(pathNode)
+  // A plain Node host keeps process.execPath exactly as before.
+  expect(resolveQuickNode({platform:'linux',execPath:'/usr/bin/node',isElectron:false,exists:()=>false,pathEnv:''})).toBe('/usr/bin/node')
+  // Nothing usable is a clear error, not a silent fall back to Electron.
+  expect(()=>resolveQuickNode({...electron,resourcesPath:undefined,exists:()=>false,pathEnv:''})).toThrow(/Node executable/)
  })
  it('keeps identical concurrent MCP requests attached to distinct Quick WSS calls',async()=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dsh-quick-concurrent-'));const statePath=path.join(dir,'tools.json');const entryFile=path.join(process.cwd(),'src/entry-aws-quick-mcp.ts')
