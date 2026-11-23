@@ -36,6 +36,64 @@ function collectResults(messages:Message[],images:Awaited<ReturnType<typeof reso
  for(const message of messages)for(const block of message.content){if(block.type!=='tool-result')continue;const result=block as ToolResultBlock;out.push({id:result.toolCallId,content:quickToolResultContent(result.content,images),isError:result.isError===true})}
  return out
 }
+/** AWS Quick rejects a single chat message above this size with a deterministic error. */
+export const QUICK_MAX_REQUEST_BYTES=64*1024
+/** Bytes held back for the JSON envelope, ids, the pre-approved tool list and mode/effort fields Quick also counts. */
+const QUICK_REQUEST_RESERVE_BYTES=8192
+const SYSTEM_TRIM_MARKER='\n\n[DSH system context truncated to fit the AWS Quick request size limit]'
+const TRANSCRIPT_TRIM_MARKER='[Earlier conversation trimmed to fit the AWS Quick request size limit]\n\n'
+function utf8Bytes(value:string):number{return Buffer.byteLength(value,'utf8')}
+/** Longest prefix of `value` whose UTF-8 length is at most `maxBytes` (never splits a surrogate pair). */
+function fitPrefix(value:string,maxBytes:number):string{if(maxBytes<=0)return'';if(utf8Bytes(value)<=maxBytes)return value;let lo=0;let hi=value.length;let best=0;while(lo<=hi){const mid=(lo+hi)>>1;if(utf8Bytes(value.slice(0,mid))<=maxBytes){best=mid;lo=mid+1}else hi=mid-1}if(best>0&&best<value.length){const code=value.charCodeAt(best-1);if(code>=0xd800&&code<=0xdbff)best-=1}return value.slice(0,best)}
+/** Longest suffix of `value` whose UTF-8 length is at most `maxBytes` (keeps the latest content). */
+function fitSuffix(value:string,maxBytes:number):string{if(maxBytes<=0)return'';if(utf8Bytes(value)<=maxBytes)return value;let lo=0;let hi=value.length;let best=0;while(lo<=hi){const mid=(lo+hi)>>1;if(utf8Bytes(value.slice(value.length-mid))<=maxBytes){best=mid;lo=mid+1}else hi=mid-1}if(best>0&&best<value.length){const code=value.charCodeAt(value.length-best);if(code>=0xdc00&&code<=0xdfff)best-=1}return value.slice(value.length-best)}
+/** The pieces that make up one outgoing Quick message. */
+export interface QuickRequestParts{text:string;systemContext:string;policy:string}
+/** The message that will actually be sent, after any budget trimming. */
+export interface QuickRequestPlan{text:string;customPrompt:string|undefined;truncated:boolean}
+/**
+ * Fit one outgoing Quick message inside Quick's per-message size limit.
+ *
+ * Quick refuses a chat message above 64 KB with a deterministic, non-retryable
+ * error. A DSH preset can put a very large block in its system prompt (the
+ * `Writing code for run_code` section alone measured ~74 KB in issue #126), and
+ * the adapter used to paste that whole block into `custom_prompt`, so a one-line
+ * user message was rejected before it ever left the plugin. This budgets the
+ * message by its UTF-8 byte length and degrades in a fixed priority order:
+ *
+ * 1. Keep the latest user input and the tool/client policy (the approval rules)
+ *    intact whenever they fit on their own; only the transcript tail is trimmed
+ *    if the conversation itself is too large.
+ * 2. Trim the system context (where a big preset prompt lives) to the remaining
+ *    room, ending it with a truncation marker.
+ * 3. If even the essentials cannot fit, throw a non-retryable {@link LlmError}
+ *    telling the user to switch preset or shorten the input, instead of sending
+ *    a request Quick will reject.
+ *
+ * @param parts - Latest user text, the system/developer context, and the fixed policy.
+ * @param cap - Byte budget; defaults to Quick's limit minus the envelope reserve.
+ */
+export function budgetQuickRequest(parts:QuickRequestParts,cap:number=QUICK_MAX_REQUEST_BYTES-QUICK_REQUEST_RESERVE_BYTES):QuickRequestPlan{
+ const custom=(systemContext:string):string|undefined=>[systemContext,parts.policy].filter(Boolean).join('\n\n')||undefined
+ const customBytes=(systemContext:string):number=>{const built=custom(systemContext);return built?utf8Bytes(built):0}
+ let text=parts.text
+ // 1. If the transcript alone plus policy overflows, keep the tail (latest turns).
+ if(utf8Bytes(text)+customBytes('')>cap){
+  const room=cap-customBytes('')-utf8Bytes(TRANSCRIPT_TRIM_MARKER)
+  if(room<=0)throw new LlmError('AWS Quick request is larger than its '+QUICK_MAX_REQUEST_BYTES+' byte limit even with the conversation trimmed; start a new session or shorten the input.','INVALID_REQUEST')
+  text=TRANSCRIPT_TRIM_MARKER+fitSuffix(text,room)
+ }
+ // 2. Trim the system context into whatever room is left; keep policy untouched.
+ let systemContext=parts.systemContext
+ if(utf8Bytes(text)+customBytes(systemContext)>cap){
+  // Reserve the two bytes the systemContext+policy join inserts, or the final
+  // custom prompt lands two bytes over the budget and the guard below trips.
+  const room=cap-utf8Bytes(text)-customBytes('')-utf8Bytes(SYSTEM_TRIM_MARKER)-2
+  systemContext=room>0?fitPrefix(systemContext,room)+SYSTEM_TRIM_MARKER:''
+  if(utf8Bytes(text)+customBytes(systemContext)>cap)throw new LlmError('AWS Quick request is larger than its '+QUICK_MAX_REQUEST_BYTES+' byte limit even after dropping system context; switch to a preset with a smaller prompt or shorten the conversation.','INVALID_REQUEST')
+ }
+ return{text,customPrompt:custom(systemContext),truncated:text!==parts.text||systemContext!==parts.systemContext}
+}
 export class AwsQuickAdapter extends LlmAdapter{
  private readonly threads=new Map<string,ThreadState>();private readonly live=new Map<string,LiveTurn>();private readonly active=new Set<string>();private readonly decisionCalls=new Map<string,QuickDecision[]>()
  constructor(private readonly options:{settings:AwsQuickSettingsStore;outpost:AwsQuickOutpost;toolBridge?:AwsQuickToolBridge;attachments?:AttachmentImageReader;openConnection?:typeof QuickConnection.open}){super()}
@@ -82,8 +140,14 @@ export class AwsQuickAdapter extends LlmAdapter{
     const connection=await open({outpost:this.options.outpost,threadId,outpostId:catalog?.outpostId,preApprovedTools:tools.map((tool)=>'dsh_quick__'+tool.name),signal,activity})
     connection.setApprovalResolver?.(this.approvalResolver(catalog))
     turn={connection,catalog,pending:new Map(),state:{threadId,covered:0,fingerprint:'',model:modelState.id,...(effort?{effort}:{}),...(catalog?{toolFingerprint:catalog.fingerprint}:{})}}
-    const customPrompt=[systemContext(options.messages),QUICK_DSH_CLIENT_POLICY,tools.length>0?QUICK_DSH_TOOL_POLICY:''].filter(Boolean).join('\n\n')||undefined
-    connection.sendUser(text,modelState.mode,effort,attachments,customPrompt)
+    // Budget the whole message against Quick's per-message size limit before
+    // sending: a large preset system prompt pasted into `custom_prompt` used to
+    // push a short user message over 64 KB and Quick rejected it outright (issue
+    // #126). The latest input and the tool/client policy are kept ahead of the
+    // trimmable system context.
+    const policy=[QUICK_DSH_CLIENT_POLICY,tools.length>0?QUICK_DSH_TOOL_POLICY:''].filter(Boolean).join('\n\n')
+    const plan=budgetQuickRequest({text,systemContext:systemContext(options.messages),policy})
+    connection.sendUser(plan.text,modelState.mode,effort,attachments,plan.customPrompt)
    }
    if(!turn)throw new LlmError('AWS Quick failed to initialize its connection.','SERVER')
    const currentTurn=turn

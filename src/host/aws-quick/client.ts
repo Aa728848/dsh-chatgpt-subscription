@@ -83,7 +83,7 @@ export class QuickConnection{
   }
   if(type==='turn_aborted'){this.finish('cancelled');return}
   if(type==='message_complete'||type==='stream_ended'){this.finish('stop');return}
-  if(type==='error'||type==='guardrail_blocked')this.queue.fail(new LlmError(textField(event,'message')??textField(event,'error')??'AWS Quick returned an error.',type==='guardrail_blocked'?'INVALID_REQUEST':'SERVER'))
+  if(type==='error'||type==='guardrail_blocked'){const message=textField(event,'message')??textField(event,'error')??'AWS Quick returned an error.';const oversize=/over the \d+ ?KB size limit|size limit/i.test(message);this.queue.fail(new LlmError(message,type==='guardrail_blocked'||oversize?'INVALID_REQUEST':'SERVER'))}
  }
  close():void{if(this.closed)return;this.closed=true;clearInterval(this.keepalive);clearInterval(this.refresh);this.signal?.removeEventListener('abort',this.onAbort);this.queue.close();if(this.socket.readyState===WebSocket.OPEN||this.socket.readyState===WebSocket.CONNECTING)this.socket.close(1000,'Complete')}
 }

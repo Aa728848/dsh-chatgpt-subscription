@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {describe,expect,it} from 'vitest'
 import type {StreamChunk} from '@deepseek-ai/dsh-llm'
-import {AwsQuickAdapter} from '../src/host/aws-quick/adapter.ts'
+import {AwsQuickAdapter,budgetQuickRequest,QUICK_MAX_REQUEST_BYTES} from '../src/host/aws-quick/adapter.ts'
 import {AwsQuickSettingsStore} from '../src/host/aws-quick/settings.ts'
 import type {AwsQuickOutpost} from '../src/host/aws-quick/outpost.ts'
 import type {QuickConnection,QuickStreamEvent} from '../src/host/aws-quick/client.ts'
@@ -93,5 +93,47 @@ describe('AWS Quick adapter',()=>{
  it('rejects unsupported sampling controls without starting a connection',async()=>{
   const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-sampling-')),'settings.json')
   try{const adapter=new AwsQuickAdapter({settings:new AwsQuickSettingsStore(file),outpost,openConnection:async()=>{throw new Error('must not start')}});const req=request('x');req.temperature=0.2;await expect(collect(adapter.stream(req as never))).rejects.toThrow(/cannot express.*temperature/);await adapter.dispose()}finally{await cleanup(file)}
+ })
+ it('trims an oversized system prompt so a short user message stays under the 64 KB limit (issue #126)',async()=>{
+  const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-budget-')),'settings.json')
+  try{
+   const fake=fakeConnection([[{kind:'text',delta:'OK'},{kind:'done',reason:'stop'}]])
+   const adapter=new AwsQuickAdapter({settings:new AwsQuickSettingsStore(file),outpost,openConnection:async()=>fake.connection})
+   const big='Writing code for run_code. '.repeat(4000) // ~104 KB, like the preset in #126
+   const req={model:'quick-balanced',sessionId:'s',tools:[],messages:[{role:'system',content:[{type:'text',text:big}]},{role:'user',content:[{type:'text',text:'OK'}]}]}
+   const chunks=await collect(adapter.stream(req as never));expect(chunks.at(-1)).toMatchObject({reason:{kind:'stop'}})
+   // The latest user input is preserved verbatim, not trimmed.
+   expect(fake.state.sent).toContain('OK')
+   // The whole message Quick receives (customPrompt) now fits inside its limit.
+   const sentPolicy=String(fake.state.policy)
+   expect(Buffer.byteLength(sentPolicy,'utf8')).toBeLessThanOrEqual(QUICK_MAX_REQUEST_BYTES)
+   // The tool/client policy survives; the giant system block is truncated with a marker.
+   expect(sentPolicy).toContain('To ask the user a question')
+   expect(sentPolicy).toContain('truncated to fit the AWS Quick request size limit')
+   expect(sentPolicy.length).toBeLessThan(big.length)
+   await adapter.dispose()
+  }finally{await cleanup(file)}
+ })
+ it('budgets the quick request by UTF-8 bytes and keeps text+policy ahead of system context',()=>{
+  const policy='POLICY:'+ 'p'.repeat(200)
+  // Everything fits: untouched, no truncation.
+  const fits=budgetQuickRequest({text:'hello',systemContext:'ctx',policy})
+  expect(fits).toEqual({text:'hello',customPrompt:'ctx\n\n'+policy,truncated:false})
+  // System context overflows: trimmed to fit, text and policy intact.
+  const big='S'.repeat(70000)
+  const plan=budgetQuickRequest({text:'user input',systemContext:big,policy})
+  expect(plan.text).toBe('user input')
+  expect(plan.truncated).toBe(true)
+  expect(plan.customPrompt).toContain(policy)
+  expect(plan.customPrompt).toContain('truncated to fit the AWS Quick request size limit')
+  expect(Buffer.byteLength(plan.customPrompt ?? '','utf8')).toBeLessThanOrEqual(QUICK_MAX_REQUEST_BYTES-4096)
+  // Transcript itself overflows: kept as a tail, still within budget.
+  const hugeText='line\n'.repeat(20000)
+  const tail=budgetQuickRequest({text:hugeText,systemContext:'',policy})
+  expect(tail.text.startsWith('[Earlier conversation trimmed')).toBe(true)
+  expect(tail.text.endsWith('line\n')).toBe(true)
+  expect(Buffer.byteLength(tail.text,'utf8')+(tail.customPrompt?Buffer.byteLength(tail.customPrompt,'utf8'):0)).toBeLessThanOrEqual(QUICK_MAX_REQUEST_BYTES-4096)
+  // Nothing can fit: a non-retryable, actionable error rather than a doomed send.
+  expect(()=>budgetQuickRequest({text:'x'.repeat(100),systemContext:'y'.repeat(100),policy:'z'.repeat(100)},10)).toThrow(/byte limit/)
  })
 })
