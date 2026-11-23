@@ -1186,9 +1186,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   }, 'dsh-chatgpt-subscription: Kimi cache wait')
 
   // One-shot "compact when this turn ends", armed from the composer's model menu.
-  // An agent preset loads the compaction engine inside the agent's own scope,
-  // which is where the controller reads it (`agent.ctx`). A root-level engine
-  // is tracked here as well, through an optional `inject` scope: declaring
+  // The controller resolves the agent-scoped /compact command because preset
+  // service realms are not agent.ctx realms. A root-level engine is tracked as
+  // a compatibility fallback through an optional inject scope: declaring
   // `compaction` in `inject` would keep the whole plugin from mounting on a
   // Host that composes none at the root.
   let compactionEngine: unknown
