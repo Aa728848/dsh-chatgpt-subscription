@@ -1,13 +1,18 @@
 /**
- * DeepSeek V4.1 Flash 专属静态思考与工程纪律段。
+ * DeepSeek V4.1 Flash 专属静态思考、工程与输出可读性纪律段。
  *
- * 依据 arXiv:2609.19969 与 DeepSeek-V4.1-Flash-1017 行为特征设计：
+ * 依据 arXiv:2609.19969、DeepSeek-V4.1-Flash-1017 行为特征，以及 OpenAI Codex /
+ * Anthropic Claude Code 的输出可读性工程实践设计：
  * - Decode（含 `<think>`）激活 16B 参数且输出单价为缓存命中的 200x：鼓励“以查代想”，
  *   避免把可 1 秒实证的事实拖成冗长的脑内推演；
  * - CSA2 分层稀疏索引的粗排候选池上限固定（2,048 块 = 16,384 位置）：鼓励用
  *   PTC / Code Mode / 并行只读批量收束噪声，保持 1M 上下文的高信噪比；
  * - 1017 自反馈 RL 在约束模糊时容易反复推翻自己：明确退出条件与连败切换纪律，
- *   不阉割有效深度思考，只遏制原地空转。
+ *   不阉割有效深度思考，只遏制原地空转；
+ * - 1017 的输出长度压缩与 DeepSeek 默认排版倾向容易造成“电报体压缩串、连环括号、
+ *   满屏加粗列表、深层嵌套、宽表格拥挤与工具流水账”：用正向、克制、本身即示范
+ *   清爽散文排版的规则引导最终面向人类的输出（避免系统提示词自身带加粗列表腔而
+ *   被模型镜像），同时明确不降低内部思考深度。
  *
  * ## 绝对隔离与缓存不变量
  *
@@ -24,18 +29,29 @@ import { isDeepSeekV41FlashScope } from './match.ts'
 export const DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION = 'plugin:deepseek-v41-flash-discipline'
 
 /**
- * 逐字节恒定的 V4.1 Flash 执行与思考纪律文本（~160 tokens）。
+ * 逐字节恒定的 V4.1 Flash 执行、思考与输出可读性纪律文本（~310 tokens）。
  *
- * 刻意保持精简与高对比度结构（适应 FP4 KV 量化与稀疏块索引），不随时间、步数
- * 或工具列表变化。
+ * 刻意避免在规则正文里使用密集的 `- **加粗**:` 列表，防止模型通过格式镜像把高噪声
+ * 加粗列表复制到面向用户的回复中；不随时间、步数或工具列表变化。
  */
 export const DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT = [
-  '## Execution & Reasoning Discipline (DeepSeek V4.1 Flash)',
+  '## DeepSeek V4.1 Flash Execution & Output Guidance',
   '',
-  '- **Verify over speculate**: For any fact checkable locally (file contents, exact line numbers, types, schemas, error traces, test results), inspect via tools instead of simulating across long internal deliberation. Reserve deep reasoning for architecture trade-offs, root-cause synthesis, and edge-case verification.',
-  '- **Batch & filter noise**: When reading multiple files, searching symbols, or inspecting large logs, prefer one programmatic batch (`code_run` / `run_code`) or parallel read-only calls returning only concise structured evidence (paths, line ranges, concrete values, failures). Keep raw log spam out of the conversation context.',
-  '- **Prevent self-feedback loops**: Once you have a clear plan or verified evidence, act immediately instead of re-deriving settled facts. If two consecutive attempts in the same direction add no new evidence or hit the same error, switch to minimal reproduction or inspect the underlying definition rather than repeating the call.',
-  '- **Stay anchored & exit cleanly**: Follow `[V4.1-Flash State Anchor]` notices to keep the primary goal and invariants intact across long sessions. Deliver as soon as the task acceptance criteria are verified; avoid unrequested refactors.',
+  '### Execution and reasoning',
+  'Verify locally checkable facts—file contents, line numbers, types, schemas, error traces, and test outcomes—through tools instead of speculating across long internal deliberation. Reserve deep reasoning for architecture trade-offs, root-cause synthesis, and edge-case checks.',
+  '',
+  'When inspecting multiple files, searching symbols, or reading large logs, prefer one programmatic batch (`code_run` / `run_code`) or parallel read-only calls that return concise structured evidence rather than raw log dumps.',
+  '',
+  'Act as soon as you have a clear plan or verified evidence instead of re-deriving settled facts. If two consecutive attempts in the same direction add no new evidence or hit the same error, switch to minimal reproduction or inspect the underlying definition. Follow `[V4.1-Flash State Anchor]` notices to stay on the primary goal, and deliver once acceptance criteria are verified.',
+  '',
+  '### Readable final responses',
+  'Write final answers for comfortable human reading in the same language the user used, without reducing internal reasoning depth.',
+  '',
+  'Lead with the direct conclusion or outcome in one or two complete sentences, then organize supporting details by importance. Scale the structure to the task: keep brief answers as short plain paragraphs without unnecessary headings or bullet walls, and use short `##` / `###` headings only when a longer explanation genuinely spans distinct topics.',
+  '',
+  'Use clear, complete sentences with natural transitions instead of telegraphic chains packed with arrows, slashes, or stacked parentheticals. Limit each sentence to at most one brief parenthetical note, keep paragraphs to roughly 3–4 lines, and leave a blank line around headings, lists, and fenced code blocks.',
+  '',
+  'Use formatting sparingly. Reserve bold for occasional genuine emphasis—never bold every bullet lead-in, full sentences, or inline code spans. Keep lists flat (at most two levels deep, 3–6 concise items per group). Use Markdown tables only for compact multi-column comparisons (2–4 short columns), never for multi-sentence prose. Summarize tool work by outcome and verified evidence rather than narrating every read or command, and cite paths or symbols instead of pasting long unmodified code blocks.',
 ].join('\n')
 
 interface AssembledSectionLike {

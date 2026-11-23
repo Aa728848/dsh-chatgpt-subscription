@@ -187,6 +187,10 @@ describe('DeepSeek V4.1 Flash discipline section', () => {
     })
     // 前缀稳定性：连续装配结果逐字节一致
     expect(out2.sections[2]?.text).toBe(out1.sections[2]?.text)
+    // 包含面向人类的输出可读性指导，且示范清爽排版（不使用密集加粗列表腔，避免模型格式镜像）
+    expect(DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT).toContain('### Readable final responses')
+    expect(DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT).toContain('without reducing internal reasoning depth')
+    expect(DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT).not.toMatch(/^- \*\*[^*]+\*\*:/m)
 
     // 2. 同线路非 V4.1 Flash 模型（deepseek-v4-pro）与其他线路模型：零改动，原引用返回
     for (const other of [

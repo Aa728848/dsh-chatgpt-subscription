@@ -394,7 +394,7 @@ export interface Config {
   timelineCacheGuard?: Volatile<boolean>
   /**
    * 仅针对 DeepSeek V4.1 Flash（含 1017 快照与官方 `deepseek-flash`）的专项优化总开关：
-   * 静态思考纪律、128-token 尾部状态锚、入库前观测头、无损双信号推理坍塌守卫与
+   * 静态思考与可读性排版纪律、128-token 尾部状态锚、入库前观测头、无损双信号推理坍塌守卫与
    * 50x 前缀缓存保护。严格按模型隔离，绝不影响其它线路与模型。
    */
   deepseekV41FlashOptimization?: Volatile<boolean>
@@ -637,7 +637,7 @@ export const Config: z<ConfigInput, Config> = z.object({
   // DeepSeek V4.1 Flash 专项优化（arXiv:2609.19969 & 1017）：严格按模型门控，
   // 零影响其它线路与其它模型；volatile 活引用，关闭后下一步立刻旁路。
   deepseekV41FlashOptimization: z.boolean().default(true).volatile()
-    .description('仅针对 DeepSeek V4.1 Flash（含 1017 与官方 deepseek-flash）的专项优化：静态思考纪律、128-token 尾部状态锚、入库前观测头、无损推理坍塌守卫与 50x 前缀缓存保护；不影响其它线路与模型。默认开启。'),
+    .description('仅针对 DeepSeek V4.1 Flash（含 1017 与官方 deepseek-flash）的专项优化：静态思考与可读性排版纪律、128-token 尾部状态锚、入库前观测头、无损推理坍塌守卫与 50x 前缀缓存保护；不影响其它线路与模型。默认开启。'),
 
   // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
   // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
