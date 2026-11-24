@@ -23,7 +23,11 @@ import {
   type ReasoningCollapseContext,
 } from '../reasoning-collapse-guard/index.ts'
 import { readScopeRoute } from '../deepseek-v41-flash/match.ts'
-import { installOpenModelDiscipline, type OpenModelDisciplineOptions } from './discipline.ts'
+import {
+  OPEN_MODEL_DISCIPLINE_ORDER,
+  installOpenModelDiscipline,
+  type OpenModelDisciplineOptions,
+} from './discipline.ts'
 import {
   OPEN_MODEL_GUARD_NOTICE_SOURCE_KIND,
   READ_ONLY_SPIN_HIGH_CONTEXT_TOKENS,
@@ -66,6 +70,7 @@ export {
   OPEN_MODEL_ANCHOR_PREFIX,
   OPEN_MODEL_ANCHOR_SOURCE_KIND,
   OPEN_MODEL_CONSECUTIVE_ERROR_THRESHOLD,
+  OPEN_MODEL_DISCIPLINE_ORDER,
   OPEN_MODEL_GUARD_NOTICE_SOURCE_KIND,
   OPEN_MODEL_PROFILES,
   READ_ONLY_SPIN_HIGH_CONTEXT_TOKENS,

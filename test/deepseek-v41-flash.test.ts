@@ -4,6 +4,7 @@ import type { PostToolDecision, ToolExecution, ToolExecutionResult } from '@deep
 import {
   DEEPSEEK_V41_FLASH_ANCHOR_PREFIX,
   DEEPSEEK_V41_FLASH_ANCHOR_SOURCE_KIND,
+  DEEPSEEK_V41_FLASH_DISCIPLINE_ORDER,
   DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION,
   DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT,
   DEEPSEEK_V41_FLASH_RUNAWAY_SOURCE_KIND,
@@ -184,9 +185,11 @@ describe('DeepSeek V4.1 Flash discipline section', () => {
     ])
     expect(out1.sections[3]).toEqual({
       name: DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION,
+      order: DEEPSEEK_V41_FLASH_DISCIPLINE_ORDER,
       text: DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT,
       interpolate: false,
     })
+    expect(Number.isFinite((out1.sections[3] as { order?: unknown })?.order)).toBe(true)
     // 前缀稳定性：连续装配结果逐字节一致
     expect(out2.sections[3]?.text).toBe(out1.sections[3]?.text)
     // 包含面向人类的输出可读性指导，且示范清爽排版（不使用密集加粗列表腔，避免模型格式镜像）

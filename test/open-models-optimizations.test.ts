@@ -25,6 +25,7 @@ import {
 import {
   OPEN_MODEL_ANCHOR_PREFIX,
   OPEN_MODEL_ANCHOR_SOURCE_KIND,
+  OPEN_MODEL_DISCIPLINE_ORDER,
   OPEN_MODEL_GUARD_NOTICE_SOURCE_KIND,
   installOpenModelDiscipline,
   installOpenModelObservationGuard,
@@ -213,20 +214,22 @@ describe('静态尾部纪律注入（零破缓存、末尾追加、差异化规�
     const kimiAgent = createFakeAgent({ provider: 'command-code', model: 'moonshotai/Kimi-K3.1-Pro' })
     const kimi1 = await host.runWaterfall('system-prompt/assemble', [{}, { scope: kimiAgent }], () => ({
       sections: [
-        { name: 'persona', text: 'P' },
-        { name: 'tools:sdk', text: 'SDK' },
-      ] as Array<{ name: string; text: string; interpolate?: boolean }>,
+        { name: 'persona', order: 0, text: 'P' },
+        { name: 'tools:sdk', order: 5000, text: 'SDK' },
+      ] as Array<{ name: string; order?: number; text: string; interpolate?: boolean }>,
     }))
     const kimi2 = await host.runWaterfall('system-prompt/assemble', [{}, { scope: kimiAgent }], () => ({
       sections: [
-        { name: 'persona', text: 'P' },
-        { name: 'tools:sdk', text: 'SDK' },
-      ] as Array<{ name: string; text: string; interpolate?: boolean }>,
+        { name: 'persona', order: 0, text: 'P' },
+        { name: 'tools:sdk', order: 5000, text: 'SDK' },
+      ] as Array<{ name: string; order?: number; text: string; interpolate?: boolean }>,
     }))
     expect(kimi1.sections).toHaveLength(3)
     expect(kimi1.sections[0]?.name).toBe('persona')
     expect(kimi1.sections[1]?.name).toBe('tools:sdk')
     expect(kimi1.sections[2]?.name).toBe('plugin:open-model-discipline:kimi-k31')
+    expect(kimi1.sections[2]?.order).toBe(OPEN_MODEL_DISCIPLINE_ORDER)
+    expect(Number.isFinite(kimi1.sections[2]?.order)).toBe(true)
     expect(kimi1.sections[2]?.interpolate).toBe(false)
     expect(kimi1.sections[2]?.text).toBe(kimi2.sections[2]?.text)
     expect(String(kimi1.sections[2]?.text)).toContain('plain valid JavaScript')

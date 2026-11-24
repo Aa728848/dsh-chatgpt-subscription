@@ -11,8 +11,15 @@
  */
 import { matchOpenModelScope } from './profiles.ts'
 
+/**
+ * 注入分节的恒定排序值：高于宿主最大内置分节 `DEPLOYMENT_PERSONA_SUFFIX` (10200)，
+ * 保证经 `comparePromptSections` 排序后仍落于系统提示词末尾，且跨步数恒定不触发增量更新。
+ */
+export const OPEN_MODEL_DISCIPLINE_ORDER = 20_000
+
 interface AssembledSectionLike {
   readonly name?: unknown
+  readonly order?: unknown
   readonly text?: unknown
   readonly interpolate?: unknown
 }
@@ -109,6 +116,7 @@ export function installOpenModelDiscipline(
 
     const entry: AssembledSectionLike = {
       name: disciplineSectionName,
+      order: OPEN_MODEL_DISCIPLINE_ORDER,
       text: disciplineText,
       interpolate: false,
     }

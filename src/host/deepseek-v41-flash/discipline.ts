@@ -29,6 +29,12 @@ import { isDeepSeekV41FlashScope } from './match.ts'
 export const DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION = 'plugin:deepseek-v41-flash-discipline'
 
 /**
+ * 注入分节的恒定排序值：高于宿主最大内置分节 `DEPLOYMENT_PERSONA_SUFFIX` (10200)，
+ * 保证经 `comparePromptSections` 排序后仍落于系统提示词末尾，且跨步数恒定不触发增量更新。
+ */
+export const DEEPSEEK_V41_FLASH_DISCIPLINE_ORDER = 20_000
+
+/**
  * 逐字节恒定的 V4.1 Flash 执行、思考与输出可读性纪律文本（~310 tokens）。
  *
  * 刻意避免在规则正文里使用密集的 `- **加粗**:` 列表，防止模型通过格式镜像把高噪声
@@ -56,6 +62,7 @@ export const DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT = [
 
 interface AssembledSectionLike {
   readonly name?: unknown
+  readonly order?: unknown
   readonly text?: unknown
   readonly interpolate?: unknown
 }
@@ -152,6 +159,7 @@ export function installDeepSeekV41FlashDiscipline(
 
     const entry: AssembledSectionLike = {
       name: DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION,
+      order: DEEPSEEK_V41_FLASH_DISCIPLINE_ORDER,
       text: DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT,
       interpolate: false,
     }
