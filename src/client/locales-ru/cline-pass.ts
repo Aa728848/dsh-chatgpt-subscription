@@ -6,7 +6,7 @@
  * makes (a Cline Pass key never expires and is replaced rather than re-signed-in)
  * are kept here as well.
  */
-import type { ClinePassLocaleKey } from '../cline-pass/locales.ts'
+import type { ClinePassLocaleKey } from '../providers/cline-pass/locales.ts'
 import { accountPoolRu } from './account-pool.ts'
 
 export const dictionary: Record<ClinePassLocaleKey, string> = {

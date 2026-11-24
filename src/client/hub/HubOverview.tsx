@@ -21,7 +21,7 @@ import {
   savePreferences,
   type LineProxySnapshot,
 } from '../common/LineProxySection.tsx'
-import type { NS } from '../locales.ts'
+import type { NS } from '../providers/codex-chatgpt/locales.ts'
 import { BrandTile } from './brand-icons.tsx'
 import { hubCardName, HUB_PROVIDERS, type HubProviderDescriptor } from './providers.tsx'
 

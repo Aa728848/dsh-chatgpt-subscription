@@ -6,7 +6,7 @@
  * source applies on top of them.
  */
 import { accountPoolRu } from './account-pool.ts'
-import type { ClaudeLocaleKey } from '../claude/locales.ts'
+import type { ClaudeLocaleKey } from '../providers/claude/locales.ts'
 
 export const dictionary: Record<ClaudeLocaleKey, string> = {
   // The account-management card is shared with every other provider tab.

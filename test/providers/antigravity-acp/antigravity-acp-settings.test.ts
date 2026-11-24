@@ -1,0 +1,97 @@
+/**
+ * The settings document: a tri-state model selection, a permission policy that
+ * must never default to "allow", and an atomic write.
+ */
+import { describe, expect, it } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  AntigravityAcpSettingsStore,
+  defaultAntigravityAcpSettings,
+  parseAntigravityAcpSettings,
+  SETTINGS_VERSION,
+} from '../../../src/host/providers/antigravity-acp/settings.ts'
+
+function storeInTemp(): { store: AntigravityAcpSettingsStore; file: string; dispose(): void } {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-settings-test-'))
+  const file = join(dir, 'settings.json')
+  return { store: new AntigravityAcpSettingsStore(file), file, dispose: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+describe('parseAntigravityAcpSettings', () => {
+  it('keeps the three model-selection states apart', () => {
+    expect(parseAntigravityAcpSettings({ enabledModelIds: null }).enabledModelIds).toBeNull()
+    expect(parseAntigravityAcpSettings({ enabledModelIds: [] }).enabledModelIds).toEqual([])
+    expect(parseAntigravityAcpSettings({ enabledModelIds: ['a'] }).enabledModelIds).toEqual(['a'])
+  })
+
+  it('keeps an explicit choice and falls back to the default for a corrupt one', () => {
+    // The default is "allow", so the interesting case is the opposite: a stored
+    // "reject" is a decision and must survive a reread.
+    expect(parseAntigravityAcpSettings({ permissionPolicy: 'reject' }).permissionPolicy).toBe('reject')
+    expect(parseAntigravityAcpSettings({ permissionPolicy: 'yes please' }).permissionPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({ permissionPolicy: 42 }).permissionPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({ permissionPolicy: 'allow' }).permissionPolicy).toBe('allow')
+    expect(defaultAntigravityAcpSettings().permissionPolicy).toBe('allow')
+  })
+
+  it('defaults the native-tool policy to allow and treats a corrupt value as the default', () => {
+    // The strict mode cancels a whole turn at the first built-in tool call, so a
+    // document that cannot be read must not be able to switch a line into it.
+    expect(defaultAntigravityAcpSettings().nativeToolPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({ nativeToolPolicy: 'allow' }).nativeToolPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({ nativeToolPolicy: 'cancel' }).nativeToolPolicy).toBe('cancel')
+    expect(parseAntigravityAcpSettings({ nativeToolPolicy: 'sometimes' }).nativeToolPolicy).toBe('allow')
+    expect(parseAntigravityAcpSettings({}).nativeToolPolicy).toBe('allow')
+  })
+
+  it('uses the default for a missing enabled field but keeps a corrupt document off', () => {
+    expect(parseAntigravityAcpSettings({}).enabled).toBe(defaultAntigravityAcpSettings().enabled)
+    expect(parseAntigravityAcpSettings({ enabled: false }).enabled).toBe(false)
+    expect(parseAntigravityAcpSettings({ enabled: 'yes' }).enabled).toBe(false)
+  })
+
+  it('falls back to the defaults for a payload that is not an object', () => {
+    expect(parseAntigravityAcpSettings(null)).toEqual(defaultAntigravityAcpSettings())
+    expect(parseAntigravityAcpSettings([])).toEqual(defaultAntigravityAcpSettings())
+  })
+})
+
+describe('AntigravityAcpSettingsStore', () => {
+  it('round-trips through its own writer', async () => {
+    const { store, dispose } = storeInTemp()
+    try {
+      await store.update({ enabledModelIds: [], permissionPolicy: 'allow', binaryPath: 'C:/agy.exe' })
+      const reread = new AntigravityAcpSettingsStore((store as unknown as { filePath: string }).filePath)
+      const loaded = await reread.read()
+      expect(loaded.enabledModelIds).toEqual([])
+      expect(loaded.permissionPolicy).toBe('allow')
+      expect(loaded.binaryPath).toBe('C:/agy.exe')
+    } finally {
+      dispose()
+    }
+  })
+
+  it('writes the schema version beside the settings', async () => {
+    const { store, file, dispose } = storeInTemp()
+    try {
+      await store.update({ defaultReasoningEffort: 'high' })
+      const written = JSON.parse(readFileSync(file, 'utf8')) as { version?: number }
+      expect(written.version).toBe(SETTINGS_VERSION)
+    } finally {
+      dispose()
+    }
+  })
+
+  it('treats an unreadable file as "no settings yet" rather than failing the host', async () => {
+    const { file, dispose } = storeInTemp()
+    try {
+      writeFileSync(file, 'not json', 'utf8')
+      const store = new AntigravityAcpSettingsStore(file)
+      await expect(store.read()).resolves.toEqual(defaultAntigravityAcpSettings())
+    } finally {
+      dispose()
+    }
+  })
+})

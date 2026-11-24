@@ -5,7 +5,7 @@
  * from `en`. No shared account-pool labels are repeated here: this line owns no
  * account pool, so the shared card's vocabulary never reaches this page.
  */
-import type { AntigravityAcpLocaleKey } from '../antigravity-acp/locales.ts'
+import type { AntigravityAcpLocaleKey } from '../providers/antigravity-acp/locales.ts'
 
 export const dictionary: Record<AntigravityAcpLocaleKey, string> = {
   title: 'Antigravity (ACP)',
@@ -90,9 +90,9 @@ export const dictionary: Record<AntigravityAcpLocaleKey, string> = {
   occupancyDetail: 'использовано {used} из {size}',
 
   scopeSection: 'Границы возможностей',
-  scopeSummary: 'Четыре объективных ограничения: нет слота системного промпта, новая сессия каждый ход, официальные инструменты в режиме субагента и отсутствие публикуемой квоты.',
-  scopeHintSummary: 'Показать четыре ограничения',
-  scopeHint: 'Это объективные ограничения ACP и официального агента; данная линия их не обходит:',
+  scopeSummary: 'Сведения о системном промпте, повторном использовании сессии, инструментах субагента, квоте и прокси.',
+  scopeHintSummary: 'Показать сведения о границах',
+  scopeHint: 'Поведение, определяемое официальным протоколом ACP и CLI:',
   scopePrompt: 'В ACP нет отдельного слота системного промпта: системный промпт DSH передаётся в начале запроса, а собственный системный промпт официального агента убрать нельзя.',
   scopeHistory: 'После нормального завершения сессия паркуется вместе с процессом для повторного использования: если отпечаток префикса и набор инструментов не изменились, следующее сообщение отправляет только приращение; полная перестройка с повторной отправкой и якорем нужна лишь при сжатии или переписывании истории, смене набора инструментов или смерти процесса.',
   scopeTools: 'Как основная модель линия выполняет вызовы инструментов через DSH и под его контролем; как субагент дочерний процесс использует собственные инструменты официального агента.',

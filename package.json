@@ -1,8 +1,8 @@
 {
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
   "version": "0.83.0",
-  "description": "DSH provider plugin for Codex access through a ChatGPT subscription.",
-  "icon": "./icon.svg",
+  "description": "Multi-provider subscription hub and agent runtime enhancements for DeepSeek Harness (DSH).",
+  "icon": "./assets/icon.svg",
   "author": {
     "name": "eddyskywalker",
     "url": "https://www.npmjs.com/~eddyskywalker"
@@ -45,25 +45,25 @@
     "./package.json": "./package.json",
     "./presets/*": "./presets/*",
     "./progress-updates": {
-      "types": "./lib/types/entry-progress-updates.d.ts",
+      "types": "./lib/types/entries/progress-updates.d.ts",
       "default": "./lib/progress-updates.js"
     },
     "./progress-updates/locale/*.json": "./locale/progress-updates/*.json",
-    "./progress-updates/icon": "./progress-updates.svg",
+    "./progress-updates/icon": "./assets/progress-updates.svg",
     "./plan-mode-pipeline": {
-      "types": "./lib/types/entry-plan-mode-pipeline.d.ts",
+      "types": "./lib/types/entries/plan-mode-pipeline.d.ts",
       "default": "./lib/plan-mode-pipeline.js"
     },
     "./plan-mode": {
-      "types": "./lib/types/entry-plan-mode.d.ts",
+      "types": "./lib/types/entries/plan-mode.d.ts",
       "default": "./lib/plan-mode.js"
     },
     "./tool-result-pruner": {
-      "types": "./lib/types/entry-tool-result-pruner.d.ts",
+      "types": "./lib/types/entries/tool-result-pruner.d.ts",
       "default": "./lib/tool-result-pruner.js"
     },
     "./codemode": {
-      "types": "./lib/types/entry-codemode.d.ts",
+      "types": "./lib/types/entries/codemode.d.ts",
       "default": "./lib/codemode.js"
     }
   },
@@ -147,7 +147,7 @@
     "vitest": "^4.1.8"
   },
   "files": [
-    "icon.svg",
+    "assets",
     "lib/index.js",
     "lib/client.js",
     "lib/client.js.map",
@@ -157,10 +157,8 @@
     "widgets",
     "cordis.patch.yml",
     "README.md",
-    "CHANGELOG.md",
     "lib/progress-updates.js",
     "locale",
-    "progress-updates.svg",
     "lib/*.js"
   ],
   "license": "MIT",

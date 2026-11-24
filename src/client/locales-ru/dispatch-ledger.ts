@@ -3,7 +3,7 @@
  *
  * Key set and order mirror the `zh` source; meaning follows `en`.
  */
-import type { DispatchLedgerLocaleKey } from '../dispatch-ledger/locales.ts'
+import type { DispatchLedgerLocaleKey } from '../features/dispatch-ledger/locales.ts'
 
 export const dictionary: Record<DispatchLedgerLocaleKey, string> = {
   mandateTitle: 'Запуск субагента',

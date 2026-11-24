@@ -6,7 +6,7 @@
  * labels the Qoder card rewrites (the composer badge and the window fallback) are
  * overridden at the tail, exactly where the source rewrites them.
  */
-import type { QoderLocaleKey } from '../qoder/locales.ts'
+import type { QoderLocaleKey } from '../providers/qoder/locales.ts'
 import { accountPoolRu } from './account-pool.ts'
 
 export const dictionary: Record<QoderLocaleKey, string> = {

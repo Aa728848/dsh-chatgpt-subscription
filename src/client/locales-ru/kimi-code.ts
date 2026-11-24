@@ -5,7 +5,7 @@
  * from `en`. The account-pool card is shared, so its labels come from
  * `./account-pool.ts` rather than being restated here.
  */
-import type { KimiCodeLocaleKey } from '../kimi-code/locales.ts'
+import type { KimiCodeLocaleKey } from '../providers/kimi-code/locales.ts'
 import { accountPoolRu } from './account-pool.ts'
 
 export const dictionary: Record<KimiCodeLocaleKey, string> = {

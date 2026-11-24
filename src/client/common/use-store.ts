@@ -7,7 +7,7 @@
  * belonged to that component.
  */
 import { useSyncExternalStore } from 'react'
-import type { SnapshotStore } from '../store.ts'
+import type { SnapshotStore } from '../providers/codex-chatgpt/store.ts'
 
 export function useStore<T>(store: SnapshotStore<T>): T {
   return useSyncExternalStore(

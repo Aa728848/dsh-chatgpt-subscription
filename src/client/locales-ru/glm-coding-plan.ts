@@ -5,7 +5,7 @@
  * from `en`. Shared account-pool labels come from `account-pool.ts` so this
  * line cannot drift from the other provider tabs.
  */
-import type { GlmCodingPlanLocaleKey } from '../glm-coding-plan/locales.ts'
+import type { GlmCodingPlanLocaleKey } from '../providers/glm-coding-plan/locales.ts'
 import { accountPoolRu } from './account-pool.ts'
 
 export const dictionary: Record<GlmCodingPlanLocaleKey, string> = {

@@ -25,7 +25,7 @@ function runCapture(command) {
 async function main() {
   const pkgPath = path.join(projectRoot, 'package.json');
   const compatPath = path.join(projectRoot, 'src/compat.ts');
-  const changelogPath = path.join(projectRoot, 'CHANGELOG.md');
+  const changelogPath = path.join(projectRoot, 'docs/CHANGELOG.md');
 
   if (!fs.existsSync(pkgPath)) {
     console.error('Error: package.json not found in project root.');
@@ -102,9 +102,9 @@ async function main() {
 
   // 5. Git Commit & Tag
   console.log('\n[5/5] Git 提交与打 Tag...');
-  run('git add package.json src/compat.ts CHANGELOG.md');
+  run('git add package.json src/compat.ts docs/CHANGELOG.md');
 
-  const status = runCapture('git status --porcelain package.json src/compat.ts CHANGELOG.md');
+  const status = runCapture('git status --porcelain package.json src/compat.ts docs/CHANGELOG.md');
   if (status) {
     run(`git commit -m "chore(release): bump package version to ${targetVersion}"`);
   } else {

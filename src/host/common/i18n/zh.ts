@@ -46,7 +46,7 @@ export const zh = {
   'wb.pool.pausedDefault': '号池已暂停。',
   'wb.pool.accountLabel': '账号 {position}',
   'wb.pool.paused': '{provider} 号池已暂停：{reason} 预计 {minutes} 分钟后自动恢复；被上游限制的账号需要重新登录后才能回到轮换。',
-  'wb.pool.notAccountScoped': '{provider} 号池只记录账号级限制（{expected}），收到业务码 {code}；11128 与 11158 不是账号级拒绝，必须由协议层分别处理。',
+  'wb.pool.notAccountScoped': '{provider} 收到非账号级错误码 {code}（预期为账号级限制 {expected}）。',
   'wb.pool.upstreamRefused': '上游以 {code} 在 {minutes} 分钟内拒绝了 {count} 个不同账号',
   'wb.pool.desktopAccountUndeletable': '桌面账号由 CodeBuddy 客户端所有，只能隐藏，不能删除。',
   // Qoder line: cancellation, upstream refusals and the quota route's answers.
@@ -134,9 +134,9 @@ export const zh = {
   'sc.quotaCredentialWriteVerifyFailed': '{provider} 额度凭据写入校验失败',
   'sc.modelSettingsWriteFailed': '{provider} 模型设置写入失败：落盘的选择与刚写入的不一致',
   // GLM line: quota failures, 429 cooldowns, the sign-in flow and route answers.
-  'glm.quotaNeedsKey': '{provider} 的配额接口需要一把 Coding Plan Key（裸值，不加 Bearer）；空凭据不会变成一个能通过鉴权的请求。',
+  'glm.quotaNeedsKey': '查询 {provider} 额度需要有效的 Coding Plan Key。',
   'glm.catalogNotJson': '{provider} 返回的模型目录不是可读的 JSON：{url}',
-  'glm.quotaNeedsKeyShort': '{provider} 的配额读取需要一把 Coding Plan Key（裸值，不加 Bearer）。',
+  'glm.quotaNeedsKeyShort': '查询 {provider} 额度需要 Coding Plan Key。',
   'glm.quotaUnreachable': '配额接口不可达：{detail}',
   'glm.quotaHttp': '配额查询失败（HTTP {status}）',
   'glm.quotaNotJson': '配额查询返回的不是 JSON。',

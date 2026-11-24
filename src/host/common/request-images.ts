@@ -529,33 +529,13 @@ export interface StickyImageOffloadResult {
 
 /**
  * Offload images against a budget that RECOVERS instead of a budget that resets.
- *
- * WHY THE TWO WATERMARKS. A single ceiling makes the retained prefix depend
- * on the request: two conversations carrying the same images drop a different
- * number of them as one more image arrives, so the prefix the service cached
- * is rewritten on the next turn and the cache is cold again. Native `kimi-cli`
- * therefore keeps a HIGH mark (20 MiB) and a LOW mark (10 MiB): the request
- * is allowed to grow to the high mark, and once it passes it, the oldest
- * images are given back until the request is back under the LOW mark. The gap
- * between the two is the slack that keeps the number of retained images — and
- * therefore the cached prefix — stable across turns.
- *
- * WHY THE DROPS ARE STICKY. The images a request gives back are replaced for
- * the REST of the session: `priorDroppedKeys` carries the identities a
- * previous turn already dropped, and they are replaced again here. A picture
- * that was omitted stays omitted, so the request the service caches stops
- * changing once the session has settled under its low mark.
- *
  * @param options - the request to budget.
  * @param maxBytes - high-water mark; images are untouched below it.
  * @param lowBytes - low-water mark; the trimming stops once the request is back under it.
  * @param images - the resolution the request will be sent with.
  * @param priorDroppedKeys - identities dropped by earlier turns.
  * @param inlineExcludedKeys - identities whose actual wire form is a hosted
- * reference rather than inline bytes. They stay in request order with a zero
- * byte weight; only genuinely inline images consume this budget.
  * @param maxImageBytes - per-image limit when the mapper independently replaces
- * larger images with placeholders. Those images do not consume the total budget.
  */
 export function offloadRequestImagesWithStickyBudget(
   options: GenerateOptions,

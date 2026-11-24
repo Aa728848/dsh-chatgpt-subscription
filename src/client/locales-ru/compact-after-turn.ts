@@ -1,4 +1,4 @@
-import type { CompactAfterTurnLocaleKey } from '../compact-after-turn/locales.ts'
+import type { CompactAfterTurnLocaleKey } from '../features/compact-after-turn/locales.ts'
 
 export const dictionary: Record<CompactAfterTurnLocaleKey, string> = {
   label: 'Сжать после этого хода',

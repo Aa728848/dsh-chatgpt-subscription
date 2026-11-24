@@ -1,0 +1,456 @@
+/**
+ * Static facts about Anthropic's Claude subscription surface.
+ *
+ * The subscription (Claude Pro/Max, the credential Claude Code uses) is a
+ * distinct product from the pay-as-you-go Console API. It is served by the same
+ * host — https://api.anthropic.com — but a subscription credential is a Bearer
+ * **OAuth access token**, not an `x-api-key`, and the subscription routes are
+ * gated behind betas the API-key line never sends.
+ *
+ * Every constant below was read out of a locally installed reference
+ * implementation, not recalled: the Anthropic wire layer and OAuth module of
+ * `@earendil-works/pi-ai` (dist/api/anthropic-messages.js,
+ * dist/auth/oauth/anthropic.js) and its `data/anthropic.json` model snapshot.
+ * Each constant names the source that establishes it, so a later reviewer can
+ * re-check the claim instead of trusting this file.
+ *
+ * The one fact this module cannot assert is which models the *server* will
+ * serve, or at what entitlement: that answer is the server's own
+ * GET /v1/models plus the account's plan, and the sibling model table says so
+ * at length.
+ */
+
+import { setClaudeCodeVersionPin } from '../_claude-shared/claude-code-version.ts'
+
+/** Provider id registered with DSH. */
+export const PROVIDER_ID = 'claude-subscription'
+/** Display name for the settings surface and the model picker. */
+export const PROVIDER_NAME = 'Claude（订阅）'
+
+/** Host serving both the Messages API and the subscription's own OAuth routes. */
+export const API_BASE = 'https://api.anthropic.com'
+
+/**
+ * Path the Messages API is posted to.
+ *
+ * The `?beta=true` query is part of the subscription contract rather than a
+ * cache buster: it is the beta route, not an alias of the plain one, so dropping
+ * it changes which endpoint answers rather than how the same endpoint is cached.
+ */
+export const MESSAGES_PATH = '/v1/messages?beta=true'
+/** Model listing. The authority on what this account can actually call. */
+export const MODELS_PATH = '/v1/models'
+/** Subscription usage meters (the 5-hour and 7-day windows). */
+export const USAGE_PATH = '/api/oauth/usage'
+
+/**
+ * Browser authorization endpoint of the subscription flow.
+ *
+ * This is the claude.ai property, which is what makes the resulting token a
+ * subscription credential. The Console's own authorization host mints
+ * API-key-scoped grants instead and is deliberately not used here.
+ *
+ * Overridable: see {@link oauthAuthorizeUrl}.
+ */
+export const OAUTH_AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize'
+/** Token endpoint for both the authorization-code grant and refresh. */
+export const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
+
+/**
+ * Redirect URI for the manual paste flow.
+ *
+ * The loopback flow ({@link loopbackRedirectUri}) is the primary one, but the
+ * authorization host only accepts a redirect URI the client is registered for.
+ * When no browser on this machine can complete the callback — a headless box, a
+ * remote shell, a browser in another profile — the user opens the authorize URL,
+ * lets the page fail to load, and pastes the resulting code back. Recognising
+ * this URI is what lets the flow tell the two apart.
+ */
+export const OAUTH_MANUAL_REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback'
+
+/**
+ * Public OAuth client id of the subscription flow.
+ *
+ * A public client id is not a secret — it identifies the client, and PKCE is
+ * what actually protects the exchange. It is still a fixed upstream fact: the
+ * authorization host rejects an unknown client id before any user is asked to
+ * authorize anything.
+ */
+export const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
+
+/**
+ * Scopes the subscription flow requests, space-separated as the endpoint wants.
+ *
+ * `user:inference` is the one that makes the token usable against
+ * /v1/messages; `user:profile` is what the usage endpoint answers against.
+ * A narrower set yields a token that authenticates but is refused on the routes
+ * this provider exists to serve, so the full set is requested.
+ */
+export const OAUTH_SCOPES = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
+
+/**
+ * Scopes a refresh asks for when the credential being refreshed records none.
+ *
+ * The claude.ai subset of {@link OAUTH_SCOPES} - everything but
+ * `org:create_api_key` - which is the set the official client sends on every
+ * refresh. The authorization host strips `org:create_api_key` from a
+ * subscription grant without failing the sign-in, and a refresh may not ask for
+ * a scope the grant does not hold (RFC 6749 section 6), so re-asking for the
+ * full authorize set is answered with `invalid_scope`. A credential that does
+ * record its scopes is refreshed with exactly those; see oauth.ts's
+ * refreshScopeFor.
+ */
+export const OAUTH_REFRESH_FALLBACK_SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
+
+/**
+ * Required on any request authenticated with a subscription OAuth token.
+ *
+ * The `anthropic-beta` header is cumulative: one request carries every marker
+ * that applies, and the values below are the wire tokens, not capability names.
+ */
+export const OAUTH_BETA = 'oauth-2025-04-20'
+/** Identity beta pairing with the Claude Code system prompt and version headers. */
+export const CLAUDE_CODE_BETA = 'claude-code-20250219'
+/** Lets thinking blocks interleave with tool use across a multi-turn loop. */
+export const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
+/**
+ * Licenses the extended one-hour prompt-cache TTL.
+ *
+ * `cache_control: { type: 'ephemeral', ttl: '1h' }` is NOT accepted without this
+ * beta: the one-hour tier is a separate licensed capability, and a body that
+ * asks for it without the marker is refused the same way `block_binding` is.
+ */
+export const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+/**
+ * Prompt-cache TTL this line asks for.
+ *
+ * Anthropic offers two tiers. The official CLI documents that a Claude
+ * SUBSCRIPTION's main conversation uses the one-hour tier while it is drawing
+ * on included plan usage, and drops to five minutes once the plan is exhausted
+ * and requests bill against usage credits. This line authenticates with a
+ * subscription token, so the subscription tier is the one that matches the
+ * official client's behaviour — and a user comparing this plugin against the
+ * official CLI should see the same cache lifetime, not half of it.
+ *
+ * The write is 1.25x the price of a five-minute write, so a short session that
+ * never re-reads the prefix pays more. That is the official trade-off and the
+ * user may override it.
+ */
+export type ClaudeCacheTtl = '5m' | '1h'
+/** TTL the official subscription client uses for its main conversation. */
+export const CLAUDE_SUBSCRIPTION_CACHE_TTL: ClaudeCacheTtl = '1h'
+/** The plain marker, i.e. the default five-minute tier. */
+export const CLAUDE_DEFAULT_CACHE_TTL: ClaudeCacheTtl = '5m'
+
+/** A cache marker for one tier. Absent `ttl` means the five-minute default. */
+export function cacheControlFor(ttl: ClaudeCacheTtl): { type: 'ephemeral'; ttl: ClaudeCacheTtl } {
+  return { type: 'ephemeral', ttl }
+}
+
+/** Whether a stored preference names a tier this line can send. */
+export function isClaudeCacheTtl(value: unknown): value is ClaudeCacheTtl {
+  return value === '5m' || value === '1h'
+}
+/**
+ * Licenses `thinking.block_binding` in a request body.
+ *
+ * The field is not optional to license: the vendor documents that a body
+ * carrying `block_binding` WITHOUT this beta is a 400 whose message ends
+ * `block_binding: Extra inputs are not permitted` — every request, every turn.
+ * The mid-convo thinking form always sends `block_binding`, so a request that
+ * uses that form must carry this value. The reference sends it for exactly those
+ * models (`THINKING_BINDING_CONTROLS_BETA`, pushed when `supportsMidConvoEffort`).
+ */
+export const THINKING_BINDING_CONTROLS_BETA = 'thinking-binding-controls-2026-08-01'
+
+/**
+ * Licenses a mid-conversation `tool_addition` / `tool_removal` block.
+ *
+ * A tool change stated inside a `role: "system"` message is a beta shape: without
+ * this marker the blocks are an unknown content type and the request is refused.
+ * The name carries its own date because the vendor versions the shape, so a
+ * future revision arrives as a new constant rather than as a silent behaviour
+ * change under the old one.
+ */
+export const INLINE_TOOLS_BETA = 'inline-tools-2026-09-15'
+
+/** Anthropic protocol revision sent as `anthropic-version`. */
+export const ANTHROPIC_VERSION = '2023-06-01'
+
+/**
+ * Client version this route CLAIMS to be on the subscription gateway.
+ */
+export const CLAUDE_CLI_VERSION = '2.1.330'
+
+/**
+ * Loopback callback port the subscription flow defaults to.
+ *
+ * The port is not free-form: it is part of the redirect URI, and the
+ * authorization host only accepts a redirect URI registered for the client, so
+ * this default is the one known to be accepted. It is still only a *default* —
+ * see {@link CALLBACK_PORT_ATTEMPTS}.
+ */
+export const DEFAULT_CALLBACK_PORT = 53692
+
+/**
+ * How many consecutive ports one probe covers, starting at the default.
+ *
+ * Windows (Hyper-V/WinNAT) dynamically reserves TCP port ranges that change on
+ * every reboot. A fixed callback port can land inside one and `listen` fails
+ * with `EACCES`, so browser authorization never completes.
+ *
+ * An excluded run is not a block of a width anyone can look up. One Windows 11
+ * host was measured holding 277 consecutive unusable ports (51121-51397) plus
+ * scattered single ones that appear in no static table, and the picture changes
+ * across reboots — so a window justified as "covers any single block" is covering
+ * a block size that does not exist. A window narrower than the run the default
+ * starts inside ends INSIDE that run, and the consequence here is worse than an
+ * error: resolveCallbackPort returns null, which beginLogin reads as "fall back
+ * to manual". The user is then pushed into pasting a code with no visible cause
+ * on a machine that has hundreds of free ports immediately behind the run.
+ *
+ * 1024 is ~3.7x the widest run measured and still ends at 54716, far below the
+ * 65535 ceiling. The window is walked one failed bind at a time (~0.35ms per
+ * rejected listen here), so the worst case costs a fraction of a second once per
+ * sign-in and only when every port in it is unusable; the ordinary case stops at
+ * the first usable port. Widening changes neither which port is tried first nor
+ * the default status as the one port known to be registered for this client
+ * (see {@link DEFAULT_CALLBACK_PORT}).
+ */
+export const CALLBACK_PORT_ATTEMPTS = 1024
+
+/** Path of the loopback callback the browser is redirected to. */
+export const CALLBACK_PATH = '/callback'
+
+/**
+ * Idle ceiling for one streaming response before it is declared stalled.
+ *
+ * Strictly inside the transport's own 300 s stream timeout; see
+ * `host/common/idle-watchdog.ts` for the measured basis.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 120_000
+/**
+ * Separate ceiling before the first streamed value arrives.
+ *
+ * A large prompt can spend much longer in prefill than a healthy stream may
+ * remain silent between values. Once the first value arrives, the watchdog
+ * returns to STREAM_IDLE_TIMEOUT_MS; this is not a whole-response deadline.
+ */
+export const STREAM_FIRST_OUTPUT_TIMEOUT_MS = 360_000
+/** Failure code the adapter reports for that stall. */
+export const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
+/** Ceiling for a model-listing or usage fetch. */
+export const DISCOVERY_TIMEOUT_MS = 20_000
+/**
+ * Ceiling for the MODEL LISTING request, which is a separate and much tighter
+ * budget than the usage read that shares {@link DISCOVERY_TIMEOUT_MS}.
+ *
+ * TRANSCRIBED from the official client's own model-discovery request: it is
+ * sent with a 3-second timeout by default, and a gateway that answers slower
+ * than that fails the discovery silently. The listing is a startup convenience
+ * that fills the model picker - it is NOT on the request path - so a slow
+ * answer must not hold a picker open for twenty seconds.
+ *
+ * This is the official figure and nothing more: the request is bounded, and a
+ * timeout degrades to the shipped table rather than to an error.
+ */
+export const MODELS_DISCOVERY_TIMEOUT_MS = 3_000
+/** Whole-request ceiling for one NON-STREAMING chat call.
+ *
+ * Deliberately never attached to a stream: an absolute `AbortSignal.timeout` on
+ * a streaming fetch keeps counting through the body and kills a long thinking
+ * pass mid-answer (opendesign shipped exactly that bug, at 180 s — see
+ * `docs/opendesign-line-plan.md` §5). A stream's liveness belongs to
+ * `STREAM_IDLE_TIMEOUT_MS`, which resets on every chunk. */
+export const CHAT_TIMEOUT_MS = 300_000
+/** How long a usage reading is served from cache before it is refetched. */
+export const QUOTA_CACHE_TTL_MS = 120_000
+/** How long a usage reading keeps answering while refreshes fail behind it. */
+export const QUOTA_FULL_REFRESH_MS = 300_000
+/** How long a model listing is served from cache. */
+export const CATALOG_CACHE_TTL_MS = 1_800_000
+/** How long a sign-in may stay open before it is abandoned. */
+export const LOGIN_TIMEOUT_MS = 600_000
+
+/** Output cap requested when the caller states none. */
+export const DEFAULT_MAX_TOKENS = 32_768
+/**
+ * Context window assumed for a model the catalog does not describe.
+ *
+ * 200K is the window every non-1M Claude model ships, so it is the value that is
+ * wrong for the fewest ids. The dangerous direction is a window that is too
+ * large — the request is rejected outright — while one that is too small only
+ * compacts earlier than it had to.
+ */
+export const DEFAULT_CONTEXT_WINDOW = 200_000
+
+/**
+ * Product identity for the `User-Agent`.
+ *
+ * The endpoint and the header vocabulary are Anthropic's own public contract, so
+ * this route identifies itself honestly as this plugin rather than
+ * impersonating a client it is not.
+ */
+export const PLUGIN_USER_AGENT = 'dsh-chatgpt-subscription (+https://github.com/Aa728848/dsh-chatgpt-subscription)'
+
+/**
+ * Anthropic error types this line classifies.
+ *
+ * Anthropic reports the real condition in the response body's `error.type`
+ * while the HTTP status stays coarse — several unrelated conditions share a
+ * status — so classification reads the body and only falls back to the status
+ * line when the body is unreadable.
+ *
+ * The keys are what this route calls each condition; the values are the wire
+ * strings, so an unknown string is never silently mapped onto a neighbour.
+ */
+export const ERROR_TYPE = {
+  /** 401 — the credential is absent, malformed, or expired. Re-signing in fixes it. */
+  AUTHENTICATION: 'authentication_error',
+  /** 403 — the credential is valid but the account may not use this resource. */
+  PERMISSION: 'permission_error',
+  /** 400 — the request itself is malformed or carries an unsupported parameter. */
+  INVALID_REQUEST: 'invalid_request_error',
+  /** 429 — request-rate or usage-window limit. The body may name a reset instant. */
+  RATE_LIMIT: 'rate_limit_error',
+  /** 529 — transient capacity shortage; retrying is the whole remedy. */
+  OVERLOADED: 'overloaded_error',
+  /** 404 — unknown model id or unknown resource. */
+  NOT_FOUND: 'not_found_error',
+  /** 500 — an unexpected server-side failure. */
+  API: 'api_error',
+  /** 413 — the request body exceeds the maximum size, independent of token count. */
+  REQUEST_TOO_LARGE: 'request_too_large',
+} as const
+
+/** One error type this line classifies. */
+export type ClaudeErrorType = (typeof ERROR_TYPE)[keyof typeof ERROR_TYPE]
+
+/**
+ * Error code the server reports when the client version it was told is too old.
+ *
+ * Distinct from {@link ERROR_TYPE}: the failure arrives as an ordinary
+ * `invalid_request_error` whose *details* carry this code, which is why it needs
+ * its own constant rather than a slot in the table above.
+ */
+export const ERROR_CODE_CLIENT_VERSION_TOO_OLD = 'claude_code_version_too_old'
+
+/** Every error type this line recognizes, for validation and tests. */
+export const CLAUDE_ERROR_TYPES: readonly ClaudeErrorType[] = Object.values(ERROR_TYPE)
+
+/** Whether a wire string is one of the error types this line classifies. */
+export function isClaudeErrorType(value: unknown): value is ClaudeErrorType {
+  return typeof value === 'string' && (CLAUDE_ERROR_TYPES as readonly string[]).includes(value)
+}
+
+/** In-process override set by {@link setClaudeCliVersion}. */
+let cliVersionOverride: string | null = null
+
+/**
+ * Effective client version to report.
+ *
+ * Resolution order is deliberate: an explicit {@link setClaudeCliVersion} pin
+ * wins, then the `DSH_CLAUDE_CLI_VERSION` environment variable, then the shipped
+ * baseline. The pin lets a running host react to
+ * `claude_code_version_too_old` without a restart; the environment variable lets a
+ * user do it without any code path at all.
+ */
+export function claudeCliVersion(): string {
+  const configured = (cliVersionOverride ?? process.env.DSH_CLAUDE_CLI_VERSION ?? '').trim()
+  return configured === '' ? CLAUDE_CLI_VERSION : configured
+}
+
+/**
+ * Pin the reported client version.
+ *
+ * Pass `null` (or a blank string) to clear the pin and fall back to the
+ * environment and then the shipped baseline.
+ */
+export function setClaudeCliVersion(value: string | null): void {
+  const normalized = (value ?? '').trim()
+  cliVersionOverride = normalized === '' ? null : normalized
+  setClaudeCodeVersionPin(normalized)
+}
+
+/**
+ * Compare two dotted numeric versions, e.g. `'2.1.283'` against `'2.1.280'`.
+ *
+ * This exists so a version FLOOR can be checked before a request is sent. The
+ * comparison is deliberately small and TOTAL rather than a SemVer parser: the
+ * only strings it ever sees are this line's own reported version (a pin, the
+ * `DSH_CLAUDE_CLI_VERSION` override, or the shipped default) and the floors
+ * recorded in the model catalog, and it must not throw on any of them — a
+ * comparison that can throw would turn a misconfigured version into a crash
+ * instead of the precise pre-flight refusal it was added to produce.
+ *
+ * Total means: a missing segment compares as 0 (`'2.1'` equals `'2.1.0'`), and a
+ * segment that is not a run of decimal digits compares as 0 rather than as NaN
+ * (`'abc'` equals `'0.0.0'`, and so does `''`). Leading zeros are exact rather
+ * than octal, and an optional leading `v` is tolerated because that is how a
+ * release is often written down.
+ *
+ * @returns a negative number, 0, or a positive number — the sign is the whole
+ *   contract, so callers compare against 0 rather than against ±1.
+ */
+export function compareDottedVersions(left: string, right: string): number {
+  const a = versionSegments(left)
+  const b = versionSegments(right)
+  const length = Math.max(a.length, b.length)
+  for (let index = 0; index < length; index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
+/**
+ * Whether one reported version clears a floor.
+ *
+ * An absent floor (`undefined`) means "no known floor" rather than "no floor",
+ * so it never blocks a request: refusing a model because nobody recorded a
+ * number would be this line inventing a restriction upstream never stated.
+ * A MALFORMED version on either side, on the other hand, is refused — that is
+ * the conservative direction, since the check exists to stop an unknown claim
+ * from reaching a server that has already refused one.
+ */
+export function meetsDottedVersionFloor(version: string, floor?: string): boolean {
+  if (floor === undefined || floor.trim() === '') return true
+  if (!isDottedVersion(version)) return false
+  return compareDottedVersions(version, floor) >= 0
+}
+
+/** Whether a string is a run of dot-separated decimal segments (an optional leading `v`). */
+function isDottedVersion(value: string): boolean {
+  const trimmed = value.trim().replace(/^v/i, '')
+  return /^\d+(\.\d+)*$/.test(trimmed)
+}
+
+/** Numeric segments of a dotted version; a non-numeric or absent segment is 0. */
+function versionSegments(value: string): number[] {
+  const trimmed = value.trim().replace(/^v/i, '')
+  if (trimmed === '') return [0]
+  return trimmed.split('.').map((segment) => {
+    const digits = /^\d+$/.test(segment.trim()) ? segment.trim() : ''
+    if (digits === '') return 0
+    const parsed = Number.parseInt(digits, 10)
+    return Number.isFinite(parsed) ? parsed : 0
+  })
+}
+
+/**
+ * Resolve the browser authorization endpoint.
+ *
+ * The subscription flow has answered on more than one host, while its Console
+ * counterpart has always been a different product, so a user hitting an
+ * authorization failure needs a way to point this route elsewhere without a
+ * republish — the same escape hatch the sibling Kimi line gives its OAuth host.
+ */
+export function oauthAuthorizeUrl(): string {
+  const override = (process.env.DSH_CLAUDE_OAUTH_AUTHORIZE_URL ?? '').trim()
+  return override === '' ? OAUTH_AUTHORIZE_URL : override
+}
+
+/** Loopback redirect URI the authorization host is told to return to. */
+export function loopbackRedirectUri(port: number = DEFAULT_CALLBACK_PORT): string {
+  return 'http://localhost:' + port + CALLBACK_PATH
+}

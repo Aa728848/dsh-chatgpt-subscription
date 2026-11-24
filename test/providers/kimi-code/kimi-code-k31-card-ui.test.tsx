@@ -1,0 +1,479 @@
+// @vitest-environment jsdom
+/**
+ * The K3.1 Pro card: what the settings page offers when a model always thinks,
+ * and what it says about cache writes.
+ *
+ * Two claims are pinned here because each one is a place where the card could
+ * look fine and still be wrong:
+ *
+ * - "thinking off" must not be offered for a model the service answers with
+ *   HTTP 400, and the reason has to be on the card rather than left to the
+ *   missing option;
+ * - a cache-write count of zero must print as 0, because a blank cell would read
+ *   as "nothing was measured";
+ * - a NULL total must print 未报告 instead: on this line's chat wire the service
+ *   never states a write field at all (a live probe returned only
+ *   `prompt_tokens_details.cached_tokens`), so 0 there would be a reading the
+ *   service never gave.
+ */
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { KimiCodeModelOption, KimiCodeRequestDiagnostic, KimiCodeWebStatus } from '../../../src/shared/kimi-code-contracts.ts'
+import { KimiCodeSection } from '../../../src/client/providers/kimi-code/KimiCodeSection.tsx'
+import { zh } from '../../../src/client/providers/kimi-code/locales.ts'
+
+function model(overrides: Partial<KimiCodeModelOption> = {}): KimiCodeModelOption {
+  return {
+    id: 'k3',
+    name: 'K3',
+    enabled: true,
+    defaultContextWindow: 262_144,
+    contextWindow: 262_144,
+    promptBudget: 262_144,
+    defaultMaxTokens: 32_768,
+    reasoningEfforts: ['low', 'high', 'max'],
+    defaultReasoningEffort: 'high',
+    wire: 'openai',
+    description: 'Flagship model',
+    supportsVideo: true,
+    supportsDynamicTools: true,
+    supportsToolUse: true,
+    minimumPlan: 'Moderato',
+    quotaMultiplier: 2,
+    ...overrides,
+  }
+}
+
+/** The K3.1 Pro pair as the host reports it: thinking always on, video declared. */
+const K31_PRO = model({
+  id: 'k3.1-pro',
+  name: 'K3.1 Pro',
+  thinkingType: 'only',
+  defaultReasoningEffort: 'max',
+  // Same chat-completions wire as every other model on this line.
+  wire: 'openai',
+  supportsVideo: true,
+  quotaMultiplier: 2,
+})
+
+const K31_HIGHSPEED = model({
+  id: 'k3.1-pro-highspeed',
+  name: 'K3.1 Pro Highspeed',
+  thinkingType: 'only',
+  defaultReasoningEffort: 'max',
+  wire: 'openai',
+  supportsVideo: true,
+  defaultContextWindow: 1_048_576,
+  contextWindow: 1_048_576,
+  promptBudget: 1_048_576,
+  quotaMultiplier: 4,
+})
+
+function status(overrides: Partial<KimiCodeWebStatus> = {}): KimiCodeWebStatus {
+  return {
+    enabled: true,
+    authenticated: true,
+    hasCredentials: true,
+    storagePath: '/tmp/kimi-code.json',
+    region: 'mainland-cn',
+    oauthHost: 'https://auth.kimi.com',
+    codingBaseUrl: 'https://api.kimi.com/coding',
+    account: null,
+    quota: null,
+    lastFetchedAt: null,
+    quotaError: null,
+    credentialsRejected: false,
+    cache: null,
+    preserveThinking: false,
+    models: [K31_PRO, K31_HIGHSPEED],
+    contextWindowOverrides: {},
+    defaultReasoningEffort: null,
+    accounts: [],
+    activeAccountId: undefined,
+    rotationStrategy: 'sequential',
+    loginRegion: 'mainland-cn',
+    serving: true,
+    conflict: null,
+    ...overrides,
+  }
+}
+
+function requestDiagnostic(overrides: Partial<KimiCodeRequestDiagnostic> = {}): KimiCodeRequestDiagnostic {
+  return {
+    id: 'request-1',
+    startedAt: 1,
+    endedAt: 2,
+    model: 'k3.1-pro',
+    wire: 'openai',
+    accountId: 'acc-1',
+    accountChanged: false,
+    outcome: 'success',
+    attempts: [],
+    ...overrides,
+  }
+}
+
+let root: Root | null = null
+let container: HTMLDivElement | null = null
+let realFetch: typeof fetch | undefined
+
+async function mount(
+  payload: KimiCodeWebStatus,
+  route: { provider: string; model: string } | null = null,
+): Promise<HTMLDivElement> {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true
+  realFetch ??= globalThis.fetch
+  // Two readers hit two endpoints on this page: the line's own status and this
+  // plugin's preferences, which the compaction card reads. One canned answer
+  // would hand the second one a document it cannot read.
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.includes('/kimi-code/api')) return Response.json({ ok: true, value: payload })
+    return Response.json({ ok: true, value: { preferences: { compactionRoute: route } } })
+  }) as unknown as typeof fetch
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
+  await act(async () => root!.render(createElement(KimiCodeSection, {})))
+  return container
+}
+
+beforeEach(() => {
+  vi.stubGlobal('open', vi.fn())
+})
+
+afterEach(async () => {
+  if (root !== null) await act(async () => root!.unmount())
+  root = null
+  container?.remove()
+  container = null
+  globalThis.IS_REACT_ACT_ENVIRONMENT = undefined
+  if (realFetch !== undefined) globalThis.fetch = realFetch
+  realFetch = undefined
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+/** The effort menu, found by its aria-label rather than by position. */
+function effortSelect(node: HTMLElement): HTMLSelectElement {
+  const select = node.querySelector<HTMLSelectElement>(`select[aria-label="${zh.defaultReasoningEffort}"]`)
+  if (select === null) throw new Error('effort select missing')
+  return select
+}
+
+function optionTexts(select: HTMLSelectElement): string[] {
+  return [...select.options].map((option) => option.textContent ?? '')
+}
+
+describe('kimi-code K3.1 Pro card', () => {
+  it('does not offer "thinking off" when every checked model thinks always', async () => {
+    const node = await mount(status())
+    const texts = optionTexts(effortSelect(node))
+    expect(texts).not.toContain(zh.effortNone)
+    // The remaining levels are the ones the models declare, not a fixed ladder.
+    expect(texts).toEqual(expect.arrayContaining([zh.effortLow, zh.effortHigh, zh.effortMax, zh.defaultEffortAuto]))
+  })
+
+  it('explains on the card why thinking off is missing, naming the models', async () => {
+    const node = await mount(status())
+    const note = zh.effortThinkingOnlyNote
+      .replace('{models}', 'K3.1 Pro · K3.1 Pro Highspeed')
+    expect(node.textContent).toContain(note)
+    expect(note).toContain('K3.1 Pro')
+  })
+
+  it('keeps offering thinking off while a checked model accepts it', async () => {
+    const node = await mount(status({ models: [model(), K31_PRO] }))
+    expect(optionTexts(effortSelect(node))).toContain(zh.effortNone)
+    // The note still names the thinking-only model that IS checked — the switch
+    // is offered because another checked model accepts it, not because the
+    // restriction went away.
+    expect(node.textContent).toContain(zh.effortThinkingOnlyNote.replace('{models}', 'K3.1 Pro'))
+  })
+
+  it('keeps a saved level no checked model accepts visible and flagged', async () => {
+    const node = await mount(status({ defaultReasoningEffort: 'none' }))
+    const select = effortSelect(node)
+    // The stored value still exists; an option that vanished would leave the
+    // select rendering blank instead of showing what is stored.
+    expect(select.value).toBe('none')
+    expect(optionTexts(select)).toContain(`${zh.effortNone} · ${zh.effortNotOffered}`)
+  })
+
+  it('labels K3.1 Pro with the same wire as every other model, and marks it thinking-only', async () => {
+    const node = await mount(status({ models: [model(), K31_PRO] }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsh-mcl-option')]
+    const pro = rows.find((row) => row.querySelector('.dsh-mcl-name')?.textContent === 'K3.1 Pro')
+    const k3 = rows.find((row) => row.querySelector('.dsh-mcl-name')?.textContent === 'K3')
+    // One protocol for the whole line: the checklist says the same thing for both.
+    expect(pro?.querySelector('.dsh-mcl-hint')?.textContent).toContain(zh.wireOpenai)
+    expect(k3?.querySelector('.dsh-mcl-hint')?.textContent).toContain(zh.wireOpenai)
+    expect(pro?.querySelector('.dsh-mcl-hint')?.textContent).toContain(zh.capThinkingOnly)
+    // ...and the declared video input is reported, not withheld.
+    expect(pro?.querySelector('.dsh-mcl-hint')?.textContent).toContain(zh.capVideo)
+  })
+
+  it('states the recorded multiplier on each K3.1 Pro row', async () => {
+    const node = await mount(status())
+    // Both rows printed "未公布" while no figure existed. They now carry the
+    // recorded multipliers — 2x for the regular version, 4x for the highspeed
+    // one — and the cost line is still drawn as a real value, in the same cell
+    // the rest of the column is compared down.
+    const costs = [...node.querySelectorAll<HTMLElement>('.dsha-cap-notes')]
+      .map((cell) => cell.querySelector('.dsha-cap-cost')?.textContent)
+    expect(costs).toEqual([
+      `${zh.quotaCost} 2x`,
+      `${zh.quotaCost} 4x`,
+    ])
+  })
+
+  it('draws the cache write row as one total, zero included', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 4,
+        cachedTokens: 1_000,
+        freshTokens: 250,
+        outputTokens: 90,
+        hitRatio: 0.8,
+        cacheWriteTokens: 1_200,
+        cacheWrite5mTokens: 1_200,
+        cacheWrite1hTokens: 0,
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const writeRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWrite)
+    expect(writeRow).toBeDefined()
+    // A reported zero is a reading, so it prints as 0 — never as a blank cell
+    // and never as the "暂无" used for a number this build cannot read.
+    expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe((1_200).toLocaleString())
+    // The hint paragraphs that used to sit under this row are gone with the tier
+    // wording, so the cache card carries data rows only.
+    expect(writeRow!.closest('.dsha-quota-card')?.querySelectorAll('p.dsha-muted').length).toBe(0)
+  })
+
+  it('offers the compaction model on this tab, showing the saved route', async () => {
+    const node = await mount(status(), { provider: 'opendesign', model: 'k3' })
+    // The preferences read resolves after the first render, so the state update
+    // it carries is flushed before anything is read off the DOM.
+    await act(async () => undefined)
+    const section = [...node.querySelectorAll<HTMLElement>('section.dsha-group')]
+      .find((entry) => entry.querySelector('h3')?.textContent === zh.compactionRoute)
+    expect(section).toBeDefined()
+    expect(section!.textContent).toContain(zh.compactionRouteHint)
+    // What is configured reads off the saved pair, not off an empty picker.
+    expect(section!.textContent).toContain('opendesign / k3')
+    expect([...section!.querySelectorAll('button')].map((button) => button.textContent))
+      .toContain(zh.compactionRouteChange)
+  })
+
+  it('still shows the write row when nothing was written', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 2,
+        cachedTokens: 10,
+        freshTokens: 5,
+        outputTokens: 5,
+        hitRatio: 10 / 15,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const writeRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWrite)
+    expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe('0')
+  })
+
+  it('prints 未报告 when no request behind the total ever stated a write', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 2,
+        cachedTokens: 470_272,
+        freshTokens: 270,
+        outputTokens: 1_834,
+        hitRatio: 470_272 / 470_542,
+        // The live shape of this line's chat wire, measured with a probe: the hit
+        // is reported and the write field is absent for every single request.
+        cacheWriteTokens: null,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const writeRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWrite)
+    expect(writeRow!.querySelector('.dsha-value')?.textContent).toBe(zh.metricNotReported)
+  })
+
+
+  it('draws the opening inheritance with the tokens it was measured on', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 9,
+        cachedTokens: 30_000,
+        freshTokens: 1_000,
+        outputTokens: 400,
+        hitRatio: 30_000 / 31_000,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        opening: { cachedTokens: 14_080, promptTokens: 21_527, hitRatio: 14_080 / 21_527 },
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const openingRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheOpening)
+    expect(openingRow).toBeDefined()
+    // Both token counts and the ratio read off the first request's own numbers,
+    // not off the rolling totals beside them.
+    expect(openingRow!.querySelector('.dsha-value')?.textContent).toBe(
+      zh.cacheOpeningValue
+        .replace('{cached}', (14_080).toLocaleString())
+        .replace('{tokens}', (21_527).toLocaleString())
+        .replace('{ratio}', `${((14_080 / 21_527) * 100).toFixed(1)}%`),
+    )
+  })
+
+  it('draws latest prefix continuity separately from newly processed input', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 2,
+        cachedTokens: 1_400,
+        freshTokens: 924,
+        outputTokens: 20,
+        hitRatio: 1_400 / 2_324,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        continuation: {
+          cachedTokens: 700,
+          freshTokens: 324,
+          previousPromptTokens: 1_000,
+          expectedCachedTokens: 768,
+          retentionRatio: 700 / 768,
+        },
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const row = rows.find((entry) => entry.querySelector('.dsha-label')?.textContent === zh.cacheContinuation)
+    expect(row).toBeDefined()
+    expect(row!.querySelector('.dsha-value')?.textContent).toBe(
+      zh.cacheContinuationValue
+        .replace('{cached}', (700).toLocaleString())
+        .replace('{expected}', (768).toLocaleString())
+        .replace('{fresh}', (324).toLocaleString())
+        .replace('{ratio}', `${((700 / 768) * 100).toFixed(1)}%`),
+    )
+  })
+
+  it('breaks down the latest request cost and attributes a reasoning-heavy spike', async () => {
+    const node = await mount(status({
+      accounts: [{ id: 'acc-1', alias: '主号', isPrimary: true }],
+      cache: {
+        requests: 2,
+        cachedTokens: 800_000,
+        freshTokens: 6_000,
+        outputTokens: 6_000,
+        hitRatio: 0.99,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        lastRequest: requestDiagnostic({
+          accountChanged: true,
+          usage: {
+            freshTokens: 5_911,
+            cacheReadTokens: 399_872,
+            cacheWriteTokens: 0,
+            outputTokens: 5_574,
+            reasoningTokens: 3_920,
+          },
+        }),
+      },
+    }))
+    expect(node.textContent).toContain('主号')
+    expect(node.textContent).toContain(zh.cacheAccountChanged)
+    expect(node.textContent).toContain(zh.cacheReasoningCost)
+    expect(node.textContent).toContain('3,920')
+    expect(node.textContent).toContain('70.3%')
+    expect(node.textContent).toContain('399,872')
+  })
+
+  it('distinguishes omitted usage fields from explicit zero readings', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 1,
+        cachedTokens: 0,
+        freshTokens: 100,
+        outputTokens: 0,
+        hitRatio: 0,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        lastRequest: requestDiagnostic({
+          usage: {
+            freshTokens: 100,
+            cacheReadTokens: null,
+            cacheWriteTokens: 0,
+            outputTokens: 0,
+            reasoningTokens: null,
+          },
+        }),
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const input = rows.find((entry) => entry.querySelector('.dsha-label')?.textContent === zh.cacheLastInput)
+    const reasoning = rows.find((entry) => entry.querySelector('.dsha-label')?.textContent === zh.cacheLastReasoning)
+    expect(input?.textContent).toContain(zh.metricNotReported)
+    expect(reasoning?.textContent).toContain(zh.metricNotReported)
+    expect(node.textContent).not.toContain(zh.cacheReasoningCost)
+    // Cache write was explicitly reported as zero and must not read as omitted.
+    expect(input?.textContent).toContain('0')
+  })
+
+  it('omits the opening row for a conversation that predates the measurement', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 4,
+        cachedTokens: 1_000,
+        freshTokens: 250,
+        outputTokens: 90,
+        hitRatio: 0.8,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    expect(rows.some((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheOpening)).toBe(false)
+    expect(rows.some((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheContinuation)).toBe(false)
+  })
+
+  it('renders the cache warmup budget row when warmup status is reported', async () => {
+    const node = await mount(status({
+      cache: {
+        requests: 3,
+        cachedTokens: 2_000,
+        freshTokens: 50,
+        outputTokens: 40,
+        hitRatio: 2_000 / 2_050,
+        cacheWriteTokens: 0,
+        cacheWrite5mTokens: 0,
+        cacheWrite1hTokens: 0,
+        warmup: {
+          warmup: false,
+          maxChars: 8_000,
+          consecutiveHits: 2,
+          requiredHits: 2,
+        },
+      },
+    }))
+    const rows = [...node.querySelectorAll<HTMLElement>('.dsha-row')]
+    const warmupRow = rows.find((row) => row.querySelector('.dsha-label')?.textContent === zh.cacheWarmupLabel)
+    expect(warmupRow).toBeDefined()
+    expect(warmupRow!.querySelector('.dsha-value')?.textContent).toBe(
+      zh.cacheWarmupSettled
+        .replace('{hits}', '2')
+        .replace('{required}', '2')
+        .replace('{chars}', (8_000).toLocaleString()),
+    )
+  })
+})

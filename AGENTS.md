@@ -2,20 +2,25 @@
 
 ## Project Structure & Module Organization
 
-This repository (`@eddyskywalker/dsh-chatgpt-subscription`) is a multi-provider subscription hub and agent runtime enhancement plugin for **DeepSeek Harness (DSH)**. It registers **13 provider lines** (`codex-chatgpt`, `claude-subscription`, `kimi-code`, `minimax-code`, `command-code`, `glm-coding-plan`, `step-code`, `cline-pass`, `qoder`, `opendesign`, `workbuddy-subscription`, `ollama`, and `antigravity-acp`), bundled agent presets, multimodal tools, prefix-cache guards, and Web UI extensions.
+This repository (`@eddyskywalker/dsh-chatgpt-subscription`) is a multi-provider subscription hub and agent runtime enhancement plugin for **DeepSeek Harness (DSH)**. It registers **17 provider lines** (`codex-chatgpt`, `claude-subscription`, `claude-api`, `kimi-code`, `minimax-code`, `command-code`, `glm-coding-plan`, `step-code`, `cline-pass`, `qoder`, `opendesign`, `workbuddy-subscription`, `qianwen-token-plan`, `relayone`, `ollama`, `antigravity-acp`, and `aws-quick`), bundled agent presets, multimodal tools, prefix-cache guards, and Web UI extensions.
 
 Source lives in `src/`; generated package output lives in `lib/` (git-ignored) and must be refreshed via build rather than edited by hand.
 
-- `src/index.ts`: core host plugin entry, `Config` schema (including `volatile()` settings), 13-provider wiring, global guards, and tool registrations.
-- `src/entry-*.ts`: sub-entry exports (`progress-updates`, `plan-mode-pipeline`, `plan-mode`, `tool-result-pruner`, `codemode`).
-- `src/host/common/`: shared kernel — multi-account pool, `poolStorage` (`keyring` / `credentials`), catalog snapshots, proxy manager, 120s two-phase stream idle watchdog, context-overflow / image-budget helpers, and 3-language (`zh` / `en` / `ru`) host i18n runtime.
-- `src/host/<line>/`: per-provider adapter, OAuth/auth flows, token/settings stores, mapper, streaming client, quota reader, and HTTP routes.
-- `src/host/{cache-warmup,codemode,dispatch-ledger,progress-updates,compaction-route,no-answer-resume,reasoning-collapse-guard,widget-board}/`: host runtime subsystems.
-- `src/client/`: Web GUI settings hub (`src/client/hub/`), per-line tabs & composer quota badges, shared pool UI (`src/client/common/`), Russian language pack (`src/client/locales-ru/`), Mermaid renderer, and image/video tool views.
+- `src/index.ts`: core host plugin entry, `Config` schema (including `volatile()` settings), provider wiring, global guards, and tool registrations.
+- `src/entries/`: sub-entry exports (`progress-updates`, `plan-mode-pipeline`, `plan-mode`, `tool-result-pruner`, `codemode`, `aws-quick-mcp`).
+- `src/host/providers/`: all 17 provider lines (`codex-chatgpt/`, `claude/`, `claude-api/`, `kimi-code/`, etc.) plus `_claude-shared/`.
+- `src/host/runtime/`: host runtime subsystems (`cache-warmup/`, `codemode/`, `dispatch-ledger/`, `progress-updates/`, `widget-board/`, `guards/`, `presets/`, model optimizations).
+- `src/host/infra/`: shared host infrastructure (`storage/`, `network/`, `hub/`).
+- `src/host/common/`: shared kernel — account pool, catalog snapshots, context-overflow / image-budget helpers, and 3-language (`zh` / `en` / `ru`) host i18n runtime.
+- `src/client/`: Web GUI entry (`src/client/index.tsx`), `providers/` (per-line tabs & composer badges), `features/` (Mermaid, progress updates, subagent settings, codemode), `hub/`, `common/`, and `locales-ru/`.
 - `src/shared/`: side-effect-free DTOs and shared wire contracts.
+- `assets/`: package SVG icons (`icon.svg`, `progress-updates.svg`).
+- `config/`: split TypeScript configs (`tsconfig.host.json`, `tsconfig.client.json`) referenced by root `tsconfig.json`.
 - `presets/dispatch/`: bundled `dispatch` orchestrator agent preset.
 - `widgets/line-flip/`: bundled `dsh-widget-board` quota & account-pool flip card.
-- `docs/`: user/maintainer reference guides (`README.md`, `providers.md`, `configuration.md`, `architecture.md`, `troubleshooting.md`) and engineering/probe archives.
+- `test/`: offline Vitest suite grouped into `providers/<line>/`, `runtime/`, `client/`, and `infra/`.
+- `docs/`: core reference docs (`README.md`, `providers.md`, `configuration.md`, `architecture.md`, `troubleshooting.md`, `CHANGELOG.md`) and historical engineering archives (`docs/archive/`).
+- `scripts/`: maintenance utilities and live probes (`scripts/probes/`, `scripts/vitest.probe.config.ts`).
 - `.dsh/skills/`: repository maintenance skills (`add-subscription-line`, `dsh-harness-upgrade`, `release-plugin`, `diagnose-windows-sandbox-acl`). Not published with the npm package.
 
 ## Harness Compatibility
@@ -37,7 +42,7 @@ Runs the offline Vitest suite with mocked OAuth, SSE streams, quota payloads, DP
 ```powershell
 npm run build
 ```
-Builds TypeScript declarations and bundles `lib/index.js`, sub-entries (`lib/progress-updates.js`, `lib/plan-mode-pipeline.js`, `lib/plan-mode.js`, `lib/tool-result-pruner.js`, `lib/codemode.js`), and `lib/client.js`.
+Builds TypeScript declarations and bundles `lib/index.js`, sub-entries (`lib/progress-updates.js`, `lib/plan-mode-pipeline.js`, `lib/plan-mode.js`, `lib/tool-result-pruner.js`, `lib/codemode.js`, `lib/aws-quick-mcp.js`), and `lib/client.js`.
 
 Use `npm pack --dry-run` when changing package metadata, exports, or published files.
 
@@ -45,20 +50,21 @@ Use `npm pack --dry-run` when changing package metadata, exports, or published f
 
 `publishConfig` carries no `tag` on purpose: a stable release lands on `latest` immediately upon publish. Publish prereleases with an explicit `--tag alpha`.
 
-`lib/` is incremental and retains stale `.d.ts` files from deleted sources if not cleaned first. Follow `.dsh/skills/release-plugin/SKILL.md` before publishing so the packed tarball matches a clean build and `src/compat.ts` (`PLUGIN_VERSION`) matches `package.json`.
+`lib/` is incremental and retains stale `.d.ts` files from deleted sources if not cleaned first. Follow `.dsh/skills/release-plugin/SKILL.md` before publishing so the packed tarball matches a clean build and `src/compat.ts` (`PLUGIN_VERSION`) matches `package.json`. Release notes live in `docs/CHANGELOG.md`.
 
-## Coding Style, i18n & Naming Conventions
+## Coding Style, Documentation & UI Copy Discipline
 
 Use strict TypeScript and ESM imports. Keep changes small and consistent with nearby code: camelCase for functions/variables, PascalCase for React components/classes, and kebab-case for package/plugin/route identifiers.
 
-When adding user-facing strings:
-- Client namespaces are strongly typed in `src/client/index.tsx` (`LocaleNamespaceMap`); update `zh`, `en`, and `src/client/locales-ru/`.
-- Host-side user-visible messages live in `src/host/common/i18n/{zh,en,ru}.ts`, where `en` and `ru` are compile-time checked against `keyof typeof zh`.
-- Never save files with a UTF-8 BOM (`test/package-integrity.test.ts` enforces BOM-free files).
+- **Single source of truth for docs**: keep root `README.md` concise and user-facing. Never duplicate internal implementation details, probe logs, or workstream IDs across docs and code comments.
+- **Concise code comments**: explain *why* a non-obvious invariant exists in 1–5 lines; do not write multi-page essays or changelog archaeology in source headers.
+- **Scope-only UI copy**: settings descriptions and hints should state only the user-visible effect in plain language — never leak raw JSON field paths, internal protocol headers, upstream issue numbers, or defensive implementation explanations into the UI.
+- **i18n**: client namespaces are strongly typed in `src/client/index.tsx` (`LocaleNamespaceMap`); update `zh`, `en`, and `src/client/locales-ru/`. Host-side user-visible messages live in `src/host/common/i18n/{zh,en,ru}.ts` (compile-time checked against `keyof typeof zh`).
+- **BOM-free files**: never save files with a UTF-8 BOM (`test/infra/package-integrity.test.ts` enforces BOM-free files).
 
 ## Testing Guidelines
 
-Tests live in `test/*.test.ts` (or `.tsx`); browser tests declare `// @vitest-environment jsdom`. Add focused unit/integration tests alongside behavior changes, especially for protocol mappers, streaming clients, OAuth/account-pool state machines, cache guards, and cross-generation compatibility code. Tests must never require live credentials or external network access.
+Tests live under `test/{providers,runtime,client,infra}/`; browser tests declare `// @vitest-environment jsdom`. Test behavior, contracts, and structural invariants rather than exact prose paragraphs, doc wording, or full prompt sentences. Tests must never require live credentials or external network access.
 
 ## Commit & Pull Request Guidelines
 

@@ -5,7 +5,7 @@
  * from `en`. Shared account-pool labels come from `account-pool.ts`; only the
  * keys this line overrides are repeated here.
  */
-import type { OpenDesignLocaleKey } from '../opendesign/locales.ts'
+import type { OpenDesignLocaleKey } from '../providers/opendesign/locales.ts'
 import { accountPoolRu } from './account-pool.ts'
 
 export const dictionary: Record<OpenDesignLocaleKey, string> = {

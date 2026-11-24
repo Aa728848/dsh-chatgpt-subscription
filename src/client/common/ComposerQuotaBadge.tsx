@@ -19,7 +19,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
-import type { SnapshotStore } from '../store.ts'
+import type { SnapshotStore } from '../providers/codex-chatgpt/store.ts'
 import { useStore } from './use-store.ts'
 
 export interface ComposerQuotaFacts {

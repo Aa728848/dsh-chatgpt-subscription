@@ -29,7 +29,7 @@ import type { ApiEnvelope } from '../../shared/contracts.ts'
 import { UPDATE_APPLY_PATH, UPDATE_CHECK_PATH } from '../../shared/update-contracts.ts'
 import type { UpdateApplyDto, UpdateCheckDto, UpdateFailureDto, UpdateRollback } from '../../shared/update-contracts.ts'
 import { formatPoolLabel } from '../common/account-pool-labels.ts'
-import type { NS } from '../locales.ts'
+import type { NS } from '../providers/codex-chatgpt/locales.ts'
 
 type Translate = PropsLocale<typeof NS>['t']
 

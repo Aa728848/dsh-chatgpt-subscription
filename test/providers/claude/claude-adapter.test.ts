@@ -1,0 +1,1429 @@
+/**
+ * Tests for the Claude subscription adapter.
+ *
+ * Each test is named after the property it protects rather than the function it
+ * calls. The properties below are the ones a plausible implementation gets wrong
+ * in a way no type checker can see:
+ *
+ *   1. NO ROTATION AFTER OUTPUT. A retried request would repeat text the user has
+ *      already read and re-issue a tool call that may already have run, so the
+ *      refusal has to be observable as "exactly one request was issued".
+ *   2. ONLY AN ACCOUNT-SCOPED LIMIT ROTATES. A global limit is shared by every
+ *      account behind the same gateway; rotating against it burns the pool.
+ *   3. THE EFFORT LADDER PASSES THROUGH UNCONVERGED. 'xhigh' is a real rung on
+ *      this route, and a convergence table would silently collapse it.
+ *   4. ONE TOOL-NAME TABLE FOR BOTH DIRECTIONS. The body renames a tool to its
+ *      canonical wire spelling and the response side maps it back; two
+ *      independently built tables would dispatch a call to the wrong tool.
+ *   5. A CLIENT-VERSION REJECTION IS NOT A CREDENTIAL FAILURE. It must not sign
+ *      the user out.
+ *   6. A VERSION BELOW A MODEL'S FLOOR IS REFUSED LOCALLY, BEFORE THE REQUEST.
+ *      Upstream answers it with an opaque 400 about a version that is our own
+ *      claim echoed back, which reads like a credential problem; the catalog
+ *      records the floor, so the same verdict is produced here, naming the model,
+ *      both versions and the remedy, with no request spent.
+ *   7. THE POSTED BODY ASKS FOR PROMPT CACHING. The server caches a prefix only
+ *      where the request carries a cache_control breakpoint, so a request sent
+ *      without one bills every turn as fresh input; this is the call site that
+ *      used to send none, and the test reads the REAL posted bytes so the
+ *      builder's own default cannot stand in for the adapter's intent.
+ *   8. AN IN-BAND OVERLOAD BEFORE OUTPUT IS RETRYABLE. A 200 whose stream reports
+ *      `overloaded_error` is the same transient failure as a 529, and while
+ *      nothing has reached the caller it must carry a code the retry policy
+ *      repeats; after output it stays PROVIDER_ERROR, as rule 1 requires.
+ *
+ * Everything runs against an injected fetch and an in-memory encrypted
+ * credential backend. No test here touches the network or a platform credential
+ * store.
+ */
+
+import { createHash } from 'node:crypto'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import {
+  ClaudeAdapter,
+  assertClaudeCliVersionMeetsFloor,
+  codeForFailure,
+  cooldownMsFor,
+  resolveDefaultReasoningEffort,
+  shouldRotateAccount,
+  type ClaudeAccountPoolLike,
+} from '../../../src/host/providers/claude/adapter.ts'
+import {
+  FileCredentialStore,
+  FileModelSettingsStore,
+  type ClaudeCredentialDocument,
+  type ClaudeCredentials,
+} from '../../../src/host/providers/claude/token-store.ts'
+import {
+  FALLBACK_MODELS,
+  DEFAULT_VISIBLE_MODEL_IDS,
+  type ClaudeModelEntry,
+} from '../../../src/host/providers/claude/model-catalog.ts'
+import {
+  API_BASE,
+  CLAUDE_CLI_VERSION,
+  MESSAGES_PATH,
+  PROVIDER_ID,
+  claudeCliVersion,
+  setClaudeCliVersion,
+} from '../../../src/host/providers/claude/types.ts'
+import { classifyFailure } from '../../../src/host/providers/claude/client.ts'
+import type { CredentialStore } from '../../../src/host/infra/storage/token-store.ts'
+import { StickyImageBudgetStore } from '../../../src/host/common/sticky-image-budget.ts'
+import { promptCacheActivityStore } from '../../../src/host/common/cache-activity.ts'
+import { promptCachePolicyOf } from '../../../src/host/common/prompt-cache-policy.ts'
+import { ClaudeCapabilityMemory } from '../../../src/host/providers/_claude-shared/claude-capability-memory.ts'
+import { claudeCodeCchToken } from '../../../src/host/providers/_claude-shared/claude-code-cch.ts'
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const temporaryDirs: string[] = []
+
+afterEach(async () => {
+  vi.restoreAllMocks()
+  vi.unstubAllEnvs()
+  await Promise.all(temporaryDirs.splice(0).map(async (dir) => {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined)
+  }))
+})
+
+/** In-memory encrypted backend, so no test reaches a platform credential store. */
+function memoryBackend<T>(): CredentialStore<T> {
+  let value: T | null = null
+  return {
+    async load() { return value },
+    async save(next) { value = next },
+    async clear() { value = null },
+  }
+}
+
+async function scratchDir(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-adapter-'))
+  temporaryDirs.push(dir)
+  return dir
+}
+
+/** A credential far from expiry, so the single-credential path never refreshes. */
+function credentials(accessToken: string, overrides: Partial<ClaudeCredentials> = {}): ClaudeCredentials {
+  return {
+    accessToken,
+    refreshToken: 'refresh-' + accessToken,
+    expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    scopes: ['user:inference', 'user:profile'],
+    account: { uuid: 'uuid-' + accessToken },
+    ...overrides,
+  }
+}
+
+interface Mounted {
+  store: FileCredentialStore
+  settings: FileModelSettingsStore
+}
+
+/** A credential store holding one account, and a settings file beside it. */
+async function mount(overrides: Partial<ClaudeCredentials> = {}): Promise<Mounted> {
+  const dir = await scratchDir()
+  const store = new FileCredentialStore(
+    path.join(dir, 'credentials.json'),
+    memoryBackend<ClaudeCredentialDocument>(),
+  )
+  await store.saveAccount(credentials('ACCESS-1', overrides))
+  return { store, settings: new FileModelSettingsStore(path.join(dir, 'models.json')) }
+}
+
+interface FetchCall {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body: Record<string, unknown>
+}
+
+/** A recording fetch. Headers are read through a real Headers object. */
+function recordingFetch(respond: (call: FetchCall, index: number) => Response | Promise<Response>) {
+  const calls: FetchCall[] = []
+  const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const headers = new Headers((init?.headers ?? {}) as HeadersInit)
+    const flat: Record<string, string> = {}
+    headers.forEach((value, key) => { flat[key] = value })
+    const call: FetchCall = {
+      url: String(input),
+      method: init?.method ?? 'GET',
+      headers: flat,
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {},
+    }
+    calls.push(call)
+    return respond(call, calls.length - 1)
+  })
+  return { fn: fn as unknown as typeof fetch, calls, mock: fn }
+}
+
+/** One SSE body from a list of event payloads. */
+function sse(frames: unknown[]): string {
+  return frames.map((frame) => 'data: ' + JSON.stringify(frame) + '\n\n').join('')
+}
+
+const MESSAGE_START = { type: 'message_start', message: { id: 'msg_1', usage: { input_tokens: 7 } } }
+const MESSAGE_STOP = { type: 'message_stop' }
+
+/** A complete, well-formed text answer. */
+function answerResponse(text = 'hi', headers: Record<string, string> = {}): Response {
+  return new Response(sse([
+    MESSAGE_START,
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    { type: 'message_stop' },
+  ]), { status: 200, headers: { 'content-type': 'text/event-stream', ...headers } })
+}
+
+function streamResponse(frames: unknown[]): Response {
+  return new Response(sse(frames), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+}
+
+function errorResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  })
+}
+
+function options(model = 'claude-sonnet-4-6', overrides: Partial<GenerateOptions> = {}): GenerateOptions {
+  return {
+    provider: PROVIDER_ID,
+    model,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+    ...overrides,
+  } as GenerateOptions
+}
+
+async function drain(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
+  const chunks: StreamChunk[] = []
+  for await (const chunk of stream) chunks.push(chunk)
+  return chunks
+}
+
+/** Collect the error one stream throws, or fail the test if it completes. */
+async function failureOf(stream: AsyncIterable<StreamChunk>): Promise<unknown> {
+  try {
+    await drain(stream)
+  } catch (error) {
+    return error
+  }
+  throw new Error('expected the stream to fail')
+}
+
+function makeAdapter(
+  store: FileCredentialStore,
+  settings: FileModelSettingsStore,
+  fetchFn: typeof fetch,
+  extra: {
+    accountPool?: ClaudeAccountPoolLike
+    loadCatalog?: () => Promise<never[]>
+    attachments?: { readImage: unknown; readImageRequest: unknown }
+    capabilityMemory?: ClaudeCapabilityMemory
+  } = {},
+): ClaudeAdapter {
+  return new ClaudeAdapter(store, settings, undefined, {
+    fetchFn,
+    loadCatalog: extra.loadCatalog ?? (async () => FALLBACK_MODELS as never[]),
+    ...(extra.accountPool === undefined ? {} : { accountPool: extra.accountPool }),
+    ...(extra.attachments === undefined ? {} : { attachments: extra.attachments as never }),
+    ...(extra.capabilityMemory === undefined ? {} : { capabilityMemory: extra.capabilityMemory }),
+  })
+}
+
+/** A pool double whose availability is purely a function of the tried set. */
+class FakePool implements ClaudeAccountPoolLike {
+  readonly cooldowns: Array<{ id: string; ms: number; reason: string }> = []
+  readonly authFailures: Array<{ id: string; reason: string }> = []
+  readonly freshRequests: string[] = []
+
+  constructor(private readonly accounts: Array<{ id: string; credentials: ClaudeCredentials }>) {}
+
+  async getEffectiveAccount(excludeIds?: ReadonlySet<string>) {
+    const account = this.accounts.find((candidate) => !(excludeIds?.has(candidate.id) ?? false))
+    if (account === undefined) throw new Error('no eligible account')
+    return { account: { id: account.id }, credentials: account.credentials }
+  }
+
+  async hasAnotherAvailableAccount(triedAccountIds: ReadonlySet<string>): Promise<boolean> {
+    return this.accounts.some((account) => !triedAccountIds.has(account.id))
+  }
+
+  async getFreshCredential(accountId?: string): Promise<ClaudeCredentials> {
+    this.freshRequests.push(accountId ?? '')
+    const account = this.accounts.find(candidate => candidate.id === accountId)
+    if (account === undefined) throw new Error('unknown account')
+    return account.credentials
+  }
+
+  async markCooldown(accountId: string, durationMs: number, reason: string): Promise<void> {
+    this.cooldowns.push({ id: accountId, ms: durationMs, reason })
+  }
+
+  async markAuthFailed(accountId: string, reason: string): Promise<void> {
+    this.authFailures.push({ id: accountId, reason })
+  }
+}
+
+/** The unified rate-limit headers that make a 429 account-scoped. */
+const ACCOUNT_SCOPED_429 = { 'anthropic-ratelimit-unified-5h-utilization': '1' }
+
+// ---------------------------------------------------------------------------
+// Route metadata
+// ---------------------------------------------------------------------------
+
+describe('claude adapter route metadata', () => {
+  it('describes the route and pins the shared bounded retry policy', async () => {
+    const { store, settings } = await mount()
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    expect(adapter.providerInfo(PROVIDER_ID)).toEqual({ id: PROVIDER_ID, name: 'Claude（订阅）' })
+    // The resolved policy is FLAT: resolveRetryPolicy spreads the backoff fields
+    // onto the policy itself rather than nesting them under `backoff` (which is
+    // only the *config* shape).
+    expect(adapter.providerRetryPolicy()).toEqual({
+      mode: 'normal',
+      maxRetries: 3,
+      retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+      initialDelayMs: 1_500,
+      maxDelayMs: 15_000,
+      jitterRatio: 0.2,
+    })
+    // The subscription bills in windows, not per image, so no per-image price is
+    // claimed; the harness's neutral estimate is the honest answer.
+    expect(adapter.imageRequestPricing()).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Catalog and model resolution
+// ---------------------------------------------------------------------------
+
+describe('claude adapter catalog', () => {
+  it('lists nothing while the route is disabled', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ enabled: false })
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    expect(await adapter.listModels()).toEqual([])
+  })
+
+  it('treats an untouched shipped default as everything the account can call', async () => {
+    const { store, settings } = await mount()
+    // The shipped default is exactly what defaultClaudeSettings writes.
+    expect((await settings.read()).enabledModelIds).toEqual([...DEFAULT_VISIBLE_MODEL_IDS])
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    const models = await adapter.listModels()
+    // Every catalog entry is offered, including ones the shipped default does
+    // not name, because an unedited default cannot know about a newer model.
+    expect(models.map((model) => model.id)).toEqual(FALLBACK_MODELS.map((model) => model.id))
+    expect(models.length).toBeGreaterThan(DEFAULT_VISIBLE_MODEL_IDS.length)
+    const haiku = models.find((model) => model.id === 'claude-haiku-4-5')!
+    expect(haiku.inputModalities).toEqual(['text', 'image'])
+    // No description: a second line here would show for this route alone.
+    expect('description' in haiku).toBe(false)
+  })
+
+  it('honours an explicit selection exactly', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ enabledModelIds: ['claude-opus-5', 'not-a-model'] })
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    expect((await adapter.listModels()).map((model) => model.id)).toEqual(['claude-opus-5'])
+  })
+})
+
+describe('claude adapter model resolution', () => {
+  it.each([undefined, 4096])('keeps a live wire cap after omitting an unsafe reservation (%s)', async maxTokens => {
+    const { store, settings } = await mount()
+    const live = [{ ...FALLBACK_MODELS.find(m => m.id === 'claude-sonnet-4-6')!, contextWindow: 200_000, maxTokens: 128_000 }]
+    const fetchStub = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fetchStub.fn, { loadCatalog: async () => live as never[] })
+    expect(await adapter.resolveModel(PROVIDER_ID, 'claude-sonnet-4-6')).not.toHaveProperty('defaultMaxTokens')
+    await drain(adapter.stream(options('claude-sonnet-4-6', { maxTokens, reasoningEffort: 'none' as never })))
+    expect(fetchStub.calls[0]?.body.max_tokens).toBe(maxTokens ?? 128_000)
+  })
+
+  it('passes the effort ladder through unconverged, xhigh included', async () => {
+    const { store, settings } = await mount()
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    const resolved = await adapter.resolveModel(PROVIDER_ID, 'claude-opus-4-7')
+    // 'xhigh' is a real rung on this model. A convergence table — the sibling
+    // lines' answer for providers whose vocabulary is narrower — would collapse
+    // it onto 'high' and advertise a distinction the model does not have.
+    expect(resolved.reasoning?.efforts.map((effort) => String(effort.id)))
+      .toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(resolved.reasoning?.efforts.at(-2)?.id).toBe('xhigh')
+    expect(resolved.reasoning?.efforts.at(-1)?.id).toBe('max')
+    expect(resolved.reasoning?.efforts.at(-2)?.name).toBe('xhigh')
+    expect(resolved.defaultMaxTokens).toBe(128_000)
+    expect(resolved.context?.contextWindow).toBe(1_000_000)
+  })
+
+  it('gives an UNKNOWN id the current-model shape: the full ladder, images and a 1M window', async () => {
+    // THE OLD BEHAVIOUR WAS A CLAIM-NOTHING STUB: no reasoning block, text
+    // only, and a 200K window. Every one of those is a claim about a model
+    // nobody described, and every one of them makes the request WORSE — a
+    // picture the model could read becomes a placeholder, and the
+    // conversation is compacted five times earlier than it has to be.
+    const { store, settings } = await mount()
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    const unknown = await adapter.resolveModel(PROVIDER_ID, 'claude-unreleased-9')
+    expect(unknown.reasoning?.efforts.map((effort) => String(effort.id)))
+      .toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(unknown.inputModalities).toEqual(['text', 'image'])
+    expect(unknown.context?.contextWindow).toBe(1_000_000)
+    expect(unknown.defaultMaxTokens).toBe(128_000)
+  })
+
+  it('prefers a finite positive context override and ignores a broken one', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({
+      contextWindowOverrides: { 'claude-sonnet-4-6': 500_000, 'claude-haiku-4-5': 0 },
+    })
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    expect((await adapter.resolveModel(PROVIDER_ID, 'claude-sonnet-4-6')).context?.contextWindow).toBe(500_000)
+    expect((await adapter.resolveModel(PROVIDER_ID, 'claude-haiku-4-5')).context?.contextWindow).toBe(200_000)
+  })
+
+  it('materializes a configured default only when the model accepts it', () => {
+    expect(resolveDefaultReasoningEffort(['low', 'high', 'xhigh'], 'xhigh')).toBe('xhigh')
+    // Membership, not convergence: a level outside the ladder is dropped rather
+    // than moved onto a neighbour that would change how hard the model thinks.
+    expect(resolveDefaultReasoningEffort(['low', 'high'], 'minimal')).toBeUndefined()
+    expect(resolveDefaultReasoningEffort([], 'high')).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The request path
+// ---------------------------------------------------------------------------
+
+describe('claude adapter request path', () => {
+  it('posts the Messages body with subscription headers and streams the answer', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('hello there'))
+    const adapter = makeAdapter(store, settings, fn)
+    const chunks = await drain(adapter.stream(options()))
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe(API_BASE + MESSAGES_PATH)
+    expect(calls[0]!.method).toBe('POST')
+    expect(calls[0]!.headers.authorization).toBe('Bearer ACCESS-1')
+    // A subscription request authenticates with the bearer token and MUST NOT
+    // carry the Console's API-key field alongside it.
+    expect('x-api-key' in calls[0]!.headers).toBe(false)
+    expect(calls[0]!.headers['anthropic-beta']).toContain('oauth-2025-04-20')
+    // A non-haiku model gets the Claude Code identity beta; a haiku one does not.
+    expect(calls[0]!.headers['anthropic-beta']).toContain('claude-code-20250219')
+    expect(calls[0]!.headers['user-agent']).toMatch(/^claude-cli\//)
+
+    expect(calls[0]!.body.model).toBe('claude-sonnet-4-6')
+    expect(calls[0]!.body.stream).toBe(true)
+    expect(typeof calls[0]!.body.max_tokens).toBe('number')
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')).toBe('hello there')
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('posts prompt-cache breakpoints on a DEFAULT request, without any caller opting in', async () => {
+    // THE REGRESSION THE USER REPORTED. Anthropic caches a prefix only where the
+    // request carries an explicit cache_control breakpoint, and this call site
+    // used to send none: the server then had nothing to cache against, every turn
+    // was billed as fresh input, and cache_read_input_tokens never appeared. The
+    // breakpoints are asserted on the REAL posted bytes, not on the builder, so a
+    // future edit that drops the option here cannot pass.
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', {
+      tools: [
+        { name: 'read', description: 'read a file', parameters: { type: 'object', properties: {} } },
+        { name: 'bash', description: 'run a command', parameters: { type: 'object', properties: {} } },
+      ],
+    } as Partial<GenerateOptions>)))
+
+    const body = calls[0]!.body
+    const system = body.system as Array<Record<string, unknown>>
+    const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
+    const tools = body.tools as Array<Record<string, unknown>>
+
+    // The last system block, the last block of the last user message, the last tool.
+    // The SUBSCRIPTION tier, not the plain one: with nothing stored, the route
+    // asks for the hour the official client asks for, and the request carries
+    // the beta that licenses it.
+    expect(system.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(messages.at(-1)!.content.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(tools.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(JSON.stringify(body).match(/"cache_control"/g)).toHaveLength(3)
+  })
+
+  it('keeps the first-party thinking-binding beta whether or not this body binds thinking', async () => {
+    // block_binding without thinking-binding-controls is a documented 400 on
+    // every request, so the posted headers and posted bytes are read together.
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-5-5')))
+    await drain(adapter.stream(options('claude-sonnet-4-6')))
+
+    const [bound, plain] = calls
+    expect((bound!.body.thinking as Record<string, unknown>).block_binding).toEqual({ prefix_mismatch_behavior: 'drop_block' })
+    expect(bound!.headers['anthropic-beta'].split(',')).toContain('thinking-binding-controls-2026-08-01')
+    expect((plain!.body.thinking as Record<string, unknown>).block_binding).toBeUndefined()
+    expect(plain!.headers['anthropic-beta']).toContain('thinking-binding-controls')
+  })
+
+  it('resolves Claude Sonnet 5.5 with its effort ladder instead of the stub', async () => {
+    const { store, settings } = await mount()
+    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
+    const resolved = await adapter.resolveModel(PROVIDER_ID, 'claude-sonnet-5-5')
+    expect(resolved.reasoning?.efforts.map((effort) => effort.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
+  })
+
+  it('keeps claude-code on a haiku model, with the captured haiku beta order', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-haiku-4-5')))
+    expect(calls[0]!.headers['anthropic-beta'].split(',')[0]).toBe('oauth-2025-04-20')
+    expect(calls[0]!.headers['anthropic-beta']).toContain('claude-code-20250219')
+    expect(calls[0]!.headers['anthropic-beta']).toContain('oauth-2025-04-20')
+  })
+
+  it('uses ONE tool-name table for the body and the response back-map', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => streamResponse([
+      MESSAGE_START,
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":"a"}' } },
+      { type: 'content_block_stop', index: 0 },
+      MESSAGE_STOP,
+    ]))
+    const adapter = makeAdapter(store, settings, fn)
+    const chunks = await drain(adapter.stream(options('claude-sonnet-4-6', {
+      tools: [{ name: 'read', description: 'read a file', parameters: { type: 'object', properties: {} } }],
+    } as Partial<GenerateOptions>)))
+
+    // Request side: the caller's lowercase name went out canonically.
+    const tools = calls[0]!.body.tools as Array<{ name: string }>
+    expect(tools[0]!.name).toBe('Read')
+    // Response side: the model's canonical spelling came back as the caller's.
+    const call = chunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
+    expect(call).toMatchObject({ block: { name: 'read' } })
+  })
+
+  it('fails with MISSING_CREDENTIAL when nothing is signed in', async () => {
+    const dir = await scratchDir()
+    const store = new FileCredentialStore(path.join(dir, 'credentials.json'), memoryBackend<ClaudeCredentialDocument>())
+    const settings = new FileModelSettingsStore(path.join(dir, 'models.json'))
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    const error = await failureOf(adapter.stream(options()))
+    expect(error).toMatchObject({ code: 'MISSING_CREDENTIAL' })
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Failure classification and codes
+// ---------------------------------------------------------------------------
+
+describe('claude adapter failure codes', () => {
+  it('maps each classified condition onto its DSH code', () => {
+    expect(codeForFailure(classifyFailure(401, '', {}))).toBe('INVALID_CREDENTIAL')
+    expect(codeForFailure(classifyFailure(429, '', new Headers(ACCOUNT_SCOPED_429)))).toBe('RATE_LIMIT')
+    expect(codeForFailure(classifyFailure(429, '', {}))).toBe('RATE_LIMIT')
+    expect(codeForFailure(classifyFailure(529, '', {}))).toBe('SERVER')
+    expect(codeForFailure(classifyFailure(500, '', {}))).toBe('SERVER')
+    expect(codeForFailure(classifyFailure(400, '', {}))).toBe('PROVIDER_ERROR')
+  })
+
+  it('reports a client-version rejection as a request problem, never a sign-out', async () => {
+    const { store, settings } = await mount()
+    const body = {
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message: 'Your client version is below the minimum supported version. code: claude_code_version_too_old',
+      },
+    }
+    const { fn, calls } = recordingFetch(() => errorResponse(400, body))
+    const adapter = makeAdapter(store, settings, fn)
+    const error = await failureOf(adapter.stream(options())) as { code: string; message: string }
+
+    // The whole point: this must NOT be reported as a dead credential, because
+    // the stored sign-in is still perfectly valid.
+    expect(error.code).toBe('PROVIDER_ERROR')
+    expect(error.code).not.toBe('INVALID_CREDENTIAL')
+    expect(error.message).toContain('claude_code_version_too_old')
+    expect(error.message).toContain('DSH_CLAUDE_CLI_VERSION')
+    expect(calls).toHaveLength(1)
+  })
+
+  it('refuses a model whose floor the reported version misses — locally, as PROVIDER_ERROR, naming both versions and the remedy', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+
+    try {
+      // Simulates the pinned/environment version being too old — the state the
+      // shipped 2.1.251 default was in for claude-opus-5-5.
+      vi.stubEnv('DSH_CLAUDE_CCH_SEED', '0x2a')
+      setClaudeCliVersion('2.1.251')
+      const error = await failureOf(adapter.stream(options('claude-opus-5-5'))) as { code: string; message: string }
+
+      // The whole point: no request is spent, and the user is told what to do.
+      expect(calls).toHaveLength(0)
+
+      // NOT a credential error. The upstream text invites a re-sign-in, which
+      // cannot change a client version; the local refusal must not repeat that.
+      expect(error.code).toBe('PROVIDER_ERROR')
+      expect(error.code).not.toBe('INVALID_CREDENTIAL')
+      // Every fact the user needs, in the message itself.
+      expect(error.message).toContain('claude-opus-5-5')
+      expect(error.message).toContain('2.1.251')
+      expect(error.message).toContain('2.1.280')
+      expect(error.message).toContain('DSH_CLAUDE_CLI_VERSION')
+      expect(error.message).toContain('setClaudeCliVersion')
+      // ...including that the stored sign-in is fine, which is the sentence the
+      // upstream wording lacks.
+      expect(error.message).toMatch(/sign(-| )?in is still valid|stored sign-in is still valid/)
+      expect(error.message).toContain('not a credential problem')
+
+      // A model this table records no floor for is untouched by the check.
+      const fine = recordingFetch(() => answerResponse('ok'))
+      await drain(makeAdapter(store, settings, fine.fn).stream(options('claude-opus-5')))
+      expect(fine.calls).toHaveLength(1)
+
+      // And raising the version clears the same model on the same adapter.
+      setClaudeCliVersion('2.1.283')
+      const raised = recordingFetch(() => answerResponse('ok'))
+      await drain(makeAdapter(store, settings, raised.fn).stream(options('claude-opus-5-5')))
+      expect(raised.calls).toHaveLength(1)
+      expect(raised.calls[0]!.headers['user-agent']).toBe('claude-cli/2.1.283 (external, cli)')
+    } finally {
+      // No test may inherit a lowered version.
+      setClaudeCliVersion(null)
+    }
+    expect(claudeCliVersion()).toBe(CLAUDE_CLI_VERSION)
+
+    // The rule is also stated directly, so a reordering of the request path that
+    // dropped the call would still be caught here.
+    try {
+      setClaudeCliVersion('2.1.279')
+      expect(() => assertClaudeCliVersionMeetsFloor('claude-opus-5-5')).toThrow(/2.1.280/)
+      setClaudeCliVersion('2.1.280')
+      expect(() => assertClaudeCliVersionMeetsFloor('claude-opus-5-5')).not.toThrow()
+    } finally {
+      setClaudeCliVersion(null)
+    }
+  })
+
+  it('honours a floor carried by a live-only catalog entry the shipped table does not have', async () => {
+    const { store, settings } = await mount()
+    // The check reads the catalog the REQUEST resolves against, not the frozen
+    // table alone: a floor recorded for an id only the account's live listing
+    // carries must be enforced too.
+    const liveCatalog: ClaudeModelEntry[] = [{
+      id: 'claude-live-only-9',
+      name: 'Claude Live Only 9',
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      supportsImage: true,
+      supportsTemperature: true,
+      thinkingMode: 'adaptive',
+      reasoningEfforts: ['low', 'high'],
+      canDisableThinking: true,
+      minCliVersion: '2.1.282',
+    }]
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = new ClaudeAdapter(store, settings, undefined, {
+      fetchFn: fn,
+      loadCatalog: async () => liveCatalog as never[],
+    })
+
+    try {
+      vi.stubEnv('DSH_CLAUDE_CCH_SEED', '0x2a')
+      setClaudeCliVersion('2.1.280')
+      const error = await failureOf(adapter.stream(options('claude-live-only-9'))) as { code: string; message: string }
+      expect(error.code).toBe('PROVIDER_ERROR')
+      expect(error.message).toContain('claude-live-only-9')
+      expect(error.message).toContain('2.1.282')
+      expect(calls).toHaveLength(0)
+
+      setClaudeCliVersion('2.1.283')
+      await drain(adapter.stream(options('claude-live-only-9')))
+      expect(calls).toHaveLength(1)
+    } finally {
+      setClaudeCliVersion(null)
+    }
+  })
+
+  it('maps a live 401 and a live 529 from the real request path', async () => {
+    const { store, settings } = await mount()
+    const unauthorized = recordingFetch(() => errorResponse(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid token' } }))
+    expect(await failureOf(makeAdapter(store, settings, unauthorized.fn).stream(options())))
+      .toMatchObject({ code: 'INVALID_CREDENTIAL' })
+
+    const { store: store2, settings: settings2 } = await mount()
+    const overloaded = recordingFetch(() => errorResponse(529, { type: 'error', error: { type: 'overloaded_error', message: 'overloaded' } }))
+    expect(await failureOf(makeAdapter(store2, settings2, overloaded.fn).stream(options())))
+      .toMatchObject({ code: 'SERVER' })
+  })
+
+  it('carries retry-after onto the error as the delay the policy reads', async () => {
+    const { store, settings } = await mount()
+    const { fn } = recordingFetch(() => errorResponse(
+      429,
+      { type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } },
+      { 'retry-after': '42', ...ACCOUNT_SCOPED_429 },
+    ))
+    const error = await failureOf(makeAdapter(store, settings, fn).stream(options())) as { failure: { providerRetryAfterMs?: number } }
+    expect(error.failure.providerRetryAfterMs).toBe(42_000)
+  })
+})
+
+describe('Claude sticky image budget (#116)', () => {
+  const mib = 1024 * 1024
+  // Legacy inline shape accepted at the adapter boundary.
+  const image = (data: string) => ({
+    role: 'user', content: [{ type: 'image', mediaType: 'image/png', data }],
+  }) as unknown as GenerateOptions['messages'][number]
+  const countImages = (body: Record<string, unknown>) => (JSON.stringify(body.messages).match(/"type":"image"/g) ?? []).length
+
+  it('sends a 2.3 MB inline image by default and ignores legacy drops on restart', async () => {
+    const data = Buffer.alloc(2_300_000).toString('base64')
+    const sessionId = 'claude-sticky-legacy-session' as NonNullable<GenerateOptions['sessionId']>
+    const home = await scratchDir()
+    const legacy = new StickyImageBudgetStore('claude', path.join(home, 'storages', 'dsh-chatgpt-subscription-claude-cache.json'))
+    legacy.record(sessionId, new Set(['inline:' + createHash('sha256').update(data).digest('hex')]))
+    legacy.flush()
+
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    vi.stubEnv('DSH_HOME', home)
+    vi.resetModules()
+    try {
+      const { ClaudeAdapter: RestartedAdapter } = await import('../../../src/host/providers/claude/adapter.ts')
+      const adapter = new RestartedAdapter(store, settings, undefined, { fetchFn: fn, loadCatalog: async () => [] })
+      await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId, messages: [image(data)] })))
+      expect(countImages(calls[0]!.body)).toBe(1)
+      expect(JSON.stringify(calls[0]!.body.messages)).not.toContain('[image omitted')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('drops older images above 8 MiB while retaining the newest legal image and explaining sticky omission', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    const sessionId = 'claude-sticky-high-water' as NonNullable<GenerateOptions['sessionId']>
+    const older = image('A'.repeat(4 * mib))
+    const latest = image('B'.repeat(5 * mib))
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId, messages: [older, latest] })))
+    const body = JSON.stringify(calls[0]!.body.messages)
+    expect(countImages(calls[0]!.body)).toBe(1)
+    expect(body).toContain('B'.repeat(100))
+    expect(body).toContain('The same image will stay omitted in this conversation')
+    expect(body).not.toContain('read its file again')
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId, messages: [older] })))
+    expect(countImages(calls[1]!.body)).toBe(0)
+    expect(older.content[0]?.type).toBe('image')
+  })
+
+  it('leaves room for valid images when another inline image exceeds the per-image limit', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { messages: [image('A'.repeat(3 * mib)), image('B'.repeat(6 * mib))] })))
+    const body = JSON.stringify(calls[0]!.body.messages)
+    expect(countImages(calls[0]!.body)).toBe(1)
+    expect(body).toContain('A'.repeat(100))
+    expect(body).not.toContain('B'.repeat(100))
+    expect(body).not.toContain('The same image will stay omitted in this conversation')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Rotation — the two limits
+// ---------------------------------------------------------------------------
+
+describe('claude adapter rotation', () => {
+  async function pooledAdapter(pool: FakePool, respond: (call: FetchCall, index: number) => Response) {
+    const dir = await scratchDir()
+    // The single-credential store is unused on the pooled path, but the adapter
+    // still takes one; it is pointed at a scratch path so nothing is shared.
+    const store = new FileCredentialStore(path.join(dir, 'credentials.json'), memoryBackend<ClaudeCredentialDocument>())
+    const settings = new FileModelSettingsStore(path.join(dir, 'models.json'))
+    const { fn, calls } = recordingFetch(respond)
+    return { adapter: makeAdapter(store, settings, fn, { accountPool: pool }), calls }
+  }
+
+  it('rotates on an ACCOUNT-SCOPED limit and finishes the turn on the next account', async () => {
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const { adapter, calls } = await pooledAdapter(pool, (_call, index) => (index === 0
+      ? errorResponse(429, { type: 'error', error: { type: 'rate_limit_error', message: 'usage window spent' } }, ACCOUNT_SCOPED_429)
+      : answerResponse('second')))
+    const chunks = await drain(adapter.stream(options()))
+
+    expect(calls.map((call) => call.headers.authorization)).toEqual(['Bearer ACCESS-1', 'Bearer ACCESS-2'])
+    expect(chunks.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text).join('')).toBe('second')
+    // The spent account is parked, which is what stops the next turn from
+    // rediscovering the same wall.
+    expect(pool.cooldowns.map((entry) => entry.id)).toEqual(['cl-1'])
+    expect(pool.cooldowns[0]!.ms).toBeGreaterThan(0)
+  })
+
+  it('does NOT rotate on a GLOBAL limit — every account shares it', async () => {
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    // A 429 with no unified rate-limit header is not attributable to this
+    // account's window, so switching would burn the pool against a wall none of
+    // the accounts can pass.
+    const { adapter, calls } = await pooledAdapter(pool, () => errorResponse(
+      429,
+      { type: 'error', error: { type: 'rate_limit_error', message: 'too many requests' } },
+    ))
+    const error = await failureOf(adapter.stream(options()))
+
+    expect(error).toMatchObject({ code: 'RATE_LIMIT' })
+    expect(calls).toHaveLength(1)
+    expect(pool.cooldowns).toHaveLength(0)
+  })
+
+  it('does NOT rotate on an overload or a 5xx', async () => {
+    for (const [status, type] of [[529, 'overloaded_error'], [503, 'api_error']] as const) {
+      const pool = new FakePool([
+        { id: 'cl-1', credentials: credentials('ACCESS-1') },
+        { id: 'cl-2', credentials: credentials('ACCESS-2') },
+      ])
+      const { adapter, calls } = await pooledAdapter(pool, () => errorResponse(
+        status,
+        { type: 'error', error: { type, message: 'capacity' } },
+      ))
+      expect(await failureOf(adapter.stream(options()))).toMatchObject({ code: 'SERVER' })
+      expect(calls).toHaveLength(1)
+      expect(pool.cooldowns).toHaveLength(0)
+    }
+  })
+
+  it('rotates on a credential verdict and takes that account out of the pool', async () => {
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const { adapter, calls } = await pooledAdapter(pool, (_call, index) => (index === 0
+      ? errorResponse(401, { type: 'error', error: { type: 'authentication_error', message: 'revoked' } })
+      : answerResponse('ok')))
+    await drain(adapter.stream(options()))
+
+    expect(calls.map((call) => call.headers.authorization)).toEqual(['Bearer ACCESS-1', 'Bearer ACCESS-2'])
+    // The account is kept (signing in again restores it) but flagged.
+    expect(pool.authFailures.map((entry) => entry.id)).toEqual(['cl-1'])
+    expect(pool.cooldowns).toHaveLength(0)
+  })
+
+  it('keeps an account in the pool on a 403 permission_error, and does not tell the user to sign in again', async () => {
+    // An entitlement answer (a model the plan lacks). Marking the account
+    // auth-failed took a working account out of rotation over a model choice.
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const { adapter, calls } = await pooledAdapter(pool, () => errorResponse(403, {
+      type: 'error',
+      error: { type: 'permission_error', message: 'Your account is not permitted to use claude-opus-5-5.' },
+    }))
+    const error = await failureOf(adapter.stream(options('claude-opus-5-5'))) as { code: string; message: string }
+
+    expect(error.code).toBe('PROVIDER_ERROR')
+    expect(error.message).toContain('not permitted')
+    expect(pool.authFailures).toEqual([])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('stops after three attempts even when the pool keeps offering another account', async () => {
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+      { id: 'cl-3', credentials: credentials('ACCESS-3') },
+      { id: 'cl-4', credentials: credentials('ACCESS-4') },
+      { id: 'cl-5', credentials: credentials('ACCESS-5') },
+    ])
+    const { adapter, calls } = await pooledAdapter(pool, () => errorResponse(
+      429,
+      { type: 'error', error: { type: 'rate_limit_error', message: 'spent' } },
+      ACCOUNT_SCOPED_429,
+    ))
+    expect(await failureOf(adapter.stream(options()))).toMatchObject({ code: 'RATE_LIMIT' })
+    // Bounded: the pool reports more accounts, the loop still stops.
+    expect(calls).toHaveLength(3)
+  })
+
+  it('rotates nothing when no pool is installed', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => errorResponse(
+      401,
+      { type: 'error', error: { type: 'authentication_error', message: 'revoked' } },
+    ))
+    const adapter = makeAdapter(store, settings, fn)
+    expect(await failureOf(adapter.stream(options()))).toMatchObject({ code: 'INVALID_CREDENTIAL' })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('decides rotation from the classified failure, not from the status alone', () => {
+    const accountScoped = classifyFailure(429, '', new Headers(ACCOUNT_SCOPED_429))
+    const global = classifyFailure(429, '', {})
+    expect(shouldRotateAccount(accountScoped, false)).toBe(true)
+    expect(shouldRotateAccount(global, false)).toBe(false)
+    expect(shouldRotateAccount(classifyFailure(529, '', {}), false)).toBe(false)
+    expect(shouldRotateAccount(classifyFailure(503, '', {}), false)).toBe(false)
+    expect(shouldRotateAccount(classifyFailure(401, '', {}), false)).toBe(true)
+    expect(shouldRotateAccount(classifyFailure(400, '', {}), false)).toBe(false)
+  })
+
+  it('prefers the stated delay, then the stated reset instant, then its own cooldown', () => {
+    const withRetryAfter = classifyFailure(429, '', new Headers({ 'retry-after': '60' }))
+    expect(cooldownMsFor(withRetryAfter)).toBe(60_000)
+
+    const resetAt = new Date(Date.now() + 120_000).toISOString()
+    const withReset = classifyFailure(429, JSON.stringify({
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'limit reached; will reset at ' + resetAt },
+    }), {})
+    expect(cooldownMsFor(withReset)).toBeGreaterThan(60_000)
+    expect(cooldownMsFor(withReset)).toBeLessThanOrEqual(120_000)
+
+    const bare = classifyFailure(429, '', {})
+    expect(cooldownMsFor(bare)).toBe(15 * 60 * 1000)
+    // A weekly window can name a reset days out; an account parked for days
+    // would look exactly like a broken pool, so the cooldown is capped.
+    const farOut = classifyFailure(429, JSON.stringify({
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'will reset at ' + new Date(Date.now() + 7 * 24 * 3600_000).toISOString() },
+    }), {})
+    expect(cooldownMsFor(farOut)).toBe(5 * 60 * 60 * 1000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// NO ROTATION AFTER OUTPUT — the hard requirement
+// ---------------------------------------------------------------------------
+
+describe('claude adapter never rotates after output has started', () => {
+  it('emits a delta, then fails the connection mid-stream, and issues NO second request', async () => {
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const dir = await scratchDir()
+    const store = new FileCredentialStore(path.join(dir, 'credentials.json'), memoryBackend<ClaudeCredentialDocument>())
+    const settings = new FileModelSettingsStore(path.join(dir, 'models.json'))
+
+    const encoder = new TextEncoder()
+    let requestCount = 0
+    const fetchFn = vi.fn(async () => {
+      requestCount += 1
+      // A stream that delivers one delta and then severs: the failure arrives
+      // AFTER the caller has already seen content.
+      // The error must arrive on a LATER read than the delta: erroring the
+      // controller in the same tick as the enqueue discards the queued chunk
+      // (the stream is settled before anything is pulled), which would make this
+      // test pass for the wrong reason — no output, therefore trivially no
+      // rotation-after-output.
+      let delivered = false
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (delivered) {
+            controller.error(new Error('connection reset by peer'))
+            return
+          }
+          delivered = true
+          controller.enqueue(encoder.encode(sse([
+            MESSAGE_START,
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial answer' } },
+          ])))
+        },
+      }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as unknown as typeof fetch
+
+    const adapter = makeAdapter(store, settings, fetchFn, { accountPool: pool })
+    const seen: StreamChunk[] = []
+    let failure: unknown
+    try {
+      for await (const chunk of adapter.stream(options())) seen.push(chunk)
+    } catch (error) {
+      failure = error
+    }
+
+    // The delta reached the caller...
+    expect(seen.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text)).toEqual(['partial answer'])
+    // ...and the adapter did not rotate to another account inside this stream.
+    // The harness still receives TRANSPORT so its bounded retry policy can act.
+    expect(failure).toMatchObject({ code: 'TRANSPORT' })
+    expect(requestCount).toBe(1)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(pool.cooldowns).toHaveLength(0)
+    expect(pool.authFailures).toHaveLength(0)
+  })
+
+  it('states the rule itself: output started means no rotation, whatever the failure', () => {
+    for (const status of [401, 429, 500, 529]) {
+      const failure = classifyFailure(status, '', new Headers(status === 429 ? ACCOUNT_SCOPED_429 : {}))
+      expect(shouldRotateAccount(failure, false)).toBe(status === 401 || status === 429)
+      // Once output has started, every one of them is refused.
+      expect(shouldRotateAccount(failure, true)).toBe(false)
+    }
+  })
+
+  it('still rotates when the credential fails BEFORE any output', async () => {
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const dir = await scratchDir()
+    const store = new FileCredentialStore(path.join(dir, 'credentials.json'), memoryBackend<ClaudeCredentialDocument>())
+    const settings = new FileModelSettingsStore(path.join(dir, 'models.json'))
+    const { fn, calls } = recordingFetch((_call, index) => (index === 0
+      ? errorResponse(401, { type: 'error', error: { type: 'authentication_error', message: 'revoked' } })
+      : answerResponse('after rotation')))
+    const chunks = await drain(makeAdapter(store, settings, fn, { accountPool: pool }).stream(options()))
+    expect(calls).toHaveLength(2)
+    expect(chunks.some((chunk) => chunk.type === 'text-delta')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// In-band stream errors
+// ---------------------------------------------------------------------------
+
+describe('claude adapter in-band stream errors', () => {
+  /** A 200 whose stream reports the failure itself, after the given frames. */
+  function inBandError(
+    type: string,
+    message: string,
+    before: unknown[] = [MESSAGE_START],
+    headers: Record<string, string> = {},
+  ): Response {
+    return new Response(sse([...before, { type: 'error', error: { type, message } }]), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', ...headers },
+    })
+  }
+
+  it('keeps a transient in-band error retryable while nothing has reached the caller', async () => {
+    // The shape that ended a real turn: HTTP 200, message_start, then an
+    // overloaded_error event. The same overload sent as a 529 is SERVER, so the
+    // in-band copy must not be the one that ends the turn on the first try.
+    const policy = (await mount().then(({ store, settings }) => makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)))
+      .providerRetryPolicy()
+    const retryable = policy.mode === 'normal' ? policy.retryableCodes : []
+    for (const [type, code] of [
+      ['overloaded_error', 'SERVER'],
+      ['api_error', 'SERVER'],
+      ['rate_limit_error', 'RATE_LIMIT'],
+    ] as const) {
+      const { store, settings } = await mount()
+      const { fn, calls } = recordingFetch(() => inBandError(type, 'Overloaded'))
+      const failure = await failureOf(makeAdapter(store, settings, fn).stream(options()))
+      expect(failure).toMatchObject({ code })
+      // The wire type stays in the message, so the notice still says what happened.
+      expect((failure as Error).message).toContain('Claude stream error (' + type + '): Overloaded')
+      expect(retryable).toContain(code)
+      // Classified, not rotated or re-requested inside the stream: the harness
+      // retry policy owns the repeat.
+      expect(calls).toHaveLength(1)
+    }
+  })
+
+  it('surfaces an in-band overload as PROVIDER_ERROR once output has reached the caller', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => inBandError('overloaded_error', 'Overloaded', [
+      MESSAGE_START,
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial answer' } },
+    ]))
+    const seen: StreamChunk[] = []
+    let failure: unknown
+    try {
+      for await (const chunk of makeAdapter(store, settings, fn).stream(options())) seen.push(chunk)
+    } catch (error) {
+      failure = error
+    }
+    expect(seen.filter((chunk) => chunk.type === 'text-delta').map((chunk) => chunk.text)).toEqual(['partial answer'])
+    expect(failure).toMatchObject({ code: 'PROVIDER_ERROR' })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves a non-transient or unrecognized in-band error with the mapper verdict', async () => {
+    for (const type of ['invalid_request_error', 'authentication_error', 'some_future_error']) {
+      const { store, settings } = await mount()
+      const { fn } = recordingFetch(() => inBandError(type, 'nope'))
+      // An unrecognized type must not fall back to the 200 status line, which
+      // the HTTP classifier would read as a server error.
+      expect(await failureOf(makeAdapter(store, settings, fn).stream(options())))
+        .toMatchObject({ code: 'PROVIDER_ERROR' })
+    }
+  })
+
+  it('takes an account-scoped in-band rate limit out of rotation so the retry lands elsewhere', async () => {
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() =>
+      inBandError('rate_limit_error', 'Rate limit exceeded', [MESSAGE_START], ACCOUNT_SCOPED_429))
+    expect(await failureOf(makeAdapter(store, settings, fn, { accountPool: pool }).stream(options())))
+      .toMatchObject({ code: 'RATE_LIMIT' })
+    // The body cannot be re-requested from here, but the evidence is the same one
+    // a 429 carries, so the account leaves rotation the same way. The harness
+    // retry is about to repeat this request, and repeating it against the account
+    // whose window is spent would fail identically three times over.
+    expect(pool.cooldowns.map((entry) => entry.id)).toEqual(['cl-1'])
+    expect(pool.cooldowns[0]!.ms).toBeGreaterThan(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('leaves the pool alone for an in-band failure every account shares', async () => {
+    // An overload is shared by every account behind the gateway even when the
+    // quota headers happen to name this one, so rotating against it would only
+    // burn the pool.
+    const pool = new FakePool([
+      { id: 'cl-1', credentials: credentials('ACCESS-1') },
+      { id: 'cl-2', credentials: credentials('ACCESS-2') },
+    ])
+    const { store, settings } = await mount()
+    const { fn } = recordingFetch(() =>
+      inBandError('overloaded_error', 'Overloaded', [MESSAGE_START], ACCOUNT_SCOPED_429))
+    expect(await failureOf(makeAdapter(store, settings, fn, { accountPool: pool }).stream(options())))
+      .toMatchObject({ code: 'SERVER' })
+    expect(pool.cooldowns).toHaveLength(0)
+  })
+
+  it('never rewrites a context-overflow verdict the mapper already typed', async () => {
+    // A transient wire type and an overflow message can arrive together. The
+    // mapper's code is what the harness acts on - CONTEXT_OVERFLOW is the signal
+    // compaction runs on - so rewriting it into a retryable SERVER would throw
+    // that recovery away while the request keeps failing identically.
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => inBandError(
+      'api_error',
+      'prompt is too long: 400000 tokens > 200000 tokens maximum',
+    ))
+    expect(await failureOf(makeAdapter(store, settings, fn).stream(options())))
+      .toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+    expect(calls).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Abort and truncation
+// ---------------------------------------------------------------------------
+
+describe('claude adapter abort and truncation', () => {
+  it('reports a caller cancellation as ABORTED rather than as a provider error', async () => {
+    const { store, settings } = await mount()
+    const controller = new AbortController()
+    const { fn } = recordingFetch(() => {
+      controller.abort()
+      throw new Error('aborted')
+    })
+    const adapter = makeAdapter(store, settings, fn)
+    const error = await failureOf(adapter.stream(options('claude-sonnet-4-6', { signal: controller.signal })))
+    expect(error).toMatchObject({ code: 'ABORTED' })
+  })
+
+  it('refuses to present a severed stream as a completed answer', async () => {
+    const { store, settings } = await mount()
+    // No message_stop: the model never finished saying this. Flushing it as a
+    // clean stop would report a wrong answer as a successful one.
+    const { fn } = recordingFetch(() => streamResponse([
+      MESSAGE_START,
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'half' } },
+    ]))
+    const adapter = makeAdapter(store, settings, fn)
+    expect(await failureOf(adapter.stream(options()))).toMatchObject({ code: 'PROVIDER_ERROR' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Request images
+// ---------------------------------------------------------------------------
+
+describe('claude adapter request images', () => {
+  it('RESOLVES the images BEFORE the offload, and budgets the payload that is really sent', async () => {
+    // THE ORDER IS THE FIX. The offload pass used to run first and measure an
+    // ESTIMATE of each image's size — its stored raw bytes — while the
+    // request actually carried the SCALED-DOWN request version, which is far
+    // smaller. An estimate that is too large drops images the request would
+    // have carried comfortably, and the images it dropped were the ones that
+    // had been scaled to fit.
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse())
+
+    const reads: string[] = []
+    const attachments = {
+      readImage: async (ref: { attachmentId: string }) => {
+        reads.push('read:' + ref.attachmentId)
+        // 9,000,000 raw bytes is 12,000,000 base64 characters: over BOTH the
+        // 8 MB request ceiling and the 5 MB per-image ceiling.
+        return { ref, data: new Uint8Array(9_000_000) }
+      },
+      readImageRequest: async (ref: { attachmentId: string }, target: { width: number; height: number; maxBytes: number }) => {
+        reads.push('request:' + ref.attachmentId)
+        return { width: target.width, height: target.height, mediaType: 'image/webp', data: new Uint8Array(8) }
+      },
+    }
+
+    const adapter = makeAdapter(store, settings, fn, { attachments })
+    await drain(adapter.stream(options('claude-sonnet-4-6', {
+      messages: [{ role: 'user', source: { kind: 'user' }, content: [
+        { type: 'image', attachment: { attachmentId: 'fat', mediaType: 'image/png', bytes: 9_000_000, width: 100, height: 100, name: 'fat.png' } },
+      ] }],
+    } as never)))
+
+    const serialized = JSON.stringify(calls[0]?.body)
+    // The picture is STILL in the request: the budget was measured against
+    // the payload that is really sent, and the scaled version is what goes.
+    expect(serialized).not.toContain('[image omitted')
+    expect(serialized).toContain('image/webp')
+    // The scaled request version is what was read.
+    expect(reads).toContain('request:fat')
+  })
+})
+
+describe('Claude subscription wait-time cache activity', () => {
+  const activityStore = promptCacheActivityStore(PROVIDER_ID)
+  const EXTENDED_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+  const sid = (value: string) => value as NonNullable<GenerateOptions['sessionId']>
+  function usageAnswer(): Response {
+    return streamResponse([
+      { type: 'message_start', message: { id: 'msg_1', usage: { input_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 7 } } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+      MESSAGE_STOP,
+    ])
+  }
+
+  it('records the 1h tier the request really sent, at issuance and again at stream end', async () => {
+    const { store, settings } = await mount()
+    let atIssuance: ReturnType<typeof activityStore.read>
+    const { fn, calls } = recordingFetch(() => { atIssuance = activityStore.read('claude-act-default'); return usageAnswer() })
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-default') })))
+    expect(promptCachePolicyOf(PROVIDER_ID).ttlMs).toBe(3_600_000)
+    // Nothing stored follows the official subscription tier, which is the hour.
+    expect(calls[0]!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
+    expect(atIssuance).toMatchObject({ ttlMs: 3_600_000 })
+    expect(atIssuance!.lastActiveAt).toBeGreaterThan(0)
+    expect(activityStore.read('claude-act-default')).toMatchObject({ ttlMs: 3_600_000, totalTokens: 112 })
+  })
+
+  it('records 300000 for a session that really sends the 5m tier', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheTtl: '5m' })
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-5m') })))
+    expect(calls[0]!.headers['anthropic-beta'] ?? '').not.toContain(EXTENDED_TTL_BETA)
+    expect(activityStore.read('claude-act-5m')).toMatchObject({ ttlMs: 300_000, totalTokens: 112 })
+  })
+
+  it('records 3600000 for an explicit 1h choice', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheTtl: '1h' })
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-1h') })))
+    expect(calls[0]!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
+    expect(activityStore.read('claude-act-1h')).toMatchObject({ ttlMs: 3_600_000, totalTokens: 112 })
+  })
+
+  it('keeps the issue time as lastActiveAt when the stream ends later', async () => {
+    const { store, settings } = await mount()
+    // Newer than every real record in this shared store, and still inside the
+    // credential's 24h validity so no refresh is triggered by the mocked clock.
+    const issuedAt = Date.now() + 60_000_000
+    let clock = issuedAt
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    try {
+      const { fn } = recordingFetch(() => usageAnswer())
+      const adapter = makeAdapter(store, settings, fn)
+      const chunks: StreamChunk[] = []
+      for await (const chunk of adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-issue') }))) {
+        chunks.push(chunk)
+        clock += 60_000
+      }
+      expect(chunks.length).toBeGreaterThan(0)
+      expect(clock).toBeGreaterThan(issuedAt)
+      expect(activityStore.read('claude-act-issue')).toMatchObject({
+        lastActiveAt: issuedAt, ttlMs: 3_600_000, totalTokens: 112,
+      })
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it('records nothing for an auxiliary purpose or without a session id', async () => {
+    const { store, settings } = await mount()
+    const { fn } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn)
+    // 'compaction' is the auxiliary purpose this harness generation types; the gate
+    // is "no purpose at all", so every named purpose is excluded the same way.
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-aux'), purpose: 'compaction' })))
+    expect(activityStore.read('claude-act-aux')).toBeUndefined()
+    const before = activityStore.read(undefined)
+    await drain(adapter.stream(options('claude-sonnet-4-6')))
+    expect(activityStore.read(undefined)).toEqual(before)
+  })
+})
+
+describe('Claude first-party protocol corrections', () => {
+  it('signs the exact final body and links headers, metadata and system context', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    await drain(makeAdapter(store, settings, fn).stream(options('claude-opus-5-5', { system: 'STATIC', sessionId: 'wire-session' as never })))
+    const call = calls[0]!
+    const body = call.body
+    const system = body.system as Array<{ text: string; cache_control?: Record<string, unknown> }>
+    expect(system).toHaveLength(3)
+    expect(system[0]!.text).toContain('cch=')
+    expect(system[1]!.cache_control).toBeUndefined()
+    expect(system[2]!).toMatchObject({ text: 'STATIC', cache_control: { type: 'ephemeral', ttl: '1h', scope: 'global' } })
+    const billing = system[0]!.text
+    const cch = billing.match(/cch=([0-9a-f]{5});/)?.[1]
+    const placeholder = JSON.stringify(body).replace(/cch=[0-9a-f]{5};/, 'cch=00000;')
+    expect(cch).toBe(claudeCodeCchToken(placeholder))
+    const promptId = billing.match(/cc_prompt_id=([^;]+)/)?.[1]
+    expect(call.headers['x-claude-code-prompt-id']).toBe(promptId)
+    expect(call.headers['x-claude-1p-request-class']).toBe('main')
+    expect(call.headers['x-client-request-id']).not.toBe('')
+    const metadata = JSON.parse((body.metadata as { user_id: string }).user_id) as Record<string, string>
+    expect(metadata.account_uuid).toBe('uuid-ACCESS-1')
+    expect(metadata.session_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(metadata.device_id).toMatch(/^[0-9a-f]{64}$/)
+    expect(body.diagnostics).toEqual({ previous_message_id: null })
+    expect(body.context_management).toEqual({ edits: [{ type: 'clear_thinking_20251015', keep: 'all' }] })
+  })
+
+  it('drops thinking-token-count on refusal and persists the conclusion across adapters', async () => {
+    const { store, settings } = await mount()
+    const dir = await scratchDir()
+    const file = path.join(dir, 'capability.json')
+    const refusal = () => errorResponse(400, { error: { message: 'Unexpected value(s) thinking-token-count-2026-05-13 for the anthropic-beta header' } })
+    const first = recordingFetch(() => refusal())
+    // Replace the first refusal with a complete stream on the second request.
+    first.mock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const index = first.calls.length
+      const headers = new Headers((init?.headers ?? {}) as HeadersInit)
+      const flat: Record<string, string> = {}
+      headers.forEach((value, key) => { flat[key] = value })
+      first.calls.push({ url: String(input), method: init?.method ?? 'GET', headers: flat, body: typeof init?.body === 'string' ? JSON.parse(init.body) : {} })
+      return index === 0 ? refusal() : answerResponse('ok')
+    })
+    await drain(makeAdapter(store, settings, first.fn, { capabilityMemory: new ClaudeCapabilityMemory(file) }).stream(options()))
+    expect(first.calls).toHaveLength(2)
+    expect(first.calls[0]!.headers['anthropic-beta']).toContain('thinking-token-count-2026-05-13')
+    expect(first.calls[1]!.headers['anthropic-beta']).not.toContain('thinking-token-count-2026-05-13')
+
+    const restarted = recordingFetch(() => answerResponse('ok'))
+    await drain(makeAdapter(store, settings, restarted.fn, { capabilityMemory: new ClaudeCapabilityMemory(file) }).stream(options()))
+    expect(restarted.calls).toHaveLength(1)
+    expect(restarted.calls[0]!.headers['anthropic-beta']).not.toContain('thinking-token-count-2026-05-13')
+  })
+
+  it('adds the fast-mode beta after the exact refusal without changing accounts', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ fastMode: true })
+    const pool = new FakePool([{ id: 'a', credentials: credentials('ACCESS-1') }, { id: 'b', credentials: credentials('ACCESS-2') }])
+    let index = 0
+    const { fn, calls } = recordingFetch(() => {
+      index += 1
+      return index === 1
+        ? errorResponse(400, { error: { message: 'To use speed, send anthropic-beta: fast-mode-2026-02-01' } })
+        : answerResponse('ok')
+    })
+    await drain(makeAdapter(store, settings, fn, { accountPool: pool }).stream(options('claude-opus-5-5')))
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.body.speed).toBe('fast')
+    expect(calls[1]!.headers['anthropic-beta']).toContain('fast-mode-2026-02-01')
+    expect(pool.authFailures).toHaveLength(0)
+    expect(pool.cooldowns).toHaveLength(0)
+  })
+
+  it('folds an in-place system role after refusal and retries on the same account', async () => {
+    const { store, settings } = await mount()
+    let index = 0
+    const { fn, calls } = recordingFetch(() => {
+      index += 1
+      return index === 1 ? errorResponse(400, { error: { message: "role 'system' is not supported for this model" } }) : answerResponse('ok')
+    })
+    const request = options('claude-opus-5-5', {
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+        { role: 'system', content: [{ type: 'text', text: 'MID' }] },
+      ],
+    } as Partial<GenerateOptions>)
+    await drain(makeAdapter(store, settings, fn).stream(request))
+    expect((calls[0]!.body.messages as Array<{ role: string }>).map(message => message.role)).toContain('system')
+    expect((calls[1]!.body.messages as Array<{ role: string }>).map(message => message.role)).not.toContain('system')
+    expect(JSON.stringify(calls[1]!.body.system)).toContain('MID')
+  })
+
+  it('uses the remembered main-turn effort for compaction', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: 'effort-session' as never, reasoningEffort: 'low' as never })))
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: 'effort-session' as never, purpose: 'compaction' })))
+    expect((calls[1]!.body.output_config as Record<string, unknown>).effort).toBe('low')
+  })
+
+  it('touches the last request through the same pool account', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheKeepalive: true })
+    const pool = new FakePool([{ id: 'a', credentials: credentials('ACCESS-1') }, { id: 'b', credentials: credentials('ACCESS-2') }])
+    const { fn, calls } = recordingFetch(call => call.url.endsWith('/cache_touch')
+      ? Response.json({ ok: true })
+      : answerResponse('ok', { 'request-id': 'req_abc' }))
+    const adapter = makeAdapter(store, settings, fn, { accountPool: pool })
+    await drain(adapter.stream(options('claude-opus-5-5', { sessionId: 'touch-session' as never })))
+    await expect(adapter.tryCacheTouch('touch-session')).resolves.toBe(true)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.url).toBe(API_BASE + '/v1/messages/cache_touch')
+    expect(calls[1]!.body).toEqual({ request_id: 'req_abc' })
+    expect(calls[1]!.headers['anthropic-beta']).toBe('oauth-2025-04-20,cache-keepalive-2026-09-03')
+    expect(calls[1]!.headers.authorization).toBe('Bearer ACCESS-1')
+    expect(pool.freshRequests).toEqual(['a'])
+  })
+
+  it('does not touch when the opt-in is off or the upstream request-id is absent', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', { sessionId: 'touch-off' as never })))
+    await expect(adapter.tryCacheTouch('touch-off')).resolves.toBe(false)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('passes through speed, service_tier and inference_geo on usage', async () => {
+    const { store, settings } = await mount()
+    const { fn } = recordingFetch(() => streamResponse([
+      { type: 'message_start', message: { id: 'msg_1', usage: { input_tokens: 7, speed: 'fast', service_tier: 'standard', inference_geo: 'test-region' } } },
+      { type: 'message_stop' },
+    ]))
+    const chunks = await drain(makeAdapter(store, settings, fn).stream(options()))
+    expect(chunks.find(chunk => chunk.type === 'usage')).toMatchObject({
+      usage: { speed: 'fast', service_tier: 'standard', inference_geo: 'test-region' },
+    })
+  })
+})

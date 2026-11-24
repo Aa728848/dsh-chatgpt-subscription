@@ -5,7 +5,7 @@
  * from `en`. Shared account-pool labels come from `account-pool.ts`; only the
  * keys this line overrides are repeated here.
  */
-import type { OllamaLocaleKey } from '../ollama/locales.ts'
+import type { OllamaLocaleKey } from '../providers/ollama/locales.ts'
 import { accountPoolRu } from './account-pool.ts'
 
 export const dictionary: Record<OllamaLocaleKey, string> = {

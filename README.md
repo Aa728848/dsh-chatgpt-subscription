@@ -1,247 +1,85 @@
-# DSH Multi-Subscription Hub (`@eddyskywalker/dsh-chatgpt-subscription`)
+<div align="center">
 
-面向 **DeepSeek Harness（DSH）** 的多平台订阅接入与智能体运行时增强插件包。
+# DSH Subscription Hub
 
-插件最初为接入 ChatGPT Plus / Pro / Business 订阅的 Codex 模型而建，现已演进为统一的**多订阅服务中枢（Subscription Hub）与编码 Agent 增强套件**：在单一插件包内同时提供 **17 条独立模型供应线路**、跨平台加密多账号池、多模态生图/视频工具链、前缀缓存零漂移保护，以及随包分发的 `dispatch` 多子代理编排预设。
+**面向 DeepSeek Harness 的多平台订阅接入与运行时增强插件。**
 
-- **跨平台支持**：Windows、macOS、Linux（含无桌面密钥环的远程服务器部署模式）
-- **跨代际兼容**：单一代码库兼容 `@deepseek-ai/dsh` **0.1.2-alpha.5 至 0.2.2-rc.3** 全系列版本
-- **全栈多语言**：Web 设置中心与宿主侧提示/报错完整支持 **简体中文（`zh`）/ English（`en`）/ Русский（`ru`）**
+[![npm version](https://img.shields.io/npm/v/@eddyskywalker/dsh-chatgpt-subscription?style=flat&label=version)](https://www.npmjs.com/package/@eddyskywalker/dsh-chatgpt-subscription)
+[![npm downloads](https://img.shields.io/npm/dm/@eddyskywalker/dsh-chatgpt-subscription?style=flat&label=downloads)](https://www.npmjs.com/package/@eddyskywalker/dsh-chatgpt-subscription)
+[![license](https://img.shields.io/badge/license-MIT-blue?style=flat)](LICENSE)
 
----
+</div>
 
-## 目录
+## 支持线路
 
-- [供应线路总览](#供应线路总览)
-- [核心特性](#核心特性)
-- [环境要求](#环境要求)
-- [安装与升级](#安装与升级)
-- [快速上手](#快速上手)
-- [内置工具与界面扩展](#内置工具与界面扩展)
-- [Agent 编排与运行时增强](#agent-编排与运行时增强)
-- [常用配置速查](#常用配置速查)
-- [安全与隐私边界](#安全与隐私边界)
-- [开发与测试验证](#开发与测试验证)
-- [进阶文档索引](#进阶文档索引)
+在 **设置 → 订阅服务** 中统一管理以下线路的启停、账号池、模型勾选与网络代理：
 
----
+| 线路 | Provider ID | 登录方式 |
+| --- | --- | --- |
+| ChatGPT / Codex | `codex-chatgpt` | 浏览器登录 / 设备码 / 导入 Codex CLI |
+| Claude 订阅 | `claude-subscription` | 浏览器授权 / 导入 Claude Code |
+| Claude API | `claude-api` | API Key |
+| Kimi Code | `kimi-code` | 设备码授权 / API Key |
+| MiniMax Code | `minimax-code` | 设备码授权 / 复用桌面端登录 |
+| GLM Coding Plan | `glm-coding-plan` | 浏览器授权 / 导入 ZCode |
+| Step Code | `step-code` | 浏览器授权 / API Key / 导入 StepCode |
+| Command Code | `command-code` | 浏览器授权 / API Key |
+| Cline Pass | `cline-pass` | 设备码授权 / API Key |
+| Qoder | `qoder` | 浏览器授权 / PAT / 导入 Qoder CLI |
+| OpenDesign | `opendesign` | 浏览器授权 / API Key |
+| WorkBuddy | `workbuddy-subscription` | 浏览器授权 / 复用桌面端登录 |
+| Qwen Token Plan | `qianwen-token-plan` | API Key |
+| RelayOne | `relayone` | API Key |
+| Ollama Cloud | `ollama` | API Key |
+| Google Antigravity | `antigravity-acp` | 复用本机官方 `agy` 登录态 |
+| AWS Quick | `aws-quick` | 复用本机 Quick Desktop 登录态 |
 
-## 供应线路总览
+> 部分订阅线路与非公开接口（如 `claude-subscription`、`antigravity-acp`、`aws-quick`、`workbuddy-subscription`、`qoder`）可能涉及第三方服务条款限制或上游协议变更，详见[供应线路指南](docs/providers.md)。
 
-插件同时注册 **17 条相互隔离的供应线路**。每条线路拥有独立的 Provider ID、凭据存储、模型目录与上下文窗口覆盖；支持账号池的线路另有独立轮换策略。任意一条线路限流或故障均不影响其它线路。
+## 主要能力
 
-| Provider ID | 订阅 / 服务 | 传输协议 | 登录与凭据方式 | 模型目录来源 |
-| --- | --- | --- | --- | --- |
-| `codex-chatgpt` | ChatGPT（Plus / Pro / Business 等） | OpenAI Responses / Lite | 浏览器 OAuth（`:1455`）/ 设备码 / 只读导入 Codex CLI | 实时 `/backend-api/codex/models` + 随包兜底 |
-| `claude-subscription` | Claude Pro / Max | Anthropic Messages | PKCE 手动粘贴 `<code#state>` / loopback 回调 / 只读收编 Claude Code | 实时 `/v1/models` + 随包 17 模型能力表 |
-| `kimi-code` | Kimi Code 编程订阅 | OpenAI Chat Completions（可选 Anthropic） | RFC 8628 设备码授权（国区 / 国际区）/ 套餐 API Key | 实时 `/v1/models` + 随包兜底 |
-| `minimax-code` | MiniMax Code 编程订阅 | Anthropic Messages | 复用/导入本机桌面端 `auth.json` 或 RFC 8628 设备码 | 随包硬编码目录（上游未开放订阅侧 `/v1/models`） |
-| `command-code` | Command Code | Anthropic（`claude-*`）/ OpenAI（其余） | 浏览器 loopback OAuth（`:5959+`）或粘贴 API Key | 实时 `/provider/v1/models` + 官方 109 条能力表 |
-| `glm-coding-plan` | GLM Coding Plan（国区 BigModel / 国际区 Z.ai） | Anthropic Messages（套餐专用端点） | ZCode 浏览器轮询 OAuth / 手工粘贴 / 只读导入 ZCode | 随包目录（源自官方 `zcode-builtin.json`） |
-| `step-code` | StepFun Step Plan 订阅 / 开放平台 | OpenAI Chat Completions | 云端轮询浏览器授权 / Platform API Key / 只读导入 `stepcode` | 纯实时运行时发现 |
-| `cline-pass` | Cline Pass | OpenAI Chat Completions | WorkOS 设备码 OAuth（自动续期）/ API Key 兼容回退 | 随包兜底 + 官方推荐与上游网关目录补全 |
-| `qoder` | Qoder 订阅（全球区 / 中国站） | Qoder 自有（COSY 签名 + 信封 SSE） | 浏览器设备流（全球区）/ 粘贴 PAT / 只读导入 `qodercli` | 实时 COSY 签名发现 + 随包能力兜底表 |
-| `opendesign` | OpenDesign（Go / Plus / Pro / Max） | OpenAI Chat Completions | AMR 浏览器设备授权（双 Key 签发）/ 粘贴 API Key | 随包 41 模型表 + AMR 控制面与实时 `/v1/models` |
-| `workbuddy-subscription` | WorkBuddy（CodeBuddy 国区 / 国际区） | OpenAI `/v2/chat/completions`；国区 Claude 走 `/v1/messages` | 浏览器轮询授权 / 只读采纳 CodeBuddy 桌面登录态 | 实时 `/v3/config` + 本地快照与随包兜底 |
-| `ollama` | Ollama Cloud | Ollama Native `/api/chat` + OpenAI `/v1/chat/completions` | 粘贴 Ollama Cloud API Key | 实时 `/api/tags` + `/api/show` 元数据探测 |
-| `antigravity-acp` | Google Antigravity（官方 CLI） | **ACP v1 / stdio JSON-RPC**（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；本插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 |
-| `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个套餐专属 API Key（主机加密存储，无账号池） | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 |
-| `relayone` | RelayOne 中转站 | Responses / Chat Completions / Anthropic Messages 自动选择 | 单个 API Key（主机加密存储，无账号池） | 当前 Key `/v1/models` + 公开分组/协议元数据 + 隔离快照 |
-| `claude-api` | Claude API（Anthropic Messages） | Anthropic Messages（官方 Claude Code 客户端请求形态） | 单个 API Key（主机加密存储，无账号池） | 当前 Key `/v1/models` + 随包能力表 + 凭据隔离快照 |
-| `aws-quick` | AWS Quick Free / Plus / Max / Enterprise | Quick AIDP 双向 WebSocket + event-stream + stdio MCP 工具目录 | 官方 Quick Desktop outpost 单账号登录；无号池，本插件不持有长期凭据 | Fast / Balanced / Smart 官方响应模式（无虚构底层模型 ID） |
+- **多账号池与独立代理**：支持顺序耗尽、轮流、固定当前三种轮换策略，遇到限流自动冷却切换；每条线路可单独配置系统代理、自定义代理或直连。
+- **跨平台凭据存储**：默认使用系统加密密钥环（Windows DPAPI / macOS Keychain / Linux Secret Service），无桌面环境的服务器可切换为 DSH 凭据库。
+- **扩展工具与界面**：内置生图/视频工具、进展更新面板、Mermaid 图表渲染、额度看板卡片，以及随包提供的 `dispatch` 调度预设。
+- **三语支持**：设置页与宿主提示完整支持简体中文、English、Русский。
 
-> **合规与风险提示**：
-> - `claude-subscription` 通过订阅 OAuth 凭据模拟官方 CLI 身份转发请求，与 Anthropic 现行服务条款存在冲突，未获官方授权，存在账号被限制或封禁的风险。
-> - `workbuddy-subscription`、`qoder` 等线路部分依赖非公开或逆向协议契约；`step-code` 额度面板使用非公开开发者中心接口（与对话请求完全隔离）。
-> - **`antigravity-acp` 的合规风险不是技术风险，而是条款风险**：它运行的是 Google 官方 `agy` 与其官方 ACP 服务器（协议、凭据、网络全部由官方程序负责，与旧的逆向 `antigravity` 线路有本质区别），但 Google 的 Antigravity FAQ 明确写着：*使用第三方软件、工具或服务访问 Antigravity 违反其服务条款*，且 *把 `agy` 包在第三方编码 Agent/应用中、或自动化账号轮换，在消费者套餐下不受支持*，可能导致账号被暂停或终止。Google 同时公开推荐了 ACP 接入编辑器的方式，两者之间存在解释空间。**该线路默认启用**，可在「订阅服务」总览页的卡片上随时关闭（关闭后不再启动 `agy`、不再出现在模型选择器，子代理也拒绝委派）；是否继续使用由使用者自行判断并承担账号风险。Gemini Enterprise / AI Studio API Key 是 Google 官方指引中风险最低的替代路径。
-> - `aws-quick` 使用 Quick Desktop 的非公开 AIDP 数据面，未获公开聊天 API 的稳定性承诺；支持文本、思考、图片输入与 DSH 工具闭环（含 MCP 图片结果）；设置卡提供官方下载、免费注册提示和连接器预初始化，不显示未经证实的配额。实机验证状态与协议证据见 `docs/aws-quick-line-plan.md`。
-> - 各线路详细的鉴权细节、验证置信度分档与宿主 API 路由请参阅 **[供应线路完整指南（docs/providers.md）](docs/providers.md)**。
+## 安装
 
----
-
-## 核心特性
-
-### 1. 统一订阅中心与多账号池调度
-- **聚合总览页**：在 **设置 → 订阅服务** 提供单页总览卡片，集中查看 16 条线路的启停状态、可用账号数与已勾选模型数，支持在线检测 npm 更新并一键升级插件（自动保护本地 `link:` 开发目录）。
-- **统一号池内核**：支持账号池的线路共享多账号池架构，支持 **顺序耗尽（`sequential`）/ 轮流使用（`round-robin`）/ 固定当前（`sticky`）** 三种策略；遇到账号级 429 配额耗尽自动按重置窗口冷却换号，遇到全局瞬时过载则原地指数退避，防止抽干号池。
-- **本机登录态零侵入收编**：支持只读导入本机已登录的 Codex CLI、Claude Code、ZCode、StepCode、Qoder CLI、CodeBuddy 桌面端凭据，以及复用 MiniMax Code 桌面端登录态。导入前仅做 `stat` 存在性检查，绝不修改或删除第三方客户端文件，也不跨进程抢刷单次轮换令牌。
-- **桌面与无头服务器双存储模式**：默认使用系统加密密钥环（`keyring`：Windows DPAPI / macOS Keychain / Linux Secret Service）；无桌面环境的 Linux 服务器可一键切换至 DSH 标准凭据库（`credentials`：`$DSH_HOME/.credentials.yaml`，强制 `0600` 权限），告别安装 `gnome-keyring` 的繁琐配置。
-
-### 2. 全共享网络代理与智能网页抓取
-- **每条线路各配各的代理**：16 条线路的设置卡里各有「网络代理」（系统代理自动检测 / 自定义代理 / 直连），只影响该线路的对话、OAuth 登录续期、额度查询与目录拉取；回环地址永远直连，**「不使用代理的主机」**是全局共用的一份列表（每条线路都能改），与 `NO_PROXY`（进程环境 / `$DSH_HOME/.env`）合并生效。
-- **Codex 搜索与 `fake-ip` 友好的 `web_fetch`**：支持将 DSH 搜索切换为 ChatGPT 订阅侧 Codex 搜索；在 Clash / Mihomo 等开启 `fake-ip`（`198.18.0.0/15`）的代理环境下，`fetchProvider: auto` 会自动用插件抓取器接管 `web_fetch`，交由远端代理解析域名，解决内置抓取器因本地 DNS 固定报错 `WEB_BLOCKED_URL` 的痛点。
-
-### 3. 精细上下文预算、独立压缩路由与前缀缓存保护
-- **逐模型能力与窗口覆盖**：按上游实时目录与官方注册表精确声明图片/视频模态、思考档位梯子与上下文窗口（支持 `1M`、`512K`、`272000` 等自定义覆盖写法）。
-- **独立压缩模型**：支持在设置页指定更快或更便宜的跨线路模型专门执行上下文压缩摘要（`purpose: 'compaction'`），自动处理多模态降级与半截摘要回退。
-- **Qwen4 原生降本增能**：`qianwen-token-plan` 提供 5m/1h 显式缓存与多断点、CoT 摘要和 encrypted_content 同模型回放、七档推理原样透传、max_completion_tokens 预算、视觉 detail/max_pixels 控制及分档缓存统计；单 Key，不做账号池或伪造余额。
-- **RelayOne 动态中转**：单 Key 自动发现当前上游分组与模型，OpenAI 优先 Responses、Claude 优先 Anthropic、其余走 Chat；GPT 推理全档位透传、默认 272K 上下文可覆盖 500K；通过 New API 官方令牌用量接口显示真实剩余额度；支持对话工具、生图/编辑和异步视频，媒体工具受全局 `mediaTools` 开关控制。
-- **Claude API 第一方形态**：单 Key、端点可自定义，发送第一方头、计费归因、cch、metadata 与 diagnostics；两条 Claude 线路共享版本/种子，只有已知种子的新版本才会在双方会话均超过各自缓存 TTL 后采纳；5m/1h 显式缓存、对话中 system 消息与工具增删、单轮提醒 `clear_at`、快速模式；服务端按需压缩默认开，上游拒绝或空摘要时同调用退回客户端压缩；system 角色/快速模式/模型级压缩被上游拒绝时记入能力记忆（7 天）并运行时纠正；不做额度显示、账号池与媒体工具。
-- **等待期缓存保活**：Kimi、Claude 订阅与 Claude API 在主会话等待子代理或后台任务期间，于缓存到期前 5 分钟自动发一次很小的续热请求（Kimi 空闲 20 分钟、两条 Claude 线路的 1 小时档空闲 55 分钟）；两条 Claude 线路只在 1 小时档生效，5 分钟档从不续热。每次续热是一次真实请求，按缓存读取价格读回整段前缀，Claude 订阅线路还计入订阅额度。
-- **前缀缓存零漂移架构**：针对 Kimi Code、MiniMax Code、Claude、Qwen 等前缀缓存敏感线路，内置计划模式指引尾部一次性投递、Agent Teams `team:policy` 与实验性 Timeline `timeline:planning` 系统段尾部投递及描述冻结、PTC `tools:sdk` 与 Code Mode 恒定说明段冻结、历史工具结果修剪自动跳过（`./tool-result-pruner`），以及受控线路大结果 `ref://` 引用投影与 `cache_warmup_result` 分页/字面量定位补读。
-
-### 4. Claude API：第一方客户端形态、签名与服务端压缩
-- **能做**：粘贴单个 API Key 即以 Claude Code 第一方形态使用 Anthropic Messages（请求头、计费块、cch 与版本/种子一致；未知 npm 版本不直接采用，两条线路均空闲后才切换）；端点可自定义；5m/1h 显式缓存断点、思考清理、快速模式、单轮提醒 `clear_at`、对话中 system 消息与工具增删；服务端按需压缩默认开启，压缩块按摘要哈希持久化并在后续主轮次整块回放；1 小时缓存档在子代理或后台任务运行期间约每 55 分钟自动续热一次（5 分钟档不做）。
-- **不能做**：额度显示与输入框徽章、账号池、原生 API 形态、阈值压缩、生图/视频等媒体工具、任务预算；上游明确拒绝压缩或返回空摘要时在同一次调用内退回客户端压缩，并把该端点+模型标记为不支持 30 分钟。
-- **风险提示**：请求形态依据官方客户端抓包与 cch 算法，新形态未经直连官方端点实测；官方客户端若更改请求头、指纹盐或 cch 种子，需重新抓包并更新版本组合。订阅 cache_touch 与真实 55 分钟续热尚未实测。详见 [Claude API 线路设计与证据](docs/claude-api-line-plan.md)。
-
----
-
-## 环境要求
-
-- **操作系统**：Windows（需内置 PowerShell 以支持 CurrentUser DPAPI）、macOS 或 Linux
-- **运行时**：Node.js **≥ 22.19**（内置 `undici` 8 的下限，已写入 `package.json` 的 `engines`；建议 24 LTS）与 npm
-- **宿主版本**：DeepSeek Harness `@deepseek-ai/dsh` `0.1.2-alpha.5` 至 `0.2.2-rc.3`
-
----
-
-## 安装与升级
-
-### 方式 1：通过 DSH CLI 安装（推荐）
+需要 Node.js ≥ 22.19 与 `@deepseek-ai/dsh` `0.1.2-alpha.5` – `0.2.2-rc.3`。
 
 ```sh
-# 若已全局安装 dsh
 dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
-
-# 或通过 npx 执行
-npx @deepseek-ai/dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription
 ```
 
-如需尝鲜预发布通道，可显式指定 `@alpha` 标签：
+也可在 DSH Web 侧边栏的 **Plugins** 页面直接搜索并安装 `@eddyskywalker/dsh-chatgpt-subscription`。安装预发布版请追加 `@alpha`。
 
-```sh
-dsh plugin --profile web add @eddyskywalker/dsh-chatgpt-subscription@alpha
-```
-
-### 方式 2：通过 DSH Web 界面安装
-
-1. 打开 DSH Web 侧边栏的 **Plugins（插件）** 页面；
-2. 输入包名 `@eddyskywalker/dsh-chatgpt-subscription` 并安装；
-3. 按界面提示重载或重启 `dsh web`（Live Profile 支持热应用更新）。
-
-### 方式 3：源码软链接（本地开发调试）
+本地源码调试：
 
 ```sh
 git clone https://github.com/Aa728848/dsh-chatgpt-subscription.git
 cd dsh-chatgpt-subscription
-npm install
-npm run build
-
-# Linux / macOS
-npx @deepseek-ai/dsh plugin --profile web add "link:/absolute/path/to/dsh-chatgpt-subscription"
-
-# Windows PowerShell
-npx @deepseek-ai/dsh plugin --profile web add "link:C:\absolute\path\to\dsh-chatgpt-subscription"
+npm install && npm run build
+dsh plugin --profile web add "link:/absolute/path/to/dsh-chatgpt-subscription"
 ```
 
----
+## 快速开始
 
-## 快速上手
+1. 启动或重启 `dsh web`，进入 **设置 → 订阅服务**。
+2. 选择需要使用的线路，完成登录、导入本机登录或粘贴 API Key（无桌面 Linux 服务器请先将账号存储位置切换为 **DSH 凭据库**）。
+3. 勾选可用模型并点击 **测试连接**。
+4. 返回对话页，在模型选择器中切换使用。
 
-1. 启动或重启 `dsh web` 并打开 Web 界面；
-2. 进入 **设置 → 订阅服务**，点击任一目标线路卡片（如 **ChatGPT**、**Kimi Code**、**Claude**、**MiniMax Code** 等）；
-3. **无头 Linux 服务器首次使用提示**：若主机未运行桌面钥匙环守护进程，先在 **ChatGPT → 账号存储位置** 将存储切换为 **DSH 凭据库（`credentials`）**；
-4. 点击 **登录**（浏览器 OAuth / 设备码 / API Key）或 **导入本机登录** 完成账号入池；
-5. 按需调整 **可用模型勾选**、**默认思考深度**、**上下文窗口覆盖** 与 **网络代理**，点击 **测试连接** 验证；
-6. 回到对话页，即可在模型选择器中选用已启用线路的模型，输入框右侧将实时展示当前线路最紧迫窗口的剩余额度胶囊。
+## 文档
 
----
+| 文档 | 说明 |
+| --- | --- |
+| [供应线路指南](docs/providers.md) | 各线路登录方式、能力边界、额度机制与合规说明 |
+| [配置与安全参考](docs/configuration.md) | `cordis.patch.yml` 配置项、代理、存储后端与环境变量 |
+| [架构与开发指南](docs/architecture.md) | 目录结构、开发命令、跨版本兼容与发布流程 |
+| [故障排查](docs/troubleshooting.md) | 登录、密钥环、代理、限流与压缩等常见问题 |
+| [调度预设说明](presets/dispatch/README.md) | 内置 `dispatch` 编排预设的使用与规则 |
+| [更新日志](docs/CHANGELOG.md) | 版本历史 |
 
-## 内置工具与界面扩展
+## 许可
 
-### 注册给 Agent 的工具
-
-| 工具名 | 适用范围 | 功能说明 |
-| --- | --- | --- |
-| `progress_update` | 全线路通用 | 在不中断当前回合的前提下向用户汇报结构化阶段进展，渲染于对话行与右侧进展面板 |
-| `dispatch_ledger` | 全线路通用（配合 `dispatch` 预设） | 只读查询委派账本并获取 Mandate v2 协议及预填好的可复制头部骨架 |
-| `code_run` / `code_tools_*` | `dispatch` 预设会话（`./codemode`） | Code Mode 程序传输与按需工具检索（`list` / `search` / `describe` / `debug`），支持 `inspect` 图文混排投影与沙箱提权 |
-| `codex_image_generate` | 需已登录 `codex-chatgpt` | 通过 ChatGPT 订阅生图接口生成 PNG 图片（或基于最多 5 张参考图改图）并写入会话附件 |
-| `kimi_attach_video` | `kimi-code` 支持视频的模型 | 将本地视频路径或 URL 挂载进下一轮多模态请求 |
-| `cache_warmup_result` | 受控线路会话 | 对被替换为 `ref://<session>/<sha256>` 预览的大工具结果按字节/行或字面量 `query` 精确分页补读与释放 |
-| `minimax_generate_video` | `minimax-code` 会话 | 调用 MiniMax-H3 / H3-Max / Hailuo-2.3 生成视频（支持首尾帧与参考图/视频/音频）并下载至工作区 |
-| `minimax_understand_video` | `minimax-code` 会话 | 上传或内联本地视频并调用 MiniMax 视频理解接口回答问题 |
-| `enter_plan_mode` / `leave_plan_mode` | `dispatch` 预设会话 | 调度模式下在澄清访谈收敛后进入只读计划模式，或显式放弃规划 |
-| `cline_pass_*`（共 5 个） | 可选开启（默认不注册） | Cline Pass 状态、目录、普通模型测试、账号与请求历史管理工具 |
-| `relayone_generate_image` | 已配置 RelayOne 且开启媒体工具 | 动态选择当前分组生图模型，支持参考图编辑、base64/URL 与异步图像任务 |
-| `relayone_generate_video` | 已配置 RelayOne 且开启媒体工具 | 提交并轮询异步视频任务，下载到工作区 `relayone-videos/` 并在对话中播放 |
-
-### Web 客户端与看板扩展
-
-- **MiniMax `/video` 斜杠命令与预览**：在对话输入框输入 `/video` 即可唤出可视化视频参数表单（自动校验模型专属分辨率与时长联动规则），生成的视频支持对话内播放与右侧文档预览栏直接播放。
-- **Mermaid 图表自动渲染**：对话流中的 Mermaid 代码块在客户端经安全消毒后自动渲染为矢量图。
-- **组件看板卡片（`dsh-widget-board`）**：随包发布双面翻转组件 `line-flip`（**线路额度**）——正面展示指定订阅线路（`props.line`）的多窗口进度条与重置倒计时，背面展示该线路号池列表、当前激活账号与轮换策略切换器。
-
----
-
-## Agent 编排与运行时增强
-
-- **随包分发 `dispatch`（调度模式）预设**：安装插件后自动注册到新建会话的 Agent Preset 列表中。遵循 `分诊(L0/L1/L2-Clear/L2-Governed) → 澄清访谈(R-G) → 计划模式审批(R9) → 拓扑派发(Lead-Core / Hybrid / Fan-out) → Lead 证据验收(R6)` 纪律，基于 Code Mode（`code_run`）收敛顶层工具声明面，配合 `dispatchExecutionGuard` 与 `dispatch_ledger` Mandate v2 血缘守卫防重、防越权、禁空 `sleep`。详见 **[调度模式说明（presets/dispatch/README.md）](presets/dispatch/README.md)**。
-- **子代理模型白名单强制守卫（`subagentModelAuthorization`）**：消除省略 `provider`/`model` 时悄悄继承主模型绕过白名单的漏洞（覆盖直接工具调用与 PTC / `code_run` 内 SDK 调用）；客户端插件页同步提供支持「全局默认 + 按主代理模型分别配置」的增强版 **子智能体** 设置卡。
-- **流式健康、失控治理与自动续跑保护**：全线路配备双阶段流式空闲看门狗（响应头脉冲 + 流内 120s 静默判死，Kimi 首帧预算 360s 且看门狗 TIMEOUT 不自动重发、Ollama 为 300s）、工具失控确定性零增量守卫（`toolRunawayGuard`：检测同名同参重复、同一工具连续同族报错 `same_error_family` 与后台任务无变化轮询 `polling_repeat`）、空结束轮次自动续跑（`noAnswerResume`，默认开启），以及可选的字面 + 语义双信号推理复读熔断器（`reasoningCollapseGuard`，默认关闭）。
-
----
-
-## 常用配置速查
-
-插件级部署参数位于 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 的 `id: dsh-chatgpt-subscription` 条目下（标记 **热生效** 的字段亦可在 Web 设置页直接开关，保存即生效）：
-
-| 配置键 | 默认值 | 生效时机 | 作用简述 |
-| --- | --- | --- | --- |
-| `poolStorage` | `'keyring'` | 重载插件（UI 切换即时生效） | 号池存储：`keyring`（系统密钥环）或 `credentials`（DSH 凭据库，服务器推荐） |
-| `fetchProvider` | `'auto'` | 重载插件 | `web_fetch` 策略：`auto`（有代理或 Codex 搜索时插件接管）/ `plugin` / `dsh` |
-| `syncAgentPresets` | `true` | 重启 / 重载 | 是否自动注册或同步随包 `dispatch` Agent Preset |
-| `subagentModelAuthorization` | `true` | 重载插件 | 启用子代理显式/继承路由白名单单调守卫 |
-| `mediaTools` | `true` | 重载插件 / 重启 | 注册 Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解四个媒体工具 |
-| `progressUpdates` | `true` | 热生效 | 启用 `progress_update` 工具、提示词引导与右侧进展面板 |
-| `planModePipeline` | `true` | 热生效 | 允许 `dispatch` 预设使用 `enter_plan_mode` / `leave_plan_mode` |
-| `dispatchExecutionGuard` | `true` | 热生效 | 启用子代理主控工具越权拦截、空等拦截与 Mandate v2 账本守卫 |
-| `toolRunawayGuard` | `true` | 热生效 | 对同参重复、同族连续报错与后台无变化轮询做分级提醒（Kimi 保留第 12 次强停） |
-| `teamPolicyCacheGuard` / `timelineCacheGuard` | `true` | 热生效 | 冻结 Agent Teams `team:policy` 与 Timeline 规划段/任务工具描述，变更走尾部投递保缓存 |
-| `cacheWarmup` / `cacheWarmupRetrieval` | `true` | 热生效 | 受控线路大日志结果与导航检索大纲的 `ref://` 预览投影 |
-| `cacheAffinity` / `cacheWaitWarmup` | `true` | 热生效 | 轮换优先选前缀缓存仍热的账号（剩余额度 ≥20%），以及等待子代理或后台任务期间的缓存保活（TTL 前 5 分钟：Kimi 20 分钟，Claude 订阅与 Claude API 的 1h 档 55 分钟） |
-| `noAnswerResume` | `{}`（开启） | 重载插件 | 无正文且无工具调用异常收尾时自动续跑；设 `false` 关闭 |
-| `reasoningCollapseGuard` | `false`（关闭） | 重载插件 | 传 `{}` 或阈值对象开启双信号推理复读熔断器 |
-
-完整的配置参数、并发控制（`DSH_PROVIDER_CONCURRENCY`）与全量环境变量表请参阅 **[部署配置与安全参考（docs/configuration.md）](docs/configuration.md)**。
-
----
-
-## 安全与隐私边界
-
-- **凭据不出宿主**：所有 OAuth 令牌、刷新令牌、API Key、PKCE `code_verifier` 仅存于宿主内存与加密存储（Windows CurrentUser DPAPI / macOS Keychain / Linux Secret Service 或 `0600` 独占文件），**永不进入浏览器响应、`settings.yaml` 或日志**；诊断信息只输出 SHA-256 指纹前缀。
-- **同源防伪校验**：全部修改状态的宿主 HTTP 路由强制要求同源 JSON `POST` 并校验 `Origin` 与 `Host`。
-- **外部凭据零写入**：所有本机 CLI / 桌面端凭据收编逻辑严守只读边界，从不篡改、移动或删除原客户端文件。
-- **地址安全策略**：本地图片仅通过回环通道读取；插件网页抓取器严格拦截私网、回环、链路本地等非公网字面量地址（仅放行本地代理的 `198.18.0.0/15` fake-ip 解析结果）。
-
----
-
-## 开发与测试验证
-
-```sh
-# 运行宿主、客户端、测试与脚本工程的 TypeScript 类型检查
-npm run typecheck
-
-# 运行全量离线 Vitest 测试套件（全 mock，无需真实账号或外网连接）
-npm test
-
-# 构建类型声明与 lib/ 产物（ESM 宿主入口 + CJS 浏览器 bundle）
-npm run build
-
-# 检查 npm 打包文件清单与体积
-npm pack --dry-run
-```
-
-> 升级 `@deepseek-ai/dsh*` 依赖或重构公共类型后，请执行 `npx tsc -b --force` 绕过增量 `.tsbuildinfo` 缓存做完整编译校验。架构细节与贡献规范详见 **[架构设计与开发指南（docs/architecture.md）](docs/architecture.md)**。
-
----
-
-## 进阶文档索引
-
-- **[文档总导航（docs/README.md）](docs/README.md)** — 全部参考手册与历史工程审计档案目录
-- **[供应线路完整指南（docs/providers.md）](docs/providers.md)** — 16 条线路的鉴权、模型能力、协议细节、验证边界与 HTTP 路由表
-- **[RelayOne 线路设计与证据](docs/relayone-line-plan.md)** — 动态分组、三协议工具链、媒体任务与在线验证边界
-- **[部署配置与安全参考（docs/configuration.md）](docs/configuration.md)** — `cordis.patch.yml` 全字段、`poolStorage`、代理策略与全量环境变量表
-- **[架构设计与开发指南（docs/architecture.md）](docs/architecture.md)** — 多入口设计、共享内核、三语国际化、缓存守卫与跨代际兼容规范
-- **[故障排查手册（docs/troubleshooting.md）](docs/troubleshooting.md)** — 登录回调、钥匙环、路由冲突、429 冷却、压缩溢出与代理抓网页排障
-- **[调度模式预设说明（presets/dispatch/README.md）](presets/dispatch/README.md)** — `dispatch` 编排规则（`R0`–`R9`）与 Mandate v2 账本协议
+[MIT](LICENSE)

@@ -17,7 +17,7 @@ import {
   claudeCodeCchHashView,
   claudeCodeXxHash64,
   signClaudeCodeCch,
-} from '../src/host/common/claude-code-cch.ts'
+} from '../src/host/providers/_claude-shared/claude-code-cch.ts'
 
 const CCH_PATTERN = /\bcch=([0-9a-f]{5});/
 const MAX_CAPTURE_BYTES = 20 * 1024 * 1024

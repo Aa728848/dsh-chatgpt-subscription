@@ -6,7 +6,7 @@
  * source applies on top of them.
  */
 import { accountPoolRu } from './account-pool.ts'
-import type { LocaleKey } from '../locales.ts'
+import type { LocaleKey } from '../providers/codex-chatgpt/locales.ts'
 
 export const dictionary: Record<LocaleKey, string> = {
   // The account-management card is shared with every other provider tab.

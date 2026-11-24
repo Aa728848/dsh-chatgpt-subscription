@@ -1,0 +1,1677 @@
+/**
+ * Host-side authorization for the models a subagent may run.
+ *
+ * The `subagent-model-selection` preference is sampled into each Session as a
+ * durable route allowlist, but the built-in delegation tool only rejects an
+ * explicit route outside that list: a call that omits `provider` or `model`
+ * silently falls back to the configured child defaults or to the parent's own
+ * route, so a DeepSeek parent could spawn DeepSeek children even though the
+ * allowlist authorizes only other models.
+ *
+ * This guard closes that gap from the plugin plane. Whenever the calling
+ * Session (or the nearest ancestor that recorded one) carries an allowlist,
+ * every delegation must name an authorized `provider` and `model`; a call that
+ * names neither, names only half of the pair, or names a route outside the list
+ * is denied before the child starts, with the authorized routes in the reason so
+ * the model can call `list_subagent_models` and retry with one of them.
+ * @module dsh-chatgpt-subscription/subagent-model-authorization
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import { hasRegister } from '../../common/settings-compat.ts'
+
+/** DSH settings namespace owned by the Subagent settings card. */
+export const SUBAGENT_MODEL_SELECTION_NAMESPACE = 'subagent-model-selection'
+
+/** Durable Session event carrying one Session's authorized child routes. */
+export const SUBAGENT_POLICY_EVENT = 'subagent/model-selection-policy'
+
+const NO_COMPATIBLE_ROUTES_REASON = 'subagent model selection: none of the configured child routes match this Session’s recorded policy. '
+  + 'Save the desired models in Subagents settings and start a new Session to use them.'
+
+/** Delegation tools whose child routes this guard authorizes. */
+export const DEFAULT_DELEGATION_TOOLS: readonly string[] = ['subagent']
+
+/**
+ * Delegation tools that start their child on the caller's own route by design.
+ * `subagent_fork` is the shipped one: it omits `modelSelectionSettings`, so it
+ * exposes no route parameters and seeds the child from the parent's own
+ * conversation — a child on any other route would discard the inherited prefix
+ * and its cache. Inherit mode is what keeps that design honest: the fork still
+ * cannot choose, but an allowlist-carrying Session now refuses to let it run on
+ * a route the user did not authorize.
+ *
+ * `spawn_teammate` is the second, for the same reason at one remove. The Agent
+ * Teams runtime registers it in the calling agent's own scope, and it creates
+ * every child through `ctx.subagents.startContinuable` with no `agentOptions`
+ * at all: a teammate inherits the Lead's route and the tool exposes no route
+ * parameters. Policing it as an explicit tool would deny every creation with a
+ * reason the model cannot act on, so it sits here beside the fork.
+ */
+export const DEFAULT_SUBAGENT_INHERIT_TOOLS: readonly string[] = ['subagent_fork', 'spawn_teammate']
+
+/**
+ * Inherit-mode tools that fork the caller's own conversation context on the
+ * caller's own route (as opposed to multi-agent team spawning such as
+ * `spawn_teammate`). Only these tools are unlocked by `allowParentFork`.
+ */
+export const DEFAULT_PARENT_FORK_TOOLS: readonly string[] = ['subagent_fork']
+
+/**
+ * How one delegation tool resolves the child route this guard authorizes.
+ *
+ * `explicit` — the tool exposes `provider`/`model`, so the call must name the
+ * pair and that pair must be on the allowlist.
+ * `inherit` — the tool declares no route parameters and starts the child on the
+ * caller's own route (the fork backend, whose whole value is reusing the
+ * parent's conversation and its cache). The guard then forbids a route override
+ * and checks the effective inherited route against the same allowlist, because
+ * "the tool cannot choose" is not the same as "the choice is authorized".
+ */
+export type DelegationToolMode = 'explicit' | 'inherit'
+
+/** One delegation tool name paired with the mode the guard enforces on it. */
+export interface DelegationToolPolicy {
+  readonly name: string
+  readonly mode: DelegationToolMode
+}
+
+/** One exact provider/model route the user authorized for children. */
+export interface AllowedModelRoute {
+  readonly provider: string
+  readonly model: string
+}
+
+/**
+ * Per-main-model routing overrides, as the Settings card stores them.
+ *
+ * The first configured list observed for a root Session is kept for that
+ * Session. Its recorded allowlist stays the outer bound: a per-main-model
+ * entry can only narrow the native policy.
+ */
+export interface SubagentRoutingOverrides {
+  /** Routes used when the Session's main model matches no `byMainModel` entry. */
+  readonly defaultAllowedModels?: readonly AllowedModelRoute[]
+  /** Authorized child routes per main agent model, keyed by `provider/model`. */
+  readonly byMainModel?: Readonly<Record<string, readonly AllowedModelRoute[]>>
+  /** Whether `subagent_fork` may inherit the parent route when a main model has no dedicated fork override. */
+  readonly defaultAllowParentFork?: boolean
+  /** Per-main-model `subagent_fork` self-inheritance policy, keyed by `provider/model`. */
+  readonly allowParentForkByMainModel?: Readonly<Record<string, boolean>>
+}
+
+/** Resolved model-selection preference read from the Host settings document. */
+export interface SubagentModelSelectionPreference {
+  readonly enabled: boolean
+  readonly allowedModels: readonly AllowedModelRoute[]
+  /**
+   * The fallback route list, when the deployment configured one. Absent means
+   * "no per-main-model routing", which leaves `allowedModels` in charge.
+   */
+  readonly defaultAllowedModels?: readonly AllowedModelRoute[]
+  /**
+   * Authorized routes per main agent model. A Session whose main route matches
+   * a key here is governed by that entry instead of the fallback list.
+   */
+  readonly byMainModel?: Readonly<Record<string, readonly AllowedModelRoute[]>>
+  /** Fallback `subagent_fork` self-inheritance policy when `allowParentForkByMainModel` carries no entry for the main model. */
+  readonly defaultAllowParentFork?: boolean
+  /** Per-main-model `subagent_fork` self-inheritance policy, keyed by `provider/model`. */
+  readonly allowParentForkByMainModel?: Readonly<Record<string, boolean>>
+}
+
+/** One durable Session record this module reads: its events and its lineage. */
+export interface PolicySession {
+  eventAt?(seq: number): { type?: unknown; data?: unknown } | undefined
+  readonly header?: {
+    readonly origin?: unknown
+    readonly parentSession?: unknown
+  }
+  /**
+   * The request header in force after the log's last header snapshot — the
+   * route the NEXT request uses. Read only by `inherit` mode, and optional so
+   * a minimal durable record still satisfies this interface.
+   */
+  requestHeader?(): { readonly config?: { readonly provider?: unknown; readonly model?: unknown } } | undefined
+}
+
+/** Session lookup the guard walks from the calling agent to its ancestors. */
+export interface SessionsResolver {
+  get(id: string): PolicySession | undefined
+}
+
+/** Calling agent fields the guard reads. */
+export interface AuthorizationAgent {
+  readonly session?: PolicySession
+  readonly options?: { readonly provider?: unknown; readonly model?: unknown }
+  /**
+   * Live model selection, when the agent exposes one. A root Session's main
+   * route is read from here before the first request has a header to record it.
+   */
+  readonly model?: { current?(): { readonly provider?: unknown; readonly model?: unknown } | undefined }
+}
+
+/** What the delegation tool received from the model. */
+export interface DelegationArguments {
+  readonly provider?: unknown
+  readonly model?: unknown
+}
+
+/** The route an inherit-mode child would run on, as far as it can be resolved. */
+export interface InheritedRoute {
+  readonly provider?: string
+  readonly model?: string
+  readonly reasoningEffort?: string
+}
+
+/**
+ * Answer whether one delegation tool currently exposes `provider`/`model` to
+ * the model.
+ *
+ * The mode a tool is policed in is configuration, but the tool's PARAMETERS are
+ * a runtime fact: `@deepseek-ai/dsh-tool-subagent@0.2.1-rc.1` renamed
+ * `modelSelectionSettings` to `modelSelection` and split discovery into
+ * `modelDiscovery`, so a preset written for an older harness silently mounts
+ * the tool with neither. Demanding an explicit pair from a tool that has no
+ * such parameter is a denial no call can satisfy, which is why the guard asks
+ * instead of assuming.
+ *
+ * Removing the pair from the enforce path must not remove enforcement: an
+ * undeclared-route tool falls back to inherit mode, whose inherited route is
+ * checked against the same allowlist.
+ * @param agent - Calling agent, whose scope decides which registry view applies.
+ * @param toolName - Tool being dispatched.
+ * @returns whether the tool declares a route field; undefined when the registry
+ *   cannot answer, which keeps the configured mode in charge.
+ */
+export type RouteParameterProbe = (
+  agent: AuthorizationAgent | undefined,
+  toolName: string,
+) => boolean | undefined
+
+/**
+ * Read one deployment event field as a string.
+ * @param value - Candidate field value from a durable event.
+ * @returns the string value, or undefined for any other type.
+ */
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * Read one deployment event field as a plain object.
+ * @param value - Candidate field value from a durable event.
+ * @returns the record value, or undefined for arrays, null, and primitives.
+ */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/**
+ * Read one deployment event field as a boolean.
+ * @param value - Candidate field value from a durable event.
+ * @returns the boolean value, or undefined for any other type.
+ */
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+/**
+ * Parse the allowlist out of a durable route-policy event.
+ * @param data - `subagent/model-selection-policy` event payload.
+ * @returns every well-formed route, or undefined when the payload carries none.
+ */
+export function parseAllowedRoutes(data: unknown): AllowedModelRoute[] | undefined {
+  const allowed = asRecord(data)?.['allowedModels']
+  if (!Array.isArray(allowed)) return undefined
+  const routes: AllowedModelRoute[] = []
+  for (const entry of allowed) {
+    const record = asRecord(entry)
+    const provider = asString(record?.['provider'])
+    const model = asString(record?.['model'])
+    if (provider === undefined || model === undefined) continue
+    if (provider.length === 0 || model.length === 0) continue
+    routes.push({ provider, model })
+  }
+  return routes.length === 0 ? undefined : routes
+}
+
+/**
+ * Find one Session's recorded allowlist among its durable events.
+ * @param session - Session whose log is scanned.
+ * @returns the authorized routes, or undefined for a Session that recorded none.
+ */
+export function policyRoutesOf(session: PolicySession | undefined): AllowedModelRoute[] | undefined {
+  if (session === undefined || typeof session.eventAt !== 'function') return undefined
+  // Policy events precede the first model request, so the scan stays short; the
+  // bound keeps a Session without one from walking its whole log.
+  for (let seq = 0; seq < 256; seq += 1) {
+    let event
+    try {
+      event = session.eventAt(seq)
+    } catch {
+      return undefined
+    }
+    if (event === undefined) return undefined
+    if (event.type !== SUBAGENT_POLICY_EVENT) continue
+    const routes = parseAllowedRoutes(event.data)
+    if (routes !== undefined) return routes
+  }
+  return undefined
+}
+
+/**
+ * Resolve the allowlist a delegation from this agent must respect: the agent's
+ * own recorded policy, else the nearest ancestor Session that recorded one
+ * (the inheritance the delegation tool applies to child Sessions).
+ * @param agent - Calling agent.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @returns the authorized routes, or undefined when no Session recorded any.
+ */
+export function authorizedRoutesFor(
+  agent: AuthorizationAgent | undefined,
+  sessions: SessionsResolver,
+): AllowedModelRoute[] | undefined {
+  let session = agent?.session
+  for (let depth = 0; depth < 8 && session !== undefined; depth += 1) {
+    const recorded = policyRoutesOf(session)
+    if (recorded !== undefined) return recorded
+    const header = session.header
+    if (header?.origin !== 'subagent') return undefined
+    const parentId = asString(header.parentSession)
+    if (parentId === undefined) return undefined
+    session = sessions.get(parentId)
+  }
+  return undefined
+}
+
+/**
+ * Read the Host preference that owns the allowlist. Values in the stored
+ * document are untrusted JSON, so every field is narrowed before use.
+ * @param settings - Live settings service, when composed and when it still
+ * exposes the register seam (harness 0.1.7 replaced it with forms).
+ * @returns the resolved preference, or undefined without a settings service.
+ */
+export function subagentModelSelectionPreference(
+  settings: unknown,
+): SubagentModelSelectionPreference | undefined {
+  if (!hasRegister(settings)) return undefined
+  try {
+    const scope = settings.register(SUBAGENT_MODEL_SELECTION_NAMESPACE, z.object({
+      enabled: z.boolean().default(false),
+      allowedModels: z.array(z.object({
+        provider: z.string().min(1).required(),
+        model: z.string().min(1).required(),
+      })).default([]),
+    }))
+    const value = asRecord(scope.get())
+    if (value === undefined) return undefined
+    return {
+      enabled: asBoolean(value['enabled']) === true,
+      allowedModels: parseAllowedRoutes(value) ?? [],
+    }
+  } catch {
+    // A deployment without this namespace, or with a malformed stored section,
+    // leaves delegations exactly as the built-in tool resolves them.
+    return undefined
+  }
+}
+
+/**
+ * Main-model route per root Session, locked the first time it is observed.
+ *
+ * Without this, a mid-session model switch would silently re-point a Session's
+ * child allowlist: the guard would start answering with a different main model's
+ * routes, so the routes advertised in the prompt change, the prefix cache is
+ * invalidated, and a model can be handed a list its own earlier turn contradicted.
+ * Locking the FIRST resolved route keeps one Session's delegation policy stable
+ * for its whole life, which is the same promise the durable policy event makes.
+ *
+ * Keyed weakly by the root Session object, so a closed Session's entry goes with
+ * it. A Session object that is not an object (a minimal fixture) is simply not
+ * locked.
+ */
+const lockedRootMainRoutes = new WeakMap<object, AllowedModelRoute>()
+
+/**
+ * Configured route filter per root Session. Null keeps the Session policy as-is.
+ * Cache the filter independently of the caller's policy so the root and each
+ * descendant still have to match their own recorded routes.
+ */
+const lockedRootRouteFilters = new WeakMap<object, readonly AllowedModelRoute[] | null>()
+
+/**
+ * Authorized `allowParentFork` posture per root Session, locked on first evaluation
+ * alongside {@link lockedRootRouteFilters} so one Session is governed by one policy.
+ */
+const lockedRootAllowParentFork = new WeakMap<object, boolean>()
+
+/**
+ * Narrow one candidate route pair into an exact route.
+ * @param provider - Candidate provider id.
+ * @param model - Candidate model id.
+ * @returns the route, or undefined unless both halves are non-empty strings.
+ */
+function routeOf(provider: unknown, model: unknown): AllowedModelRoute | undefined {
+  const providerId = asString(provider)
+  const modelId = asString(model)
+  if (providerId === undefined || modelId === undefined) return undefined
+  if (providerId.length === 0 || modelId.length === 0) return undefined
+  return { provider: providerId, model: modelId }
+}
+
+/**
+ * Read the route a Session's next request uses, when its header names one.
+ * @param session - Session whose request header is read.
+ * @returns the exact route, or undefined when the header is absent or silent.
+ */
+function headerRouteOf(session: PolicySession | undefined): AllowedModelRoute | undefined {
+  let header: { readonly config?: { readonly provider?: unknown; readonly model?: unknown } } | undefined
+  try {
+    header = session?.requestHeader?.()
+  } catch {
+    // A Session whose fold is unavailable simply contributes no route.
+    return undefined
+  }
+  return routeOf(header?.config?.provider, header?.config?.model)
+}
+
+/**
+ * Resolve the top-level Session of one agent's lineage, together with the route
+ * its main model runs on.
+ *
+ * The main model is a property of the ROOT Session: a child subagent's own route
+ * is the child's, and reading it would authorize children by what a child chose
+ * rather than by what the user's main agent is. Walking up through
+ * `header.parentSession` finds that root, and the root's route is read from its
+ * own header (or, for an agent that IS the root, from the live model accessor and
+ * then the delegation hint, which is what an unstarted Session has).
+ *
+ * Once resolved for a Session that has already sent a request, the route is
+ * locked in {@link lockedRootMainRoutes}, so the answer never drifts mid-session.
+ * @param agent - Calling agent.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param modelSelectionHint - Route fields the caller already resolved.
+ * @param lockSnapshot - Lock even a route that has no request header yet; the
+ *   prompt-assembly, post-execute and denial paths pass true, so a Session's
+ *   first turn fixes its policy for the rest of its life.
+ * @returns the root Session (when one exists) and the main route (when known).
+ */
+export function resolveRootSessionAndMainRoute(
+  agent: AuthorizationAgent | undefined,
+  sessions: SessionsResolver,
+  modelSelectionHint?: { readonly provider?: unknown; readonly model?: unknown },
+  lockSnapshot = false,
+): { rootSession?: PolicySession; mainRoute?: AllowedModelRoute } {
+  let rootSession = agent?.session
+  for (let depth = 0; depth < 8 && rootSession !== undefined; depth += 1) {
+    const header = rootSession.header
+    if (header?.origin !== 'subagent') break
+    const parentId = asString(header.parentSession)
+    if (parentId === undefined) break
+    const parent = sessions.get(parentId)
+    if (parent === undefined) break
+    rootSession = parent
+  }
+  if (rootSession === undefined) {
+    // No Session at all (a scope-only call): the caller's own hint is the only
+    // route there is, and there is nothing to lock it against.
+    return { mainRoute: routeOf(modelSelectionHint?.provider, modelSelectionHint?.model) }
+  }
+  // A WeakMap only accepts object keys; a minimal fixture that is not an object
+  // simply never gets a lock, and every read stays live.
+  const lockable = typeof rootSession === 'object' && rootSession !== null
+  const locked = lockable ? lockedRootMainRoutes.get(rootSession) : undefined
+  if (locked !== undefined) return { rootSession, mainRoute: locked }
+
+  let mainRoute: AllowedModelRoute | undefined
+  if (agent?.session === rootSession || agent?.session === undefined) {
+    // The calling agent IS the root, so its live route is the main route. The
+    // header outranks the creation options for the same reason it does in
+    // `inheritedRouteOf`: after a mid-session switch the options are stale.
+    let live: { readonly provider?: unknown; readonly model?: unknown } | undefined
+    try {
+      live = agent?.model?.current?.()
+    } catch {
+      live = undefined
+    }
+    mainRoute = headerRouteOf(rootSession)
+      ?? routeOf(live?.provider, live?.model)
+      ?? routeOf(modelSelectionHint?.provider, modelSelectionHint?.model)
+  } else {
+    // A child is asking: the main model belongs to the root Session, never to
+    // the child, so the root's own recorded route decides.
+    const rootOptions = (rootSession as { readonly options?: { readonly provider?: unknown; readonly model?: unknown } }).options
+    mainRoute = headerRouteOf(rootSession)
+      ?? routeOf(rootOptions?.provider, rootOptions?.model)
+  }
+  if (mainRoute === undefined) return { rootSession }
+  // A route observed before the Session's first request is provisional unless
+  // the caller is on a path that must freeze the policy now.
+  if (lockable && (lockSnapshot || headerRouteOf(rootSession) !== undefined)) {
+    lockedRootMainRoutes.set(rootSession, mainRoute)
+  }
+  return { rootSession, mainRoute }
+}
+
+/**
+ * Read the route an inherit-mode child would run on: the calling agent's own
+ * effective request route. This mirrors the delegation seam's
+ * `parentAgentOptionsForDelegation`, where the latest request header owns
+ * provider/model after request-time model selection and the creation options
+ * remain the fallback before the first request. `AuthorizationAgent.options` is
+ * deliberately NOT a fallback while a header exists — after a mid-session model
+ * switch the creation options are stale, and trusting them would authorize the
+ * route the session no longer uses.
+ * @param agent - Calling agent.
+ * @returns the inherited route fields, each absent when its source did not supply it.
+ */
+export function inheritedRouteOf(agent: AuthorizationAgent | undefined): InheritedRoute {
+  const session = agent?.session
+  let header: { readonly config?: { readonly provider?: unknown; readonly model?: unknown; readonly reasoningEffort?: unknown } } | undefined
+  try {
+    header = session?.requestHeader?.()
+  } catch {
+    // A session whose fold is unavailable leaves the declared options in charge,
+    // exactly as the delegation seam falls back when no header exists yet.
+    header = undefined
+  }
+  if (header?.config !== undefined) {
+    // The header is authoritative only when it actually names a route. A header
+    // carrying neither field says nothing, so the creation options still decide.
+    const provider = asString(header.config.provider)
+    const model = asString(header.config.model)
+    if (provider !== undefined || model !== undefined) {
+      return { provider, model, reasoningEffort: asString(header.config.reasoningEffort) }
+    }
+  }
+  return {
+    provider: asString(agent?.options?.provider),
+    model: asString(agent?.options?.model),
+  }
+}
+
+/**
+ * Resolve the provider/model pair a call actually names, tolerating a model
+ * value that already carries its provider prefix.
+ *
+ * The discovery tool that hands a model to the model renders each route as
+ * `provider/model` (`minimax-code/MiniMax-M3.1-Flash`), and the
+ * `model` parameter is documented as "Model id interpreted by provider". A
+ * model that copies that line into `model` while naming `provider` separately
+ * therefore sends `provider` = `minimax-code` and `model` =
+ * `minimax-code/MiniMax-M3.1-Flash`. That is the single most likely way
+ * a correct-looking call is formed, and treating the doubled text as an opaque
+ * model id both denies it and — had it been authorized — resolved a model the
+ * provider does not have. The prefix is stripped only when the remainder is a
+ * non-empty model id.
+ *
+ * @param provider - Provider the call named, when it named one.
+ * @param model - Model the call named, when it named one.
+ * @returns the exact pair, or undefined when the call named no complete pair.
+ */
+export function explicitRoutePair(
+  provider: unknown,
+  model: unknown,
+): AllowedModelRoute | undefined {
+  const providerId = asString(provider)
+  const modelId = asString(model)
+  if (providerId === undefined || modelId === undefined) return undefined
+  if (providerId.length === 0 || modelId.length === 0) return undefined
+  const prefix = providerId + '/'
+  if (modelId.startsWith(prefix) && modelId.length > prefix.length) {
+    return { provider: providerId, model: modelId.slice(prefix.length) }
+  }
+  return { provider: providerId, model: modelId }
+}
+
+/** Whether an exact route is authorized by a allowlist. */
+function routesInclude(
+  allowed: readonly AllowedModelRoute[],
+  provider: string,
+  model: string,
+): boolean {
+  return allowed.some(route => route.provider === provider && route.model === model)
+}
+
+/** The authorized routes rendered for one denial reason. */
+function authorizedRoutesText(allowed: readonly AllowedModelRoute[]): string {
+  return allowed.map(entry => `${entry.provider}/${entry.model}`).join(', ')
+}
+
+/**
+ * Build the denial reason for a delegation that named no explicit route.
+ * A policy-carrying Session requires the model to choose, so the reason names
+ * every authorized route and the discovery tool that lists them.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the corrective reason handed back to the model.
+ */
+export function missingRouteReason(allowed: readonly AllowedModelRoute[]): string {
+  return 'subagent model selection: this Session requires an explicit child model — this call named neither '
+    + `provider nor model, and an omitted pair never falls back to a default or to the parent's route. `
+    + `Call list_subagent_models and pass ${authorizedRoutesText(allowed)} with an optional reasoning_effort.`
+}
+
+/**
+ * Build the denial reason for a half-specified route. The built-in delegation
+ * tool completes such a pair from its own configuration, so this reason names
+ * the missing field as well as the authorized routes.
+ * @param missing - The half of the pair the call omitted.
+ * @param supplied - The half the call did provide.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the corrective reason handed back to the model.
+ */
+export function partialRouteReason(
+  missing: 'provider' | 'model',
+  supplied: string,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  return `subagent model selection: this Session requires an explicit child model — this call supplied only `
+    + `${missing === 'provider' ? 'model' : 'provider'} "${supplied}" and ${missing} must be named together with it. `
+    + `Call list_subagent_models and pass ${authorizedRoutesText(allowed)} with an optional reasoning_effort.`
+}
+
+/**
+ * Build the denial reason for a delegation that would run on an unauthorized
+ * route. The reason names the authorized routes so the next call can select one.
+ * @param provider - Effective child provider id, when one is known.
+ * @param model - Effective child model id, when one is known.
+ * @param allowed - Routes the calling Session authorizes.
+ * @param explicit - Whether the model named the route in the tool arguments.
+ * @returns the corrective reason handed back to the model.
+ */
+export function unauthorizedRouteReason(
+  provider: string | undefined,
+  model: string | undefined,
+  allowed: readonly AllowedModelRoute[],
+  explicit: boolean,
+): string {
+  const route = provider === undefined || model === undefined
+    ? 'the inherited route'
+    : `route "${provider}/${model}"`
+  const origin = explicit
+    ? 'the model this call selected is not on the Session allowlist'
+    : 'the route this call would inherit from the parent is not on the Session allowlist'
+  return `subagent model selection: ${origin} (${route}). `
+    + `Provide an authorized provider and model — ${authorizedRoutesText(allowed)} — `
+    + 'using list_subagent_models to inspect their reasoning efforts.'
+}
+
+/**
+ * Build the denial reason for a call that spelled an authorized route the way
+ * the discovery tool prints it.
+ *
+ * `list_subagent_models` renders every route as `provider/model`, and the
+ * delegation tool documents `model` as "Model id interpreted by provider". A
+ * model that copies the printed line into `model` while also naming `provider`
+ * therefore sends a doubled id — the single most likely way a correct-looking
+ * call is formed, and the reason a delegation is refused even though the route
+ * the user picked is authorized.
+ *
+ * The id is deliberately NOT accepted here. The guard is the plugin plane, so
+ * it cannot rewrite the arguments the delegation tool executes: that tool hands
+ * `model` to the adapter verbatim, and the adapter matches it against its own
+ * table, where `minimax-code/MiniMax-M3.1-Flash` is not a model. A
+ * guard that accepted the doubled text would turn this clear refusal into a
+ * downstream `NO_ADAPTER`/unknown-model failure. Naming the two fields
+ * separately is what actually unblocks the call.
+ *
+ * @param pair - The authorized pair the call described as one string.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the corrective reason handed back to the model.
+ */
+export function prefixedModelReason(
+  pair: AllowedModelRoute,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  return `subagent model selection: this call passed a whole route as \`model\`. `
+    + `Pass \`provider\` and \`model\` as two separate fields — provider "${pair.provider}", `
+    + `model "${pair.model}" — because \`provider/model\` is only how list_subagent_models `
+    + `prints a route, not a model id. Authorized routes: ${authorizedRoutesText(allowed)}.`
+}
+
+/**
+ * Build the denial reason for an inherit-mode delegation that named a route.
+ * The fork backend accepts no route parameters, so a named pair is not a
+ * partial override the backend would ignore — it is a request to change the
+ * route, which is exactly what an inherit-mode tool exists to prevent.
+ * @param toolName - the tool the model called.
+ * @param provider - the provider the call named.
+ * @param model - the model the call named.
+ * @param explicitTools - Tools that DO expose a route pair; naming them gives the
+ *   next call a concrete target instead of "some other tool".
+ * @returns the corrective reason handed back to the model.
+ */
+export function inheritOverrideReason(
+  toolName: string,
+  provider: string,
+  model: string,
+  explicitTools: readonly string[] = [],
+): string {
+  const instead = explicitTools.length === 0
+    ? 'a tool that supports explicit child model selection'
+    : explicitTools.map(name => '"' + name + '"').join(' or ')
+  return `subagent model selection: "${toolName}" always runs on the calling agent's own route and accepts no `
+    + `provider/model. This call named "${provider}/${model}". Remove those fields to keep the child on your own `
+    + `route, or delegate through ${instead} with provider and model.`
+}
+
+/**
+ * Build the denial reason for an inherit-mode delegation whose inherited route
+ * is outside the allowlist. Unlike the explicit case this is not something the
+ * call can fix by naming a route, so the reason points at the tool that can.
+ * @param toolName - the tool the model called.
+ * @param provider - the parent route the child would inherit, when known.
+ * @param model - the parent model the child would inherit, when known.
+ * @param allowed - Routes the calling Session authorizes.
+ * @param reasoningEffort - the inherited effort, when the header recorded one.
+ * @returns the corrective reason handed back to the model.
+ */
+export function inheritRouteDenialReason(
+  toolName: string,
+  provider: string | undefined,
+  model: string | undefined,
+  allowed: readonly AllowedModelRoute[],
+  reasoningEffort?: string,
+): string {
+  const route = provider === undefined || model === undefined
+    ? 'the calling agent\'s route'
+    : `"${provider}/${model}"${reasoningEffort === undefined ? '' : ` (${reasoningEffort})`}`
+  return `subagent model selection: "${toolName}" keeps its child on ${route}, which this Session's allowlist `
+    + `does not authorize, so it is unavailable for now. Its child cannot be re-routed, so either delegate `
+    + `through a tool that exposes provider and model — passing one of ${authorizedRoutesText(allowed)} — or `
+    + `continue on an authorized model for this session, after which ${toolName} works again.`
+}
+
+/**
+ * Enforce the allowlist against the route an inherit-mode child would run on.
+ * @param agent - Calling agent whose route the child inherits.
+ * @param toolName - the tool the model called.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns a denial reason when the inherited route is unauthorized.
+ */
+function inheritedRouteDenial(
+  agent: AuthorizationAgent | undefined,
+  toolName: string,
+  allowed: readonly AllowedModelRoute[],
+): string | undefined {
+  const inherited = inheritedRouteOf(agent)
+  if (inherited.provider !== undefined && inherited.model !== undefined
+    && routesInclude(allowed, inherited.provider, inherited.model)) return undefined
+  return inheritRouteDenialReason(
+    toolName, inherited.provider, inherited.model, allowed, inherited.reasoningEffort)
+}
+
+/**
+ * Build the denial reason for a half-specified route aimed at a tool that
+ * exposes no route field at all.
+ *
+ * This is the one denial whose cause is not the call: the delegation tool was
+ * mounted without model selection, so no argument can name a child route. The
+ * reason states the configuration defect and the route the child would inherit,
+ * because "call list_subagent_models and pass a route" would be unactionable.
+ * @param toolName - the tool the model called.
+ * @param inherited - the route the child would inherit from the caller.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the corrective reason handed back to the model.
+ */
+export function routeFieldsUnavailableReason(
+  toolName: string,
+  inherited: InheritedRoute,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  const route = inherited.provider === undefined || inherited.model === undefined
+    ? 'the calling agent\'s own route'
+    : `"${inherited.provider}/${inherited.model}"`
+  return `subagent model selection: "${toolName}" exposes no provider/model parameter in this deployment, so no `
+    + 'call can name a child route — the delegation tool is mounted without model selection enabled. '
+    + `The child would run on ${route}; authorized routes are ${authorizedRoutesText(allowed)}.`
+}
+
+/** Which Session's recorded allowlist a delegation must respect. */
+export type AuthorizationScope =
+  /**
+   * `session` (default): a Session that recorded an allowlist governs itself
+   * and its descendants, matching the delegation tool's durable snapshot; a
+   * Session that recorded none keeps the built-in behavior.
+   */
+  | 'session'
+  /**
+   * `preference`: the current Host preference also governs Sessions that never
+   * recorded an allowlist, so the Settings card applies without restarting the
+   * Session. A Session that recorded its own routes still outranks it.
+   */
+  | 'preference'
+
+/**
+ * Resolve one tool's enforcement mode from the configured policies. An
+ * unconfigured name is `undefined`: the guard does not police it, which is how
+ * the plain-name configuration keeps its existing meaning.
+ * @param policies - Configured tool policies in precedence order.
+ * @param toolName - Tool being dispatched.
+ * @returns the first matching mode, or undefined when the guard ignores the tool.
+ */
+export function delegationModeOf(
+  policies: readonly DelegationToolPolicy[],
+  toolName: string,
+): DelegationToolMode | undefined {
+  for (const policy of policies) {
+    if (policy.name === toolName) return policy.mode
+  }
+  return undefined
+}
+
+/**
+ * Resolve the effective allowlist that governs delegations from this agent:
+ * absent when the Host preference explicitly disables enforcement, otherwise
+ * the Session's (or nearest subagent ancestor's) recorded policy, falling
+ * back to the live preference only under `preference` scope.
+ * @param agent - Calling agent.
+ * @param preference - Current Host preference, when the settings service exists.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param scope - Whether an unrecorded Session falls back to the preference.
+ * @returns undefined without a policy, or the effective list (possibly empty).
+ */
+export function effectiveAllowedRoutes(
+  agent: AuthorizationAgent | undefined,
+  preference: SubagentModelSelectionPreference | undefined,
+  sessions: SessionsResolver,
+  scope: AuthorizationScope = 'session',
+  lockSnapshot = false,
+): readonly AllowedModelRoute[] | undefined {
+  // An explicit "off" suspends plugin enforcement.
+  if (preference?.enabled === false) return undefined
+  const recorded = authorizedRoutesFor(agent, sessions)
+  const baseRoutes = recorded ?? (scope === 'preference' ? preference?.allowedModels : undefined)
+  if (baseRoutes === undefined || baseRoutes.length === 0) return undefined
+  return mainModelRoutesFor(agent, sessions, preference, baseRoutes, lockSnapshot, recorded !== undefined)
+}
+
+/**
+ * Apply the per-main-model override to a Session's authorized routes.
+ *
+ * Precedence is exact-match, then fallback, then the Session's own list: an
+ * entry for the main model the Session actually runs is the most specific
+ * statement available, the fallback list covers every other main model, and the
+ * Session policy is what governs when the deployment configured neither.
+ * @param agent - Calling agent.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param preference - Current Host preference, when the settings service exists.
+ * @param baseRoutes - Non-empty recorded allowlist or legacy preference fallback.
+ * @param lockSnapshot - Freeze the root's configured route filter now.
+ * @param hasRecordedPolicy - Whether the base is also enforced by the host.
+ * @returns the routes that actually govern this delegation.
+ */
+function mainModelRoutesFor(
+  agent: AuthorizationAgent | undefined,
+  sessions: SessionsResolver,
+  preference: SubagentModelSelectionPreference | undefined,
+  baseRoutes: readonly AllowedModelRoute[],
+  lockSnapshot: boolean,
+  hasRecordedPolicy: boolean,
+): readonly AllowedModelRoute[] {
+  const { rootSession, mainRoute } = resolveRootSessionAndMainRoute(agent, sessions, undefined, lockSnapshot)
+  const lockable = typeof rootSession === 'object' && rootSession !== null
+  let filter = lockable ? lockedRootRouteFilters.get(rootSession) : undefined
+  if (filter === undefined) {
+    const override = mainRoute === undefined ? undefined : preference?.byMainModel?.[`${mainRoute.provider}/${mainRoute.model}`]
+    const fallback = preference?.defaultAllowedModels
+    filter = override?.length ? override : fallback?.length ? fallback : null
+    if (lockable && (lockSnapshot || headerRouteOf(rootSession) !== undefined)) {
+      lockedRootRouteFilters.set(rootSession, filter === null ? null : [...filter])
+    }
+  }
+  if (filter === null) return baseRoutes
+  return hasRecordedPolicy
+    ? filter.filter(route => routesInclude(baseRoutes, route.provider, route.model))
+    : filter
+}
+
+/**
+ * Resolve whether `subagent_fork` is authorized to inherit the root main model's
+ * own route even when that route is absent from the cold-spawn allowlist.
+ * @param agent - Calling agent.
+ * @param preference - Current Host preference, when composed.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param lockSnapshot - Freeze the resolved posture for this Session now.
+ * @returns whether same-route parent forking is authorized for the Session's main model.
+ */
+export function effectiveAllowParentFork(
+  agent: AuthorizationAgent | undefined,
+  preference: SubagentModelSelectionPreference | undefined,
+  sessions: SessionsResolver,
+  lockSnapshot = false,
+): boolean {
+  if (preference !== undefined && !preference.enabled) return true
+  const inherited = inheritedRouteOf(agent)
+  const { rootSession, mainRoute } = resolveRootSessionAndMainRoute(agent, sessions, inherited, lockSnapshot)
+  const lockable = typeof rootSession === 'object' && rootSession !== null
+  const locked = lockable ? lockedRootAllowParentFork.get(rootSession) : undefined
+  const allowedForMain = locked !== undefined
+    ? locked
+    : (() => {
+        const specific = mainRoute === undefined
+          ? undefined
+          : preference?.allowParentForkByMainModel?.[`${mainRoute.provider}/${mainRoute.model}`]
+        const resolved = typeof specific === 'boolean' ? specific : preference?.defaultAllowParentFork === true
+        if (lockable && (lockSnapshot || headerRouteOf(rootSession) !== undefined)) {
+          lockedRootAllowParentFork.set(rootSession, resolved)
+        }
+        return resolved
+      })()
+  if (!allowedForMain) return false
+  if (inherited.provider === undefined || inherited.model === undefined || mainRoute === undefined) return false
+  return inherited.provider === mainRoute.provider && inherited.model === mainRoute.model
+}
+
+/**
+ * State a Session's routing posture in the `list_subagent_models` result.
+ *
+ * Calling `list_subagent_models({})` upstream returns only provider names
+ * (`minimax-code — MiniMax Code`), and calling it with `provider` prints
+ * `<provider>/<model>` without stating that the output is already filtered to
+ * the Session allowlist. Appending the exact split `{ provider, model }` pairs
+ * here lets even a single `list_subagent_models({})` call hand the model every
+ * authorized route in the form `subagent` expects, eliminating any reason to
+ * search local config files or source code for the allowlist.
+ *
+ * The empty case distinguishes an absent Session allowlist from the host's own
+ * delegation policy. On 0.2.2 the latter still limits explicit selection to the
+ * parent route, so calling this posture "unrestricted" would be false.
+ * @param output - Original text returned by `list_subagent_models`.
+ * @param allowed - Routes the calling Session authorizes, or undefined without a policy.
+ * @returns the output with the Session routing posture appended.
+ */
+export function enrichListSubagentModelsOutput(
+  output: string,
+  allowed: readonly AllowedModelRoute[] | undefined,
+): string {
+  if (allowed === undefined) {
+    if (output.includes(NO_ALLOWLIST_ROUTING_NOTICE)) return output
+    return output.trim().length === 0
+      ? NO_ALLOWLIST_ROUTING_NOTICE
+      : `${output}\n\n${NO_ALLOWLIST_ROUTING_NOTICE}`
+  }
+  if (allowed.length === 0) {
+    return 'Authorized child routes for this Session: (none)\n' + NO_COMPATIBLE_ROUTES_REASON
+  }
+  const header = 'Authorized child routes for this Session (already filtered by the Session allowlist; '
+    + 'only these routes are accepted, and `provider` and `model` must be passed as separate fields):'
+  if (output.includes(header)) return output
+  const filtered = filterListSubagentModelsOutput(output, allowed)
+  const lines = allowed.map(
+    route => `- ${route.provider}/${route.model} -> provider: "${route.provider}", model: "${route.model}"`,
+  )
+  const suffix = `${header}\n${lines.join('\n')}`
+  return filtered.trim().length === 0 ? suffix : `${filtered}\n\n${suffix}`
+}
+
+/** One rendered `provider — Name` line of the upstream provider list. */
+const PROVIDER_LINE = /^([^/\s]+)\s+—\s+.+$/
+
+/** One rendered `provider/model — Name` line of the upstream model list. */
+const MODEL_LINE = /^([^/\s]+)\/([^\s]+)\s+—\s+.+$/
+
+/**
+ * Drop the upstream lines that name a route this Session does not authorize.
+ *
+ * The upstream discovery tool reads the union policy recorded on the Session, so
+ * its raw answer can list a provider or a `provider/model` line that belongs to
+ * another main model's entry and NOT to the routes this main model is governed
+ * by. Leaving those lines in place is worse than a cosmetic mismatch: the
+ * documented way to read this output is to copy a line into `subagent`, so every
+ * stale line is an invitation to a delegation the guard will refuse.
+ *
+ * Only the two known renderings are filtered, and only lines that MATCH one of
+ * them are candidates: any other line (a heading, a hint, an empty answer) is
+ * passed through untouched, so a generation that changes its wording degrades to
+ * the old behavior rather than to an empty answer.
+ * @param output - Original text returned by `list_subagent_models`.
+ * @param allowed - Routes the calling Session authorizes; never empty here.
+ * @returns the output with unauthorized lines removed.
+ */
+export function filterListSubagentModelsOutput(
+  output: string,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  if (allowed.length === 0 || output.length === 0) return output
+  // A model list carries a `Reasoning efforts:` block for the selected route;
+  // filtering it would delete the very detail the call asked for.
+  if (output.includes('\nReasoning efforts:\n')) return output
+  const lines = output.split('\n')
+  // The rendering is decided by the lines themselves: a provider list has no
+  // slash in its first token, a model list always does.
+  const modelList = lines.some(line => MODEL_LINE.test(line))
+  let matched = false
+  const kept: string[] = []
+  for (const line of lines) {
+    if (modelList) {
+      const match = MODEL_LINE.exec(line)
+      if (match === null) {
+        kept.push(line)
+        continue
+      }
+      matched = true
+      if (routesInclude(allowed, match[1]!, match[2]!)) kept.push(line)
+      continue
+    }
+    const match = PROVIDER_LINE.exec(line)
+    if (match === null) {
+      kept.push(line)
+      continue
+    }
+    matched = true
+    if (allowed.some(route => route.provider === match[1])) kept.push(line)
+  }
+  if (!matched) return output
+  const keptText = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  if (keptText.length > 0) return keptText
+  // Every candidate line was filtered out. Saying so beats returning an empty
+  // answer, which reads as "this deployment has no providers at all".
+  if (modelList) {
+    const providerId = MODEL_LINE.exec(output)?.[1] ?? ''
+    return `(no advertised models for ${providerId})`
+  }
+  return '(no LLM providers)'
+}
+
+/**
+ * Merge live per-main-model overrides into a resolved preference.
+ *
+ * The overrides are a separate seam from the settings namespace because they
+ * live in THIS plugin's own preference document, not in the upstream
+ * `subagent-model-selection` namespace. They also have to work on a harness
+ * where that namespace cannot be registered at all (0.1.7 dropped
+ * `settings.register`): there, an override is the only per-main-model statement
+ * available, so it stands up an enabled preference by itself rather than being
+ * dropped for lack of a base to attach to.
+ * @param base - Preference resolved from the settings namespace, when any.
+ * @param overrides - Live overrides read from this plugin's preferences.
+ * @returns the merged preference, or undefined when neither source says anything.
+ */
+export function mergePreferenceOverrides(
+  base: SubagentModelSelectionPreference | undefined,
+  overrides: SubagentRoutingOverrides | undefined,
+): SubagentModelSelectionPreference | undefined {
+  const hasDefault = overrides?.defaultAllowedModels !== undefined
+  const hasByMain = overrides?.byMainModel !== undefined
+  const hasDefaultFork = overrides?.defaultAllowParentFork !== undefined
+  const hasForkByMain = overrides?.allowParentForkByMainModel !== undefined
+  if (base === undefined) {
+    if (!hasDefault && !hasByMain && !hasDefaultFork && !hasForkByMain) return undefined
+    return {
+      enabled: true,
+      allowedModels: overrides?.defaultAllowedModels ?? [],
+      ...hasDefault ? { defaultAllowedModels: overrides?.defaultAllowedModels } : {},
+      ...hasByMain ? { byMainModel: overrides?.byMainModel } : {},
+      ...hasDefaultFork ? { defaultAllowParentFork: overrides?.defaultAllowParentFork } : {},
+      ...hasForkByMain ? { allowParentForkByMainModel: overrides?.allowParentForkByMainModel } : {},
+    }
+  }
+  if (!hasDefault && !hasByMain && !hasDefaultFork && !hasForkByMain) return base
+  return {
+    ...base,
+    ...hasDefault ? { defaultAllowedModels: overrides?.defaultAllowedModels } : {},
+    ...hasByMain ? { byMainModel: overrides?.byMainModel } : {},
+    ...hasDefaultFork ? { defaultAllowParentFork: overrides?.defaultAllowParentFork } : {},
+    ...hasForkByMain ? { allowParentForkByMainModel: overrides?.allowParentForkByMainModel } : {},
+  }
+}
+
+/**
+ * The statement appended to `list_subagent_models` when no allowlist governs the
+ * calling Session.
+ *
+ * It distinguishes an absent Session allowlist from the host's own inheritance
+ * or parent-route rules, and deliberately does not recommend a setting. This notice is
+ * attached for every Session the plugin's authorization listener reaches—which
+ * includes sessions with no interest in the dispatch preset—so a sentence telling
+ * the reader to go enable model selection would be noise in most of them, and a
+ * model that reads it as an instruction will repeat it in an unrelated summary.
+ */
+export const NO_ALLOWLIST_ROUTING_NOTICE = 'No allowlist is in force for this Session. Omitting provider/model '
+  + 'follows the delegation tool\'s normal inheritance/default behavior; explicit selection may still be limited '
+  + 'to the parent route by the host.'
+
+/**
+ * Rewrite the upstream `list_subagent_models` and `subagent` tool/parameter
+ * descriptions when the calling Session enforces an allowlist.
+ *
+ * Upstream releases before 0.2.2 call selection optional and catalog membership
+ * advisory; 0.2.2 instead says omitted values use child defaults. In an
+ * allowlist-governed Session those statements would contradict execution.
+ * @param text - Tool description, parameter description, or rendered `tools:sdk` section text.
+ * @param allowed - Routes the calling Session authorizes.
+ * @returns the text with the misleading upstream sentences replaced by the Session's exact policy.
+ */
+export function rewriteAuthorizedToolDescriptions(
+  text: string,
+  allowed: readonly AllowedModelRoute[],
+): string {
+  if (allowed.length === 0 || text.length === 0) return text
+  const routes = authorizedRoutesText(allowed)
+  const required = `Child LLM selection is required in this Session: pass an authorized \`provider\` and \`model\` from \`list_subagent_models\` (${routes}) as separate fields; omitting either field is rejected.`
+  return text
+    .replaceAll(
+      'Catalog membership is advisory: an adapter may accept an unlisted model id.',
+      `Output is already filtered to this Session's allowlist (${routes}); only these authorized provider/model routes are accepted.`,
+    )
+    .replace(
+      /Child LLM selection is optional\.\s*Omit `?provider`?, `?model`?, and `?reasoning_effort`? to use configured child defaults and (?:inherit compatible missing values from the parent Agent|this provider's route defaults)\./g,
+      required,
+    )
+    .replace(
+      /(?:Supply `provider` and `model` together\.\s*Omitted values|Omit `?provider`?, `?model`?, and `?reasoning_effort`? to) use child defaults, falling back to (?:this backend's route defaults|compatible parent values)\./g,
+      required,
+    )
+    .replace(
+      /Supply together with model; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit from the parent Agent\./g,
+      `Required in this Session: pass an authorized provider id from list_subagent_models (${routes}).`,
+    )
+    .replace(
+      /Supply together with provider; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit when the child provider matches the parent provider\./g,
+      'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
+    )
+    .replace(
+      /Child LLM provider id(?:; requires `?model`?)?\./g,
+      `Required in this Session: pass an authorized provider id from list_subagent_models (${routes}).`,
+    )
+    .replace(
+      /Model id within that provider(?:; requires `?provider`?)?\./g,
+      'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
+    )
+}
+
+/** Minimal shape of a prompt assembly passed through `system-prompt/assemble`. */
+interface MutablePromptAssembly {
+  readonly sections?: readonly { readonly name?: unknown; readonly text?: unknown }[]
+  readonly tools?: readonly {
+    readonly name?: unknown
+    readonly description?: unknown
+    readonly parameters?: unknown
+  }[]
+}
+
+/**
+ * The sentence that keeps a route out of an inherit-mode delegation tool.
+ *
+ * The persona can say "pass provider and model" while the inherit tool has no such
+ * field, and no upstream description says so: the inherited route is implied by the
+ * tool itself. Stating it in the tool's own description is the only place the model
+ * reads immediately before it decides how to spell the call.
+ * @param explicitTools - Tools that expose a `provider`/`model` pair.
+ * @param inheritTools - Tools whose child always runs on the caller's own route.
+ * @param target - Which side of the pair is being described.
+ * @returns one sentence, or '' when there is nothing to say.
+ */
+export function inheritRouteNoticeSentence(
+  explicitTools: readonly string[],
+  inheritTools: readonly string[],
+  target: 'explicit' | 'inherit',
+): string {
+  if (explicitTools.length === 0 || inheritTools.length === 0) return ''
+  const explicit = explicitTools.map(name => '"' + name + '"').join(' or ')
+  const inherit = inheritTools.map(name => '"' + name + '"').join(' or ')
+  return target === 'explicit'
+    ? 'Never pass provider/model to ' + inherit + ': it always runs its child on the calling agent\'s own '
+      + 'route and rejects any route field.'
+    : 'This tool takes no provider/model: its child always runs on the calling agent\'s own route. '
+      + 'To choose a route, call ' + explicit + ' with provider and model.'
+}
+
+/**
+ * Rewrite one assembled prompt's `tools:sdk` section and native tool schemas
+ * when the target Agent's Session enforces a subagent model allowlist.
+ * @param assembly - Assembled prompt from `system-prompt/assemble`.
+ * @param allowed - Routes the calling Session authorizes.
+ * @param toolNames - Explicit-route delegation tool names.
+ * @param inheritToolNames - Tools whose child keeps the caller's route; their
+ *   descriptions gain the matching route notice.
+ * @returns the updated assembly, or the original object when nothing changed.
+ */
+export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>(
+  assembly: T,
+  allowed: readonly AllowedModelRoute[] | undefined,
+  toolNames: readonly string[] = DEFAULT_DELEGATION_TOOLS,
+  inheritToolNames: readonly string[] = DEFAULT_SUBAGENT_INHERIT_TOOLS,
+): T {
+  if (allowed === undefined) return assembly
+  const noCompatibleRoutes = allowed.length === 0
+  let sectionsChanged = false
+  const sections = Array.isArray(assembly.sections)
+    ? assembly.sections.map((section) => {
+        if (section?.name !== 'tools:sdk' || typeof section.text !== 'string') return section
+        const rewritten = rewriteAuthorizedToolDescriptions(section.text, allowed)
+        // In PTC mode this section IS the whole tool surface, so one sentence at its
+        // end reaches the same reader the per-tool description reaches in Native mode.
+        const notice = noCompatibleRoutes
+          ? NO_COMPATIBLE_ROUTES_REASON
+          : inheritRouteNoticeSentence(toolNames, inheritToolNames, 'explicit')
+        const text = notice.length > 0 && !rewritten.includes(notice)
+          ? rewritten + '\n\n' + notice
+          : rewritten
+        if (text === section.text) return section
+        sectionsChanged = true
+        return { ...section, text }
+      })
+    : assembly.sections
+
+  let toolsChanged = false
+  const tools = Array.isArray(assembly.tools)
+    ? assembly.tools.map((tool) => {
+        const name = asString(tool?.name)
+        if (name === undefined) return tool
+        const isExplicit = toolNames.includes(name)
+        const isInherit = inheritToolNames.includes(name)
+        if (name !== 'list_subagent_models' && !isExplicit && !isInherit) return tool
+        const rewrittenDescription = typeof tool.description === 'string'
+          ? rewriteAuthorizedToolDescriptions(tool.description, allowed)
+          : tool.description
+        // The route notice belongs on the delegation tools themselves: the explicit
+        // tool carries the pair, the inherit tool carries none and now says so.
+        let notice = ''
+        if (noCompatibleRoutes) {
+          notice = isInherit ? '' : NO_COMPATIBLE_ROUTES_REASON
+        } else if (isExplicit || isInherit) {
+          notice = inheritRouteNoticeSentence(toolNames, inheritToolNames, isExplicit ? 'explicit' : 'inherit')
+        }
+        const description = typeof rewrittenDescription === 'string' && notice.length > 0
+          && !rewrittenDescription.includes(notice)
+          ? rewrittenDescription + ' ' + notice
+          : rewrittenDescription
+        let params = tool.parameters
+        const paramsRecord = asRecord(params)
+        const propsRecord = asRecord(paramsRecord?.['properties'])
+        if (paramsRecord !== undefined && propsRecord !== undefined) {
+          let propsMutated = false
+          const nextProps: Record<string, unknown> = { ...propsRecord }
+          for (const field of ['provider', 'model'] as const) {
+            const prop = asRecord(propsRecord[field])
+            const propDesc = asString(prop?.['description'])
+            if (prop !== undefined && propDesc !== undefined) {
+              const nextDesc = rewriteAuthorizedToolDescriptions(propDesc, allowed)
+              if (nextDesc !== propDesc) {
+                nextProps[field] = { ...prop, description: nextDesc }
+                propsMutated = true
+              }
+            }
+          }
+          if (propsMutated) {
+            params = { ...paramsRecord, properties: nextProps }
+          }
+        }
+        if (description === tool.description && params === tool.parameters) return tool
+        toolsChanged = true
+        return {
+          ...tool,
+          ...(description !== tool.description ? { description } : {}),
+          ...(params !== tool.parameters ? { parameters: params } : {}),
+        }
+      })
+    : assembly.tools
+
+  if (!sectionsChanged && !toolsChanged) return assembly
+  return {
+    ...assembly,
+    ...(sectionsChanged ? { sections } : {}),
+    ...(toolsChanged ? { tools } : {}),
+  }
+}
+
+/**
+ * Decide whether one delegation call may start its child.
+ * @param agent - Calling agent.
+ * @param toolName - Tool being dispatched.
+ * @param args - Parsed tool arguments.
+ * @param preference - Current Host preference, when the settings service exists.
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param toolNames - Delegation tool names this guard authorizes (explicit mode).
+ * @param scope - Whether an unrecorded Session falls back to the preference.
+ * @param inheritToolNames - Delegation tools that start a child on the caller's own route.
+ * @returns a denial reason, or undefined to leave the call untouched.
+ */
+export function delegationDenialReason(
+  agent: AuthorizationAgent | undefined,
+  toolName: string,
+  args: unknown,
+  preference: SubagentModelSelectionPreference | undefined,
+  sessions: SessionsResolver,
+  toolNames: readonly string[] = DEFAULT_DELEGATION_TOOLS,
+  scope: AuthorizationScope = 'session',
+  inheritToolNames: readonly string[] = [],
+  declaresRouteParameters?: RouteParameterProbe,
+  lockSnapshot = true,
+  parentForkToolNames: readonly string[] = DEFAULT_PARENT_FORK_TOOLS,
+): string | undefined {
+  const mode = delegationModeOf(
+    [
+      ...toolNames.map(name => ({ name, mode: 'explicit' as const })),
+      ...inheritToolNames.map(name => ({ name, mode: 'inherit' as const })),
+    ],
+    toolName,
+  )
+  if (mode === undefined) return undefined
+  // A denial is answered from the same routes the Session will keep: locking the
+  // snapshot here is what stops the reason from advertising a list the next call
+  // would not be judged against.
+  const allowed = effectiveAllowedRoutes(agent, preference, sessions, scope, lockSnapshot)
+  if (allowed === undefined) return undefined
+  const request = asRecord(args) ?? {}
+  const requestedProvider = asString(request['provider'])
+  const requestedModel = asString(request['model'])
+  if (mode === 'inherit') {
+    // An inherit-mode tool has no route parameters, so a named pair (or half of
+    // one) can only be an attempt to re-route the child away from the route the
+    // tool exists to preserve. Check it before the inherited route: it is the
+    // more precise diagnostic, and it holds even when the inherited route (or
+    // `allowParentFork`) is authorized.
+    if (requestedProvider !== undefined || requestedModel !== undefined) {
+      return inheritOverrideReason(
+        toolName, requestedProvider ?? '', requestedModel ?? '', toolNames)
+    }
+    if (parentForkToolNames.includes(toolName)
+      && effectiveAllowParentFork(agent, preference, sessions, lockSnapshot)) {
+      return undefined
+    }
+    return allowed.length === 0 ? NO_COMPATIBLE_ROUTES_REASON : inheritedRouteDenial(agent, toolName, allowed)
+  }
+  if (allowed.length === 0) return NO_COMPATIBLE_ROUTES_REASON
+  // A tool mounted without model selection exposes no `provider`/`model` field,
+  // so "require an explicit pair" would be a denial the model cannot act on: the
+  // tool itself rejects any selection field ("child model selection is disabled
+  // for this tool instance"). Only the FACT of the tool's parameters may change
+  // the branch — never the absence of an argument — and an undeclared-route tool
+  // is still enforced, through the route its child would inherit.
+  if (declaresRouteParameters?.(agent, toolName) === false) {
+    // A complete pair is never reclassified here. The probe resolves the registry
+    // view from the call, which can be a scope that does not carry the preset's
+    // delegation registration; answering "no route parameters" for a tool the
+    // model was shown WITH them denied every explicit dispatch with a reason no
+    // call could satisfy. The pair still faces the allowlist check below, so this
+    // branch can only soften an impossible denial — never an authorization.
+    if (requestedProvider === undefined && requestedModel === undefined) {
+      return inheritedRouteDenial(agent, toolName, allowed)
+    }
+    if (requestedProvider === undefined || requestedModel === undefined) {
+      return routeFieldsUnavailableReason(toolName, inheritedRouteOf(agent), allowed)
+    }
+  }
+  // The route is explicit only when the model named a complete pair. A call that
+  // omits either half would let the built-in tool fall back to the configured
+  // child defaults or to the parent route, which is exactly the unauthorized
+  // route this guard exists to stop, so neither case reaches the parent route.
+  if (requestedProvider === undefined) {
+    return requestedModel === undefined
+      ? missingRouteReason(allowed)
+      : partialRouteReason('provider', requestedModel, allowed)
+  }
+  if (requestedModel === undefined) return partialRouteReason('model', requestedProvider, allowed)
+  // The route as sent is checked first and by itself: a model id may legally
+  // contain a slash, and one that does is authorized exactly as written.
+  if (routesInclude(allowed, requestedProvider, requestedModel)) return undefined
+  // Only then the provider-prefixed reading, which is how `list_subagent_models`
+  // prints a route. A `model` that repeats its provider is not a different
+  // route, so it is judged as the route it describes; when that route is
+  // authorized the id is still not usable as sent — the delegation tool hands
+  // `model` to the adapter verbatim, where the doubled text names no model — so
+  // the reason says which two values to pass instead.
+  const pair = explicitRoutePair(requestedProvider, requestedModel)
+  if (pair !== undefined && pair.model !== requestedModel
+    && routesInclude(allowed, pair.provider, pair.model)) {
+    return prefixedModelReason(pair, allowed)
+  }
+  return unauthorizedRouteReason(requestedProvider, requestedModel, allowed, true)
+}
+
+/** Runtime inputs the guard closes over. */
+export interface SubagentAuthorizationOptions {
+  /** Live settings service, when composed; absent leaves recorded policies in charge. */
+  readonly settings?: unknown
+  /** Session registry used for ancestor lookup. */
+  readonly sessions: SessionsResolver
+  /** Exact delegation tool names this guard authorizes (explicit route selection). */
+  readonly toolNames: readonly string[]
+  /** Delegation tools that run their child on the caller's own route. */
+  readonly inheritToolNames?: readonly string[]
+  /** Whether an unrecorded Session falls back to the current preference. */
+  readonly scope?: AuthorizationScope
+  /**
+   * Live answer to "does this tool expose `provider`/`model`?". Omitted keeps
+   * the configured mode authoritative, which is what an older Host without a
+   * definitions seam does.
+   */
+  readonly declaresRouteParameters?: RouteParameterProbe
+  /**
+   * Live per-main-model overrides, read from this plugin's own preferences.
+   *
+   * The reader lets a new Session sample updated settings without reinstalling
+   * the guard.
+   */
+  readonly routingOverrides?: () => SubagentRoutingOverrides | undefined
+}
+
+/** The exact guard signature the Host tool registry evaluates. */
+export type DelegationGuard = (
+  agent: AuthorizationAgent | undefined,
+  toolName: string,
+  args: unknown,
+) => string | undefined
+
+/**
+ * Build the monotonic tool guard for one deployment. The Host preference is
+ * sampled from the live settings document on every call, because a settings
+ * edit must not rebuild the guard the way it cannot rebuild a Session.
+ * @param options - settings, session registry, and delegation tool names.
+ * @returns a guard that denies delegations outside the Session allowlist.
+ */
+export function createSubagentAuthorization(
+  options: SubagentAuthorizationOptions,
+): DelegationGuard {
+  return (agent, toolName, args) => delegationDenialReason(
+    agent,
+    toolName,
+    args,
+    readSubagentRoutingPreference(options),
+    options.sessions,
+    options.toolNames,
+    options.scope ?? 'session',
+    options.inheritToolNames ?? [],
+    options.declaresRouteParameters,
+  )
+}
+
+/**
+ * Resolve the preference one guard evaluation uses.
+ *
+ * The namespace preference and this plugin's per-main-model overrides are
+ * separate seams — the override document outlives a harness that cannot register
+ * the namespace at all — so they are merged here, once, rather than at each of
+ * the four call sites that need the result.
+ * @param options - Runtime inputs the guard closed over.
+ * @returns the merged preference, or undefined when neither seam says anything.
+ */
+export function readSubagentRoutingPreference(
+  options: { readonly settings?: unknown; readonly routingOverrides?: () => SubagentRoutingOverrides | undefined },
+): SubagentModelSelectionPreference | undefined {
+  let overrides: SubagentRoutingOverrides | undefined
+  try {
+    overrides = options.routingOverrides?.()
+  } catch {
+    // An overrides reader that throws leaves the namespace preference in charge,
+    // which is exactly the behavior this guard had before overrides existed.
+    overrides = undefined
+  }
+  return mergePreferenceOverrides(subagentModelSelectionPreference(options.settings), overrides)
+}
+
+/** Delegation names this guard recognizes when configuration omits them. */
+export function normalizeDelegationToolNames(value: unknown): string[] {
+  const names = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    : []
+  return [...new Set(names.length === 0 ? [...DEFAULT_DELEGATION_TOOLS] : names.map(name => name.trim()))]
+}
+
+/**
+ * Normalize the configured inherit-mode names. Unlike
+ * {@link normalizeDelegationToolNames}, an empty array is a deliberate opt-out
+ * (`[]`) rather than a request for the default, and `undefined` selects the
+ * shipped default.
+ * @param value - Candidate configuration value.
+ * @returns the exact inherit-mode names this guard enforces.
+ */
+export function normalizeInheritToolNames(value: unknown): string[] {
+  if (value === undefined) return [...DEFAULT_SUBAGENT_INHERIT_TOOLS]
+  const names = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    : []
+  return [...new Set(names.map(name => name.trim()))]
+}
+
+/**
+ * Validate the configured inherit-mode names. Emptiness is legal here — it
+ * disables inherit enforcement — but a malformed entry is not.
+ * @param toolNames - Candidate inherit-mode delegation tool names.
+ * @returns the exact names this guard enforces in inherit mode.
+ */
+export function validateInheritToolNames(toolNames: readonly string[]): string[] {
+  for (const name of toolNames) {
+    if (name.length === 0 || name !== name.trim()) {
+      throw new Error(`dsh-chatgpt-subscription: subagentModelInheritTools entry "${name}" must be a non-empty trimmed string`)
+    }
+  }
+  return [...toolNames]
+}
+
+/**
+ * Validate the plugin configuration that owns this guard.
+ * @param toolNames - Candidate delegation tool names.
+ * @returns the exact names this guard authorizes.
+ */
+export function validateDelegationToolNames(toolNames: readonly string[]): string[] {
+  if (toolNames.length === 0) {
+    throw new Error('dsh-chatgpt-subscription: subagentModelAuthorization.toolNames must name at least one delegation tool')
+  }
+  for (const name of toolNames) {
+    if (name.length === 0 || name !== name.trim()) {
+      throw new Error(`dsh-chatgpt-subscription: subagentModelAuthorization.toolNames entry "${name}" must be a non-empty trimmed string`)
+    }
+  }
+  return [...toolNames]
+}
+
+/** Configuration accepted by {@link installSubagentModelAuthorization}. */
+export interface SubagentModelAuthorizationConfig {
+  /** Delegation tool names the guard authorizes (explicit route selection). */
+  readonly toolNames?: readonly string[]
+  /** Delegation tools that run their child on the caller's own route. */
+  readonly inheritToolNames?: readonly string[]
+  /** Whether an unrecorded Session falls back to the current preference. */
+  readonly scope?: AuthorizationScope
+  /**
+   * Live per-main-model overrides read from this plugin's preferences.
+   *
+   * Read on demand so each new Session can sample the updated preferences.
+   */
+  readonly routingOverrides?: () => SubagentRoutingOverrides | undefined
+}
+
+/** Event-registration surface used when the Host context is a full Cordis context. */
+interface EventHost {
+  on?(event: string, listener: (...args: never[]) => unknown): () => void
+}
+
+/**
+ * Build the live route-parameter probe from the Host tool registry.
+ *
+ * The registry is read per call rather than snapshotted: an HMR replacement or a
+ * preset change can remount the delegation tool, and a stale answer would put
+ * the guard back on the impossible branch.
+ * @param ctx - Host context carrying the `tools` registry.
+ * @returns a probe over the registry, or undefined when it exposes no readable
+ *   definitions (older harness generations), which keeps the configured mode.
+ */
+export function routeParameterProbe(ctx: Context): RouteParameterProbe | undefined {
+  const registry = (ctx as unknown as {
+    tools?: { definitions?(scope?: unknown): readonly { readonly name?: unknown; readonly parameters?: unknown }[] }
+  }).tools
+  if (typeof registry?.definitions !== 'function') return undefined
+  const definitions = registry.definitions.bind(registry)
+  return (agent, toolName) => {
+    let visible: readonly { readonly name?: unknown; readonly parameters?: unknown }[]
+    try {
+      visible = definitions(agent)
+    } catch {
+      // A scope the registry cannot resolve says nothing about the tool.
+      return undefined
+    }
+    const definition = visible.find(entry => entry?.name === toolName)
+    if (definition === undefined) return undefined
+    const parameters = asRecord(definition.parameters)
+    if (parameters === undefined) return undefined
+    // The registry hands over the model-facing JSON Schema, whose argument names
+    // live under `properties`: `{ type: 'object', properties: { provider, model } }`.
+    // Reading only the flat form answered `false` for every real tool, which sent
+    // each explicit dispatch down the inherit branch and denied it with a reason
+    // the call could not satisfy. A hand-built definition may still flatten the
+    // names onto the parameter object, so both readings are honoured.
+    const properties = asRecord(parameters['properties'])
+    if (properties !== undefined) return 'provider' in properties || 'model' in properties
+    return 'provider' in parameters || 'model' in parameters
+  }
+}
+
+/**
+ * Register the monotonic guard on the Host tool registry, and — when the Host
+ * context exposes Cordis events — enrich `list_subagent_models` output with the
+ * Session's split `{ provider, model }` routes and rewrite the misleading
+ * upstream optional/advisory wording in assembled prompts.
+ * @param ctx - Host context carrying `tools` (and optionally `settings` / `on`).
+ * @param sessions - Session registry used for ancestor lookup.
+ * @param config - Enforcement toggle and delegation tool names.
+ * @returns the exact disposer that unregisters the guard and listeners.
+ */
+export function installSubagentModelAuthorization(
+  ctx: Context,
+  sessions: SessionsResolver,
+  config: SubagentModelAuthorizationConfig = {},
+): () => void {
+  const toolNames = validateDelegationToolNames(config.toolNames ?? [...DEFAULT_DELEGATION_TOOLS])
+  const inheritToolNames = validateInheritToolNames(config.inheritToolNames ?? [])
+  if (inheritToolNames.some(name => toolNames.includes(name))) {
+    throw new Error(
+      'dsh-chatgpt-subscription: a delegation tool cannot be both an explicit and an inherit tool '
+      + `(${inheritToolNames.filter(name => toolNames.includes(name)).join(', ')})`,
+    )
+  }
+  const scope = validateAuthorizationScope(config.scope ?? 'session')
+  // A 0.1.7 `SettingsForms` service has no register seam; the preference read
+  // below checks for it and leaves recorded policies in charge when it is gone.
+  const settings = (ctx as unknown as { get?(name: string): unknown }).get?.('settings')
+  const authorize = createSubagentAuthorization({
+    settings,
+    sessions,
+    toolNames,
+    inheritToolNames,
+    scope,
+    declaresRouteParameters: routeParameterProbe(ctx),
+    routingOverrides: config.routingOverrides,
+  })
+  // Discovery, prompt assembly and dispatch all resolve the same policy.
+  const currentPreference = (): SubagentModelSelectionPreference | undefined =>
+    readSubagentRoutingPreference({ settings, routingOverrides: config.routingOverrides })
+  const disposeGuard = ctx.tools.guard(exec => {
+    const agent = exec.agent as AuthorizationAgent | undefined
+    if (exec.name === 'list_subagent_models') {
+      const request = asRecord(exec.arguments)
+      const provider = asString(request?.['provider'])
+      const model = asString(request?.['model'])
+      // Summary calls always reach the post-execute hook. Reject detail requests
+      // outside the effective policy before the native tool consults its wider list.
+      if (provider === undefined || provider.length === 0 || model === '') return undefined
+      const allowed = effectiveAllowedRoutes(agent, currentPreference(), sessions, scope, true)
+      if (allowed === undefined) return undefined
+      if (allowed.length === 0) return NO_COMPATIBLE_ROUTES_REASON
+      if (model !== undefined) {
+        return routesInclude(allowed, provider, model)
+          ? undefined : unauthorizedRouteReason(provider, model, allowed, true)
+      }
+      if (!allowed.some(route => route.provider === provider)) {
+        return 'subagent model selection: provider ' + JSON.stringify(provider)
+          + ' is not on the Session allowlist. Authorized child routes are ' + authorizedRoutesText(allowed) + '.'
+      }
+      return undefined
+    }
+    return authorize(agent, exec.name, exec.arguments)
+  })
+
+  const eventHost = ctx as unknown as EventHost
+  const disposePostExecute = eventHost.on?.(
+    'tools/post-execute',
+    async (
+      exec: { readonly name?: unknown; readonly agent?: unknown },
+      result: {
+        readonly isError?: unknown
+        readonly value?: unknown
+        readonly content?: readonly { readonly type?: unknown; readonly text?: unknown }[]
+      },
+      next: () => Promise<unknown>,
+    ) => {
+      const decision = await next() as {
+        readonly kind?: string
+        readonly value?: unknown
+        readonly content?: readonly { readonly type?: unknown; readonly text?: unknown }[]
+        readonly additionalContexts?: unknown
+      }
+      if (exec.name !== 'list_subagent_models' || result.isError === true || decision?.kind !== 'accept') {
+        return decision
+      }
+      const allowed = effectiveAllowedRoutes(
+        exec.agent as AuthorizationAgent | undefined,
+        currentPreference(),
+        sessions,
+        scope,
+        true,
+      )
+      // Both postures are stated: a governed Session gets its routes, and one
+      // without a recorded allowlist gets that fact plus the host-policy caveat.
+      const currentValue = decision.value !== undefined ? decision.value : result.value
+      if (typeof currentValue === 'string') {
+        const enriched = enrichListSubagentModelsOutput(currentValue, allowed)
+        if (enriched === currentValue) return decision
+        return {
+          kind: 'accept' as const,
+          value: enriched,
+          ...(decision.additionalContexts !== undefined ? { additionalContexts: decision.additionalContexts } : {}),
+        }
+      }
+      const currentContent = decision.content ?? result.content
+      const firstBlock = Array.isArray(currentContent) ? currentContent[0] : undefined
+      if (firstBlock?.type === 'text' && typeof firstBlock.text === 'string') {
+        const enriched = enrichListSubagentModelsOutput(firstBlock.text, allowed)
+        if (enriched === firstBlock.text) return decision
+        return {
+          kind: 'accept' as const,
+          content: [{ type: 'text' as const, text: enriched }, ...currentContent!.slice(1)],
+          ...(decision.additionalContexts !== undefined ? { additionalContexts: decision.additionalContexts } : {}),
+        }
+      }
+      return decision
+    },
+  )
+
+  const disposeAssemble = eventHost.on?.(
+    'system-prompt/assemble',
+    async (
+       _assembly: MutablePromptAssembly,
+      context: { readonly agent?: unknown; readonly scope?: unknown } | undefined,
+      next: () => Promise<MutablePromptAssembly>,
+    ) => {
+      const assembled = await next()
+      const agent = (context?.agent ?? context?.scope) as AuthorizationAgent | undefined
+      const allowed = effectiveAllowedRoutes(agent, currentPreference(), sessions, scope, true)
+      return rewriteAuthorizedPromptAssembly(assembled, allowed, toolNames, inheritToolNames)
+    },
+  )
+
+  return () => {
+    disposeGuard()
+    disposePostExecute?.()
+    disposeAssemble?.()
+  }
+}
+
+/**
+ * Validate the configured authorization scope.
+ * @param scope - Candidate scope from deployment configuration.
+ * @returns the exact scope this guard enforces.
+ */
+export function validateAuthorizationScope(scope: unknown): AuthorizationScope {
+  if (scope === 'session' || scope === 'preference') return scope
+  throw new Error(
+    `dsh-chatgpt-subscription: subagentModelScope must be "session" or "preference", received ${JSON.stringify(scope)}`,
+  )
+}

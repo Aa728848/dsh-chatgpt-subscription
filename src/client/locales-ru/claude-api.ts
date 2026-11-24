@@ -1,4 +1,4 @@
-import type { ClaudeApiLocaleKey } from '../claude-api/locales.ts'
+import type { ClaudeApiLocaleKey } from '../providers/claude-api/locales.ts'
 export const dictionary: Record<ClaudeApiLocaleKey, string> = {
   title: 'Claude API', pageDesc: 'Один API-ключ для эндпоинта Anthropic Messages или совместимого шлюза; запросы отправляются в формате официального клиента Claude Code.', loading: 'Чтение состояния линии…',
   enabled: 'Включить Claude API', keySection: 'API-ключ', keyPlaceholder: 'sk-ant-…', saveKey: 'Сохранить ключ', savingKey: 'Сохранение…', removeKey: 'Удалить ключ', removingKey: 'Удаление…',

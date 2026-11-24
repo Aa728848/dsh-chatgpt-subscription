@@ -1,0 +1,691 @@
+/**
+ * Cline Pass wire mapping: the harness conversation in, an OpenAI-compatible
+ * `chat/completions` body out; decoded SSE frames in, harness stream chunks out.
+ *
+ * The request order rules matter more than they look: an assistant message
+ * carrying `tool_calls` must be followed immediately by one `tool` message per
+ * call id, or a validating gateway rejects the whole request with "insufficient
+ * tool messages following tool_calls message". Everything that would otherwise
+ * land inside that run is held back until the group closes.
+ *
+ * @module dsh-chatgpt-subscription/cline-pass-mapper
+ */
+import {
+  EMPTY_RESPONSE_CODE,
+  ToolCallId,
+  type ContentBlock,
+  type StreamChunk,
+  type TokenUsage,
+} from '@deepseek-ai/dsh-llm'
+import {
+  LlmError,
+  type ContentBlock as CompatContentBlock,
+  type GenerateOptions,
+  type Message,
+} from '../../common/llm-compat.ts'
+import {
+  imageBlockToInline,
+  unavailableImageText,
+  type ResolvedRequestImages,
+} from '../../common/request-images.ts'
+import { NO_ANSWER_PHRASE } from '../minimax-code/mapper.ts'
+import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../../common/context-overflow.ts'
+import { errorText, isAuthenticationError, isRecord, unwrapEnvelope } from './protocol.ts'
+import { PROVIDER_NAME } from './types.ts'
+import { ReasoningKeyDialect } from '../../common/reasoning-dialect.ts'
+
+const clineReasoningDialect = new ReasoningKeyDialect()
+
+/**
+ * The one wording the shared detector does not know.
+ *
+ * `common/context-overflow.ts` reads the provider wording every other line of
+ * this plugin reads, but it does not know this line's older phrase. Dropping it
+ * would turn a refusal that used to recover into a plain 400, so the exact
+ * wording is kept beside the shared judgement — and ONLY that wording: the
+ * other phrases the old private regex carried are either already in the shared
+ * vocabulary or were the over-broad guesses this change removed.
+ */
+const LEGACY_TOO_MANY_TOKENS = /too many tokens/i
+
+/** One OpenAI wire message. */
+export interface ClinePassWireMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: string | Array<Record<string, unknown>>
+  reasoning_content?: string
+  tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
+  tool_call_id?: string
+}
+
+/** One automatically routed request body. */
+export interface ClinePassWireBody {
+  model: string
+  messages: ClinePassWireMessage[]
+  stream: true
+  stream_options: { include_usage: true }
+  tools?: Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }>
+  temperature?: number
+  max_tokens?: number
+  /** The newer spelling of the output budget, for the models that reject `max_tokens`. */
+  max_completion_tokens?: number
+  stop?: readonly string[]
+  reasoning_effort?: string
+  /** Explicit thinking switch: the OpenAI-compatible spelling for a disabled reasoning level. */
+  thinking?: { type: 'disabled' }
+}
+
+/** Lead-in text for the user message that carries images recovered from tool results. */
+const TOOL_RESULT_IMAGE_TEXT = 'Attached image(s) from tool result:'
+
+/** Join a message's text blocks. */
+function flattenText(blocks: readonly CompatContentBlock[] | undefined): string {
+  return (blocks ?? []).filter((block) => block.type === 'text').map((block) => block.text).join('')
+}
+
+/** Convert one assistant message, keeping tool calls and reasoning. */
+function serializeAssistant(message: Message): ClinePassWireMessage {
+  const content = message.content ?? []
+  const text = flattenText(content)
+  const reasoning = content.filter((block) => block.type === 'reasoning').map((block) => block.text).join('')
+  const toolCalls = content.filter((block) => block.type === 'tool-call').map((block) => ({
+    id: block.id,
+    type: 'function' as const,
+    function: { name: block.name, arguments: block.arguments },
+  }))
+  return {
+    role: 'assistant',
+    content: text,
+    ...(reasoning.length > 0 ? { [clineReasoningDialect.outboundKey()]: reasoning } : {}),
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+  }
+}
+
+/** One image content part, or a visible placeholder when it cannot be sent. */
+function imagePart(block: unknown, images: ResolvedRequestImages): Record<string, unknown> {
+  const record = isRecord(block) ? block : {}
+  const inline = imageBlockToInline(record, images)
+  if (inline === undefined) return { type: 'text', text: unavailableImageText(record) }
+  return { type: 'image_url', image_url: { url: `data:${inline.mediaType};base64,${inline.data}` } }
+}
+
+/**
+ * Whether one model id names a DeepSeek model.
+ *
+ * DeepSeek's own Chat Completions contract carries a disabled reasoning level as
+ * `thinking: { type: 'disabled' }` rather than as a `reasoning_effort` value, so
+ * the translation below is scoped to this model family. Read from the model id's
+ * own segment so a provider-prefixed spelling (`cline-pass/...`, or a canonical
+ * `deepseek/...` slug) is recognised either way.
+ */
+function isDeepSeekModel(modelId: string): boolean {
+  const bare = modelId.slice(modelId.lastIndexOf('/') + 1).trim()
+  return /^deepseek/i.test(bare)
+}
+
+/**
+ * Whether one model id names an OpenAI reasoning-era family that refuses the
+ * legacy output-budget field.
+ *
+ * Transcribed from the official Cline baseline (cline/cline@ca7402c,
+ * `sdk/packages/llms/src/providers/model-facts.ts`): the o-series (o1/o3/o4,
+ * including -mini, -pro and dated variants) and gpt-5 and every later
+ * single-digit family. Those models reject `max_tokens` and require
+ * `max_completion_tokens`; every other id keeps the field it always sent.
+ *
+ * The boundaries are non-alphanumeric on BOTH sides, so `gpt-4o`, `gpt-35-turbo`,
+ * `yolo1` and `chatgpt-5` never match, while `openai/o3-mini`, `azure-o1` and
+ * `gpt-5.2` do. The version digit stays single on purpose: two digits would
+ * match Azure's `gpt-35-turbo`.
+ */
+export function wantsCompletionTokens(modelId: string): boolean {
+  const normalized = modelId.trim().toLowerCase()
+  return /(^|[^a-z0-9])o[134](?=$|[^a-z0-9])/.test(normalized)
+    || /(^|[^a-z0-9])gpt-?[5-9](?=$|[^a-z0-9])/.test(normalized)
+}
+
+/** The names one developer message declares or revokes, in history order. */
+function toolNamesOf(blocks: readonly CompatContentBlock[] | undefined, type: 'tool-addition' | 'tool-removal'): string[] {
+  const names: string[] = []
+  for (const block of blocks ?? []) {
+    const record = block as unknown as Record<string, unknown>
+    if (record.type !== type) continue
+    const name = record.toolName
+    if (typeof name !== 'string' || name.trim().length === 0) continue
+    names.push(name.trim())
+  }
+  return names
+}
+
+/** One quoted, comma-joined list of tool names. */
+function quotedList(names: readonly string[]): string {
+  return names.map((name) => '"' + name + '"').join(', ')
+}
+
+/**
+ * The model-facing text of a mid-conversation tool change, or '' when there is none.
+ *
+ * `in-history` means the harness stopped rewriting the declaration list: an
+ * added tool still travels in `tools`, and a removed one keeps its declaration
+ * so the prefix survives. The history note is therefore the only thing that
+ * tells the model a removal happened, which is why the removal sentence is
+ * imperative rather than descriptive.
+ */
+function toolUpdateNotice(blocks: readonly CompatContentBlock[] | undefined): string {
+  const added = toolNamesOf(blocks, 'tool-addition')
+  const removed = toolNamesOf(blocks, 'tool-removal')
+  const notices: string[] = []
+  if (added.length > 0) {
+    notices.push(added.length === 1
+      ? '[The tool ' + quotedList(added) + ' is now available.]'
+      : '[The tools ' + quotedList(added) + ' are now available.]')
+  }
+  if (removed.length > 0) {
+    notices.push(removed.length === 1
+      ? '[' + quotedList(removed) + ' is no longer available. Do not call it again: any call will fail.]'
+      : '[' + quotedList(removed) + ' are no longer available. Do not call them again: any call will fail.]')
+  }
+  return notices.join('\n')
+}
+
+/** Recursively collect image parts from blocks, including nested tool results. */
+function collectImageParts(blocks: unknown, images: ResolvedRequestImages, target: Array<Record<string, unknown>> = []): Array<Record<string, unknown>> {
+  if (!Array.isArray(blocks)) return target
+  for (const block of blocks) {
+    if (!isRecord(block)) continue
+    if (block.type === 'image') target.push(imagePart(block, images))
+    else if (block.type === 'tool-result') collectImageParts(block.content, images, target)
+  }
+  return target
+}
+
+/**
+ * Convert the harness conversation to wire messages.
+ *
+ * Tool results become standalone `role: 'tool'` messages. A user message
+ * carrying an image switches to the OpenAI content-part array; a text-only one
+ * keeps the plain-string form. An image nested in a tool result has no OpenAI
+ * `tool` wire spelling, so it rides a following user message instead — the same
+ * shape the shipped adapters use. Deferring that message until the next non-tool
+ * message keeps a parallel group's answers contiguous.
+ *
+ * `developer` becomes `system`: the newer OpenAI spelling is not accepted by
+ * every OpenAI-compatible gateway, while `system` is.
+ */
+export function serializeMessages(messages: readonly Message[], images: ResolvedRequestImages): ClinePassWireMessage[] {
+  const wire: ClinePassWireMessage[] = []
+  let pendingToolImages: Array<Record<string, unknown>> = []
+  /** Call ids of the most recent assistant tool_calls still awaiting an answer. */
+  let awaiting: string[] = []
+  /** Messages held back so they cannot split the group; emitted in order. */
+  let deferred: ClinePassWireMessage[] = []
+
+  const flushDeferred = (): void => {
+    if (deferred.length === 0) return
+    for (const held of deferred) wire.push(held)
+    deferred = []
+  }
+  /** Emit a non-tool message; a message that cannot close a group waits. */
+  const emit = (message: ClinePassWireMessage): void => {
+    if (awaiting.length > 0) deferred.push(message)
+    else wire.push(message)
+  }
+  const flushToolImages = (): void => {
+    if (pendingToolImages.length === 0) return
+    const message: ClinePassWireMessage = {
+      role: 'user',
+      content: [{ type: 'text', text: TOOL_RESULT_IMAGE_TEXT }, ...pendingToolImages],
+    }
+    pendingToolImages = []
+    emit(message)
+  }
+  /**
+   * A tool answer: it closes its own id, and the group when it was the last.
+   *
+   * An answer whose call id has no pending `tool_call` is refused here, before
+   * anything is sent. Forwarding it produces an OpenAI message sequence the
+   * gateway rejects (a `tool` message with no declaration in front of it), and
+   * the gateway's 400 names neither the call nor the turn, so the failure is
+   * raised locally with the id that has no question.
+   */
+  const answer = (callId: string, content: readonly CompatContentBlock[] | undefined): void => {
+    if (!awaiting.includes(callId)) {
+      throw new LlmError(
+        `tool result for call "${callId}" has no tool_call awaiting it: the conversation cannot be expressed as a valid OpenAI message sequence`,
+        'INVALID_REQUEST',
+      )
+    }
+    wire.push({ role: 'tool', tool_call_id: callId, content: flattenText(content) || '(no output)' })
+    collectImageParts(content, images, pendingToolImages)
+    awaiting = awaiting.filter((id) => id !== callId)
+    if (awaiting.length === 0) flushDeferred()
+  }
+
+  for (const message of messages) {
+    if (message.role === 'system' || message.role === 'developer') {
+      flushToolImages()
+      // A developer message carries the mid-conversation tool change as blocks
+      // rather than prose, so its text is the notice PLUS whatever the harness
+      // wrote. A message with neither is dropped: an empty system message is
+      // payload the model gains nothing from, and some gateways reject it.
+      const content = [toolUpdateNotice(message.content), flattenText(message.content)]
+        .filter((part) => part.length > 0)
+        .join('\n')
+      if (content.length === 0) continue
+      emit({ role: 'system', content })
+      continue
+    }
+    if (message.role === 'assistant') {
+      flushToolImages()
+      // A turn boundary. Anything still held belongs before the new turn, and an
+      // unanswered group from the previous turn can no longer be answered.
+      flushDeferred()
+      wire.push(serializeAssistant(message))
+      awaiting = (message.content ?? []).filter((block) => block.type === 'tool-call').map((block) => block.id)
+      continue
+    }
+    const toolResults = (message.content ?? []).filter((block) => block.type === 'tool-result')
+    const parts: Array<Record<string, unknown>> = []
+    for (const block of message.content ?? []) {
+      if (block.type === 'text' && block.text.length > 0) parts.push({ type: 'text', text: block.text })
+      else if (block.type === 'image') parts.push(imagePart(block, images))
+    }
+    const hasImage = parts.some((part) => part.type === 'image_url')
+    const text = parts.filter((part) => part.type === 'text').map((part) => String(part.text)).join('')
+    // A user turn that carries neither text nor an image has nothing to say on
+    // this wire, and an empty `content: ''` message is worse than absent. A
+    // tool-result-only message is untouched by this: its answers travel as the
+    // `tool` messages below, which is the shape the gateway validates.
+    if (hasImage || text.length > 0) {
+      flushToolImages()
+      emit({ role: 'user', content: hasImage ? parts : text })
+    }
+    for (const result of toolResults) {
+      answer(result.toolCallId, result.content)
+    }
+  }
+  flushToolImages()
+  // A group the history never closed leaves nothing to wait for; whatever was
+  // held still belongs in the request, just after the answers that do exist.
+  flushDeferred()
+  return wire
+}
+
+/**
+ * Build the wire request for one harness call, before pinning.
+ * @param options - the harness request (model, system, history, tools, sampling).
+ * @param connection - resolved connection facts (default output budget).
+ * @param images - attachmentId → prepared request version.
+ */
+export function buildClinePassBody(
+  options: GenerateOptions,
+  connection: { maxTokens: number },
+  images: ResolvedRequestImages,
+): ClinePassWireBody {
+  const messages: ClinePassWireMessage[] = []
+  if (options.system !== undefined && options.system !== '') messages.push({ role: 'system', content: options.system })
+  messages.push(...serializeMessages(options.messages, images))
+  const tools = (options.tools ?? []).map((tool) => ({
+    type: 'function' as const,
+    function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+  }))
+  const maxTokens = options.maxTokens ?? connection.maxTokens
+  // DeepSeek's Chat Completions contract spells a disabled reasoning level as
+  // `thinking: { type: 'disabled' }` rather than as a `reasoning_effort` value,
+  // so the level is translated rather than forwarded. Scoped to DeepSeek ids on
+  // purpose: every other model keeps the level verbatim, including 'none'.
+  const thinkingOff = options.reasoningEffort !== undefined
+    && String(options.reasoningEffort) === 'none'
+    && isDeepSeekModel(options.model)
+  return {
+    model: options.model,
+    messages,
+    stream: true,
+    stream_options: { include_usage: true },
+    ...(tools.length > 0 ? { tools } : {}),
+    ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+    // The output budget travels in the field the model family accepts: the
+    // reasoning-era families reject `max_tokens` outright, and the refusal is a
+    // 400 that names the field it wants (see the official Cline baseline).
+    ...(maxTokens === undefined || maxTokens <= 0
+      ? {}
+      : wantsCompletionTokens(options.model)
+        ? { max_completion_tokens: maxTokens }
+        : { max_tokens: maxTokens }),
+    ...(options.stop === undefined ? {} : { stop: options.stop }),
+    ...(options.reasoningEffort === undefined || thinkingOff ? {} : { reasoning_effort: String(options.reasoningEffort) }),
+    ...(thinkingOff ? { thinking: { type: 'disabled' as const } } : {}),
+  }
+}
+
+/** Map an OpenAI `finish_reason` to the harness finish reason. */
+export function mapFinishReason(reason: string): StreamChunk & { type: 'finish' } {
+  switch (reason) {
+    case 'stop':
+    case 'end_turn':
+      return { type: 'finish', reason: { kind: 'stop' } }
+    case 'tool_calls':
+    case 'tool-calls':
+      return { type: 'finish', reason: { kind: 'tool-calls' } }
+    case 'length':
+    case 'max_tokens':
+      return { type: 'finish', reason: { kind: 'max-tokens' } }
+    default:
+      return { type: 'finish', reason: { kind: 'error', failure: { message: `model stopped: ${reason}`, code: String(reason).toUpperCase() } } }
+  }
+}
+
+/**
+ * Map OpenAI usage fields to disjoint harness counts.
+ *
+ * `prompt_tokens` includes cache hits per the OpenAI convention, and the harness
+ * counts are disjoint, so cached tokens are subtracted out of `inputTokens`.
+ */
+export function mapUsage(usage: Record<string, unknown> | null | undefined): TokenUsage {
+  const promptDetails = isRecord(usage?.prompt_tokens_details) ? usage.prompt_tokens_details : undefined
+  const completionDetails = isRecord(usage?.completion_tokens_details) ? usage.completion_tokens_details : undefined
+  const cacheRead = Number(promptDetails?.cached_tokens ?? usage?.prompt_cache_hit_tokens ?? 0) || 0
+  const reasoning = completionDetails?.reasoning_tokens
+  const input = Number.isSafeInteger(usage?.prompt_tokens) ? Number(usage?.prompt_tokens) : 0
+  const output = Number.isSafeInteger(usage?.completion_tokens) ? Number(usage?.completion_tokens) : 0
+  const combined = input + output
+  const total = usage?.total_tokens
+  const hasExactTotal = Number.isSafeInteger(total) ? Number(total) === combined : true
+  return {
+    inputTokens: input - cacheRead,
+    outputTokens: output,
+    ...(hasExactTotal ? { totalTokens: combined } : {}),
+    ...(cacheRead === 0 ? {} : { cacheReadTokens: cacheRead }),
+    ...(typeof reasoning === 'number' && Number.isSafeInteger(reasoning) ? { reasoningTokens: reasoning } : {}),
+  }
+}
+
+/** One streamed identity field: a later empty or null value never clears it. */
+function acceptIdentity(current: string | undefined, incoming: unknown): string | undefined {
+  return typeof incoming === 'string' && incoming.length > 0 ? incoming : current
+}
+
+/**
+ * Read one delta's reasoning text, tolerating both wire spellings.
+ *
+ * Prefers the string field, and falls back to joining the `reasoning_details`
+ * parts, which is where a gateway that omits the flat field puts the same text.
+ */
+export function reasoningOf(delta: Record<string, unknown>): string | undefined {
+  clineReasoningDialect.observe(delta)
+  for (const field of ['reasoning', 'reasoning_content']) {
+    const value = delta[field]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  const details = delta.reasoning_details
+  if (Array.isArray(details)) {
+    const text = details.map((part) => (isRecord(part) && typeof part.text === 'string' ? part.text : '')).join('')
+    if (text.length > 0) return text
+  }
+  return undefined
+}
+
+/** Map a gateway error payload to a stable harness code. */
+export function streamErrorCode(message: string, status?: number): string {
+  const detail = String(message ?? '')
+  // The harness vocabulary covers balances, but Cline also refuses spent
+  // subscription windows. Require exhaustion, not just a window name, so a
+  // temporary error fetching weekly usage does not stand an account down.
+  const windowDetail = detail.replace(/[_-]/g, ' ')
+  const spentWindow = /\b(?:weekly|monthly|daily|(?:five|5)\s*hour|plan)\b[\s\S]{0,80}?\b(?:exceed\w*|exhaust\w*|reach\w*|used\s+up|out\s+of|deplet\w*|spent)\b|\b(?:exceed\w*|exhaust\w*|reach\w*|used\s+up|out\s+of|deplet\w*)\b[\s\S]{0,80}?\b(?:weekly|monthly|daily|(?:five|5)\s*hour|plan)\b[\s\S]{0,40}?\b(?:limit|cap|quota|credits|budget|allowance)\b/i.test(windowDetail)
+  if (status === 402 || spentWindow) return 'QUOTA'
+  if (isAuthenticationError(detail, status)) return 'AUTH'
+  if (status === 429 || /429|rate limit|rate-?limited/i.test(detail)) return 'RATE_LIMIT'
+  // The overflow wording is the SHARED one, so this line reads a refusal the
+  // same way every other line of this plugin reads it. A private regex here
+  // missed most of that vocabulary, and a missed overflow is a missed
+  // compaction recovery.
+  if (isContextOverflow(detail) || LEGACY_TOO_MANY_TOKENS.test(detail)) return CONTEXT_OVERFLOW_CODE
+  if (status === 400) return 'INVALID_REQUEST'
+  if (status !== undefined && status >= 500) return 'SERVER'
+  if (status !== undefined && status >= 400) return `HTTP_${status}`
+  return 'UPSTREAM'
+}
+
+/**
+ * Parse an SSE body into decoded JSON frames.
+ * @param body - a web ReadableStream of UTF-8 bytes.
+ * @returns every `data:` payload up to `[DONE]`.
+ */
+export async function* parseServerSentEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown | '[DONE]'> {
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const reader = body.getReader()
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let index = buffer.indexOf('\n')
+      while (index >= 0) {
+        const line = buffer.slice(0, index).replace(/\r$/, '')
+        buffer = buffer.slice(index + 1)
+        index = buffer.indexOf('\n')
+        if (line.length === 0 || line.startsWith(':')) continue
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (payload === '[DONE]') {
+          yield '[DONE]'
+          return
+        }
+        try {
+          yield JSON.parse(payload)
+        } catch { /* an unparseable frame carries nothing to deliver */ }
+      }
+    }
+  } finally {
+    try { reader.releaseLock() } catch { /* already released */ }
+  }
+  const tail = buffer.trim()
+  if (tail.startsWith('data:')) {
+    const payload = tail.slice(5).trim()
+    if (payload === '[DONE]') {
+      yield '[DONE]'
+      return
+    }
+    if (payload.length > 0) {
+      try {
+        yield JSON.parse(payload)
+      } catch { /* see above */ }
+    }
+  }
+  throw new LlmError('stream ended without [DONE]', 'STREAM_CLOSED')
+}
+
+/** Assemble the terminal content block for one open block. */
+function closeBlock(block: { kind: 'text' | 'reasoning' | 'tool-call'; text: string; callId?: string; name?: string }): ContentBlock {
+  switch (block.kind) {
+    case 'text':
+      return { type: 'text', text: block.text }
+    case 'reasoning':
+      return { type: 'reasoning', text: block.text }
+    default:
+      return { type: 'tool-call', id: ToolCallId(block.callId ?? ''), name: block.name ?? '', arguments: block.text }
+  }
+}
+
+/**
+ * Whether one failure is the SSE parser's own "the body ended without [DONE]".
+ *
+ * Structural rather than `instanceof`: what has to match is the code the parser
+ * assigns, and a second copy of this module (or a harness generation that ships
+ * its own LlmError class) would fail an identity test on a value that is
+ * otherwise exactly the signal this decision is about.
+ */
+function isMissingSentinel(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'STREAM_CLOSED'
+}
+
+/**
+ * End the payload iteration instead of throwing when a body stops cleanly.
+ *
+ * The parser can only report "no [DONE] arrived" by throwing, and that is NOT a
+ * failure on its own: the gateway sometimes closes the response right after the
+ * terminal frame. Whether the response actually completed is decided by the
+ * frames that were seen, which is knowledge this generator does not have — so it
+ * only removes the transport signal and leaves the verdict to {@link translate}.
+ * Every other failure passes through untouched, including the error frames a 200
+ * body can carry.
+ */
+async function* tolerateMissingSentinel(
+  payloads: AsyncIterable<unknown | '[DONE]'>,
+): AsyncGenerator<unknown | '[DONE]'> {
+  try {
+    for await (const payload of payloads) yield payload
+  } catch (error) {
+    if (!isMissingSentinel(error)) throw error
+  }
+}
+
+/**
+ * Translate decoded SSE payloads into harness stream chunks.
+ *
+ * Deltas stream through as they arrive; block ends, usage and the finish reason
+ * are all deferred to the `[DONE]` sentinel, so no chunk ever follows `finish`.
+ * A completion with no content at all becomes an `EMPTY_RESPONSE` error finish
+ * rather than a silent empty message.
+ *
+ * A missing `[DONE]` is not a failure by itself. Once a valid `finish_reason`
+ * has been seen the response IS complete, and it closes exactly as a `[DONE]`
+ * one does — block ends, usage and finish all preserved. A body that carried
+ * content but never named a finish reason is a truncation, and still fails with
+ * `STREAM_CLOSED`.
+ */
+export async function* translate(payloads: AsyncIterable<unknown | '[DONE]'>): AsyncGenerator<StreamChunk> {
+  let nextIndex = 0
+  type OpenText = { index: number; kind: 'text'; text: string }
+  type OpenReasoning = { index: number; kind: 'reasoning'; text: string }
+  type OpenTool = { index: number; kind: 'tool-call'; text: string; callId?: string; name?: string }
+  type OpenBlock = OpenText | OpenReasoning | OpenTool
+  let textBlock: OpenText | undefined
+  let reasoningBlock: OpenReasoning | undefined
+  const toolBlocks = new Map<number, OpenTool>()
+  const order: OpenBlock[] = []
+  let pendingFinish: (StreamChunk & { type: 'finish' }) | undefined
+  let pendingUsage: TokenUsage | undefined
+  const open = (kind: OpenBlock['kind']): OpenBlock => {
+    const block: OpenBlock = kind === 'text'
+      ? { index: nextIndex++, kind: 'text', text: '' }
+      : kind === 'reasoning'
+        ? { index: nextIndex++, kind: 'reasoning', text: '' }
+        : { index: nextIndex++, kind: 'tool-call', text: '' }
+    order.push(block)
+    return block
+  }
+  /**
+   * The chunks that close a completed response: every open block, then usage,
+   * then the single finish. Both terminal paths use this one assembly, so a
+   * response read from a clean EOF and one read from `[DONE]` cannot drift.
+   */
+  const closing = (): StreamChunk[] => {
+    const chunks: StreamChunk[] = []
+    for (const block of order) chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
+    if (pendingUsage !== undefined) chunks.push({ type: 'usage', usage: pendingUsage })
+    const reason = pendingFinish ?? { type: 'finish' as const, reason: { kind: 'stop' as const } }
+    const hasVisibleAnswer = toolBlocks.size > 0 || (textBlock !== undefined && textBlock.text.trim() !== '')
+    chunks.push({
+      type: 'finish',
+      reason: reason.reason.kind === 'stop' && order.length === 0
+        ? { kind: 'error', failure: { message: 'model returned a completed response with no content', code: EMPTY_RESPONSE_CODE } }
+        : reason.reason.kind === 'stop' && !hasVisibleAnswer
+          ? { kind: 'error', failure: { message: PROVIDER_NAME + ' ' + NO_ANSWER_PHRASE + ' — the response stopped before it did anything', code: 'PROVIDER_ERROR' } }
+          : reason.reason,
+    })
+    return chunks
+  }
+  for await (const payload of tolerateMissingSentinel(payloads)) {
+    if (payload === '[DONE]') {
+      for (const chunk of closing()) yield chunk
+      return
+    }
+    const chunk = unwrapEnvelope(payload)
+    // A 200 response whose body is an error object must fail the attempt, so a
+    // pin that the router refuses still fails over to the next candidate.
+    if (chunk.error !== undefined && chunk.choices === undefined) {
+      throw new LlmError(errorText(chunk.error), streamErrorCode(errorText(chunk.error)))
+    }
+    const choices = Array.isArray(chunk.choices) ? chunk.choices : []
+    for (const choice of choices) {
+      if (!isRecord(choice)) continue
+      const delta = isRecord(choice.delta) ? choice.delta : {}
+      // Two spellings carry the same thinking. The Cline gateway streams
+      // `reasoning` (plus `reasoning_details`); `reasoning_content` is the
+      // DeepSeek-native name some OpenAI-compatible backends use instead.
+      const reasoning = reasoningOf(delta)
+      if (typeof reasoning === 'string' && reasoning.length > 0) {
+        if (reasoningBlock === undefined) {
+          reasoningBlock = open('reasoning') as OpenReasoning
+          yield { type: 'block-start', index: reasoningBlock.index, blockType: 'reasoning' }
+        }
+        reasoningBlock.text += reasoning
+        yield { type: 'reasoning-delta', index: reasoningBlock.index, text: reasoning }
+      }
+      const content = delta.content
+      if (typeof content === 'string' && content.length > 0) {
+        if (textBlock === undefined) {
+          textBlock = open('text') as OpenText
+          yield { type: 'block-start', index: textBlock.index, blockType: 'text' }
+        }
+        textBlock.text += content
+        yield { type: 'text-delta', index: textBlock.index, text: content }
+      }
+      const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : []
+      for (const call of toolCalls) {
+        if (!isRecord(call)) continue
+        const index = Number(call.index ?? 0)
+        let block = toolBlocks.get(index)
+        // A gateway that omits `index` (or repeats `0`) while streaming a second
+        // parallel call would otherwise fold two calls into one block: the later
+        // id and name would overwrite the earlier ones and both argument
+        // fragments would concatenate into `{...}{...}`, which is not JSON. A
+        // different non-empty id behind an already settled id IS a new call, so
+        // it opens its own block here; the superseded block stays in `order` and
+        // still receives its own block-end in the closing chunks.
+        if (
+          block !== undefined &&
+          typeof call.id === 'string' &&
+          call.id.length > 0 &&
+          block.callId !== undefined &&
+          block.callId.length > 0 &&
+          block.callId !== call.id
+        ) {
+          block = undefined
+        }
+        if (block === undefined) {
+          block = open('tool-call') as OpenTool
+          toolBlocks.set(index, block)
+          yield { type: 'block-start', index: block.index, blockType: 'tool-call' }
+        }
+        const fn = isRecord(call.function) ? call.function : {}
+        block.callId = acceptIdentity(block.callId, call.id)
+        // Only a call that never named itself may be named: a later chunk must
+        // never rewrite an already established tool name.
+        if (block.name === undefined || block.name === '') block.name = acceptIdentity(block.name, fn.name)
+        const fragment = typeof fn.arguments === 'string' ? fn.arguments : ''
+        block.text += fragment
+        yield {
+          type: 'tool-call-delta',
+          index: block.index,
+          id: ToolCallId(block.callId ?? ''),
+          ...(block.name === undefined ? {} : { name: block.name }),
+          argumentsDelta: fragment,
+        }
+      }
+      if (typeof choice.finish_reason === 'string') pendingFinish = mapFinishReason(choice.finish_reason)
+    }
+    if (isRecord(chunk.usage)) pendingUsage = mapUsage(chunk.usage)
+  }
+  // The body ended without `[DONE]`. A response that already named its finish
+  // reason is complete — only the sentinel was missing — so it closes like any
+  // other. Content with no finish reason is a truncated turn and must fail, or a
+  // half-written answer would be handed to the caller as a finished one.
+  if (pendingFinish !== undefined) {
+    for (const chunk of closing()) yield chunk
+    return
+  }
+  throw new LlmError('stream ended without [DONE]', 'STREAM_CLOSED')
+}

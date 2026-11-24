@@ -1,4 +1,4 @@
-import type { RelayOneLocaleKey } from '../relayone/locales.ts'
+import type { RelayOneLocaleKey } from '../providers/relayone/locales.ts'
 export const dictionary: Record<RelayOneLocaleKey, string> = {
   title: 'RelayOne', pageDesc: 'Один API-ключ для диалоговых и медиамоделей, доступных в его текущей группе.',
   enabled: 'Включить RelayOne', keySection: 'API-ключ', keyPlaceholder: 'sk-…', saveKey: 'Сохранить ключ', savingKey: 'Сохранение…', removeKey: 'Удалить ключ', removingKey: 'Удаление…',

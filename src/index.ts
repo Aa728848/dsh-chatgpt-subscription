@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { attachProgressSettings } from './entry-progress-updates.ts'
-import { attachPlanModePipelineSettings, resolvePlanModePipelineEnabled } from './entry-plan-mode-pipeline.ts'
-import { resolveProgressUpdatesSettings } from './host/progress-updates/index.ts'
-import type { ProgressUpdateLanguage } from './host/progress-updates/prompt.ts'
-import { NUDGE_THRESHOLD as PROGRESS_NUDGE_THRESHOLD } from './host/progress-updates/store.ts'
+import { attachProgressSettings } from './entries/progress-updates.ts'
+import { attachPlanModePipelineSettings, resolvePlanModePipelineEnabled } from './entries/plan-mode-pipeline.ts'
+import { resolveProgressUpdatesSettings } from './host/runtime/progress-updates/index.ts'
+import type { ProgressUpdateLanguage } from './host/runtime/progress-updates/prompt.ts'
+import { NUDGE_THRESHOLD as PROGRESS_NUDGE_THRESHOLD } from './host/runtime/progress-updates/store.ts'
 import { createRequire } from 'node:module'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -13,19 +13,19 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-web'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { CodexChatGptAdapter, PROVIDER_ID } from './host/adapter.ts'
-import { loadCodexCatalog } from './host/codex-catalog.ts'
-import { CodexAccountPool, codexAccountQuota } from './host/codex-account-pool.ts'
-import { createCodexFetchProvider } from './host/codex-fetch.ts'
-import { resolveFetchConfiguration, DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_MAX_RESPONSE_BYTES } from './host/fetch-configuration.ts'
+import { CodexChatGptAdapter, PROVIDER_ID } from './host/providers/codex-chatgpt/adapter.ts'
+import { loadCodexCatalog } from './host/providers/codex-chatgpt/codex-catalog.ts'
+import { CodexAccountPool, codexAccountQuota } from './host/providers/codex-chatgpt/codex-account-pool.ts'
+import { createCodexFetchProvider } from './host/providers/codex-chatgpt/codex-fetch.ts'
+import { resolveFetchConfiguration, DEFAULT_FETCH_MAX_BODY_CHARS, DEFAULT_FETCH_MAX_RESPONSE_BYTES } from './host/infra/network/fetch-configuration.ts'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './host/common/idle-watchdog.ts'
 import { HostLocaleRuntime, installHostLocale } from './host/common/i18n/index.ts'
 import { webServerOrigin } from './host/common/webserver-compat.ts'
-import { createCodexImageTool } from './host/codex-images.ts'
-import { createCodexSearchProvider } from './host/codex-search.ts'
-import { OAuthService } from './host/oauth-service.ts'
-import { ProxyManager } from './host/proxy-manager.ts'
+import { createCodexImageTool } from './host/providers/codex-chatgpt/codex-images.ts'
+import { createCodexSearchProvider } from './host/providers/codex-chatgpt/codex-search.ts'
+import { OAuthService } from './host/providers/codex-chatgpt/oauth-service.ts'
+import { ProxyManager } from './host/infra/network/proxy-manager.ts'
 import { CONTROLLED_PROVIDERS, createControlledModelFetch, readModelRequestLimits, type ControlledProvider } from './host/common/model-request-control.ts'
 import { resolveToolRunawayGuardEnabled } from './host/common/tool-runaway.ts'
 import { parsePromptCacheOverrides } from './host/common/prompt-cache-policy.ts'
@@ -33,86 +33,86 @@ import type { PromptCacheOverride } from './host/common/prompt-cache-policy.ts'
 import { claimProviderRoute } from './host/common/provider-route.ts'
 import { catalogTotal } from './host/common/catalog-snapshot.ts'
 import { createDiagnosticFetch } from './host/common/request-diagnostics.ts'
-import { registerPreferenceStore } from './host/preferences.ts'
-import { ResponsesClient } from './host/responses-client.ts'
-import { registerHubOverviewRoutes, type HubSummarySource } from './host/hub-overview.ts'
-import { registerUpdateRoutes } from './host/update-check.ts'
-import { registerRoutes } from './host/routes.ts'
-import { installCompactAfterTurn, type CompactAfterTurnHost } from './host/compact-after-turn/index.ts'
+import { registerPreferenceStore } from './host/providers/codex-chatgpt/preferences.ts'
+import { ResponsesClient } from './host/providers/codex-chatgpt/responses-client.ts'
+import { registerHubOverviewRoutes, type HubSummarySource } from './host/infra/hub/hub-overview.ts'
+import { registerUpdateRoutes } from './host/infra/hub/update-check.ts'
+import { registerRoutes } from './host/providers/codex-chatgpt/routes.ts'
+import { installCompactAfterTurn, type CompactAfterTurnHost } from './host/runtime/compact-after-turn/index.ts'
 import { CODEX_MODEL_CATALOG } from './shared/model-catalog.ts'
-import { createPlatformTokenStore } from './host/platform-token-store.ts'
-import { SearchProviderSwitcher } from './host/search-provider-switcher.ts'
-import { startWebProviderReconciler } from './host/web-provider-reconciler.ts'
-import { UsageService } from './host/usage-service.ts'
-import { registerWidgetBoard, type WidgetBoardContext } from './host/widget-board/provider.ts'
+import { createPlatformTokenStore } from './host/infra/storage/platform-token-store.ts'
+import { SearchProviderSwitcher } from './host/infra/network/search-provider-switcher.ts'
+import { startWebProviderReconciler } from './host/infra/network/web-provider-reconciler.ts'
+import { UsageService } from './host/providers/codex-chatgpt/usage-service.ts'
+import { registerWidgetBoard, type WidgetBoardContext } from './host/runtime/widget-board/provider.ts'
 import { configurePoolStorage } from './host/common/pool-storage.ts'
 import { PoolStorageSettings } from './host/common/pool-storage-settings.ts'
 import { asCredentialsSeam } from './host/common/credentials-compat.ts'
-import { CommandCodeAdapter } from './host/command-code/adapter.ts'
-import { CommandCodeAccountPool } from './host/command-code/account-pool.ts'
-import { registerCommandCodeRoutes } from './host/command-code/routes.ts'
+import { CommandCodeAdapter } from './host/providers/command-code/adapter.ts'
+import { CommandCodeAccountPool } from './host/providers/command-code/account-pool.ts'
+import { registerCommandCodeRoutes } from './host/providers/command-code/routes.ts'
 import {
   FileCredentialStore as CommandCodeCredentialStore,
   FileModelSettingsStore as CommandCodeModelSettingsStore,
   registerCommandCodePreferenceStore,
-} from './host/command-code/token-store.ts'
-import { PROVIDER_ID as COMMAND_CODE_PROVIDER_ID, PROVIDER_NAME as COMMAND_CODE_PROVIDER_NAME } from './host/command-code/types.ts'
-import { OllamaAdapter } from './host/ollama/adapter.ts'
-import { registerOllamaRoutes } from './host/ollama/routes.ts'
-import { OllamaAccountPool } from './host/ollama/account-pool.ts'
-import { PROVIDER_ID as OLLAMA_PROVIDER_ID, PROVIDER_NAME as OLLAMA_PROVIDER_NAME } from './host/ollama/types.ts'
-import { FileCredentialStore as OllamaCredentialStore, FileModelSettingsStore as OllamaModelSettingsStore } from './host/ollama/token-store.ts'
-import { AntigravityAcpAdapter } from './host/antigravity-acp/adapter.ts'
-import { AntigravityAcpSettingsStore } from './host/antigravity-acp/settings.ts'
-import { AcpCatalog } from './host/antigravity-acp/catalog.ts'
-import { AcpClient } from './host/antigravity-acp/acp-client.ts'
-import { AcpBinaryCache, acpLaunchArgs, resolveAcpBinary } from './host/antigravity-acp/binary.ts'
-import { probeAuth, startLogin } from './host/antigravity-acp/login.ts'
-import { registerAntigravityAcpRoutes } from './host/antigravity-acp/routes.ts'
-import { AcpAuthCache } from './host/antigravity-acp/auth-cache.ts'
-import { runDoctor } from './host/antigravity-acp/doctor.ts'
-import { readCatalogFrom } from './host/antigravity-acp/catalog.ts'
-import { registerAntigravityAcpSubagent } from './host/antigravity-acp/subagent.ts'
-import { PROVIDER_ID as ANTIGRAVITY_ACP_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_ACP_PROVIDER_NAME, AUTH_REQUIRED_MESSAGE } from './host/antigravity-acp/types.ts'
-import { AwsQuickAdapter } from './host/aws-quick/adapter.ts'
-import { AwsQuickSettingsStore } from './host/aws-quick/settings.ts'
-import { AwsQuickOutpost } from './host/aws-quick/outpost.ts'
-import { AwsQuickToolBridge } from './host/aws-quick/tool-bridge.ts'
-import { registerAwsQuickRoutes } from './host/aws-quick/routes.ts'
-import { PROVIDER_ID as AWS_QUICK_PROVIDER_ID, PROVIDER_NAME as AWS_QUICK_PROVIDER_NAME, QUICK_MODELS } from './host/aws-quick/types.ts'
-import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
-import { resolvedKimiContextWindow } from './host/kimi-code/client.ts'
-import { KimiCodeAccountPool } from './host/kimi-code/account-pool.ts'
-import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
-import { createKimiVideoTool } from './host/kimi-code/video-tool.ts'
-import { createMinimaxGenerateVideoTool, createMinimaxUnderstandVideoTool } from './host/minimax-code/video-tool.ts'
-import { readVideoBytes } from './host/kimi-code/video-store.ts'
-import type { VideoAttachmentRef } from './host/kimi-code/modalities.ts'
+} from './host/providers/command-code/token-store.ts'
+import { PROVIDER_ID as COMMAND_CODE_PROVIDER_ID, PROVIDER_NAME as COMMAND_CODE_PROVIDER_NAME } from './host/providers/command-code/types.ts'
+import { OllamaAdapter } from './host/providers/ollama/adapter.ts'
+import { registerOllamaRoutes } from './host/providers/ollama/routes.ts'
+import { OllamaAccountPool } from './host/providers/ollama/account-pool.ts'
+import { PROVIDER_ID as OLLAMA_PROVIDER_ID, PROVIDER_NAME as OLLAMA_PROVIDER_NAME } from './host/providers/ollama/types.ts'
+import { FileCredentialStore as OllamaCredentialStore, FileModelSettingsStore as OllamaModelSettingsStore } from './host/providers/ollama/token-store.ts'
+import { AntigravityAcpAdapter } from './host/providers/antigravity-acp/adapter.ts'
+import { AntigravityAcpSettingsStore } from './host/providers/antigravity-acp/settings.ts'
+import { AcpCatalog } from './host/providers/antigravity-acp/catalog.ts'
+import { AcpClient } from './host/providers/antigravity-acp/acp-client.ts'
+import { AcpBinaryCache, acpLaunchArgs, resolveAcpBinary } from './host/providers/antigravity-acp/binary.ts'
+import { probeAuth, startLogin } from './host/providers/antigravity-acp/login.ts'
+import { registerAntigravityAcpRoutes } from './host/providers/antigravity-acp/routes.ts'
+import { AcpAuthCache } from './host/providers/antigravity-acp/auth-cache.ts'
+import { runDoctor } from './host/providers/antigravity-acp/doctor.ts'
+import { readCatalogFrom } from './host/providers/antigravity-acp/catalog.ts'
+import { registerAntigravityAcpSubagent } from './host/providers/antigravity-acp/subagent.ts'
+import { PROVIDER_ID as ANTIGRAVITY_ACP_PROVIDER_ID, PROVIDER_NAME as ANTIGRAVITY_ACP_PROVIDER_NAME, AUTH_REQUIRED_MESSAGE } from './host/providers/antigravity-acp/types.ts'
+import { AwsQuickAdapter } from './host/providers/aws-quick/adapter.ts'
+import { AwsQuickSettingsStore } from './host/providers/aws-quick/settings.ts'
+import { AwsQuickOutpost } from './host/providers/aws-quick/outpost.ts'
+import { AwsQuickToolBridge } from './host/providers/aws-quick/tool-bridge.ts'
+import { registerAwsQuickRoutes } from './host/providers/aws-quick/routes.ts'
+import { PROVIDER_ID as AWS_QUICK_PROVIDER_ID, PROVIDER_NAME as AWS_QUICK_PROVIDER_NAME, QUICK_MODELS } from './host/providers/aws-quick/types.ts'
+import { KimiCodeAdapter } from './host/providers/kimi-code/adapter.ts'
+import { resolvedKimiContextWindow } from './host/providers/kimi-code/client.ts'
+import { KimiCodeAccountPool } from './host/providers/kimi-code/account-pool.ts'
+import { registerKimiCodeRoutes } from './host/providers/kimi-code/routes.ts'
+import { createKimiVideoTool } from './host/providers/kimi-code/video-tool.ts'
+import { createMinimaxGenerateVideoTool, createMinimaxUnderstandVideoTool } from './host/providers/minimax-code/video-tool.ts'
+import { readVideoBytes } from './host/providers/kimi-code/video-store.ts'
+import type { VideoAttachmentRef } from './host/providers/kimi-code/modalities.ts'
 import {
   FileCredentialStore as KimiCodeCredentialStore,
   FileModelSettingsStore as KimiCodeModelSettingsStore,
   registerKimiCodePreferenceStore,
-} from './host/kimi-code/token-store.ts'
+} from './host/providers/kimi-code/token-store.ts'
 import {
   PROVIDER_ID as KIMI_CODE_PROVIDER_ID,
   PROVIDER_NAME as KIMI_CODE_PROVIDER_NAME,
   TRANSPORT_HEADERS_TIMEOUT_MS as KIMI_CODE_TRANSPORT_HEADERS_TIMEOUT_MS,
-} from './host/kimi-code/types.ts'
+} from './host/providers/kimi-code/types.ts'
 import {
   installKimiRepeatBreaker,
   type KimiRepeatBreakerContext,
-} from './host/kimi-code/repeat-breaker.ts'
+} from './host/providers/kimi-code/repeat-breaker.ts'
 import {
   installKimiToolArgumentRecovery,
   type RecoveryContext as KimiToolArgumentRecoveryContext,
-} from './host/kimi-code/tool-argument-recovery.ts'
-import { MinimaxCodeAdapter } from './host/minimax-code/adapter.ts'
-import { MinimaxCodeAccountPool } from './host/minimax-code/account-pool.ts'
-import { registerMinimaxCodeRoutes } from './host/minimax-code/routes.ts'
+} from './host/providers/kimi-code/tool-argument-recovery.ts'
+import { MinimaxCodeAdapter } from './host/providers/minimax-code/adapter.ts'
+import { MinimaxCodeAccountPool } from './host/providers/minimax-code/account-pool.ts'
+import { registerMinimaxCodeRoutes } from './host/providers/minimax-code/routes.ts'
 import {
   installMinimaxRuntimeEnhancements,
   type MinimaxRuntimeEnhancementsContext,
-} from './host/minimax-code/runtime-enhancements.ts'
+} from './host/providers/minimax-code/runtime-enhancements.ts'
 // The line that does not persist its model catalog in model settings keeps it
 // in memory; the overview reads the size from there (see `catalogTotal`).
 // The quota reader rides the same import because the board's per-account hook
@@ -120,58 +120,58 @@ import {
 import {
   catalogSize as minimaxCodeCatalogSize,
   fetchTokenPlanQuota as fetchMinimaxTokenPlanQuota,
-} from './host/minimax-code/client.ts'
+} from './host/providers/minimax-code/client.ts'
 import {
   MinimaxCodeCredentialStore,
   MinimaxCodeModelSettingsStore,
   registerMinimaxCodePreferenceStore,
-} from './host/minimax-code/token-store.ts'
-import { PROVIDER_ID as MINIMAX_CODE_PROVIDER_ID, PROVIDER_NAME as MINIMAX_CODE_PROVIDER_NAME } from './host/minimax-code/types.ts'
-import { ClaudeAdapter } from './host/claude/adapter.ts'
-import { ClaudeAccountPool } from './host/claude/account-pool.ts'
-import { registerClaudeRoutes } from './host/claude/routes.ts'
-import { getCachedCatalog as getCachedClaudeCatalog } from './host/claude/client.ts'
+} from './host/providers/minimax-code/token-store.ts'
+import { PROVIDER_ID as MINIMAX_CODE_PROVIDER_ID, PROVIDER_NAME as MINIMAX_CODE_PROVIDER_NAME } from './host/providers/minimax-code/types.ts'
+import { ClaudeAdapter } from './host/providers/claude/adapter.ts'
+import { ClaudeAccountPool } from './host/providers/claude/account-pool.ts'
+import { registerClaudeRoutes } from './host/providers/claude/routes.ts'
+import { getCachedCatalog as getCachedClaudeCatalog } from './host/providers/claude/client.ts'
 import {
   FileCredentialStore as ClaudeCredentialStore,
   FileModelSettingsStore as ClaudeModelSettingsStore,
   registerClaudePreferenceStore,
-} from './host/claude/token-store.ts'
-import { PROVIDER_ID as CLAUDE_PROVIDER_ID, PROVIDER_NAME as CLAUDE_PROVIDER_NAME } from './host/claude/types.ts'
-import { GlmCodingPlanAdapter } from './host/glm-coding-plan/adapter.ts'
-import { GlmCodingPlanAccountPool } from './host/glm-coding-plan/account-pool.ts'
-import { glmCodingPlanSettingsSource, registerGlmCodingPlanRoutes } from './host/glm-coding-plan/routes.ts'
-import { catalogSize as glmCodingPlanCatalogSize } from './host/glm-coding-plan/model-catalog.ts'
+} from './host/providers/claude/token-store.ts'
+import { PROVIDER_ID as CLAUDE_PROVIDER_ID, PROVIDER_NAME as CLAUDE_PROVIDER_NAME } from './host/providers/claude/types.ts'
+import { GlmCodingPlanAdapter } from './host/providers/glm-coding-plan/adapter.ts'
+import { GlmCodingPlanAccountPool } from './host/providers/glm-coding-plan/account-pool.ts'
+import { glmCodingPlanSettingsSource, registerGlmCodingPlanRoutes } from './host/providers/glm-coding-plan/routes.ts'
+import { catalogSize as glmCodingPlanCatalogSize } from './host/providers/glm-coding-plan/model-catalog.ts'
 import {
   GlmCodingPlanCredentialStore,
   GlmCodingPlanModelSettingsStore,
   registerGlmCodingPlanPreferenceStore,
-} from './host/glm-coding-plan/token-store.ts'
-import { PROVIDER_ID as GLM_CODING_PLAN_PROVIDER_ID, PROVIDER_NAME as GLM_CODING_PLAN_PROVIDER_NAME } from './host/glm-coding-plan/types.ts'
-import { StepCodeAdapter, stepCodeCatalogSize } from './host/step-code/adapter.ts'
-import { StepCodeAccountPool } from './host/step-code/account-pool.ts'
-import { registerStepCodeRoutes, stepCodeSettingsSource } from './host/step-code/routes.ts'
+} from './host/providers/glm-coding-plan/token-store.ts'
+import { PROVIDER_ID as GLM_CODING_PLAN_PROVIDER_ID, PROVIDER_NAME as GLM_CODING_PLAN_PROVIDER_NAME } from './host/providers/glm-coding-plan/types.ts'
+import { StepCodeAdapter, stepCodeCatalogSize } from './host/providers/step-code/adapter.ts'
+import { StepCodeAccountPool } from './host/providers/step-code/account-pool.ts'
+import { registerStepCodeRoutes, stepCodeSettingsSource } from './host/providers/step-code/routes.ts'
 import {
   StepCodeCredentialStore,
   StepCodeModelSettingsStore,
   registerStepCodePreferenceStore,
-} from './host/step-code/token-store.ts'
-import { PROVIDER_ID as STEP_CODE_PROVIDER_ID, PROVIDER_NAME as STEP_CODE_PROVIDER_NAME } from './host/step-code/types.ts'
-import { createClinePassLine } from './host/cline-pass/line.ts'
-import { QoderAdapter, cachedQoderModelCatalog, convergeQoderSelection } from './host/qoder/adapter.ts'
-import { QoderAccountPool } from './host/qoder/account-pool.ts'
-import { registerQoderRoutes, qoderSettingsSource, warmQoderCatalogOnStartup } from './host/qoder/routes.ts'
+} from './host/providers/step-code/token-store.ts'
+import { PROVIDER_ID as STEP_CODE_PROVIDER_ID, PROVIDER_NAME as STEP_CODE_PROVIDER_NAME } from './host/providers/step-code/types.ts'
+import { createClinePassLine } from './host/providers/cline-pass/line.ts'
+import { QoderAdapter, cachedQoderModelCatalog, convergeQoderSelection } from './host/providers/qoder/adapter.ts'
+import { QoderAccountPool } from './host/providers/qoder/account-pool.ts'
+import { registerQoderRoutes, qoderSettingsSource, warmQoderCatalogOnStartup } from './host/providers/qoder/routes.ts'
 import {
   QoderCredentialStore,
   QoderModelSettingsStore,
   registerQoderPreferenceStore,
-} from './host/qoder/token-store.ts'
-import { loadQoderQuota, qoderCatalogIsLive } from './host/qoder/client.ts'
-import { PROVIDER_ID as QODER_PROVIDER_ID, PROVIDER_NAME as QODER_PROVIDER_NAME } from './host/qoder/types.ts'
-import { createOpenDesignLine } from './host/opendesign/line.ts'
+} from './host/providers/qoder/token-store.ts'
+import { loadQoderQuota, qoderCatalogIsLive } from './host/providers/qoder/client.ts'
+import { PROVIDER_ID as QODER_PROVIDER_ID, PROVIDER_NAME as QODER_PROVIDER_NAME } from './host/providers/qoder/types.ts'
+import { createOpenDesignLine } from './host/providers/opendesign/line.ts'
 import {
   CHECKIN_TICK_MS as MINIMAX_CODE_CHECKIN_TICK_MS,
   MinimaxCodeCheckinService,
-} from './host/minimax-code/checkin.ts'
+} from './host/providers/minimax-code/checkin.ts'
 import {
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
   effectiveAllowedRoutes,
@@ -183,31 +183,31 @@ import {
   validateDelegationToolNames,
   type PolicySession,
   type SessionsResolver,
-} from './host/subagent-model-authorization.ts'
-import { installCompactionPrompt, type PromptContext as CompactionPromptContext } from './host/compaction-prompt.ts'
-import { installToolResultPrunerGuard } from './host/tool-result-pruner-guard.ts'
-import { installPlanModeCacheGuard } from './host/plan-mode-cache-guard.ts'
-import { installPtcSdkCacheGuard } from './host/ptc-sdk-cache-guard.ts'
-import { installSettledJobGuard } from './host/settled-job-guard.ts'
+} from './host/runtime/guards/subagent-model-authorization.ts'
+import { installCompactionPrompt, type PromptContext as CompactionPromptContext } from './host/infra/hub/compaction-prompt.ts'
+import { installToolResultPrunerGuard } from './host/runtime/guards/tool-result-pruner-guard.ts'
+import { installPlanModeCacheGuard } from './host/runtime/guards/plan-mode-cache-guard.ts'
+import { installPtcSdkCacheGuard } from './host/runtime/guards/ptc-sdk-cache-guard.ts'
+import { installSettledJobGuard } from './host/runtime/guards/settled-job-guard.ts'
 import {
   installTeamPolicyCacheGuard,
   resolveTeamPolicyCacheGuardEnabled,
-} from './host/team-policy-cache-guard.ts'
-import { installCompactionPolicyGuard } from './host/compaction-policy-guard.ts'
+} from './host/runtime/guards/team-policy-cache-guard.ts'
+import { installCompactionPolicyGuard } from './host/runtime/guards/compaction-policy-guard.ts'
 import {
   installTimelineCacheGuard,
   resolveTimelineCacheGuardEnabled,
-} from './host/timeline-cache-guard.ts'
+} from './host/runtime/guards/timeline-cache-guard.ts'
 import {
   installDispatchExecutionGuard,
   resolveDispatchExecutionGuardEnabled,
-} from './host/dispatch-execution-guard.ts'
-import { canonicalPromptSourceText, installDispatchLedger } from './host/dispatch-ledger/index.ts'
-import { promptRefDescriptor } from './host/dispatch-ledger/policy.ts'
-import type { DispatchLedgerSessions } from './host/dispatch-ledger/guard.ts'
-import { installBundledPresets } from './host/preset-sync.ts'
-import { DISPATCH_PRESET, installDispatchPreset } from './host/agent-preset.ts'
-import { auditChildRoutes, type AuditedSessions } from './host/subagent-route-audit.ts'
+} from './host/runtime/guards/dispatch-execution-guard.ts'
+import { canonicalPromptSourceText, installDispatchLedger } from './host/runtime/dispatch-ledger/index.ts'
+import { promptRefDescriptor } from './host/runtime/dispatch-ledger/policy.ts'
+import type { DispatchLedgerSessions } from './host/runtime/dispatch-ledger/guard.ts'
+import { installBundledPresets } from './host/runtime/presets/preset-sync.ts'
+import { DISPATCH_PRESET, installDispatchPreset } from './host/runtime/presets/agent-preset.ts'
+import { auditChildRoutes, type AuditedSessions } from './host/runtime/guards/subagent-route-audit.ts'
 import type { PoolStorageMode, SubagentRouteAuditDto } from './shared/contracts.ts'
 import {
   createFileRelayProbeSink,
@@ -216,100 +216,100 @@ import {
   relayProbeEnvFile,
   relayProbeLogPath,
   type RelayProbeContext,
-} from './host/relay-probe.ts'
+} from './host/infra/network/relay-probe.ts'
 import {
   installReasoningCollapseGuard,
   type GuardOptions,
   type ReasoningCollapseContext,
-} from './host/reasoning-collapse-guard/index.ts'
+} from './host/runtime/reasoning-collapse-guard/index.ts'
 import {
   installDeepSeekV41FlashOptimizations,
   isDeepSeekV41Flash,
   isDeepSeekV41FlashScope,
   resolveDeepSeekV41FlashOptimizationEnabled,
-} from './host/deepseek-v41-flash/index.ts'
+} from './host/runtime/deepseek-v41-flash/index.ts'
 import {
   installOpenModelsOptimizations,
   isOpenModelCacheWarmupProtected,
   isOpenModelPrefixCacheProtected,
   resolveOpenModelsOptimizationEnabled,
-} from './host/open-models/index.ts'
+} from './host/runtime/open-models/index.ts'
 import {
   installCompactionRoute,
   type CompactionChunk,
   type CompactionModelInfo,
   type CompactionRouteContext,
   type CompactionStreamOptions,
-} from './host/compaction-route/index.ts'
+} from './host/runtime/compaction-route/index.ts'
 import {
   installSessionTitleGuard,
   type SessionTitleGuardContext,
-} from './host/session-title-guard/index.ts'
+} from './host/runtime/session-title-guard/index.ts'
 import {
   installNoAnswerResume,
   type NoAnswerResumeContext,
   type NoAnswerResumeOptions,
-} from './host/no-answer-resume/index.ts'
+} from './host/runtime/no-answer-resume/index.ts'
 import {
   installCacheWarmup,
   type CacheWarmupContext,
-} from './host/cache-warmup/install.ts'
-import { sessionCacheState } from './host/kimi-code/session-cache-state.ts'
+} from './host/runtime/cache-warmup/install.ts'
+import { sessionCacheState } from './host/providers/kimi-code/session-cache-state.ts'
 import {
   CACHE_WAIT_WARMUP_SETTING_DESCRIPTION,
   installKimiCacheWait,
   resolveCacheWaitWarmupEnabled,
   type KimiCacheWaitContext,
-} from './host/kimi-code/cache-wait.ts'
+} from './host/providers/kimi-code/cache-wait.ts'
 import {
   CACHE_AFFINITY_SETTING_DESCRIPTION,
   resolveCacheAffinityEnabled,
-} from './host/kimi-code/cache-affinity.ts'
+} from './host/providers/kimi-code/cache-affinity.ts'
 import {
   CACHE_WARMUP_SETTING_DESCRIPTION,
   CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION,
   readCacheWarmupConfigField,
   resolveCacheWarmupSettings,
-} from './host/cache-warmup/settings.ts'
-import { WorkBuddyAdapter } from './host/workbuddy/adapter.ts'
-import { WorkBuddyAccountPool } from './host/workbuddy/account-pool.ts'
-import { registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
+} from './host/runtime/cache-warmup/settings.ts'
+import { WorkBuddyAdapter } from './host/providers/workbuddy/adapter.ts'
+import { WorkBuddyAccountPool } from './host/providers/workbuddy/account-pool.ts'
+import { registerWorkBuddyRoutes } from './host/providers/workbuddy/routes.ts'
 import {
   fetchAccountQuota as fetchWorkBuddyAccountQuota,
   getCachedCatalog as getCachedWorkBuddyCatalog,
-} from './host/workbuddy/client.ts'
+} from './host/providers/workbuddy/client.ts'
 import {
   FileCredentialStore as WorkBuddyCredentialStore,
   FileModelSettingsStore as WorkBuddyModelSettingsStore,
   WorkBuddyAtRestKeyStore,
   registerWorkBuddyPreferenceStore,
-} from './host/workbuddy/token-store.ts'
-import { WorkBuddyUsageLedger } from './host/workbuddy/guardrails.ts'
-import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/workbuddy/types.ts'
-import { CHECKIN_TICK_MS as WORKBUDDY_CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
-import { QianwenTokenPlanAdapter } from './host/qianwen-token-plan/adapter.ts'
-import { registerQianwenTokenPlanRoutes } from './host/qianwen-token-plan/routes.ts'
-import { QianwenCredentialStore, QianwenSettingsStore } from './host/qianwen-token-plan/token-store.ts'
-import { QIANWEN_MODEL_CATALOG, catalogModelOptions as qianwenCatalogModelOptions } from './host/qianwen-token-plan/model-catalog.ts'
-import { PROVIDER_ID as QIANWEN_PROVIDER_ID, PROVIDER_NAME as QIANWEN_PROVIDER_NAME } from './host/qianwen-token-plan/types.ts'
-import { RelayOneAccountPool } from './host/relayone/account-pool.ts'
-import { RelayOneAdapter } from './host/relayone/adapter.ts'
-import { registerRelayOneRoutes, warmRelayOneCatalogOnStartup } from './host/relayone/routes.ts'
-import { RelayOneCredentialStore, RelayOneSettingsStore } from './host/relayone/token-store.ts'
-import { RelayOneCatalogManager } from './host/relayone/catalog-manager.ts'
-import { relayOneModelOptions } from './host/relayone/model-catalog.ts'
-import { PROVIDER_ID as RELAYONE_PROVIDER_ID, PROVIDER_NAME as RELAYONE_PROVIDER_NAME } from './host/relayone/types.ts'
-import { createRelayOneImageTool } from './host/relayone/image-tool.ts'
-import { createRelayOneVideoTool } from './host/relayone/video-tool.ts'
-import { RelayOneQuotaReader } from './host/relayone/quota.ts'
-import { ClaudeApiAdapter } from './host/claude-api/adapter.ts'
-import { registerClaudeApiRoutes, warmClaudeApiCatalogOnStartup } from './host/claude-api/routes.ts'
-import { ClaudeApiCredentialStore, ClaudeApiSettingsStore } from './host/claude-api/token-store.ts'
-import { ClaudeApiCatalogManager } from './host/claude-api/catalog-manager.ts'
-import { ClaudeApiClientVersionResolver } from './host/claude-api/client-version.ts'
-import { ClaudeApiCompactionStore } from './host/claude-api/compaction-store.ts'
-import { claudeApiModelOptions } from './host/claude-api/model-catalog.ts'
-import { PROVIDER_ID as CLAUDE_API_PROVIDER_ID, PROVIDER_NAME as CLAUDE_API_PROVIDER_NAME } from './host/claude-api/types.ts'
+} from './host/providers/workbuddy/token-store.ts'
+import { WorkBuddyUsageLedger } from './host/providers/workbuddy/guardrails.ts'
+import { PROVIDER_ID as WORKBUDDY_PROVIDER_ID, PROVIDER_NAME as WORKBUDDY_PROVIDER_NAME } from './host/providers/workbuddy/types.ts'
+import { CHECKIN_TICK_MS as WORKBUDDY_CHECKIN_TICK_MS, WorkBuddyCheckinService } from './host/providers/workbuddy/checkin.ts'
+import { QianwenTokenPlanAdapter } from './host/providers/qianwen-token-plan/adapter.ts'
+import { registerQianwenTokenPlanRoutes } from './host/providers/qianwen-token-plan/routes.ts'
+import { QianwenCredentialStore, QianwenSettingsStore } from './host/providers/qianwen-token-plan/token-store.ts'
+import { QIANWEN_MODEL_CATALOG, catalogModelOptions as qianwenCatalogModelOptions } from './host/providers/qianwen-token-plan/model-catalog.ts'
+import { PROVIDER_ID as QIANWEN_PROVIDER_ID, PROVIDER_NAME as QIANWEN_PROVIDER_NAME } from './host/providers/qianwen-token-plan/types.ts'
+import { RelayOneAccountPool } from './host/providers/relayone/account-pool.ts'
+import { RelayOneAdapter } from './host/providers/relayone/adapter.ts'
+import { registerRelayOneRoutes, warmRelayOneCatalogOnStartup } from './host/providers/relayone/routes.ts'
+import { RelayOneCredentialStore, RelayOneSettingsStore } from './host/providers/relayone/token-store.ts'
+import { RelayOneCatalogManager } from './host/providers/relayone/catalog-manager.ts'
+import { relayOneModelOptions } from './host/providers/relayone/model-catalog.ts'
+import { PROVIDER_ID as RELAYONE_PROVIDER_ID, PROVIDER_NAME as RELAYONE_PROVIDER_NAME } from './host/providers/relayone/types.ts'
+import { createRelayOneImageTool } from './host/providers/relayone/image-tool.ts'
+import { createRelayOneVideoTool } from './host/providers/relayone/video-tool.ts'
+import { RelayOneQuotaReader } from './host/providers/relayone/quota.ts'
+import { ClaudeApiAdapter } from './host/providers/claude-api/adapter.ts'
+import { registerClaudeApiRoutes, warmClaudeApiCatalogOnStartup } from './host/providers/claude-api/routes.ts'
+import { ClaudeApiCredentialStore, ClaudeApiSettingsStore } from './host/providers/claude-api/token-store.ts'
+import { ClaudeApiCatalogManager } from './host/providers/claude-api/catalog-manager.ts'
+import { ClaudeApiClientVersionResolver } from './host/providers/claude-api/client-version.ts'
+import { ClaudeApiCompactionStore } from './host/providers/claude-api/compaction-store.ts'
+import { claudeApiModelOptions } from './host/providers/claude-api/model-catalog.ts'
+import { PROVIDER_ID as CLAUDE_API_PROVIDER_ID, PROVIDER_NAME as CLAUDE_API_PROVIDER_NAME } from './host/providers/claude-api/types.ts'
 
 interface Volatile<T> {
   get(): T
@@ -607,105 +607,66 @@ export interface ConfigInput {
 }
 
 export const Config: z<ConfigInput, Config> = z.object({
-  fetchProvider: z.union([z.const('auto'), z.const('plugin'), z.const('dsh')]).default('auto'),
-  fetchMaxBodyChars: z.number().min(1).max(Number.MAX_SAFE_INTEGER).step(1).default(DEFAULT_FETCH_MAX_BODY_CHARS),
-  fetchMaxResponseBytes: z.number().min(1).max(Number.MAX_SAFE_INTEGER).step(1).default(DEFAULT_FETCH_MAX_RESPONSE_BYTES),
-  syncAgentPresets: z.boolean().default(true),
-  subagentModelAuthorization: z.boolean().default(true),
-  subagentModelTools: z.array(z.string()).default([]),
-  subagentModelInheritTools: z.array(z.string()).default(DEFAULT_SUBAGENT_INHERIT_TOOLS as unknown as string[]),
-  subagentModelScope: z.union([z.const('session'), z.const('preference')]).default('session'),
-  // A free-form object is validated by the guard's own fail-loud resolver rather
-  // than by a nested schema here, so one rule describes the numbers for both
-  // the shipped defaults and a deployment's overrides. The default is `false`:
-  // the guard stays maintained and installable, but this line does not turn it
-  // on by itself — a deployment must opt in with an object of its own.
-  reasoningCollapseGuard: z.union([z.object({}), z.const(false)]).default(false),
-  // Same shape as the guard above: the resume hook validates its own numbers
-  // fail-loud, and `false` opts out.
-  noAnswerResume: z.union([z.object({}), z.const(false)]).default({}),
-  // 进展更新：实现挂在独立的 loader 行上，但**字段留在这里**（见运行期 Config 的
-  // 同名注释）。三个都是 `volatile()`：设置面板保存时直接提交进正在运行的实例，
-  // 不重挂任何行，开关因此在同一个会话里立刻生效。
+  fetchProvider: z.union([z.const('auto'), z.const('plugin'), z.const('dsh')]).default('auto')
+    .description('网页抓取通道：auto 自动选择，plugin 使用插件抓取，dsh 使用宿主默认抓取。'),
+  fetchMaxBodyChars: z.number().min(1).max(Number.MAX_SAFE_INTEGER).step(1).default(DEFAULT_FETCH_MAX_BODY_CHARS)
+    .description('插件抓取正文的最大字符数。'),
+  fetchMaxResponseBytes: z.number().min(1).max(Number.MAX_SAFE_INTEGER).step(1).default(DEFAULT_FETCH_MAX_RESPONSE_BYTES)
+    .description('插件抓取响应体的最大字节数。'),
+  syncAgentPresets: z.boolean().default(true)
+    .description('自动注册并同步随包提供的调度预设。'),
+  subagentModelAuthorization: z.boolean().default(true)
+    .description('将子代理模型白名单同时作用于继承主模型的委派调用。'),
+  subagentModelTools: z.array(z.string()).default([])
+    .description('额外受子代理模型白名单约束的委派工具名列表。'),
+  subagentModelInheritTools: z.array(z.string()).default(DEFAULT_SUBAGENT_INHERIT_TOOLS as unknown as string[])
+    .description('默认继承主模型路由、需校核白名单的委派工具名列表。'),
+  subagentModelScope: z.union([z.const('session'), z.const('preference')]).default('session')
+    .description('子代理白名单生效范围：session 仅按会话记录校验，preference 同时应用当前设置卡配置。'),
+  reasoningCollapseGuard: z.union([z.object({}), z.const(false)]).default(false)
+    .description('推理复读熔断器；传入配置对象开启，false 关闭。'),
+  noAnswerResume: z.union([z.object({}), z.const(false)]).default({})
+    .description('在回合无回答且无工具调用结束时自动续跑；设 false 关闭。'),
   progressUpdates: z.boolean().default(true).volatile()
-    .description('启用进展更新：允许 agent 用 progress_update 工具主动汇报多步任务的进展，并在侧栏展示。本插件的所有线路都可用。'),
+    .description('允许 Agent 在执行过程中汇报阶段进展并在侧栏展示。'),
   progressUpdatesNudgeThreshold: z.number().step(1).min(1).max(50).default(PROGRESS_NUDGE_THRESHOLD).volatile()
-    .description('催促阈值：连续这么多轮带工具调用却没有进展更新时，提醒 agent 发一条进展。'),
+    .description('连续工具调用达到该轮数仍未汇报进展时发出提醒。'),
   progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en'), z.const('ru')]).default('auto').volatile()
-    .description('进展更新的输出语言：auto 跟随对话语言，zh 中文，en 英文，ru 俄文。'),
-  // 计划模式管线：实现挂在独立的 loader 行上（preset 的 planning 组），字段留在这里
-  // 的理由与进展更新相同。volatile 让设置保存后就地写新值，递交下去的读取器每次都
-  // 重读活引用，因此开关在同一个会话里下一步就生效。
+    .description('进展更新的输出语言：auto 跟随对话语言。'),
   planModePipeline: z.boolean().default(true).volatile()
-    .description('启用计划模式管线：允许调度模式在澄清访谈收敛后用 enter_plan_mode 进入计划模式，放弃规划时用 leave_plan_mode 退出。'),
-
-  // 调度执行守卫：执行期拦截子代理越权调用主控专用工具，以及等待子代理期间的
-  // 纯 sleep 空等。volatile 让设置保存后就地写新值，下一步就生效、不重挂任何行。
+    .description('允许调度模式按需进入或退出计划模式。'),
   dispatchExecutionGuard: z.boolean().default(true).volatile()
-    .description('启用调度执行守卫：在执行期拦截子代理越权调用主控专用工具，并拦截等待子代理期间的纯 sleep 空等命令；不修改工具声明面，零损耗保护 Kimi 缓存。'),
+    .description('拦截子代理越权调用主控工具以及等待期间的空转睡眠命令。'),
   toolRunawayGuard: z.boolean().default(true).volatile()
-    .description('启用工具失控治理：对零增量病态信号（同名同参重复、同一工具连续同族报错、后台任务无变化轮询）分级提醒；Kimi 保留第 12 次同参强停，其他线路只提醒。'),
-  // 注册期开关：volatile 只让设置写入器接受保存，apply 仍只读取一次，
-  // 不在会话中途改变工具表。默认 true 保持既有工具表与缓存前缀不变。
+    .description('检测到重复调用、连续同类错误或无变化轮询时提醒模型中止失控循环。'),
   mediaTools: z.boolean().default(true).volatile()
-    .description('注册图片/视频工具：Codex 生图、Kimi 视频挂载、MiniMax 视频生成与理解；默认开启。修改后重载插件或重启 DSH，Kimi 既有会话在工具表变化后会重建一次前缀缓存。'),
-
-  // Agent Teams 策略段守卫：把内置 `team:policy` 段从 system 里摘掉，改成切开关时
-  // 尾部投递一次，避免中途开团队协作时整段前缀重建。默认开启——它不增加任何工具
-  // 声明面，只在真正切开关时才起作用。volatile：下一步就生效。
+    .description('注册插件内置的图片与视频工具（修改后需重载插件生效）。'),
   teamPolicyCacheGuard: z.boolean().default(true).volatile()
-    .description('把内置 Agent Teams 的 team:policy 段从 system prompt 摘掉，改为开关切换时以尾部用户消息投递一次，避免中途开团队协作时刷掉整段前缀缓存；默认开启。'),
-
-  // Timeline 规划段守卫：timeline 把 language/uiLanguage 拼进 system 段，把 taskPrompt
-  // 挂在 timeline_tasks 的描述 getter 上，两者都是 volatile。Kimi/MiniMax 没有
-  // systemPromptUpdate 的 in-history 形态，一改就是整段重建。默认开启：没装 timeline 时
-  // 这条守卫完全静默（只有一次「没见过该段」的 warn）。
+    .description('保持 Agent Teams 系统提示稳定，切换团队开关时不重建前缀缓存。'),
   timelineCacheGuard: z.boolean().default(true).volatile()
-    .description('冻结实验性 Timeline 插件的规划段与任务工具描述，变更改为尾部用户消息投递，避免中途改语言/写作提示词时刷掉 Kimi/MiniMax 的整段前缀缓存；默认开启。'),
-
-  // DeepSeek V4.1 Flash 专项优化（arXiv:2609.19969 & 1017）：严格按模型门控，
-  // 零影响其它线路与其它模型；volatile 活引用，关闭后下一步立刻旁路。
+    .description('保持 Timeline 系统提示与工具描述稳定，避免中途变更使前缀缓存失效。'),
   deepseekV41FlashOptimization: z.boolean().default(true).volatile()
-    .description('仅针对 DeepSeek V4.1 Flash（含 1017 与官方 deepseek-flash）的专项优化：静态思考与可读性排版纪律、128-token 尾部状态锚、入库前观测头、无损推理坍塌守卫与 50x 前缀缓存保护；不影响其它线路与模型。默认开启。'),
-
-  // 主力开源模型运行时专项优化（Kimi K3/K3.1、GLM-5.x、DeepSeek-V4 Pro/Flash、MiniMax M3/M3.1、
-  // Qwen 3.5–4、Step 3.5–5、MiMo V2.6、Ling 3.1、Hunyuan Hy4、LongCat 2.0、Ollama 本地推理）：
-  // 严格按模型门控，零影响闭源模型；volatile 活引用，关闭后下一步立刻旁路。
+    .description('启用 DeepSeek V4.1 Flash 的上下文稳定性与推理防坍塌优化。'),
   openModelsOptimization: z.boolean().default(true).volatile()
-    .description('面向各大开源模型（Kimi K3/K3.1、GLM-5.x、DeepSeek-V4 Pro/Flash、MiniMax M3/M3.1、Qwen 3.5–4、Step 3.5–5、MiMo V2.6、Ling 3.1、Hunyuan Hy4、LongCat 2.0 等）的专项运行时优化：尾部纪律、零改前缀状态锚、入库前观测头、Kimi 只读空转提醒与 ESC ANSI 清洗、跨线路前缀缓存守护与无损推理坍塌熔断；绝不影响闭源模型。默认开启。'),
-
-  // 结果预览的开关同样声明在这里、实现挂在本插件的 apply 里（不像进展更新那样
-  // 有独立 loader 行）。volatile 的选择与上面三个一致：设置卡保存时直接提交进
-  // 正在运行的实例，不重挂任何行。
+    .description('启用开源模型家族的运行时稳定性与前缀缓存保护（不影响闭源模型）。'),
   cacheWarmup: z.boolean().default(true).volatile()
     .description(CACHE_WARMUP_SETTING_DESCRIPTION),
   cacheWarmupProviders: z.array(z.string()).default(CONTROLLED_PROVIDERS as unknown as string[]).volatile()
-    .description('允许产生新结果预览的线路；默认覆盖全部受控线路，空数组表示关闭所有新投影。'),
-  // 会话标题的额外一次模型请求由 DSH 内置 title provider 在首条消息后发出，走会话当前线路，
-  // 花的是同一条额度。这里在本插件自有线路上一律短路掉这次请求（不触达适配器、零消耗），
-  // 标题回退到 DSH 的确定性首条消息标题。volatile：设置卡保存即生效，无需重挂。
+    .description('启用大结果预览投影的线路列表；留空数组表示全部关闭。'),
   skipSessionTitle: z.boolean().default(true).volatile()
-    .description('在本插件自有线路上跳过自动会话标题的额外一次模型请求（不触达模型、零消耗），标题改用首条消息的确定性回退标题；默认开启。'),
+    .description('跳过本插件线路的自动会话标题模型请求，改用首条消息作为标题。'),
   cacheWarmupRetrieval: z.boolean().default(true).volatile()
     .description(CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION),
   cacheWaitWarmup: z.boolean().default(true).volatile()
     .description(CACHE_WAIT_WARMUP_SETTING_DESCRIPTION),
-  // 多账号轮换与缓存亲和的取舍：热账号能直接继承前缀，额度更足的账号能让会话跑得
-  // 更久。默认开启并要求剩余额度不低于 20%，把「为了省一次 prefix 而把一个窗口提前
-  // 打穿」这条路堵住；volatile，设置保存即生效，无需重挂。
   cacheAffinity: z.boolean().default(true).volatile()
     .description(CACHE_AFFINITY_SETTING_DESCRIPTION),
   promptCacheOverrides: z.object({}).default({})
-    .description('按线路覆盖缓存语义（ttlMs、scope、coldStart、affinity、waitWarmup 等）；仅用于已有证据的部署，修改后重载插件。'),
-  // `min(1)` on purpose: this is a deadline, not a switch. There is no "off".
-  codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
-  // 号池存储后端。默认 `keyring`：桌面照旧走平台存储（DPAPI / 钥匙串 / Secret
-  // Service），现有安装零变化；没有桌面密钥环的服务器要显式选 `credentials`，
-  // 把号池放进 DSH 自己的凭据库——原先这里在 Linux 上硬编码 Secret Service，
-  // 那种主机上令牌换成功了却存不下来。设置卡把选择写进插件自己的存储文档，
-  // 并优先于这里的值。
+    .description('按线路覆盖缓存策略参数（修改后需重载插件生效）。'),
+  codexStreamIdleTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).step(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS)
+    .description('Codex 流式请求空闲超时毫秒数。'),
   poolStorage: z.union([z.const('keyring'), z.const('credentials')]).default('keyring')
-    .description('号池存储后端：keyring（默认，桌面平台的系统密钥环）或 credentials（DSH 凭据库，服务器推荐）。'),
+    .description('账号池存储后端：keyring 使用系统密钥环，credentials 使用 DSH 凭据库（无桌面服务器推荐）。'),
 })
 
 export const inject = ['webServer', 'llm', 'attachments', 'tools', 'settings', 'loader']
@@ -2510,7 +2471,7 @@ export {
   relayProbeEnvFile,
   relayProbeEnvValue,
   relayProbeLogPath,
-} from './host/relay-probe.ts'
+} from './host/infra/network/relay-probe.ts'
 export type {
   AgentsLookup,
   ProbeAgent,
@@ -2519,7 +2480,7 @@ export type {
   RelayProbeContext,
   RelayProbeOptions,
   RelayProbeSink,
-} from './host/relay-probe.ts'
+} from './host/infra/network/relay-probe.ts'
 export {
   DEFAULT_GUARD_OPTIONS,
   RESUME_HINT,
@@ -2527,7 +2488,7 @@ export {
   collapseScore,
   installReasoningCollapseGuard,
   resolveGuardOptions,
-} from './host/reasoning-collapse-guard/index.ts'
+} from './host/runtime/reasoning-collapse-guard/index.ts'
 export {
   ANCHOR_CONSECUTIVE_ERROR_THRESHOLD,
   ANCHOR_CONTEXT_WATERMARKS,
@@ -2555,14 +2516,14 @@ export {
   readSessionRoute,
   renderStateAnchorText,
   resolveDeepSeekV41FlashOptimizationEnabled,
-} from './host/deepseek-v41-flash/index.ts'
+} from './host/runtime/deepseek-v41-flash/index.ts'
 export type {
   DeepSeekV41FlashConfigFields,
   DeepSeekV41FlashOptimizationHandle,
   DeepSeekV41FlashOptimizationOptions,
   DetectedRoute,
   StateAnchorOptions,
-} from './host/deepseek-v41-flash/index.ts'
+} from './host/runtime/deepseek-v41-flash/index.ts'
 export {
   OPEN_MODEL_ANCHOR_PREFIX,
   OPEN_MODEL_ANCHOR_SOURCE_KIND,
@@ -2592,7 +2553,7 @@ export {
   renderOpenModelStateAnchorText,
   resolveOpenModelsOptimizationEnabled,
   stripEscAnsiSequences,
-} from './host/open-models/index.ts'
+} from './host/runtime/open-models/index.ts'
 export type {
   AttentionArchitectureCamp,
   OpenModelDisciplineOptions,
@@ -2603,7 +2564,7 @@ export type {
   OpenModelsOptimizationConfigFields,
   OpenModelsOptimizationHandle,
   OpenModelsOptimizationOptions,
-} from './host/open-models/index.ts'
+} from './host/runtime/open-models/index.ts'
 export type {
   GuardAgentLike,
   GuardChunk,
@@ -2611,8 +2572,8 @@ export type {
   GuardStreamOptions,
   ReasoningCollapseContext,
   ResolvedGuardOptions,
-} from './host/reasoning-collapse-guard/index.ts'
-export { ProxyManager, detectSystemProxy } from './host/proxy-manager.ts'
+} from './host/runtime/reasoning-collapse-guard/index.ts'
+export { ProxyManager, detectSystemProxy } from './host/infra/network/proxy-manager.ts'
 export {
   DEFAULT_PARENT_FORK_TOOLS,
   DEFAULT_SUBAGENT_INHERIT_TOOLS,
@@ -2636,7 +2597,7 @@ export {
   validateAuthorizationScope,
   validateDelegationToolNames,
   validateInheritToolNames,
-} from './host/subagent-model-authorization.ts'
+} from './host/runtime/guards/subagent-model-authorization.ts'
 export {
   auditChildRoutes,
   auditedRoutesOf,
@@ -2644,7 +2605,7 @@ export {
   effectiveRouteOf,
   readChildDescriptor,
   violationText,
-} from './host/subagent-route-audit.ts'
+} from './host/runtime/guards/subagent-route-audit.ts'
 export type {
   AuditChildRoutesOptions,
   AuditedRoute,
@@ -2652,29 +2613,29 @@ export type {
   AuditedSessions,
   ChildRouteFinding,
   RouteViolation,
-} from './host/subagent-route-audit.ts'
-export { OAuthService } from './host/oauth-service.ts'
+} from './host/runtime/guards/subagent-route-audit.ts'
+export { OAuthService } from './host/providers/codex-chatgpt/oauth-service.ts'
 export {
   CodexAccountPool,
   codexPoolPath,
   parseCodexPoolData,
   type CodexPoolAccount,
   type CodexTokenRefresher,
-} from './host/codex-account-pool.ts'
+} from './host/providers/codex-chatgpt/codex-account-pool.ts'
 export { AccountPoolCore, normalizeRotationStrategy } from './host/common/account-pool.ts'
 export { dshHomeDir } from './host/common/home.ts'
-export { CodexChatGptAdapter } from './host/adapter.ts'
-export { createCodexImageTool } from './host/codex-images.ts'
-export { createCodexSearchProvider } from './host/codex-search.ts'
-export { createCodexFetchProvider } from './host/codex-fetch.ts'
-export { SearchProviderSwitcher, type SearchProviderSwitcherStatus } from './host/search-provider-switcher.ts'
-export { ResponsesClient, parseResponsesStream } from './host/responses-client.ts'
-export { UsageService, mapCodexUsage, parseCodexUsage } from './host/usage-service.ts'
-export { createPlatformTokenStore } from './host/platform-token-store.ts'
-export { MacKeychainTokenStore } from './host/token-store-macos.ts'
-export { LinuxFileTokenStore } from './host/token-store-linux.ts'
-export { WindowsDpapiTokenStore } from './host/token-store-windows.ts'
-export type { TokenStore, StoredOAuthCredentials } from './host/token-store.ts'
+export { CodexChatGptAdapter } from './host/providers/codex-chatgpt/adapter.ts'
+export { createCodexImageTool } from './host/providers/codex-chatgpt/codex-images.ts'
+export { createCodexSearchProvider } from './host/providers/codex-chatgpt/codex-search.ts'
+export { createCodexFetchProvider } from './host/providers/codex-chatgpt/codex-fetch.ts'
+export { SearchProviderSwitcher, type SearchProviderSwitcherStatus } from './host/infra/network/search-provider-switcher.ts'
+export { ResponsesClient, parseResponsesStream } from './host/providers/codex-chatgpt/responses-client.ts'
+export { UsageService, mapCodexUsage, parseCodexUsage } from './host/providers/codex-chatgpt/usage-service.ts'
+export { createPlatformTokenStore } from './host/infra/storage/platform-token-store.ts'
+export { MacKeychainTokenStore } from './host/infra/storage/token-store-macos.ts'
+export { LinuxFileTokenStore } from './host/infra/storage/token-store-linux.ts'
+export { WindowsDpapiTokenStore } from './host/infra/storage/token-store-windows.ts'
+export type { TokenStore, StoredOAuthCredentials } from './host/infra/storage/token-store.ts'
 
 export {
   CommandCodeAccountPool,
@@ -2683,28 +2644,28 @@ export {
   parseCommandCodePoolData,
   type CommandCodePoolAccount,
   type CommandCodeAccountSummaryDto,
-} from './host/command-code/account-pool.ts'
-export { CommandCodeAdapter } from './host/command-code/adapter.ts'
+} from './host/providers/command-code/account-pool.ts'
+export { CommandCodeAdapter } from './host/providers/command-code/adapter.ts'
 export {
   FileCredentialStore as CommandCodeCredentialStore,
   FileModelSettingsStore as CommandCodeModelSettingsStore,
   credentialPath as commandCodeCredentialPath,
   modelSettingsPath as commandCodeModelSettingsPath,
   registerCommandCodePreferenceStore,
-} from './host/command-code/token-store.ts'
+} from './host/providers/command-code/token-store.ts'
 export {
   beginWebLogin as startCommandCodeLogin,
   getWebLoginStatus as getCommandCodeLoginStatus,
   saveApiKey as saveCommandCodeApiKey,
-} from './host/command-code/oauth.ts'
-export { getCommandCodeWebStatus, registerCommandCodeRoutes } from './host/command-code/routes.ts'
+} from './host/providers/command-code/oauth.ts'
+export { getCommandCodeWebStatus, registerCommandCodeRoutes } from './host/providers/command-code/routes.ts'
 export {
   fetchAccountQuota as fetchCommandCodeQuota,
   clearCachedQuota as clearCommandCodeQuota,
   getCachedQuota as getCommandCodeQuota,
   loadProviderModels as loadCommandCodeModels,
-} from './host/command-code/client.ts'
-export { KimiCodeAdapter, classifyKimiFailure, KIMI_CODE_RETRY_POLICY_CONFIG } from './host/kimi-code/adapter.ts'
+} from './host/providers/command-code/client.ts'
+export { KimiCodeAdapter, classifyKimiFailure, KIMI_CODE_RETRY_POLICY_CONFIG } from './host/providers/kimi-code/adapter.ts'
 export {
   FileCredentialStore as KimiCodeCredentialStore,
   FileModelSettingsStore as KimiCodeModelSettingsStore,
@@ -2712,28 +2673,28 @@ export {
   modelSettingsPath as kimiCodeModelSettingsPath,
   registerKimiCodePreferenceStore,
   resolveRegion as resolveKimiCodeRegion,
-} from './host/kimi-code/token-store.ts'
+} from './host/providers/kimi-code/token-store.ts'
 export {
   beginWebLogin as beginKimiCodeLogin,
   ensureAccessToken as ensureKimiCodeAccessToken,
   getWebLoginStatus as getKimiCodeLoginStatus,
   refreshAccessToken as refreshKimiCodeToken,
   requestDeviceAuthorization as requestKimiCodeDeviceAuthorization,
-} from './host/kimi-code/oauth.ts'
+} from './host/providers/kimi-code/oauth.ts'
 export {
   fetchAccountQuota as fetchKimiCodeQuota,
   fetchUserInfo as fetchKimiCodeUserInfo,
   loadProviderModels as loadKimiCodeModels,
   clearCachedQuota as clearKimiCodeQuota,
   getCachedQuota as getKimiCodeQuota,
-} from './host/kimi-code/client.ts'
-export { getKimiCodeWebStatus, registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
-export { MinimaxCodeCheckinService } from './host/minimax-code/checkin.ts'
+} from './host/providers/kimi-code/client.ts'
+export { getKimiCodeWebStatus, registerKimiCodeRoutes } from './host/providers/kimi-code/routes.ts'
+export { MinimaxCodeCheckinService } from './host/providers/minimax-code/checkin.ts'
 export {
   ClaudeAdapter,
   codeForFailure as claudeCodeForFailure,
   toLlmError as claudeToLlmError,
-} from './host/claude/adapter.ts'
+} from './host/providers/claude/adapter.ts'
 export {
   ClaudeAccountPool,
   claudePoolPath,
@@ -2742,7 +2703,7 @@ export {
   isAdoptedPoolCredential,
   type ClaudePoolAccount,
   type ClaudeAccountSummaryDto,
-} from './host/claude/account-pool.ts'
+} from './host/providers/claude/account-pool.ts'
 export {
   FileCredentialStore as ClaudeCredentialStore,
   FileModelSettingsStore as ClaudeModelSettingsStore,
@@ -2754,7 +2715,7 @@ export {
   type ClaudeCredentials,
   type ClaudeModelSettings,
   type ClaudePreferenceStore,
-} from './host/claude/token-store.ts'
+} from './host/providers/claude/token-store.ts'
 export {
   beginLogin as beginClaudeLogin,
   cancelLogin as cancelClaudeLogin,
@@ -2763,7 +2724,7 @@ export {
   refreshAccessToken as refreshClaudeToken,
   resolveLoginInput as resolveClaudeLoginInput,
   submitLoginInput as submitClaudeLoginInput,
-} from './host/claude/oauth.ts'
+} from './host/providers/claude/oauth.ts'
 export {
   claudeCodeCredentialPaths,
   claudeCodeCredentialPresence,
@@ -2771,7 +2732,7 @@ export {
   isAdoptedCredentialExpired,
   readClaudeCodeCredentials,
   ADOPTED_CREDENTIAL_EXPIRED_HINT as CLAUDE_ADOPTED_CREDENTIAL_EXPIRED_HINT,
-} from './host/claude/adopt.ts'
+} from './host/providers/claude/adopt.ts'
 export {
   clearCachedCatalog as clearClaudeCatalog,
   clearCachedQuota as clearClaudeQuota,
@@ -2781,14 +2742,14 @@ export {
   loadCatalog as loadClaudeCatalog,
   parseUsagePayload as parseClaudeUsagePayload,
   probeConnection as probeClaudeConnection,
-} from './host/claude/client.ts'
+} from './host/providers/claude/client.ts'
 export {
   getClaudeWebStatus,
   registerClaudeRoutes,
   ROUTE_PREFIX as CLAUDE_ROUTE_PREFIX,
   buildClaudeModelOptions as buildClaudeModelOptions,
   resolveEnabledModelIds as resolveClaudeEnabledModelIds,
-} from './host/claude/routes.ts'
+} from './host/providers/claude/routes.ts'
 export {
   CLAUDE_MODELS,
   CLAUDE_MODEL_IDS,
@@ -2803,7 +2764,7 @@ export {
   maxOutputTokensFor as claudeMaxOutputTokens,
   resolveClaudeModel,
   type ClaudeModelEntry,
-} from './host/claude/model-catalog.ts'
+} from './host/providers/claude/model-catalog.ts'
 export {
   API_BASE as CLAUDE_API_BASE,
   MESSAGES_PATH as CLAUDE_MESSAGES_PATH,
@@ -2812,7 +2773,7 @@ export {
   QUOTA_CACHE_TTL_MS as CLAUDE_QUOTA_CACHE_TTL_MS,
   claudeCliVersion,
   setClaudeCliVersion,
-} from './host/claude/types.ts'
+} from './host/providers/claude/types.ts'
 export {
   CLAUDE_REASONING_EFFORTS,
   isClaudeReasoningEffort,
@@ -2830,11 +2791,11 @@ export {
   kimiCodePoolPath,
   parseKimiCodePoolData,
   type KimiCodePoolAccount,
-} from './host/kimi-code/account-pool.ts'
+} from './host/providers/kimi-code/account-pool.ts'
 export {
   KIMI_CODE_MODELS,
   kimiCodeModelDef,
-} from './host/kimi-code/model-catalog.ts'
+} from './host/providers/kimi-code/model-catalog.ts'
 // --- GLM（ZCode 账号）-------------------------------------------------------------
 export {
   GlmCodingPlanAdapter,
@@ -2844,7 +2805,7 @@ export {
   glmCooldownDecision,
   readGlmResetAt,
   type GlmRequestPlan,
-} from './host/glm-coding-plan/adapter.ts'
+} from './host/providers/glm-coding-plan/adapter.ts'
 export {
   GlmAdoptedCredentialRefreshError,
   GlmCodingPlanAccountPool,
@@ -2856,7 +2817,7 @@ export {
   type GlmCodingPlanAccountSummary,
   type GlmCodingPlanPoolAccount,
   type GlmCodingPlanPoolStatus,
-} from './host/glm-coding-plan/account-pool.ts'
+} from './host/providers/glm-coding-plan/account-pool.ts'
 export {
   GLM_CODING_PLAN_PREFERENCES_NAMESPACE,
   GlmCodingPlanCredentialStore,
@@ -2874,7 +2835,7 @@ export {
   type GlmCodingPlanModelSettings,
   type GlmCodingPlanPreferenceStore,
   type GlmCodingPlanSettingsPatch,
-} from './host/glm-coding-plan/token-store.ts'
+} from './host/providers/glm-coding-plan/token-store.ts'
 export {
   getGlmCodingPlanStatus,
   glmCatalogSize,
@@ -2883,7 +2844,7 @@ export {
   registerGlmCodingPlanRoutes,
   type GlmCodingPlanRouteOptions,
   type GlmCodingPlanSettingsSource,
-} from './host/glm-coding-plan/routes.ts'
+} from './host/providers/glm-coding-plan/routes.ts'
 export {
   GLM_MODEL_CATALOG,
   GLM_MODEL_IDS,
@@ -2892,7 +2853,7 @@ export {
   modelsForRegion as glmCodingPlanModelsForRegion,
   resolveGlmModel,
   type GlmModelEntry as GlmCodingPlanModelEntry,
-} from './host/glm-coding-plan/model-catalog.ts'
+} from './host/providers/glm-coding-plan/model-catalog.ts'
 export {
   PROVIDER_ID as GLM_CODING_PLAN_ROUTE_PROVIDER_ID,
   PROVIDER_NAME as GLM_CODING_PLAN_ROUTE_PROVIDER_NAME,
@@ -2901,21 +2862,21 @@ export {
   convergeGlmEffort,
   isGlmReasoningEffort,
   normalizeRegion as normalizeGlmCodingPlanRegion,
-} from './host/glm-coding-plan/types.ts'
+} from './host/providers/glm-coding-plan/types.ts'
 export {
   adoptZcodeSignIn as adoptGlmZcodeSignIn,
   isAdoptedZcodeCredential as isAdoptedGlmZcodeCredential,
   zcodeCredentialsPath,
-} from './host/glm-coding-plan/adopt.ts'
+} from './host/providers/glm-coding-plan/adopt.ts'
 export {
   fetchGlmQuota,
   getCachedQuota as getCachedGlmCodingPlanQuota,
   loadCatalog as loadGlmCodingPlanCatalog,
   verifyCodingPlanKey as verifyGlmCodingPlanKey,
-} from './host/glm-coding-plan/client.ts'
+} from './host/providers/glm-coding-plan/client.ts'
 
 // --- MiniMax Code -----------------------------------------------------------------
-export { MinimaxCodeAdapter, classifyMinimaxFailure, MINIMAX_CODE_RETRY_POLICY_CONFIG } from './host/minimax-code/adapter.ts'
+export { MinimaxCodeAdapter, classifyMinimaxFailure, MINIMAX_CODE_RETRY_POLICY_CONFIG } from './host/providers/minimax-code/adapter.ts'
 export {
   MinimaxCodeAccountPool,
   minimaxCodePoolPath,
@@ -2925,7 +2886,7 @@ export {
   createMinimaxCodeAccountsHandler,
   type MinimaxCodePoolAccount,
   type MinimaxCodeAccountSummaryDto,
-} from './host/minimax-code/account-pool.ts'
+} from './host/providers/minimax-code/account-pool.ts'
 export {
   MinimaxCodeCredentialStore,
   MinimaxCodeModelSettingsStore,
@@ -2941,7 +2902,7 @@ export {
   type MinimaxCodeCredentials,
   type MinimaxCodeModelSettings,
   type MinimaxCodePreferenceStore,
-} from './host/minimax-code/token-store.ts'
+} from './host/providers/minimax-code/token-store.ts'
 export {
   accountFromCredentials as minimaxCodeAccountFromCredentials,
   beginWebLogin as beginMinimaxCodeLogin,
@@ -2957,7 +2918,7 @@ export {
   createPkcePair as createMinimaxCodePkcePair,
   type DeviceAuthorization as MinimaxCodeDeviceAuthorization,
   type MinimaxToken,
-} from './host/minimax-code/oauth.ts'
+} from './host/providers/minimax-code/oauth.ts'
 export {
   PROBE_MODEL as MINIMAX_CODE_PROBE_MODEL,
   catalogSize as minimaxCodeCatalogSize,
@@ -2976,7 +2937,7 @@ export {
   resolveQuotaCounts as resolveMinimaxCodeQuotaCounts,
   type MinimaxProbeResult,
   type MinimaxUsage,
-} from './host/minimax-code/client.ts'
+} from './host/providers/minimax-code/client.ts'
 export {
   MINIMAX_CODE_MODELS,
   buildMinimaxCodeModelOptions,
@@ -2990,7 +2951,7 @@ export {
   resolveMinimaxCodeModelId,
   type MinimaxCodeCatalogModel,
   type MinimaxCodeThinkingMode,
-} from './host/minimax-code/model-catalog.ts'
+} from './host/providers/minimax-code/model-catalog.ts'
 export {
   assertRequestBodyFits as assertMinimaxCodeBodyFits,
   assertStreamComplete as assertMinimaxCodeStreamComplete,
@@ -3004,12 +2965,12 @@ export {
   processMinimaxStreamLine,
   outputConfigFor as minimaxCodeOutputConfig,
   type MinimaxStreamState,
-} from './host/minimax-code/mapper.ts'
+} from './host/providers/minimax-code/mapper.ts'
 export {
   getMinimaxCodeWebStatus,
   registerMinimaxCodeRoutes,
   subPathOf as minimaxCodeSubPathOf,
-} from './host/minimax-code/routes.ts'
+} from './host/providers/minimax-code/routes.ts'
 export {
   AGENT_LLM_PREFIX as MINIMAX_CODE_AGENT_LLM_PREFIX,
   MESSAGES_PATH as MINIMAX_CODE_MESSAGES_PATH,
@@ -3021,7 +2982,7 @@ export {
   tokenPlanRemainsUrl as minimaxCodeTokenPlanRemainsUrl,
   messagesUrl as minimaxCodeMessagesUrl,
   redactToken as redactMinimaxCodeToken,
-} from './host/minimax-code/types.ts'
+} from './host/providers/minimax-code/types.ts'
 export {
   MINIMAX_CODE_PROVIDER_ID,
   MINIMAX_CODE_PROVIDER_NAME,
@@ -3050,7 +3011,7 @@ export {
   stepCodeModelCatalogFrom,
   type StepCodeAdapterOptions,
   type StepCodePickedCredential,
-} from './host/step-code/adapter.ts'
+} from './host/providers/step-code/adapter.ts'
 export {
   StepCodeAccountPool,
   StepCodeCredentialRefreshError,
@@ -3061,7 +3022,7 @@ export {
   stepCodePoolStatusSlice,
   type StepCodePoolAccount,
   type StepCodePoolStatus,
-} from './host/step-code/account-pool.ts'
+} from './host/providers/step-code/account-pool.ts'
 export {
   getStepCodeStatus,
   registerStepCodeRoutes,
@@ -3071,7 +3032,7 @@ export {
   type StepCodeRouteOptions,
   type StepCodeSettingsSource,
   type StepCodeStatusSources,
-} from './host/step-code/routes.ts'
+} from './host/providers/step-code/routes.ts'
 export {
   StepCodeCredentialStore,
   StepCodeModelSettingsStore,
@@ -3085,7 +3046,7 @@ export {
   type StepCodePreferenceStore,
   type StepCodeQuotaCredential,
   type StepCodeSettingsPatch,
-} from './host/step-code/token-store.ts'
+} from './host/providers/step-code/token-store.ts'
 export {
   STEP_CODE_PROVIDER_ID,
   STEP_CODE_PROVIDER_NAME,
@@ -3106,12 +3067,12 @@ export {
 export {
   ClinePassAdapter,
   type ClinePassAdapterOptions,
-} from './host/cline-pass/adapter.ts'
+} from './host/providers/cline-pass/adapter.ts'
 export {
   ClinePassEngine,
   type ClinePassAccount,
   type ClinePassEngineOptions,
-} from './host/cline-pass/engine.ts'
+} from './host/providers/cline-pass/engine.ts'
 export {
   CLINE_PASS_API_KEY_ENV,
   ClinePassAccountPool,
@@ -3119,13 +3080,13 @@ export {
   clinePassPoolPath,
   parseClinePassPoolData,
   type ClinePassPoolAccount,
-} from './host/cline-pass/account-pool.ts'
+} from './host/providers/cline-pass/account-pool.ts'
 export {
   CLINE_PASS_ROUTES,
   getClinePassWebStatus,
   registerClinePassRoutes,
   type ClinePassRouteOptions,
-} from './host/cline-pass/routes.ts'
+} from './host/providers/cline-pass/routes.ts'
 export {
   ClinePassModelSettingsStore,
   FileCredentialStore as ClinePassCredentialStore,
@@ -3137,15 +3098,15 @@ export {
   type ClinePassCredentials,
   type ClinePassModelSettings,
   type ClinePassPreferenceStore,
-} from './host/cline-pass/token-store.ts'
+} from './host/providers/cline-pass/token-store.ts'
 export {
   createClinePassLine,
   clinePassKnownModelIds,
   clinePassVisibleModelIds,
   type ClinePassLine,
   type ClinePassLineOptions,
-} from './host/cline-pass/line.ts'
-export { createClinePassStore, type ClinePassStore } from './host/cline-pass/store.ts'
+} from './host/providers/cline-pass/line.ts'
+export { createClinePassStore, type ClinePassStore } from './host/providers/cline-pass/store.ts'
 export {
   chatCompletion as clinePassChatCompletion,
   chatURL as clinePassChatURL,
@@ -3157,7 +3118,7 @@ export {
   trimBase as trimClinePassBase,
   type ClinePassHttpResult,
   type ClinePassRawUsageLimit,
-} from './host/cline-pass/client.ts'
+} from './host/providers/cline-pass/client.ts'
 export {
   buildClinePassBody,
   mapFinishReason,
@@ -3169,11 +3130,11 @@ export {
   translate,
   type ClinePassWireBody,
   type ClinePassWireMessage,
-} from './host/cline-pass/mapper.ts'
+} from './host/providers/cline-pass/mapper.ts'
 export {
   parseRouting,
   type RoutingFacts,
-} from './host/cline-pass/protocol.ts'
+} from './host/providers/cline-pass/protocol.ts'
 export {
   DEFAULT_BASE_URL as CLINE_PASS_DEFAULT_BASE_URL,
   DEFAULT_MODELS as CLINE_PASS_DEFAULT_MODELS,
@@ -3185,7 +3146,7 @@ export {
   type ClinePassModelInfo,
   type ClinePassModelMeta,
   type ClinePassReasoningEffort,
-} from './host/cline-pass/types.ts'
+} from './host/providers/cline-pass/types.ts'
 export {
   CLINE_PASS_PROVIDER_ID as CLINE_PASS_ROUTE_PROVIDER_ID,
   CLINE_PASS_PROVIDER_NAME as CLINE_PASS_ROUTE_PROVIDER_NAME,
@@ -3218,7 +3179,7 @@ export {
   rememberQoderCacheUsage,
   type QoderAdapterOptions,
   type QoderPickedCredential,
-} from './host/qoder/adapter.ts'
+} from './host/providers/qoder/adapter.ts'
 export {
   QoderAccountPool,
   qoderPoolIdentity,
@@ -3229,7 +3190,7 @@ export {
   qoderRefreshFailureStatus,
   type QoderPoolAccount,
   type QoderPoolStatus,
-} from './host/qoder/account-pool.ts'
+} from './host/providers/qoder/account-pool.ts'
 export {
   getQoderStatus,
   qoderSettingsSource,
@@ -3240,7 +3201,7 @@ export {
   type QoderRouteOptions,
   type QoderSettingsSource,
   type QoderStatusSources,
-} from './host/qoder/routes.ts'
+} from './host/providers/qoder/routes.ts'
 export {
   QoderCredentialStore,
   QoderModelSettingsStore,
@@ -3254,7 +3215,7 @@ export {
   type QoderModelSettings,
   type QoderPreferenceStore,
   type QoderSettingsPatch,
-} from './host/qoder/token-store.ts'
+} from './host/providers/qoder/token-store.ts'
 export {
   QODER_PROVIDER_ID,
   QODER_PROVIDER_NAME,
@@ -3275,7 +3236,7 @@ export {
   OpenDesignAdapter,
   REASONING_EFFORT_IDS as OPENDESIGN_REASONING_EFFORT_IDS,
   type OpenDesignAdapterOptions,
-} from './host/opendesign/adapter.ts'
+} from './host/providers/opendesign/adapter.ts'
 export {
   OpenDesignAccountPool,
   OPENDESIGN_API_KEY_ENV,
@@ -3285,11 +3246,11 @@ export {
   type OpenDesignAccountPoolOptions,
   type OpenDesignPoolAccount,
   type OpenDesignPoolStatusDto,
-} from './host/opendesign/account-pool.ts'
+} from './host/providers/opendesign/account-pool.ts'
 export {
   resolveModelInfo as resolveOpenDesignModelInfo,
   resolveOutputBudget as resolveOpenDesignOutputBudget,
-} from './host/opendesign/catalog.ts'
+} from './host/providers/opendesign/catalog.ts'
 export {
   chatURL as openDesignChatURL,
   fetchGatewayCatalog as fetchOpenDesignGatewayCatalog,
@@ -3301,7 +3262,7 @@ export {
   trimBase as trimOpenDesignBase,
   withTimeout as withOpenDesignTimeout,
   type OpenDesignHttpResult,
-} from './host/opendesign/client.ts'
+} from './host/providers/opendesign/client.ts'
 export {
   buildOpenDesignBody,
   isAuthenticationError as isOpenDesignAuthenticationError,
@@ -3315,13 +3276,13 @@ export {
   translate as translateOpenDesignStream,
   type OpenDesignWireBody,
   type OpenDesignWireMessage,
-} from './host/opendesign/mapper.ts'
+} from './host/providers/opendesign/mapper.ts'
 export {
   getOpenDesignWebStatus,
   OPENDESIGN_ROUTES,
   registerOpenDesignRoutes,
   type OpenDesignRouteOptions,
-} from './host/opendesign/routes.ts'
+} from './host/providers/opendesign/routes.ts'
 export {
   bearerFor as openDesignBearerFor,
   credentialPath as openDesignCredentialPath,
@@ -3337,14 +3298,14 @@ export {
   type OpenDesignCredentials,
   type OpenDesignModelSettings,
   type OpenDesignPreferenceStore,
-} from './host/opendesign/token-store.ts'
+} from './host/providers/opendesign/token-store.ts'
 export {
   createOpenDesignLine,
   openDesignKnownModelIds,
   openDesignVisibleModelIds,
   type OpenDesignLine,
   type OpenDesignLineOptions,
-} from './host/opendesign/line.ts'
+} from './host/providers/opendesign/line.ts'
 export {
   catalogEntry as openDesignCatalogEntry,
   DEFAULT_BASE_URL as OPENDESIGN_DEFAULT_BASE_URL,
@@ -3361,7 +3322,7 @@ export {
   type OpenDesignDiscoveredModel,
   type OpenDesignModelInfo,
   type OpenDesignModelMeta,
-} from './host/opendesign/types.ts'
+} from './host/providers/opendesign/types.ts'
 export {
   OPENDESIGN_CONSOLE_URL,
   OPENDESIGN_PROVIDER_ID,
@@ -3377,7 +3338,7 @@ export {
   type OpenDesignSettingsUpdateDto,
   type OpenDesignWebStatus,
 } from './shared/opendesign-contracts.ts'
-export { WorkBuddyAdapter, classifyFailure as classifyWorkBuddyFailure } from './host/workbuddy/adapter.ts'
+export { WorkBuddyAdapter, classifyFailure as classifyWorkBuddyFailure } from './host/providers/workbuddy/adapter.ts'
 export {
   FileCredentialStore as WorkBuddyCredentialStore,
   FileModelSettingsStore as WorkBuddyModelSettingsStore,
@@ -3385,7 +3346,7 @@ export {
   parseCredentialFile as parseWorkBuddyCredential,
   registerWorkBuddyPreferenceStore,
   scanCredentials as scanWorkBuddyCredentials,
-} from './host/workbuddy/token-store.ts'
+} from './host/providers/workbuddy/token-store.ts'
 export {
   fetchAccountQuota as fetchWorkBuddyQuota,
   clearCachedQuota as clearWorkBuddyQuota,
@@ -3395,32 +3356,32 @@ export {
   parseConfigModels as parseWorkBuddyConfigModels,
   refreshCredentials as refreshWorkBuddyCredentials,
   parseBilling as parseWorkBuddyBilling,
-} from './host/workbuddy/client.ts'
-export { getWorkBuddyWebStatus, registerWorkBuddyRoutes } from './host/workbuddy/routes.ts'
-export { WorkBuddyCheckinService } from './host/workbuddy/checkin.ts'
+} from './host/providers/workbuddy/client.ts'
+export { getWorkBuddyWebStatus, registerWorkBuddyRoutes } from './host/providers/workbuddy/routes.ts'
+export { WorkBuddyCheckinService } from './host/providers/workbuddy/checkin.ts'
 export {
   FALLBACK_MODELS as WORKBUDDY_MODELS,
   WORKBUDDY_MODEL_IDS,
   resolveWorkBuddyModel,
   modelsForRegion as workBuddyModelsForRegion,
-} from './host/workbuddy/model-catalog.ts'
-export { QianwenTokenPlanAdapter, readQianwenCacheHint } from './host/qianwen-token-plan/adapter.ts'
-export { registerQianwenTokenPlanRoutes, getQianwenTokenPlanWebStatus } from './host/qianwen-token-plan/routes.ts'
-export { QianwenCredentialStore, QianwenSettingsStore } from './host/qianwen-token-plan/token-store.ts'
-export { QIANWEN_MODEL_CATALOG } from './host/qianwen-token-plan/model-catalog.ts'
+} from './host/providers/workbuddy/model-catalog.ts'
+export { QianwenTokenPlanAdapter, readQianwenCacheHint } from './host/providers/qianwen-token-plan/adapter.ts'
+export { registerQianwenTokenPlanRoutes, getQianwenTokenPlanWebStatus } from './host/providers/qianwen-token-plan/routes.ts'
+export { QianwenCredentialStore, QianwenSettingsStore } from './host/providers/qianwen-token-plan/token-store.ts'
+export { QIANWEN_MODEL_CATALOG } from './host/providers/qianwen-token-plan/model-catalog.ts'
 export * from './shared/qianwen-token-plan-contracts.ts'
-export { RelayOneAdapter } from './host/relayone/adapter.ts'
-export { registerRelayOneRoutes, getRelayOneWebStatus, warmRelayOneCatalogOnStartup } from './host/relayone/routes.ts'
-export { RelayOneCredentialStore, RelayOneSettingsStore } from './host/relayone/token-store.ts'
-export { RelayOneCatalogManager } from './host/relayone/catalog-manager.ts'
-export { RelayOneQuotaReader } from './host/relayone/quota.ts'
+export { RelayOneAdapter } from './host/providers/relayone/adapter.ts'
+export { registerRelayOneRoutes, getRelayOneWebStatus, warmRelayOneCatalogOnStartup } from './host/providers/relayone/routes.ts'
+export { RelayOneCredentialStore, RelayOneSettingsStore } from './host/providers/relayone/token-store.ts'
+export { RelayOneCatalogManager } from './host/providers/relayone/catalog-manager.ts'
+export { RelayOneQuotaReader } from './host/providers/relayone/quota.ts'
 export * from './shared/relayone-contracts.ts'
-export { createRelayOneImageTool } from './host/relayone/image-tool.ts'
-export { createRelayOneVideoTool } from './host/relayone/video-tool.ts'
-export { ClaudeApiAdapter } from './host/claude-api/adapter.ts'
-export { registerClaudeApiRoutes, getClaudeApiWebStatus, warmClaudeApiCatalogOnStartup } from './host/claude-api/routes.ts'
-export { ClaudeApiCredentialStore, ClaudeApiSettingsStore } from './host/claude-api/token-store.ts'
-export { ClaudeApiCatalogManager } from './host/claude-api/catalog-manager.ts'
-export { ClaudeApiClientVersionResolver } from './host/claude-api/client-version.ts'
-export { ClaudeApiCompactionStore } from './host/claude-api/compaction-store.ts'
+export { createRelayOneImageTool } from './host/providers/relayone/image-tool.ts'
+export { createRelayOneVideoTool } from './host/providers/relayone/video-tool.ts'
+export { ClaudeApiAdapter } from './host/providers/claude-api/adapter.ts'
+export { registerClaudeApiRoutes, getClaudeApiWebStatus, warmClaudeApiCatalogOnStartup } from './host/providers/claude-api/routes.ts'
+export { ClaudeApiCredentialStore, ClaudeApiSettingsStore } from './host/providers/claude-api/token-store.ts'
+export { ClaudeApiCatalogManager } from './host/providers/claude-api/catalog-manager.ts'
+export { ClaudeApiClientVersionResolver } from './host/providers/claude-api/client-version.ts'
+export { ClaudeApiCompactionStore } from './host/providers/claude-api/compaction-store.ts'
 export * from './shared/claude-api-contracts.ts'

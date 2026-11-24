@@ -1,11 +1,11 @@
 import os from 'node:os'
 import path from 'node:path'
-import type { CredentialStore } from '../../src/host/token-store.ts'
+import type { CredentialStore } from '../../src/host/infra/storage/token-store.ts'
 import {
   FileCredentialStore,
   ManagedCredentialStore,
   type WorkBuddyCredentials,
-} from '../../src/host/workbuddy/token-store.ts'
+} from '../../src/host/providers/workbuddy/token-store.ts'
 
 type ManagedPayload = { version: 1; accounts: WorkBuddyCredentials[] }
 

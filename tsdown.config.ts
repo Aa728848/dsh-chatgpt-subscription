@@ -16,12 +16,12 @@ const host: UserConfig = {
   // 两个宿主入口：核心行与「进展更新」行（同包多组件，见 cordis.patch.yml）。
   entry: {
     index: 'src/index.ts',
-    'progress-updates': 'src/entry-progress-updates.ts',
-    'plan-mode-pipeline': 'src/entry-plan-mode-pipeline.ts',
-    'plan-mode': 'src/entry-plan-mode.ts',
-    'tool-result-pruner': 'src/entry-tool-result-pruner.ts',
-    codemode: 'src/entry-codemode.ts',
-    'aws-quick-mcp': 'src/entry-aws-quick-mcp.ts',
+    'progress-updates': 'src/entries/progress-updates.ts',
+    'plan-mode-pipeline': 'src/entries/plan-mode-pipeline.ts',
+    'plan-mode': 'src/entries/plan-mode.ts',
+    'tool-result-pruner': 'src/entries/tool-result-pruner.ts',
+    codemode: 'src/entries/codemode.ts',
+    'aws-quick-mcp': 'src/entries/aws-quick-mcp.ts',
   },
   outDir: 'lib',
   format: ['esm'],

@@ -1,0 +1,109 @@
+/**
+ * 「缓存预热」宿主集成的设置面。
+ *
+ * 这个文件**刻意不 import 核心**：设置解析必须在这个宿主上的任何状态都能跑——
+ * 包括结果投影因为任何原因不可用的时候，设置卡那一行仍然要读得回来。
+ *
+ * 字段是 volatile 的（见 `src/index.ts` 的 `Config`）：loader 把它解析成活引用交进
+ * `apply`，设置卡保存时就地写新值、**不**重挂插件行。所以
+ * {@link resolveCacheWarmupSettings} 必须每次用到都重新调，而不是在 apply 时求值
+ * 一次存下来——存下来的那一份会让开关在同一个会话里彻底失效。
+ *
+ * 语义上只有一条保守规则：开关**只影响之后产生的新结果**。已经进入历史的结果，
+ * 它的 preview 与 refId 是历史的一部分，不随开关、也不随存储过期而改变
+ * （见 `install.ts` 的 post-execute 说明）。
+ *
+ * @module dsh-chatgpt-subscription/host/cache-warmup/settings
+ */
+
+/**
+ * profile 里的设置字段名。
+ *
+ * 设置卡按这个键读写，改名等于让老配置整体失效；测试也用它拼配置对象，避免
+ * 「设置里叫 A、解析时读 B」这种只在线上才发现的错位。
+ */
+export const CACHE_WARMUP_SETTING = 'cacheWarmup'
+
+/** 检索型结果投影的独立开关（默认开启）。 */
+export const CACHE_WARMUP_RETRIEVAL_SETTING = 'cacheWarmupRetrieval'
+
+/** 设置卡与配置 Schema 共用的说明文案。 */
+export const CACHE_WARMUP_SETTING_DESCRIPTION =
+  '将超大工具输出转为按需补读的摘要预览，降低上下文占用（仅影响新产生的结果）。'
+
+export const CACHE_WARMUP_RETRIEVAL_SETTING_DESCRIPTION =
+  '将检索类大文件、网页和搜索输出转为大纲预览并按需补读（仅影响新产生的结果）。'
+
+/** 一次挂载读到的有效设置。 */
+export interface CacheWarmupSettings {
+  /** 总开关。关闭后新的日志类工具结果原样返回，已有结果与引用不动。 */
+  enabled: boolean
+  /** 检索型投影开关。独立于总开关，默认开启，只影响之后的新结果。 */
+  retrievalEnabled?: boolean
+  /** 允许产生新预览的线路；空数组表示全部关闭。 */
+  providers?: readonly string[]
+}
+
+/** 缺省设置由宿主注入 controlled provider 列表；独立使用时保持 Kimi 兼容。 */
+export const DEFAULT_CACHE_WARMUP_SETTINGS: CacheWarmupSettings = {
+  enabled: true,
+  retrievalEnabled: true,
+  providers: ['kimi-code'],
+}
+
+/**
+ * 设置字段在运行时可能是活引用（volatile）或普通值（手工构造的上下文、测试）。
+ *
+ * loader 把声明为 `volatile()` 的字段解析成一个 `{ get() }` 活引用，设置保存时
+ * 就地写新值并广播 `loader/volatile-update`，**不**重挂插件行；所以这里必须能
+ * 跟着引用读到当前值，而不是拿到一份快照。
+ */
+interface ConfigRef<T> {
+  /** 读取当前已提交的值。 */
+  get(): T | undefined
+}
+
+/** 一个配置字段：活引用或普通值。 */
+export type CacheWarmupConfigField<T> = ConfigRef<T> | T | undefined
+
+/** 主入口交给本模块的配置形状（只取本模块认识的那一个字段）。 */
+export interface CacheWarmupConfigFields {
+  /** 总开关字段。 */
+  cacheWarmup?: CacheWarmupConfigField<boolean>
+  /** 检索型投影的独立开关字段。 */
+  cacheWarmupRetrieval?: CacheWarmupConfigField<boolean>
+  /** 允许产生新预览的 provider 列表。 */
+  cacheWarmupProviders?: CacheWarmupConfigField<readonly string[]>
+}
+
+/**
+ * 读取一个配置字段，沿着 volatile 活引用取当前值。
+ * @param field - 字段本身。
+ * @returns 当前值，或字段缺失时的 undefined。
+ */
+export function readCacheWarmupConfigField<T>(field: CacheWarmupConfigField<T>): T | undefined {
+  if (field === undefined || field === null) return undefined
+  if (typeof field === 'object' && typeof (field as ConfigRef<T>).get === 'function') {
+    return (field as ConfigRef<T>).get()
+  }
+  return field as T
+}
+
+/**
+ * 解析一次读取的有效设置。
+ *
+ * 每次调用都重读活引用，因此设置保存后立刻生效（对**之后**的新结果生效；历史
+ * 结果不重新投影，见模块说明）。
+ * @param config - 主入口收到的插件配置（活引用或普通值）。
+ * @returns 生效的开关。
+ */
+export function resolveCacheWarmupSettings(config?: CacheWarmupConfigFields): CacheWarmupSettings {
+  const enabled = readCacheWarmupConfigField(config?.cacheWarmup)
+  const retrievalEnabled = readCacheWarmupConfigField(config?.cacheWarmupRetrieval)
+  const configuredProviders = readCacheWarmupConfigField(config?.cacheWarmupProviders)
+  const providers = configuredProviders === undefined
+    ? DEFAULT_CACHE_WARMUP_SETTINGS.providers
+    : [...new Set(configuredProviders.map(provider => provider.trim()).filter(provider => provider !== ''))]
+  // 两个开关都只有明确 false 才关闭；provider 空列表是有意的全关。
+  return { enabled: enabled !== false, retrievalEnabled: retrievalEnabled !== false, providers }
+}

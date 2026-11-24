@@ -1,0 +1,178 @@
+import { outputReservation } from '../../common/output-reservation.ts'
+import { orderReasoningEfforts } from '../../common/reasoning-efforts.ts'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
+import { CODEX_CHATGPT_PROVIDER_ID } from '../../../compat.ts'
+import { CODEX_MODEL_CATALOG, GPT_56_REASONING_EFFORTS, codexModelMaxTokens, codexModelUsesResponsesLite, isCodexReasoningEffort, reasoningEffortsForModel, resolveCodexCatalogEntry, type CodexWireCapabilities } from '../../../shared/model-catalog.ts'
+import type { CodexCatalogEntry } from './codex-catalog.ts'
+import type { SubscriptionPreferenceStore } from './preferences.ts'
+
+export const PROVIDER_ID = CODEX_CHATGPT_PROVIDER_ID
+export const PROVIDER_NAME = 'Codex（ChatGPT 订阅）' as const
+
+export function listCodexModels(
+  preferences?: SubscriptionPreferenceStore,
+  live?: readonly CodexCatalogEntry[],
+): LlmModelInfo[] {
+  const status = preferences?.status()
+  if (status?.enabled === false) return []
+  // A live listing is narrower than the shipped table by design: it names what
+  // this account may call. When it is empty the shipped table stands in, so a
+  // failed listing widens the picker instead of emptying it.
+  const listed = live !== undefined && live.length > 0
+    ? live.map(entry => ({ id: entry.id, name: entry.name, inputModalities: entry.inputModalities }))
+    : undefined
+  const visible = new Set(status?.visibleModelIds ?? (listed ?? shippedModels()).map(entry => entry.id))
+  const selected = (listed ?? shippedModels()).filter(entry => visible.has(entry.id))
+  // A listing must not be able to empty the picker. On several plans the
+  // subscription listing carries only the account's code-review slug
+  // (`codex-auto-review`) and no chat model at all, so honouring it literally
+  // would delete every model the user's own selection asks for. A listing that
+  // cannot satisfy the selection is not a narrower view of what this account
+  // may call, and the shipped table answers instead.
+  const source = listed === undefined || selected.length > 0
+    ? selected
+    : shippedModels().filter(entry => visible.has(entry.id))
+  return source.map((entry) => ({
+    provider: PROVIDER_ID,
+    id: entry.id,
+    name: entry.name,
+    inputModalities: [...entry.inputModalities],
+  }))
+}
+
+/** The shipped table as picker rows. */
+function shippedModels(): { id: string; name: string; inputModalities: readonly ('text' | 'image')[] }[] {
+  return CODEX_MODEL_CATALOG.map(entry => ({ id: entry.id, name: entry.name, inputModalities: entry.inputModalities }))
+}
+
+export function resolveCodexModel(
+  model: string,
+  preferences?: SubscriptionPreferenceStore,
+  live?: readonly CodexCatalogEntry[],
+): LlmResolvedModelInfo {
+  const entry = resolveCodexCatalogEntry(model)
+  const liveEntry = live?.find(candidate => candidate.id === model)
+  const status = preferences?.status()
+  // Any catalog model may carry an override; a model without one falls back to
+  // the value the catalog states, and a live listing outranks the shipped table
+  // because the backend is the authority on what this plan currently serves.
+  const configuredContextWindow = status?.contextWindowOverrides[model]
+  // The listing's levels are filtered through the shared vocabulary: an effort
+  // this line cannot express is not an effort the picker should offer.
+  const listedEfforts = liveEntry?.reasoningEfforts?.filter(isCodexReasoningEffort)
+  const efforts = listedEfforts !== undefined && listedEfforts.length > 0
+    ? listedEfforts
+    : reasoningEffortsForModel(model)
+  // A listing default only applies when the shipped table did not name one this
+  // line can express; otherwise the shipped default is the known-good choice.
+  const statedDefault = liveEntry?.defaultReasoningEffort ?? entry.defaultReasoningEffort
+  const defaultEffort = isCodexReasoningEffort(statedDefault) && efforts.includes(statedDefault)
+    ? statedDefault
+    : efforts[0]
+  return {
+    provider: PROVIDER_ID,
+    id: model,
+    // A live entry carries the backend's own display name, which is authoritative
+    // for a model this shipped table has never heard of.
+    name: liveEntry?.name ?? (entry.id === model ? entry.name : model),
+    inputModalities: [...(liveEntry?.inputModalities ?? entry.inputModalities)],
+    context: { contextWindow: configuredContextWindow ?? liveEntry?.contextWindow ?? entry.contextWindow },
+    // A LOCAL reservation, not a wire field: the subscription Responses
+    // endpoint rejects `max_output_tokens` (issue #29). DSH charges this much
+    // of the window to the completion when it plans compaction; the request
+    // builder never transmits it.
+    ...outputReservation(configuredContextWindow ?? liveEntry?.contextWindow ?? entry.contextWindow, codexModelMaxTokens(model)),
+    // No `systemPromptUpdate: 'in-history'`: the Responses wire carries the system
+    // prompt as a developer message at the head of `input`, and the mapper still
+    // rebuilds that message from the NEWEST system node on every request, so a
+    // later system message must not be treated as an addition to the prompt.
+    // Declaring the flag would make DSH append every later prompt while the
+    // earlier ones stayed effective, and the mapper would have to drop them again.
+    //
+    // `toolUpdate` IS declared. The head keeps the declaration set it started
+    // with, an addition rides an `additional_tools` item at the position where
+    // it happened, and a removal keeps its declaration with a note appended, so
+    // a mid-conversation tool change no longer rewrites the prefix. Measured on
+    // the subscription backend by scripts/probe-codex-tool-updates.probe.ts.
+    ...(codexToolUpdateMode() === undefined ? {} : { toolUpdate: codexToolUpdateMode() }),
+    reasoning: {
+      efforts: orderReasoningEfforts(efforts, GPT_56_REASONING_EFFORTS).map((effort) => ({
+        id: ReasoningEffortId(effort),
+        name: effort,
+      })),
+      ...(defaultEffort ? { defaultEffort: ReasoningEffortId(defaultEffort) } : {}),
+    },
+  }
+}
+
+/**
+ * Whether this line may state a tool change in the history instead of rewriting
+ * the head.
+ *
+ * `in-history` rather than `addition-only`: this wire has an `additional_tools`
+ * item to add a tool but nothing to withdraw one, so a removal has to keep its
+ * declaration and travel as a note. Deleting the declaration would shorten the
+ * head and throw the cached prefix away, which is the cost this mode exists to
+ * avoid.
+ *
+ * `DSH_CODEX_TOOL_UPDATE=0` turns it off for one account without a code change,
+ * the same escape hatch kimi-code carries for its own gate.
+ *
+ * @returns the mode to declare, or undefined when every request must restate the
+ * complete tool list.
+ */
+export function codexToolUpdateMode(): 'in-history' | undefined {
+  // A backend that has already refused the shape once keeps refusing it: the
+  // latch is what turns one rejected request into a permanent fallback instead
+  // of a failure on every turn.
+  if (toolUpdateRejected) return undefined
+  const raw = (process.env.DSH_CODEX_TOOL_UPDATE ?? '').trim().toLowerCase()
+  if (raw !== '' && ['0', 'false', 'no', 'off', 'none'].includes(raw)) return undefined
+  return 'in-history'
+}
+
+/**
+ * Set when a request that carried a tool change was refused with a 400.
+ *
+ * Process-wide and one-way: the failure mode of a stale probe is a lost cache
+ * optimisation, and the failure mode of NOT latching is the same 400 on every
+ * later turn. The asymmetry decides it.
+ */
+let toolUpdateRejected = false
+
+/** Record a refusal, so every later request restates the complete tool list. */
+export function disableCodexToolUpdate(): void {
+  toolUpdateRejected = true
+}
+
+/** Clear the latch. Only tests and a process restart call this. */
+export function resetCodexToolUpdateLatch(): void {
+  toolUpdateRejected = false
+}
+
+/**
+ * Resolve the wire capabilities of one model.
+ *
+ * The live listing outranks the shipped table, because the backend is the
+ * authority on what this plan currently serves. A live entry that states no
+ * Lite flag has said nothing about it, so the shipped table answers then - and
+ * a model neither table knows is not Lite.
+ *
+ * @param model - the model id.
+ * @param live - the live listing this call resolved against, when there is one.
+ * @returns the capabilities for that model.
+ */
+export function resolveCodexWireCapabilities(
+  model: string,
+  live?: readonly CodexCatalogEntry[],
+): CodexWireCapabilities {
+  const liveEntry = live?.find(candidate => candidate.id === model)
+  const fallback = resolveCodexCatalogEntry(model)
+  return {
+    useResponsesLite: liveEntry?.useResponsesLite ?? codexModelUsesResponsesLite(model),
+    contextWindow: liveEntry?.contextWindow ?? fallback.contextWindow,
+    autoCompactTokenLimit: liveEntry?.autoCompactTokenLimit ?? null,
+    compHash: liveEntry?.compHash ?? null,
+  }
+}

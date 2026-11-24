@@ -3,7 +3,7 @@
  *
  * Key set and order mirror the `zh` source; meaning follows `en`.
  */
-import type { ProgressUpdatesLocaleKey } from '../progress-updates/locales.ts'
+import type { ProgressUpdatesLocaleKey } from '../features/progress-updates/locales.ts'
 
 export const dictionary: Record<ProgressUpdatesLocaleKey, string> = {
   navTitle: 'Ход работы',

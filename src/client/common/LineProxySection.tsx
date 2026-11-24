@@ -32,7 +32,7 @@ import type {
   SubscriptionPreferencesUpdateDto,
 } from '../../shared/contracts.ts'
 import { ROUTE_PREFIX } from '../../compat.ts'
-import { NS, zh } from '../locales.ts'
+import { NS, zh } from '../providers/codex-chatgpt/locales.ts'
 import { useLineDict } from './line-locale.ts'
 
 /** The proxy facts one provider page needs, as `GET /proxy` answers them. */

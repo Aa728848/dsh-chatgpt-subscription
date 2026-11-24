@@ -4,7 +4,7 @@
  * Key set and order follow the `zh` object key for key; the meaning is taken
  * from `en`. The account-pool subset comes from `account-pool.ts`.
  */
-import type { CommandCodeLocaleKey } from '../command-code/locales.ts'
+import type { CommandCodeLocaleKey } from '../providers/command-code/locales.ts'
 import { accountPoolRu } from './account-pool.ts'
 
 export const dictionary: Record<CommandCodeLocaleKey, string> = {

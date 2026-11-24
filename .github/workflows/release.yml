@@ -69,7 +69,7 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Extract Release Notes from CHANGELOG.md
+      - name: Extract Release Notes from docs/CHANGELOG.md
         shell: node {0}
         env:
           RAW_TAG: ${{ steps.version_info.outputs.tag }}
@@ -79,8 +79,8 @@ jobs:
           const version = rawTag.replace(/^v/, '');
           let notes = '';
 
-          if (fs.existsSync('CHANGELOG.md')) {
-            const content = fs.readFileSync('CHANGELOG.md', 'utf8');
+          if (fs.existsSync('docs/CHANGELOG.md')) {
+            const content = fs.readFileSync('docs/CHANGELOG.md', 'utf8');
             const escapedVer = version.replace(/\./g, '\\.');
             const verRegex = new RegExp(`##\\s*\\[?v?${escapedVer}\\]?[^\\r\\n]*[\\r\\n]+([\\s\\S]*?)(?=\\r?\\n##\\s|$)`);
             const match = content.match(verRegex);

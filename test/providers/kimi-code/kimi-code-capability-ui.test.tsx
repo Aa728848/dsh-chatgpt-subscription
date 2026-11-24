@@ -1,0 +1,139 @@
+// @vitest-environment jsdom
+/**
+ * Layout tests for the Kimi capability table.
+ *
+ * The first revision rendered capability prose inline beside each model name,
+ * which stretched the name column and misaligned the descriptions. These pin
+ * the structure that replaced it: one column per capability, short tags, and a
+ * per-model hover carrying the detail.
+ */
+import { renderToStaticMarkup } from 'react-dom/server'
+import { describe, expect, it } from 'vitest'
+import type { KimiCodeModelOption } from '../../../src/shared/kimi-code-contracts.ts'
+import { KimiModelCapabilities } from '../../../src/client/providers/kimi-code/KimiModelCapabilities.tsx'
+
+function model(overrides: Partial<KimiCodeModelOption> = {}): KimiCodeModelOption {
+  return {
+    id: 'k3',
+    name: 'K3',
+    enabled: true,
+    defaultContextWindow: 262144,
+    contextWindow: 262144,
+    // No separate input cap, so the prompt budget is the window itself.
+    promptBudget: 262144,
+    defaultMaxTokens: 32768,
+    supportsToolUse: true,
+    wire: 'openai',
+    description: 'Flagship model',
+    supportsVideo: true,
+    supportsDynamicTools: true,
+    minimumPlan: 'Moderato',
+    quotaMultiplier: 2,
+    ...overrides,
+  }
+}
+
+describe('Kimi capability table', () => {
+  it('renders one row per model with a column for each capability', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[
+      model(),
+      model({ id: 'k3-256k', name: 'K3 (256K)', supportsVideo: false }),
+    ]} />)
+    // Four columns: name, multimodal, dynamic tools, notes.
+    expect((html.match(/<th>/g) ?? [])).toHaveLength(4)
+    expect((html.match(/<tr>/g) ?? [])).toHaveLength(3)
+  })
+
+  it('uses short tags and no explanatory prose anywhere', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[model()]} />)
+    expect(html).toContain('dsha-cap-on')
+    // The table explains itself through its columns; a paragraph of prose here
+    // was removed on request, and long text must not creep back into a cell.
+    expect(html).not.toContain('dsha-cap-hint')
+    expect(html).not.toContain('前缀缓存')
+    expect(html).not.toContain('dynamically_loaded_tools')
+  })
+
+  it('distinguishes video from dynamic tools per model', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[
+      model({ id: 'highspeed', name: 'HighSpeed', supportsVideo: true, supportsDynamicTools: false }),
+      model({ id: 'k3-256k', name: 'K3 (256K)', supportsVideo: false, supportsDynamicTools: true }),
+    ]} />)
+    // Counted inside the body only: the column headers reuse two of these
+    // labels, so a whole-document count would over-report them.
+    const body = html.slice(html.indexOf('<tbody>'))
+    // The tag carries an asterisk pointing at the footnote, because the model
+    // accepts video while this build has no path that can actually send one.
+    expect((body.match(/>视频\*</g) ?? [])).toHaveLength(1)
+    expect((body.match(/>仅图片</g) ?? [])).toHaveLength(1)
+    expect((body.match(/>动态工具</g) ?? [])).toHaveLength(1)
+    expect((body.match(/>—</g) ?? [])).toHaveLength(1)
+  })
+
+  it('keeps wire, effort and plan facts in the hover title, not the cells', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[
+      model({ defaultReasoningEffort: 'high' }),
+    ]} />)
+    const title = /title="([^"]*)"/.exec(html)?.[1] ?? ''
+    expect(title).toContain('k3')
+    expect(title).toContain('Moderato')
+    expect(title).toContain('high')
+  })
+
+  it('discloses that video has no delivery path in this build', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[model()]} />)
+    expect(html).toContain('dsha-cap-footnote')
+    expect(html).toContain('kimi_attach_video')
+    // An images-only model must not drag the footnote in with it.
+    const none = renderToStaticMarkup(<KimiModelCapabilities models={[model({ supportsVideo: false })]} />)
+    expect(none).not.toContain('dsha-cap-footnote')
+  })
+
+  it('marks a thinking-only model and states the 400 behind the missing level', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[
+      model({
+        id: 'k3.1-pro',
+        name: 'K3.1 Pro',
+        thinkingType: 'only',
+        reasoningEfforts: ['low', 'high', 'max'],
+        defaultReasoningEffort: 'max',
+      }),
+    ]} />)
+    const title = /title="([^"]*)"/.exec(html)?.[1] ?? ''
+    expect(title).toContain('只支持思考')
+    // The ladder is read from the model, not assumed from the wire or the id.
+    expect(title).toContain('档位 low / high / max')
+    expect(html).toContain('只支持思考」的模型不能关闭思考')
+    expect(html).toContain('400')
+  })
+
+  it('renders an empty notes cell rather than the word null', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[model({ description: null })]} />)
+    expect(html).not.toContain('null')
+  })
+
+  it('states the quota multiplier for a model the registry knows', () => {
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[model({ quotaMultiplier: 2 })]} />)
+    // The cost fact belongs in the notes cell so it can be compared down a
+    // column; the same value also rides along in the hover title.
+    expect(html).toContain('额度倍率 2x')
+    expect(/title="([^"]*)"/.exec(html)?.[1] ?? '').toContain('额度倍率: 2x')
+  })
+
+  it('states an unpublished multiplier rather than leaving the cell blank', () => {
+    // The live catalog publishes no multiplier, so a model it adds is reported
+    // as unknown. Rendering a guessed 1x would understate a 2x model on the one
+    // page whose whole purpose is telling the user what costs more — but a cell
+    // with no cost line at all reads as a row the table skipped, so the absence
+    // is named. The facts hover keeps its shape and does not repeat it.
+    const html = renderToStaticMarkup(<KimiModelCapabilities models={[model({ quotaMultiplier: null })]} />)
+    // Its own line, in the tertiary class a value that is NOT published gets
+    // rather than the primary class a real multiplier gets: stated, but never
+    // dressed up as a number.
+    expect(html).toContain('<div class="dsha-cap-off">额度倍率 未公布</div>')
+    expect(html).not.toMatch(/额度倍率\s*\d/)
+    const title = /title="([^"]*)"/.exec(html)?.[1] ?? ''
+    expect(title).not.toContain('额度倍率')
+    expect(title).not.toContain('未公布')
+  })
+})

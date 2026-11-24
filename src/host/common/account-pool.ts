@@ -2,7 +2,7 @@ import path from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import { isCorruptStoredDocument, type CredentialStore } from '../token-store.ts'
+import { isCorruptStoredDocument, type CredentialStore } from '../infra/storage/token-store.ts'
 import { t } from './i18n/t.ts'
 import {
   DEFAULT_POOL_STORAGE_MODE,

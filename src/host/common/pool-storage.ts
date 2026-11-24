@@ -24,10 +24,10 @@
  * why the configured one is unusable and offers the switch — and the accounts that
  * stayed behind in the other store are still there.
  */
-import { MacKeychainCredentialStore } from '../token-store-macos.ts'
-import { SecretServiceCredentialStore } from '../credential-store-secret-service.ts'
-import { WindowsDpapiCredentialStore } from '../token-store-windows.ts'
-import { CorruptStoredDocumentError, type CredentialStore } from '../token-store.ts'
+import { MacKeychainCredentialStore } from '../infra/storage/token-store-macos.ts'
+import { SecretServiceCredentialStore } from '../infra/storage/credential-store-secret-service.ts'
+import { WindowsDpapiCredentialStore } from '../infra/storage/token-store-windows.ts'
+import { CorruptStoredDocumentError, type CredentialStore } from '../infra/storage/token-store.ts'
 import { credentialsRecordKey, type CredentialsRecordSeam } from './credentials-compat.ts'
 import type {
   PoolStorageBackend,

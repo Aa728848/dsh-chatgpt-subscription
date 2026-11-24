@@ -1,4 +1,4 @@
-import type { QianwenLocaleKey } from '../qianwen-token-plan/locales.ts'
+import type { QianwenLocaleKey } from '../providers/qianwen-token-plan/locales.ts'
 export const dictionary: Record<QianwenLocaleKey, string> = {
   title: 'Qwen Token Plan', pageDesc: 'Подключение Qwen4 по выделенному API-ключу Qianwen Token Plan: явный кеш, воспроизведение размышлений, уровни reasoning, модели и визуальный бюджет.', loading: 'Загрузка…', moreNotes: 'Подробнее', enabled: 'Включить линию',
   keySection: 'API-ключ', keyConfigured: 'Выделенный ключ настроен и хранится только в зашифрованном хранилище host.', keyMissing: 'API-ключ не настроен. Создайте выделенный ключ в консоли Qianwen Token Plan.', keyPlaceholder: 'Вставьте API-ключ Token Plan (sk-sp-…)', saveKey: 'Сохранить ключ', savingKey: 'Сохранение…', removeKey: 'Удалить ключ', removingKey: 'Удаление…', storagePath: 'Зашифрованное хранилище',

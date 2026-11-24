@@ -4,7 +4,7 @@
  * Key set and order mirror `minimax-code/locales.ts` `zh`; the meaning comes from
  * `en`, which is the source of truth. Placeholders are kept verbatim.
  */
-import type { MinimaxCodeLocaleKey } from '../minimax-code/locales.ts'
+import type { MinimaxCodeLocaleKey } from '../providers/minimax-code/locales.ts'
 import { accountPoolRu } from './account-pool.ts'
 
 export const dictionary: Record<MinimaxCodeLocaleKey, string> = {

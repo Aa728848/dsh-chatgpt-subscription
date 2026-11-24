@@ -2,65 +2,6 @@
  * Wire contracts between the Claude subscription host routes and the browser
  * settings card. Everything here is public: NO CREDENTIAL EVER CROSSES THIS
  * BOUNDARY, and no shape below has a field a token could live in.
- *
- * ---------------------------------------------------------------------------
- * THE ONE RULE THIS FILE OBEYS, AND WHY IT IS NOT NEGOTIABLE
- * ---------------------------------------------------------------------------
- *
- * **Nothing in this file may resolve a module under 'src/host/'.** Not a value
- * import, not an `import type`, not an `export type … from`.
- *
- * This file is compiled by TWO projects with different worlds:
- *
- * - the host project ('tsconfig.host.json'): Node types, and 'src/host/**' in
- *   its include list;
- * - the client project ('tsconfig.client.json'): NO 'types' at all, and
- *   'src/host/**' deliberately absent from its include list.
- *
- * The second one is the constraint. A type-only import is ERASED for emit but
- * still RESOLVED for checking, so a single `import type` of
- * '../host/claude/account-pool.ts' from here pulls that whole subtree —
- * node:path, node:fs, node:http, node:crypto — into the client program. It does
- * not degrade quietly; it fails the build:
- *
- *   src/host/claude/account-pool.ts(104,18): error TS2307:
- *     Cannot find module 'node:path' or its corresponding type declarations.
- *   src/host/claude/account-pool.ts(105,28): error TS6307:
- *     File '…/src/host/common/home.ts' is not listed within the file list of
- *     project '…/tsconfig.client.json'.
- *
- * That was measured, not assumed: `npx tsc -p tsconfig.client.json` exits 0
- * with this file absent and exits 2 with a single type-only host re-export in
- * it. So the boundary is a property of the build, and this file is on the public
- * side of it.
- *
- * ---------------------------------------------------------------------------
- * THE TWO CONSEQUENCES, STATED PLAINLY RATHER THAN HIDDEN
- * ---------------------------------------------------------------------------
- *
- * 1. {@link ClaudeAccountSummaryDto} is DECLARED here rather than re-exported
- *    from 'src/host/claude/account-pool.ts', which is where the pool chunk put
- *    it. A re-export is what this file would prefer — and it is what the task
- *    asked for — but it cannot compile, for the reason above.
- *
- *    The drift that risks is closed from the OTHER side instead:
- *    'src/host/claude/routes.ts' imports BOTH declarations and carries a
- *    compile-time assertion that each is assignable to the other. Adding a field
- *    to the pool's copy without adding it here is therefore a build failure in
- *    `npx tsc -p tsconfig.host.json` — the same protection a re-export would
- *    have given, minus the impossible direction.
- *
- * 2. {@link CLAUDE_REASONING_EFFORTS} cannot be DERIVED from the catalog's
- *    ladders by an indexed access, for the same reason. It is a literal, and the
- *    equivalence between it and the catalog is asserted at the bottom of
- *    'src/host/claude/routes.ts' — against the real `CLAUDE_MODELS` table, in
- *    the project that can read it. Adding a level to a catalog ladder without
- *    adding it here stops the host typecheck, so the card cannot silently omit a
- *    level the wire would accept.
- *
- * Both assertions live in the host project because that is the only project that
- * can see both sides. Neither is documentation: each is a line of TypeScript
- * whose deletion is the only way to make it stop working.
  */
 
 import type { AccountPoolStatusDto, AccountRotationStrategy, PoolAccountSummaryDto } from './account-pool-contracts.ts'
