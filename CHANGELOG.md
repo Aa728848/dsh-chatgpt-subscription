@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.83.0 - 2026-11-28
+
+- **[relayone] 支持保存多个 API Key 并手动切换**：RelayOne 由单 Key 改为号池，复用共享 `AccountPoolCore`。**不做自动轮询**：设置卡里手动「切换到此 Key」，选中的 Key 服务所有请求直到再次切换，选择会持久化并在重启后生效。401/403 只把该 Key 标记为失效、429 只记 60 秒冷却，两者都不会偷偷换号——请求照常失败并提示切换，避免消耗用户没选的账号。新增的 Key 先向 `/v1/models` 验证再入库；升级前保存的单 Key 文件自动投影为主账号并保持镜像回写，无需重新粘贴。模型目录与额度跟随当前选中的 Key，切换时自动重新读取。共享账号卡片新增可选 `showStrategy`，本线路不渲染调度策略选择器，其余线路行为不变。
+
+- **[open-models] 开源模型运行时专项优化**：按底层注意力物理架构（混合线性+稀疏/MLA、块稀疏/压缩、短窗 SWA、深窄网、本地稠密）为 Kimi K3/K3.1 Pro、GLM-5.x、DeepSeek-V4 Pro/Flash、MiniMax M3/M3.1/M2.7、Qwen 3.5–4、Step 3.5–5、MiMo V2.6、Ling 3.1、Hunyuan Hy4、LongCat 2.0 及 Ollama 本地模型匹配专属画像，提供四项能力：按家族追加在系统提示词末尾的静态纪律段（零破前缀缓存）、尾部零改前缀的状态锚（按阵营决定步频与水位）、入库前观测头与 Kimi 只读空转提醒，以及按模型精准门控的推理坍塌守卫。严格排除 DeepSeek V4.1 Flash 与全部闭源模型。
+
+- **[kimi] 细化 K3.1 Pro 推理档位与 1M 压缩保留**：K3.1 Pro 的推理档位强制与压缩策略跟随新增的模型画像；压缩保留窗口按 1M 上下文口径处理，缓存写入与缓存守卫的判定同步调整。
+
+- **[compact-after-turn] 修复「本轮结束后压缩」的忙碌判定与预设命令**：`/compact` 的结果只携带人类可读文本，原本靠匹配英文措辞判断忙碌，措辞一变即失效。现在改为依据控制器自身观察到的现象判定——agent 离开 idle、尝试在途时有新一轮开启，或存在未配对的 `compaction/start`——措辞匹配仅作为额外线索。同时修正预设 agent 未正确解析 `/compact` 命令的问题。
+
+- **[aws-quick] 插件线路跳过自动会话标题请求**：DSH 会在首条消息后经会话自身 provider 额外发一次 `llm/stream`（`purpose: session-title`）来生成标题，消耗该线路配额。现在在 `llm/stream` 层短路本插件受控线路：adapter 根本不被派发（无请求、无消耗），标题回退到 DSH 基于首条消息的确定性标题。仅作用于本插件自己的线路，用户配置的其他 provider 不受影响；由易失开关 `skipSessionTitle` 控制（默认开启）。
+
 ## 0.82.3 - 2026-11-24
 
 - **[aws-quick] 修复已获批连接器每次启动触发 "Invalid or missing confirmation nonce"**：Quick 的 `/local/mcp/update` 需要一次性 UI 确认 nonce，而旧逻辑只要已获批连接器缺少 `ELECTRON_RUN_AS_NODE` 环境变量就发 `update`，导致每次启动报 nonce 错误。现在命令/参数一致的已获批连接器原样复用、不再发 `update`；仅当启动器（command/args）真正变化时才更新，且 Quick 因缺 nonce 拒绝时降级为 `approval_required`（指引在 Quick 内原生批准一次），不再把裸 nonce 错误抛给用户。真机 agent 实测确认 `add` 会把新连接器置为未启用，故重建连接器无益。重写对应单测。
