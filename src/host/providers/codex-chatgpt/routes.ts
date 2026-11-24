@@ -120,10 +120,11 @@ export function registerRoutes(
     // route would drag OAuth, quota and the account pool along with them.
     if (request.method === 'GET' && url.pathname === `${ROUTE_PREFIX}/proxy`) {
       const prefs = preferences.status()
+      const detectedProxy = proxyManager === undefined ? null : await proxyManager.getSystemProxyAsync()
       json(response, { ok: true, value: {
         lineProxies: prefs.lineProxies ?? {},
         noProxy: prefs.noProxy ?? null,
-        detectedProxy: proxyManager?.getSystemProxy() ?? null,
+        detectedProxy,
         activeProxies: proxyManager === undefined
           ? {}
           : Object.fromEntries(LINE_PROXY_PROVIDER_IDS.map((line) => [line, maskProxyUrl(proxyManager.resolveActiveProxyUrl(line))])),

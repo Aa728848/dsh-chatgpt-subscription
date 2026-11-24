@@ -29,6 +29,54 @@ export type HubTranslate = PropsLocale<typeof NS>['t']
 
 /** Versioned because the stored value is a bare ordered id array. */
 export const HUB_PROVIDER_ORDER_STORAGE_KEY = 'dsh-chatgpt-subscription:hub-provider-order:v1'
+const HUB_OVERVIEW_CACHE_STORAGE_KEY = 'dsh-chatgpt-subscription:hub-overview-cache:v1'
+const HUB_PROXY_CACHE_STORAGE_KEY = 'dsh-chatgpt-subscription:hub-proxy-cache:v1'
+
+function readCachedSummaries(): ReadonlyMap<string, HubProviderSummaryDto> | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(HUB_OVERVIEW_CACHE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return null
+    const map = new Map<string, HubProviderSummaryDto>()
+    for (const item of parsed) {
+      if (item && typeof item === 'object' && typeof (item as HubProviderSummaryDto).id === 'string') {
+        map.set((item as HubProviderSummaryDto).id, item as HubProviderSummaryDto)
+      }
+    }
+    return map.size > 0 ? map : null
+  } catch {
+    return null
+  }
+}
+
+function saveCachedSummaries(providers: readonly HubProviderSummaryDto[]): void {
+  try {
+    globalThis.localStorage?.setItem(HUB_OVERVIEW_CACHE_STORAGE_KEY, JSON.stringify(providers))
+  } catch {
+    // Storage may be unavailable in privacy mode.
+  }
+}
+
+function readCachedProxySnapshot(): LineProxySnapshot | null {
+  try {
+    const raw = globalThis.localStorage?.getItem(HUB_PROXY_CACHE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    return parsed as LineProxySnapshot
+  } catch {
+    return null
+  }
+}
+
+function saveCachedProxySnapshot(snapshot: LineProxySnapshot): void {
+  try {
+    globalThis.localStorage?.setItem(HUB_PROXY_CACHE_STORAGE_KEY, JSON.stringify(snapshot))
+  } catch {
+    // Storage may be unavailable in privacy mode.
+  }
+}
 
 interface Props {
   t: HubTranslate
@@ -118,8 +166,8 @@ export function cardAnnotation(summary: HubProviderSummaryDto | undefined, descr
 
 export function HubOverview({ t, onOpen }: Props): React.JSX.Element {
   const [providers, setProviders] = useState<HubProviderDescriptor[]>(orderedProviders)
-  const [summaries, setSummaries] = useState<ReadonlyMap<string, HubProviderSummaryDto> | null>(null)
-  const [proxySnapshot, setProxySnapshot] = useState<LineProxySnapshot | null>(null)
+  const [summaries, setSummaries] = useState<ReadonlyMap<string, HubProviderSummaryDto> | null>(readCachedSummaries)
+  const [proxySnapshot, setProxySnapshot] = useState<LineProxySnapshot | null>(readCachedProxySnapshot)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [proxyLoadError, setProxyLoadError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -132,6 +180,7 @@ export function HubOverview({ t, onOpen }: Props): React.JSX.Element {
     try {
       const overview = await fetchOverview()
       setSummaries(new Map(overview.providers.map((provider) => [provider.id, provider])))
+      saveCachedSummaries(overview.providers)
       setLoadError(null)
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error))
@@ -140,7 +189,9 @@ export function HubOverview({ t, onOpen }: Props): React.JSX.Element {
 
   const loadProxy = useCallback(async (): Promise<void> => {
     try {
-      setProxySnapshot(await fetchLineProxySnapshot(ROUTE_PREFIX))
+      const snapshot = await fetchLineProxySnapshot(ROUTE_PREFIX)
+      setProxySnapshot(snapshot)
+      saveCachedProxySnapshot(snapshot)
       setProxyLoadError(null)
     } catch (error) {
       setProxyLoadError(error instanceof Error ? error.message : String(error))

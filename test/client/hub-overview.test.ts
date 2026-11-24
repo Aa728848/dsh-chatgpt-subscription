@@ -13,7 +13,7 @@ afterEach(async () => {
   })))
 })
 
-function mount(sources: readonly HubSummarySource[]): { origin: Promise<string> } {
+function mount(sources: readonly HubSummarySource[], options?: { sourceTimeoutMs?: number }): { origin: Promise<string> } {
   let handler: http.RequestListener | undefined
   const ctx = {
     webServer: {
@@ -24,7 +24,7 @@ function mount(sources: readonly HubSummarySource[]): { origin: Promise<string> 
       },
     },
   }
-  const dispose = registerHubOverviewRoutes(ctx as never, sources)
+  const dispose = registerHubOverviewRoutes(ctx as never, sources, options)
   expect(dispose).toBeTypeOf('function')
   return {
     origin: new Promise((resolveListen) => {
@@ -131,5 +131,17 @@ describe('hub overview route', () => {
     expect(slowStarted).toBe(2)
     // Two 60ms reads in parallel land well under their serialized 120ms.
     expect(Date.now() - started).toBeLessThan(120)
+  })
+
+  it('bounds a stalled source with a timeout so it cannot freeze the entire overview', async () => {
+    const stalled: HubSummarySource['read'] = () => new Promise(() => undefined)
+    const { origin } = mount([source('chatgpt'), source('antigravity-acp', {}, stalled)], { sourceTimeoutMs: 40 })
+    const started = Date.now()
+    const response = await fetch(`${await origin}${HUB_OVERVIEW_PATH}`)
+    expect(response.status).toBe(200)
+    expect(Date.now() - started).toBeLessThan(500)
+    const body = await response.json() as { ok: true; value: HubOverviewDto }
+    expect(body.value.providers[0]!.error).toBeUndefined()
+    expect(body.value.providers[1]).toMatchObject({ id: 'antigravity-acp', error: true })
   })
 })

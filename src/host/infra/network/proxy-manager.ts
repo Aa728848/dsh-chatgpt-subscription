@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
@@ -11,7 +11,7 @@ import { DEFAULT_LINE_PROXY, normalizeNoProxyList } from '../../../shared/prefer
 
 export type FetchLike = typeof fetch
 
-const SYSTEM_PROXY_CACHE_TTL_MS = 5_000
+const SYSTEM_PROXY_CACHE_TTL_MS = 30_000
 
 /**
  * How long a proxied connection may take to establish.
@@ -451,6 +451,19 @@ function runSystemProbe(file: string, args: string[]): string {
   })
 }
 
+function runSystemProbeAsync(file: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, {
+      timeout: 1500,
+      encoding: 'utf-8',
+      windowsHide: true,
+    }, (error, stdout) => {
+      if (error) reject(error)
+      else resolve(stdout)
+    })
+  })
+}
+
 /**
  * Read one GNOME proxy setting; `null` when `gsettings` is absent or the key is
  * unreadable (headless box, no dconf session).
@@ -513,6 +526,46 @@ export function detectSystemProxy(
     }
   } catch {
     // If system registry or scutil fails (e.g. restricted sandbox/permission), fall through to environment variables
+  }
+
+  return parseEnvProxy(env)
+}
+
+export async function detectSystemProxyAsync(
+  platform: NodeJS.Platform = process.platform,
+  env: Record<string, string | undefined> = process.env,
+): Promise<string | null> {
+  try {
+    if (platform === 'win32') {
+      const stdout = await runSystemProbeAsync('reg.exe', [
+        'query',
+        'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
+      ])
+      const detected = parseWindowsProxyRegistry(stdout)
+      if (detected) return detected
+    } else if (platform === 'darwin') {
+      const stdout = await runSystemProbeAsync('scutil', ['--proxy'])
+      const detected = parseMacOsScutilProxy(stdout)
+      if (detected) return detected
+    } else if (platform === 'linux') {
+      const readAsync = async (key: string): Promise<string | null> => {
+        try { return (await runSystemProbeAsync('gsettings', ['get', key])).trim() }
+        catch { return null }
+      }
+      if (gsettingsString(await readAsync('org.gnome.system.proxy mode')).toLowerCase() === 'manual') {
+        const values = new Map<string, string | null>([['org.gnome.system.proxy mode', 'manual']])
+        const keys = [
+          'org.gnome.system.proxy.https host', 'org.gnome.system.proxy.https port',
+          'org.gnome.system.proxy.http host', 'org.gnome.system.proxy.http port',
+          'org.gnome.system.proxy.socks host', 'org.gnome.system.proxy.socks port',
+        ]
+        await Promise.all(keys.map(async (key) => values.set(key, await readAsync(key))))
+        const detected = parseLinuxSystemProxy((key) => values.get(key) ?? null)
+        if (detected) return detected
+      }
+    }
+  } catch {
+    // Fall through to environment variables when system probe fails.
   }
 
   return parseEnvProxy(env)
@@ -588,6 +641,8 @@ export class ProxyManager {
   private lastNoProxyCheck = 0
   private detected = false
   private readonly proxyListeners = new Set<SystemProxyListener>()
+  private readonly customDetectorProvided: boolean
+  private inflightSystemProxyProbe: Promise<string | null> | null = null
   private readonly agents = new Map<string, ProxyAgent | Agent>()
   /** One shaping wrapper per pooled dispatcher, so a pool keeps a stable identity. */
   private readonly shaped = new WeakMap<object, object>()
@@ -596,9 +651,48 @@ export class ProxyManager {
     this.getPreferences = options.getPreferences
     this.baseFetch = options.baseFetch ?? fetch
     this.proxyFetchFn = options.proxyFetchFn ?? (undiciFetch as unknown as FetchLike)
+    this.customDetectorProvided = options.systemProxyDetector !== undefined
     this.systemProxyDetector = options.systemProxyDetector ?? (() => detectSystemProxy())
     this.noProxyReader = options.noProxyReader ?? (() => parseNoProxy())
     this.logger = options.logger
+  }
+
+  private applyDetectedSystemProxy(detected: string | null, hadDetected: boolean, previous: string | null): string | null {
+    this.cachedSystemProxy = detected
+    this.lastSystemProxyCheck = Date.now()
+    this.detected = true
+    if (hadDetected && previous === null && this.cachedSystemProxy !== null) {
+      for (const listener of [...this.proxyListeners]) {
+        try {
+          listener(this.cachedSystemProxy)
+        } catch {
+          // An observing listener must never break detection for the request that triggered it.
+        }
+      }
+    }
+    return this.cachedSystemProxy
+  }
+
+  /** Non-blocking system proxy probe for HTTP routes; avoids stalling the event loop on reg.exe/scutil. */
+  async getSystemProxyAsync(force = false): Promise<string | null> {
+    if (this.customDetectorProvided) return this.getSystemProxy(force)
+    const now = Date.now()
+    if (!force && now - this.lastSystemProxyCheck < SYSTEM_PROXY_CACHE_TTL_MS) {
+      return this.cachedSystemProxy
+    }
+    if (this.inflightSystemProxyProbe !== null) return this.inflightSystemProxyProbe
+    const previous = this.cachedSystemProxy
+    const hadDetected = this.detected
+    this.inflightSystemProxyProbe = detectSystemProxyAsync()
+      .catch((error) => {
+        this.logger?.warn?.(`[dsh-chatgpt-subscription] Failed to detect system proxy: ${error instanceof Error ? error.message : String(error)}`)
+        return null
+      })
+      .then((detected) => this.applyDetectedSystemProxy(detected, hadDetected, previous))
+      .finally(() => {
+        this.inflightSystemProxyProbe = null
+      })
+    return this.inflightSystemProxyProbe
   }
 
   getSystemProxy(force = false): string | null {

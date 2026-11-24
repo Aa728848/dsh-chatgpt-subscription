@@ -27,7 +27,33 @@ export interface HubSummarySource {
   read(): Promise<Omit<HubProviderSummaryDto, 'id' | 'providerId' | 'canToggle'>>
 }
 
-export function registerHubOverviewRoutes(ctx: Context, sources: readonly HubSummarySource[]): () => void {
+export const HUB_OVERVIEW_SOURCE_TIMEOUT_MS = 2_500
+
+export interface HubOverviewRouteOptions {
+  /** Per-source read ceiling so one slow provider cannot stall the entire overview. */
+  sourceTimeoutMs?: number
+}
+
+function readWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise
+  let timer: NodeJS.Timeout | undefined
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Hub overview source timed out after ${timeoutMs}ms`)), timeoutMs)
+      timer.unref?.()
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer)
+  })
+}
+
+export function registerHubOverviewRoutes(
+  ctx: Context,
+  sources: readonly HubSummarySource[],
+  options: HubOverviewRouteOptions = {},
+): () => void {
+  const sourceTimeoutMs = options.sourceTimeoutMs ?? HUB_OVERVIEW_SOURCE_TIMEOUT_MS
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     // The overview is a read. Rejecting every other method keeps it that way even
     // though the harness routes an exact path regardless of method.
@@ -36,14 +62,14 @@ export function registerHubOverviewRoutes(ctx: Context, sources: readonly HubSum
       response.end(JSON.stringify({ ok: false, error: { code: 'bad-request', message: 'Method not allowed.' } }))
       return
     }
-    // A line whose store cannot be read must not take the whole overview down
-    // with it: it degrades to a placeholder card the UI marks as unreadable,
+    // A line whose store cannot be read or stalls must not take the whole overview
+    // down with it: it degrades to a placeholder card the UI marks as unreadable,
     // and every other card still answers.
     const settled = await Promise.allSettled(sources.map(async (source) => ({
       id: source.id,
       providerId: source.providerId,
       canToggle: source.canToggle,
-      ...(await source.read()),
+      ...(await readWithTimeout(source.read(), sourceTimeoutMs)),
     } satisfies HubProviderSummaryDto)))
     const providers: HubProviderSummaryDto[] = settled.map((result, index) => {
       if (result.status === 'fulfilled') return result.value

@@ -67,7 +67,7 @@ import { AntigravityAcpSettingsStore } from './host/providers/antigravity-acp/se
 import { AcpCatalog } from './host/providers/antigravity-acp/catalog.ts'
 import { AcpClient } from './host/providers/antigravity-acp/acp-client.ts'
 import { AcpBinaryCache, acpLaunchArgs, resolveAcpBinary } from './host/providers/antigravity-acp/binary.ts'
-import { probeAuth, startLogin } from './host/providers/antigravity-acp/login.ts'
+import { AUTH_PROBE_BUDGET_MS, probeAuth, startLogin } from './host/providers/antigravity-acp/login.ts'
 import { registerAntigravityAcpRoutes } from './host/providers/antigravity-acp/routes.ts'
 import { AcpAuthCache } from './host/providers/antigravity-acp/auth-cache.ts'
 import { runDoctor } from './host/providers/antigravity-acp/doctor.ts'
@@ -2068,16 +2068,26 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       {
         id: 'claude-api', providerId: CLAUDE_API_PROVIDER_ID, canToggle: true,
         read: async () => {
-          const [current, credentials] = await Promise.all([claudeApiSettings.read(), claudeApiStore.read(), claudeApiCatalog.warm()])
+          const [current, credentials] = await Promise.all([claudeApiSettings.read(), claudeApiStore.read()])
+          if (credentials === null) {
+            return {
+              enabled: current.enabled,
+              accountCount: 0,
+              authenticated: false,
+              enabledModelCount: null,
+              totalModelCount: null,
+            }
+          }
+          await claudeApiCatalog.warm()
           const snapshot = claudeApiCatalog.snapshot()
           const models = claudeApiModelOptions(snapshot.entries, current, snapshot.live)
           const total = catalogTotal(models.length)
           return {
             enabled: current.enabled,
-            accountCount: credentials === null ? 0 : 1,
-            authenticated: credentials !== null,
-            enabledModelCount: credentials === null ? null : models.filter(model => model.enabled).length,
-            totalModelCount: credentials === null ? null : total,
+            accountCount: 1,
+            authenticated: true,
+            enabledModelCount: models.filter(model => model.enabled).length,
+            totalModelCount: total,
           }
         },
       },
@@ -2146,11 +2156,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           const catalog = await antigravityAcpCatalog.rehydrate()
           const total = catalog === undefined ? null : catalogTotal(catalog.models.length)
           const selected = current.enabledModelIds === null ? total : current.enabledModelIds.length
-          const auth = await antigravityAcpAuth.read()
+          // Never block the overview route on spawning `agy` + Google `session/new`.
+          // Answer immediately from the in-memory cache and warm in the background if stale.
+          const cachedAuth = antigravityAcpAuth.peek()
+          if (cachedAuth === undefined) {
+            void antigravityAcpAuth.read().catch(() => undefined)
+          }
+          const authenticated = cachedAuth?.authenticated === true
           return {
             enabled: true,
-            accountCount: auth.authenticated ? 1 : 0,
-            authenticated: auth.authenticated,
+            accountCount: authenticated ? 1 : 0,
+            authenticated,
             enabledModelCount: total === null || selected === null ? null : Math.min(selected, total),
             totalModelCount: total,
           }
@@ -2254,15 +2270,25 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       {
         id: 'relayone', providerId: RELAYONE_PROVIDER_ID, canToggle: true,
         read: async () => {
-          const [current, accounts] = await Promise.all([relayOneSettings.read(), relayOnePool.listAccounts().catch(() => []), relayOneCatalog.warm()])
+          const [current, accounts] = await Promise.all([relayOneSettings.read(), relayOnePool.listAccounts().catch(() => [])])
+          if (accounts.length === 0) {
+            return {
+              enabled: current.enabled,
+              accountCount: 0,
+              authenticated: false,
+              enabledModelCount: null,
+              totalModelCount: null,
+            }
+          }
+          await relayOneCatalog.warm()
           const models = relayOneModelOptions(relayOneCatalog.snapshot().entries, current).filter(model => model.kind === 'chat')
           const total = catalogTotal(models.length)
           return {
             enabled: current.enabled,
             accountCount: accounts.length,
-            authenticated: accounts.length > 0,
-            enabledModelCount: accounts.length === 0 ? null : models.filter(model => model.enabled).length,
-            totalModelCount: accounts.length === 0 ? null : total,
+            authenticated: true,
+            enabledModelCount: models.filter(model => model.enabled).length,
+            totalModelCount: total,
           }
         },
       },
@@ -2452,7 +2478,7 @@ async function probeAuthWithLaunch(
   try {
     const launch = await resolveLaunch()
     client = new AcpClient({ command: launch.command, args: launch.args, cwd: process.cwd() })
-    return await probeAuth(client)
+    return await probeAuth(client, AbortSignal.timeout(AUTH_PROBE_BUDGET_MS))
   } finally {
     await client?.dispose().catch(() => undefined)
   }
