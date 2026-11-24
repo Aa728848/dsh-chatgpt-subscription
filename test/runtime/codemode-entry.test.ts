@@ -350,12 +350,18 @@ describe('Code Mode 入口的会话授权', () => {
     )
     expect(hostSeenPaths).toEqual(['sha256:cua_shot_1'])
     expect(receivedImages).toHaveLength(1)
-    const imageHandle = receivedImages[0] as PtcImageLike
-    expect(imageHandle).toBeInstanceOf(PtcImageLike)
-    expect((imageHandle as unknown as Record<symbol, unknown>)[PTC_IMAGE_TAG]).toBe(true)
+    const ptcRuntime = await import('@deepseek-ai/dsh-ptc-runtime').catch(() => undefined)
+    const HostPtcImage = (ptcRuntime as { PtcImage?: new (...args: unknown[]) => unknown } | undefined)?.PtcImage
+    const imageHandle = receivedImages[0] as { path: string; attachment: { width: number; height: number } }
+    if (typeof HostPtcImage === 'function') {
+      expect(imageHandle).toBeInstanceOf(HostPtcImage)
+    } else {
+      expect(imageHandle).toBeInstanceOf(PtcImageLike)
+      expect((imageHandle as unknown as Record<symbol, unknown>)[PTC_IMAGE_TAG]).toBe(true)
+    }
     expect(imageHandle.path).toBe('/sandbox/attachments/cua_shot_1.png')
-    expect(imageHandle.width).toBe(1280)
-    expect(imageHandle.height).toBe(720)
+    expect(imageHandle.attachment.width).toBe(1280)
+    expect(imageHandle.attachment.height).toBe(720)
     // 已被 inspect 显式输出的图片不再通过 deferContext 重复注入
     expect(deferred).toEqual([])
 
@@ -440,5 +446,100 @@ describe('Code Mode 入口的会话授权', () => {
       sandbox_permissions: 'danger-full-access',
       justification: 'need full',
     }, exec())).rejects.toMatchObject({ name: 'SandboxEscalationError', code: 'SANDBOX_ESCALATION_UNAVAILABLE' })
+  })
+
+  it('0.2.3: entry-codemode 使用宿主真实 PtcInspectableValue 与嵌套 PtcImage 实例', async () => {
+    const imgRef = {
+      attachmentId: 'sha256:nested_shot',
+      mediaType: 'image/png',
+      width: 800,
+      height: 600,
+      bytes: 12345,
+    }
+    const received: Record<string, unknown> = {}
+    const runtime = {
+      language: 'typescript',
+      programFormat: 'scoped-repl',
+      executionInstructions: 'Call inspect(value) to show output or images.',
+      resolve: (request: Record<string, unknown>) => ({
+        ...request,
+        sandboxPolicy: request['sandboxPolicy'] ?? { mode: 'read-only' },
+      }),
+      async run(spec: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+        received['summary'] = await spec.bindings[0]!.functions['get_summary']!({})
+        received['gallery'] = await spec.bindings[0]!.functions['get_gallery']!({})
+        return { output: [] }
+      },
+    }
+    const { registered, executor } = createContext({
+      runtime,
+      exposeExecutor: true,
+      attachments: {
+        imageHostPath: () => 'C:/dsh-home/attachments/nested_shot.png',
+      },
+      fs: {
+        processPathFromHostPath: (hostPath: string) =>
+          hostPath.replace('C:/dsh-home/attachments', '/sandbox/attachments'),
+      },
+      execute: async (input: unknown) => {
+        const request = input as { calls: Array<{ callId: string; name: string }> }
+        return {
+          results: request.calls.map((call) => {
+            if (call.name === 'get_summary') {
+              return {
+                callId: call.callId,
+                result: {
+                  isError: false,
+                  value: { files: 4, ok: true },
+                  content: [{ type: 'text', text: '4 files ok' }],
+                },
+              }
+            }
+            return {
+              callId: call.callId,
+              result: {
+                isError: false,
+                value: { items: [{ type: 'image', attachment: imgRef }] },
+                content: [{ type: 'image', attachment: imgRef }],
+              },
+            }
+          }),
+        }
+      },
+    })
+    const describe = (executor as { describe(tools: readonly unknown[]): unknown }).describe.bind(executor)
+    describe([
+      { name: 'get_summary', description: 'summary', parameters: {} },
+      { name: 'get_gallery', description: 'gallery', parameters: {} },
+    ])
+    const codeRun = registered.find((entry) => entry.name === 'code_run')!
+    const deferred: unknown[] = []
+    await codeRun.execute(
+      { code: 'await tools.get_summary({}); await tools.get_gallery({})', description: 'real ptc classes' },
+      { callId: 'c-real-ptc', signal: new AbortController().signal, agent: { session }, deferContext: (m: unknown) => deferred.push(m) },
+    )
+
+    const ptcRuntime = await import('@deepseek-ai/dsh-ptc-runtime').catch(() => undefined) as {
+      PtcImage?: new (...args: unknown[]) => unknown
+      PtcInspectableValue?: new (...args: unknown[]) => unknown
+    } | undefined
+
+    if (typeof ptcRuntime?.PtcInspectableValue === 'function') {
+      expect(received['summary']).toBeInstanceOf(ptcRuntime.PtcInspectableValue)
+      expect((received['summary'] as { value: unknown; text: string }).value).toEqual({ files: 4, ok: true })
+      expect((received['summary'] as { value: unknown; text: string }).text).toBe('4 files ok')
+    } else {
+      expect(received['summary']).toEqual({ files: 4, ok: true })
+    }
+
+    const galleryItem = (received['gallery'] as { items: unknown[] }).items[0]
+    if (typeof ptcRuntime?.PtcImage === 'function') {
+      expect(galleryItem).toBeInstanceOf(ptcRuntime.PtcImage)
+    } else {
+      expect(galleryItem).toBeInstanceOf(PtcImageLike)
+    }
+    expect((galleryItem as { path: string }).path).toBe('/sandbox/attachments/nested_shot.png')
+    // 嵌套图片未被 inspect，自动通过 deferContext 兜底补发
+    expect(deferred).toHaveLength(1)
   })
 })

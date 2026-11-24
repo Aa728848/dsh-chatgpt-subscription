@@ -7,6 +7,7 @@ import {
   EXIT_PLAN_MODE,
   PLAN_POLICY_SECTION,
   PLAN_PROJECTION_KEY,
+  PLAN_STATUS_SECTION,
   createPlanNotice,
   installPlanModeExitReminder,
   registeredPlanControllerActive,
@@ -69,7 +70,7 @@ interface ToolsRegistryLike {
   get?(name: string, ...rest: unknown[]): unknown
 }
 
-/** 系统段（只读名字与正文）。 */
+/** 系统段（只读名字、正文与退役标记）。 */
 interface AssembledSectionLike {
   /** 段名。 */
   name?: unknown
@@ -77,6 +78,8 @@ interface AssembledSectionLike {
   text?: unknown
   /** 是否插值。 */
   interpolate?: unknown
+  /** DSH 0.2.3+：该段注册已被卸载，正文为退役提示而非激活指引。 */
+  retire?: unknown
 }
 
 /** 一次装配的呈现面。 */
@@ -196,7 +199,7 @@ export function installPlanModeCacheGuard(ctx: unknown): PlanModeCacheGuard {
     return state
   }
 
-  // ── 1. 摘掉 plan:policy ───────────────────────────────────────────────────
+  // ── 1. 摘掉 plan:policy 与 0.2.3+ plan:status ───────────────────────────────
   const onAssemble = async (
     assembly: PresentationLike,
     context: AssembleContextLike,
@@ -207,17 +210,42 @@ export function installPlanModeCacheGuard(ctx: unknown): PlanModeCacheGuard {
     if (sections === undefined) return result
     const kept: AssembledSectionLike[] = []
     let policy: string | undefined
+    let policyRetired = false
+    let status: string | undefined
+    let statusRetired = false
     for (const section of sections) {
       if (section?.name === PLAN_POLICY_SECTION) {
         policy = typeof section.text === 'string' ? section.text : ''
+        policyRetired = section.retire === true
+        continue
+      }
+      if (section?.name === PLAN_STATUS_SECTION) {
+        status = typeof section.text === 'string' ? section.text : ''
+        statusRetired = section.retire === true
         continue
       }
       kept.push(section)
     }
     const state = stateOf(bucketOf(context?.scope ?? context?.agent))
-    if (policy !== undefined) {
+    if (policyRetired || statusRetired) {
+      // 注册已卸载的退役通知绝不当作激活指引投递。
+      state.pending = undefined
+      state.delivered = false
+    } else if (status !== undefined) {
+      // DSH 0.2.3+：首次进入计划模式后 plan:policy 永久非空，实际激活状态由
+      // plan:status 段表达（active vs inactive）。仅在 status 明确激活时排入投递，
+      // 避免退出计划模式后把常驻的 plan:policy 误投进非计划模式对话。
+      const statusActive = status.trim() !== '' && !/\binactive\b/i.test(status)
+      if (!statusActive) {
+        state.pending = undefined
+        state.delivered = false
+      } else if (policy !== undefined && policy.trim() !== '') {
+        state.policy = policy
+        if (!state.delivered) state.pending = policy
+      }
+    } else if (policy !== undefined) {
       if (policy.trim() === '') {
-        // 官方段在非计划模式时就是空串：这是「一次激活结束」的信号，下一次进入
+        // 旧代官方段在非计划模式时就是空串：这是「一次激活结束」的信号，下一次进入
         // 要重新投递。
         state.pending = undefined
         state.delivered = false

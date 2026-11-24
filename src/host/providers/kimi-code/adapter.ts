@@ -112,7 +112,7 @@ import {
   requestHasSendableImage,
   requestInlineImageBytes,
   requestImagePayloadLengths,
-  requestImageTarget,
+  requestImageTargetOrOriginal,
   MAX_MESSAGE_BODY_BYTES,
   MAX_REQUEST_IMAGE_BYTES,
   MAX_VIDEO_MESSAGE_BODY_BYTES,
@@ -1265,8 +1265,7 @@ export class KimiCodeAdapter extends LlmAdapter {
     // `edge` is the reuse seam: the shared helper already takes the ceiling, so
     // this route passes its own instead of moving the shared constant every
     // other provider is calibrated against.
-    return requestImageTarget(image, KIMI_CODE_REQUEST_IMAGE_MAX_EDGE)
-      ?? { width: image.width, height: image.height, maxBytes: image.bytes }
+    return requestImageTargetOrOriginal(image, KIMI_CODE_REQUEST_IMAGE_MAX_EDGE)
   }
 
   private settings() {

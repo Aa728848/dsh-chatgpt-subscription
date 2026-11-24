@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import { toToolCallId as ToolCallId } from '../../src/host/common/brand-compat.ts'
 import {
   PLUGIN_MESSAGE_SOURCE_KIND,
   normalizeGenerateOptions,

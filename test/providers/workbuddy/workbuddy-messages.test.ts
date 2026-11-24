@@ -1,7 +1,7 @@
 import { gunzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAssistantMessage, createToolResultMessage, createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
-import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import { toToolCallId as ToolCallId } from '../../../src/host/common/brand-compat.ts'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { WorkBuddyAdapter, type WorkBuddyAccountPool } from '../../../src/host/providers/workbuddy/adapter.ts'
 import { FileCredentialStore, FileModelSettingsStore, type WorkBuddyCredentials } from '../../../src/host/providers/workbuddy/token-store.ts'

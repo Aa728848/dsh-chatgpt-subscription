@@ -1,5 +1,5 @@
 import type { GenerateOptions, Message, OutboundContentBlock, StreamChunk, TokenUsage } from '../../common/llm-compat.ts'
-import { LlmError } from '../../common/llm-compat.ts'
+import { LlmError, formatMidConversationSystemReminder } from '../../common/llm-compat.ts'
 import { toToolCallId } from '../../common/brand-compat.ts'
 import { stripMetaSchema } from '../../common/tool-schema.ts'
 import type { ResolvedRequestImages } from '../../common/request-images.ts'
@@ -10,6 +10,8 @@ import {
   relayOneArgsText,
   relayOneEffort,
   relayOneImageParts,
+  relayOneInstructionText,
+  relayOneLeadingInstructionEndIndex,
   relayOneNumber,
   relayOneReplayBlocks,
   relayOneSafeJson,
@@ -50,10 +52,16 @@ export function buildRelayOneAnthropicRequest(
   entry: RelayOneModelEntry,
   settings: RelayOneSettings,
 ): Record<string, unknown> {
+  const leadingEnd = relayOneLeadingInstructionEndIndex(options.messages)
   const messages: Record<string, unknown>[] = []
   const knownCalls = new Set<string>()
-  for (const message of options.messages) {
-    if (message.role === 'system' || message.role === 'developer') continue
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role === 'system' || message.role === 'developer') {
+      const text = relayOneInstructionText(message)
+      if (text !== '') pushMessage(messages, 'user', [{ type: 'text', text: formatMidConversationSystemReminder(text) }])
+      continue
+    }
     if (message.role === 'assistant') {
       const content = assistantContent(message)
       for (const block of content) if (block.type === 'tool_use' && typeof block.id === 'string') knownCalls.add(block.id)

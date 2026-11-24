@@ -106,10 +106,11 @@ describe('claude-api system messages', () => {
     expect(systemOf(body)).toHaveLength(2)
   })
 
-  it('folds system messages on a model without midConversationSystem', () => {
+  it('keeps mid-conversation system messages in place as reminders on a model without midConversationSystem', () => {
     const body = build(options([userText('u'), systemText('mid instruction'), assistantText('a')]), resolveClaudeApiModel('claude-sonnet-4-6'))
     expect(messagesOf(body).some(m => m.role === 'system')).toBe(false)
-    expect(systemOf(body)[2]?.text).toBe('mid instruction')
+    expect(systemOf(body)).toHaveLength(2)
+    expect(JSON.stringify(messagesOf(body)[0])).toContain('<system-reminder>\\nmid instruction\\n</system-reminder>')
   })
 
   it('folds a system message at an illegal position (first)', () => {
@@ -135,7 +136,9 @@ describe('claude-api system messages', () => {
     expect(messagesOf(legal).map(m => m.role)).toEqual(['user', 'system', 'system', 'assistant', 'user'])
     const illegal = build(options([userText('u'), systemText('A'), systemText('B'), userText('u2')]))
     expect(messagesOf(illegal).some(m => m.role === 'system')).toBe(false)
-    expect(systemOf(illegal)[2]?.text).toBe('A\n\nB')
+    expect(systemOf(illegal)).toHaveLength(2)
+    expect(JSON.stringify(messagesOf(illegal)[0])).toContain('<system-reminder>\\nA\\n</system-reminder>')
+    expect(JSON.stringify(messagesOf(illegal)[0])).toContain('<system-reminder>\\nB\\n</system-reminder>')
   })
 })
 
@@ -490,10 +493,14 @@ describe('claude-api placement after the compaction block', () => {
     expect(messages.some(m => m.clear_at !== undefined)).toBe(false)
     expect(deriveClaudeApiBetas(body, fable())).toContain(CLAUDE_API_BETA_CLEAR_AT)
   })
-  it('folds a system message directly after the block', () => {
+  it('keeps a system message directly after the block in place as a user reminder', () => {
     const body = build(options([checkpoint(), systemText('mid'), assistantText('a')]), fable(), {}, found)
     expect(messagesOf(body).some(m => m.role === 'system')).toBe(false)
-    expect(systemOf(body)[2]?.text).toBe('mid')
+    expect(systemOf(body)).toHaveLength(2)
+    expect(messagesOf(body)[1]).toEqual({
+      role: 'user',
+      content: [{ type: 'text', text: '<system-reminder>\nmid\n</system-reminder>', cache_control: { type: 'ephemeral' } }],
+    })
   })
   it('falls back to a user note for a tool change directly after the block', () => {
     const body = build(options([checkpoint(), msg('developer', [{ type: 'tool-addition', toolName: 'Bash' }]), assistantText('a')], { tools: [tool('Bash')] }), fable(), {}, found)

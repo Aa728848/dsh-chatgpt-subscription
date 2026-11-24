@@ -1376,7 +1376,8 @@ describe('Claude first-party protocol corrections', () => {
     await drain(makeAdapter(store, settings, fn).stream(request))
     expect((calls[0]!.body.messages as Array<{ role: string }>).map(message => message.role)).toContain('system')
     expect((calls[1]!.body.messages as Array<{ role: string }>).map(message => message.role)).not.toContain('system')
-    expect(JSON.stringify(calls[1]!.body.system)).toContain('MID')
+    expect(JSON.stringify(calls[1]!.body.system)).not.toContain('MID')
+    expect(JSON.stringify(calls[1]!.body.messages)).toContain('<system-reminder>\\nMID\\n</system-reminder>')
   })
 
   it('uses the remembered main-turn effort for compaction', async () => {

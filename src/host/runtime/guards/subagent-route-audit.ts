@@ -142,7 +142,10 @@ export function readChildDescriptor(data: unknown): Omit<ChildRouteFinding, 'chi
  * @param session - the session whose policy is read.
  * @returns the authorized routes, or undefined when the session recorded none.
  */
-export function auditedRoutesOf(session: AuditedSession): AuditedRoute[] | undefined {
+export function auditedRoutesOf(
+  session: AuditedSession,
+  fallbackRoutes?: readonly AuditedRoute[],
+): AuditedRoute[] | undefined {
   for (const event of eventsOf(session)) {
     if (event.type !== 'subagent/model-selection-policy') continue
     const allowed = asRecord(event.data)?.['allowedModels']
@@ -154,6 +157,9 @@ export function auditedRoutesOf(session: AuditedSession): AuditedRoute[] | undef
       if (provider !== undefined && model !== undefined) routes.push({ provider, model })
     }
     if (routes.length > 0) return routes
+  }
+  if (fallbackRoutes !== undefined && fallbackRoutes.length > 0) {
+    return fallbackRoutes.map(route => ({ provider: route.provider, model: route.model }))
   }
   return undefined
 }

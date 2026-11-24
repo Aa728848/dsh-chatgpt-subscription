@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import { toToolCallId as ToolCallId } from '../../src/host/common/brand-compat.ts'
 import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { PtcRunRequest, PtcRunResult, PtcRunSpec } from '@deepseek-ai/dsh-ptc-runtime'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -41,7 +41,7 @@ class FakeRuntime extends PtcRuntime {
   readonly language = 'typescript'
   readonly isolation = 'fake'
   behavior: (spec: PtcRunSpec) => Promise<PtcRunResult> =
-    () => Promise.resolve({ logs: [] })
+    () => Promise.resolve({ logs: [], output: [] })
 
   resolve(request: PtcRunRequest): PtcRunSpec {
     return { ...request, cwd: request.cwd ?? process.cwd(), timeoutMs: request.timeoutMs ?? null }
@@ -96,6 +96,17 @@ async function setup(): Promise<{ ctx: Context; runtime: FakeRuntime }> {
   } catch {
     // Harnesses before 0.2.2 select PTC through ToolRuntime's own mode config.
   }
+  try {
+    const sessionProjectionPkg = '@deepseek-ai/dsh-session-projection'
+    const projections = (await import(sessionProjectionPkg)) as {
+      default?: unknown
+      SessionProjections?: unknown
+    }
+    const SessionProjections = projections.default ?? projections.SessionProjections ?? projections
+    if (SessionProjections) await (ctx.plugin as (plugin: unknown) => unknown)(SessionProjections)
+  } catch {
+    // Older harness generations without a standalone session-projection plugin.
+  }
   await ctx.plugin(SystemPrompt)
   if (hasExecutor) await ctx.plugin(ToolRuntime)
   else await ctx.plugin(ToolRuntime, { mode: CODE_MODE } as never)
@@ -147,10 +158,10 @@ async function runCode(
     >
     try {
       observed = { message: String(await call(tools)) }
-      return { logs: [], value: 'program finished' }
+      return { logs: [], output: [], value: 'program finished' }
     } catch (error) {
       observed = { isError: true, message: String(error) }
-      return { logs: [], value: 'program finished' }
+      return { logs: [], output: [], value: 'program finished' }
     }
   }
   const signal = new AbortController().signal

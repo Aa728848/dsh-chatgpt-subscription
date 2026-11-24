@@ -67,6 +67,42 @@ export const inject = ['tools', 'systemPrompt']
 /** 决策环长度：只留给 `code_debug`。 */
 const DEBUG_RING = 50
 
+interface PtcRuntimeClasses {
+  readonly PtcImage?: new (path: string, attachment: unknown) => unknown
+  readonly PtcInspectableValue?: new (value: object, text: string) => unknown
+}
+
+let cachedPtcClasses: PtcRuntimeClasses | undefined
+let ptcClassesPromise: Promise<PtcRuntimeClasses> | undefined
+
+/**
+ * 懒加载宿主真实的 `@deepseek-ai/dsh-ptc-runtime` 类引用（`tsdown` 设为 `neverBundle`）。
+ *
+ * `ptc-runtime-node` 通过 `instanceof PtcImage` 与 `instanceof PtcInspectableValue`
+ * 校验类身份，因此必须用宿主真实构造函数实例化；老代未导出相应类时退回空对象。
+ */
+function loadPtcRuntimeClasses(): Promise<PtcRuntimeClasses> {
+  if (cachedPtcClasses !== undefined) return Promise.resolve(cachedPtcClasses)
+  if (ptcClassesPromise === undefined) {
+    const specifier = '@deepseek-ai/dsh-ptc-runtime'
+    ptcClassesPromise = import(specifier).then((mod: Record<string, unknown>) => {
+      cachedPtcClasses = {
+        ...(typeof mod['PtcImage'] === 'function'
+          ? { PtcImage: mod['PtcImage'] as PtcRuntimeClasses['PtcImage'] }
+          : {}),
+        ...(typeof mod['PtcInspectableValue'] === 'function'
+          ? { PtcInspectableValue: mod['PtcInspectableValue'] as PtcRuntimeClasses['PtcInspectableValue'] }
+          : {}),
+      }
+      return cachedPtcClasses
+    }, () => {
+      cachedPtcClasses = {}
+      return cachedPtcClasses
+    })
+  }
+  return ptcClassesPromise
+}
+
 /** 本行会读到的服务（结构探测，不 import 内核类型）。 */
 interface ToolsServiceLike {
   /** 注册一个工具定义。 */
@@ -203,6 +239,8 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
   }
 
   const rules = createRules(config)
+  // 预热宿主 `@deepseek-ai/dsh-ptc-runtime` 类引用（不阻塞同步 apply）。
+  void loadPtcRuntimeClasses()
   const retention = createRetention(runtimeOf)
   if (typeof context.effect === 'function') {
     context.effect(() => () => { void retention.dispose() }, 'codemode retained environments')
@@ -365,6 +403,12 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
         return undefined
       }
       if (!isImageAttachmentRefLike(attachment)) return undefined
+      const makeImage = (readonlyPath: string): unknown => {
+        const HostPtcImage = cachedPtcClasses?.PtcImage
+        return HostPtcImage !== undefined
+          ? new HostPtcImage(readonlyPath, attachment)
+          : new PtcImageLike(readonlyPath, attachment)
+      }
       const resolveAccess = (dshLlm as Record<string, unknown>)['resolveImageAttachmentAccess']
       if (typeof resolveAccess === 'function') {
         try {
@@ -383,20 +427,26 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
               ? (resolveAccess as (ref: unknown) => { readonly readonlyPath?: unknown } | undefined)(attachment)
               : undefined
           if (typeof access?.readonlyPath === 'string' && access.readonlyPath.length > 0) {
-            return new PtcImageLike(access.readonlyPath, attachment)
+            return makeImage(access.readonlyPath)
           }
         } catch {
           // 回退到工具自身的路径字段。
         }
       }
       if (typeof fallbackPath === 'string' && fallbackPath.length > 0) {
-        return new PtcImageLike(fallbackPath, attachment)
+        return makeImage(fallbackPath)
       }
       return undefined
+    },
+    inspectableValue(value: object, text: string): unknown {
+      const HostInspectable = cachedPtcClasses?.PtcInspectableValue
+      return HostInspectable !== undefined ? new HostInspectable(value, text) : value
     },
     trackRun: (run) => retention.trackRun(run),
     shapeDispatchLog,
     async callTool(request: CallToolRequest): Promise<CallToolOutcome> {
+      // 确保首次工具返回前已完成宿主 `PtcImage` / `PtcInspectableValue` 类解析。
+      if (cachedPtcClasses === undefined) await loadPtcRuntimeClasses()
       const call = {
         type: 'tool-call',
         id: request.callId,

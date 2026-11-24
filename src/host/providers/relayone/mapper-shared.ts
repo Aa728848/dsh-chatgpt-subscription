@@ -1,4 +1,9 @@
-import type { ContentBlock, GenerateOptions, Message } from '../../common/llm-compat.ts'
+import {
+  extractSystemText,
+  type ContentBlock,
+  type GenerateOptions,
+  type Message,
+} from '../../common/llm-compat.ts'
 import {
   attachmentLabel,
   imageBlockToInline,
@@ -39,13 +44,25 @@ export function relayOneToolResult(message: Message): ContentBlock & { type: 'to
   return message.content.find((block): block is ContentBlock & { type: 'tool-result' } => block.type === 'tool-result')
 }
 export function relayOneInstructionText(message: Message): string {
-  return relayOneTextOf(message.content.filter(block => block.type !== 'tool-addition' && block.type !== 'tool-removal')).trim()
+  const filtered = message.content.filter(block => block.type !== 'tool-addition' && block.type !== 'tool-removal')
+  if (message.role === 'system') {
+    const text = extractSystemText(filtered, value => value.replace(/\0/g, ''))
+    if (text !== '') return text
+  }
+  return relayOneTextOf(filtered).trim()
+}
+export function relayOneLeadingInstructionEndIndex(messages: readonly Message[]): number {
+  let end = 0
+  while (end < messages.length && (messages[end]?.role === 'system' || messages[end]?.role === 'developer')) {
+    end += 1
+  }
+  return end
 }
 export function relayOneSystemText(options: GenerateOptions): string {
   const parts = [typeof options.system === 'string' ? options.system.trim() : '']
-  for (const message of options.messages) {
-    if (message.role !== 'system' && message.role !== 'developer') continue
-    const text = relayOneInstructionText(message)
+  const leadingEnd = relayOneLeadingInstructionEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = relayOneInstructionText(options.messages[index]!)
     if (text !== '') parts.push(text)
   }
   return parts.filter(Boolean).join('\n\n')

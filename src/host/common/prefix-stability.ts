@@ -3,7 +3,12 @@
  * Dynamic mid-conversation updates stay at their original history position;
  * only the initial harness bootstrap run is normalised ahead of the user task.
  */
-import type { GenerateOptions, Message } from './llm-compat.ts'
+import {
+  extractSystemText,
+  leadingSystemEndIndex,
+  type GenerateOptions,
+  type Message,
+} from './llm-compat.ts'
 import { promptCachePolicyOf, type PromptCacheOverride } from './prompt-cache-policy.ts'
 import { isAuxiliaryRequest } from './prefix-request-coordinator.ts'
 
@@ -187,11 +192,13 @@ export function sharedPrefixGroupKey(
   if (isAuxiliaryRequest(options)) return undefined
   const systemParts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') systemParts.push(options.system)
-  for (const message of options.messages) {
-    if (message.role === 'system') {
-      const text = allTextOf(message.content)
-      if (text !== '') systemParts.push(text)
-    }
+  // Only leading contiguous system messages form the static cold prefix.
+  // Mid-conversation incremental system messages (DSH 0.2.3+ PR #6941) stay in-place
+  // and must not drift the shared prefix group key.
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = extractSystemText(options.messages[index]!.content)
+    if (text !== '') systemParts.push(text)
   }
   if (systemParts.length === 0) return undefined
   const systemHash = prefixFingerprint(systemParts.join('\n\n'))

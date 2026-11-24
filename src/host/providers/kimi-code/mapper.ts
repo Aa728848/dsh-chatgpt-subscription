@@ -30,6 +30,9 @@
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../../common/context-overflow.ts'
 import {
   LlmError,
+  extractSystemText,
+  leadingSystemEndIndex,
+  midConversationSystemToUserMessage,
   type ContentBlock,
   type OutboundContentBlock,
   type FinishReason,
@@ -814,22 +817,34 @@ function isToolResultMessage(message: Message): boolean {
 function leadingSystemText(options: GenerateOptions): string | undefined {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
-  for (const message of options.messages) {
-    if (message.role !== 'system') continue
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const message = options.messages[index]!
     // A declaration carrier holds its text at its own position instead
     // (declarationSlots re-emits it there), so folding it here as well would
     // send the same system text twice: wasted tokens, and the second copy sits
     // at a position that can disturb the very cache prefix the declarations
     // exist to protect.
     if (messageToolsOf(message) !== undefined) continue
-    const text = textOf(message.content)
+    const text = extractSystemText(message.content, sanitizeText)
     if (text !== '') parts.push(text)
   }
   return parts.length === 0 ? undefined : parts.join('\n\n')
 }
 
 function nonSystemMessages(options: GenerateOptions): Message[] {
-  const raw = options.messages.filter((message) => message.role !== 'system')
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  const raw: Message[] = []
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role !== 'system') {
+      raw.push(message)
+      continue
+    }
+    if (messageToolsOf(message) !== undefined) continue
+    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    if (reminder !== undefined) raw.push(reminder)
+  }
   return orderStaticPrefixMessages(raw)
 }
 
@@ -1369,8 +1384,10 @@ function declarationSlots(
   media: RequestMediaOptions,
 ): DeclarationSlot[] {
   const slots: DeclarationSlot[] = []
+  const leadingEnd = leadingSystemEndIndex(options.messages)
   let beforeIndex = 0
-  for (const message of options.messages) {
+  for (let index = 0; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
     if (message.role === 'developer') {
       // The harness appends a tool change as a developer message at the point in
       // history where it happened, which is exactly where it must be replayed:
@@ -1398,8 +1415,13 @@ function declarationSlots(
       continue
     }
     const declarations = messageToolsOf(message)
-    if (declarations === undefined) continue
-    const text = textOf(message.content)
+    if (declarations === undefined) {
+      if (index >= leadingEnd && midConversationSystemToUserMessage(message, sanitizeText) !== undefined) {
+        beforeIndex += 1
+      }
+      continue
+    }
+    const text = extractSystemText(message.content, sanitizeText)
     if (text !== '') {
       slots.push({
         beforeIndex,
@@ -1836,8 +1858,9 @@ function firstTextOf(content: unknown): string | undefined {
  */
 function leadingSystemTextStart(options: GenerateOptions): string | undefined {
   if (typeof options.system === 'string' && options.system.trim() !== '') return options.system
-  for (const message of options.messages) {
-    if (message.role !== 'system') continue
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const message = options.messages[index]!
     if (messageToolsOf(message) !== undefined) continue
     const text = firstTextOf(message.content)
     if (text !== undefined) return text

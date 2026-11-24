@@ -41,6 +41,10 @@ const host: UserConfig = {
       // the bundled copy would apply its own policy pipeline beside the host's.
       // It must stay an import resolved from the running installation.
       '@deepseek-ai/dsh-tool-executor-native',
+      // `ptc-runtime-node` checks `resolved instanceof PtcInspectableValue`, so
+      // Code Mode must dynamically resolve the host's own runtime module rather
+      // than bundling a second copy whose class identity would never match.
+      '@deepseek-ai/dsh-ptc-runtime',
     ],
   },
 }

@@ -24,6 +24,7 @@ import { DISABLED_VIEW, resolveCatalogView, resolveNameView } from '../../src/ho
 import { createCodemodeExecutor, isNestedCall, markNested } from '../../src/host/runtime/codemode/executor.ts'
 import { createRetention } from '../../src/host/runtime/codemode/retention.ts'
 import {
+  CODE_RUN_ERROR_CODES,
   CodemodeArgsError,
   CodemodeContextUnavailableError,
   CodeResetFailedError,
@@ -35,6 +36,7 @@ import {
   createTransportDefinition,
   normalizeSubCallArgs,
   sanitizeReplTopLevelReturn,
+  substituteProgramImages,
 } from '../../src/host/runtime/codemode/transport.ts'
 import { apply as applyCodemode } from '../../src/entries/codemode.ts'
 
@@ -1611,5 +1613,214 @@ describe('DSH 内核 PTC 机制对齐与宿主层入参别名容错', () => {
     }, { callId: 'c5', signal: new AbortController().signal }))
       .rejects.toSatisfy((err: unknown) =>
         err instanceof SandboxEscalationError && err.code === 'SANDBOX_ESCALATION_INVALID_ARGUMENT')
+  })
+
+  it('0.2.3: substituteProgramImages 兼容真实 ImageAttachmentRef(bytes) 并对未替换图片安全降级', async () => {
+    // 真实 @deepseek-ai/dsh-attachment 的 ImageAttachmentRef 使用 bytes 字段且无 kind
+    const realImgA = {
+      attachmentId: 'sha256:real_a',
+      mediaType: 'image/png',
+      width: 320,
+      height: 240,
+      bytes: 4096,
+    }
+    const realImgB = {
+      attachmentId: 'sha256:real_b',
+      mediaType: 'image/jpeg',
+      width: 640,
+      height: 480,
+      bytes: 8192,
+    }
+    const programImage = (attachment: { attachmentId: string }) =>
+      attachment.attachmentId === 'sha256:real_a'
+        ? new PtcImageLike('/sandbox/a.png', attachment as never)
+        : undefined
+
+    const allOk = substituteProgramImages(
+      { ok: true, items: [{ type: 'image', attachment: realImgA }] },
+      [realImgA],
+      (att) => new PtcImageLike('/sandbox/a.png', att),
+    )
+    expect(allOk).toBeDefined()
+    expect(allOk?.substitutedIds).toEqual(['sha256:real_a'])
+    const replacedItem = ((allOk?.value as { items: unknown[] }).items[0]) as PtcImageLike
+    expect(replacedItem).toBeInstanceOf(PtcImageLike)
+    expect(replacedItem.path).toBe('/sandbox/a.png')
+
+    // 若嵌套图片中有一张无法转换为程序图片，返回 undefined，整份内容保留给 deferContext
+    const partial = substituteProgramImages(
+      { items: [{ type: 'image', attachment: realImgA }, { type: 'image', attachment: realImgB }] },
+      [realImgA, realImgB],
+      programImage,
+    )
+    expect(partial).toBeUndefined()
+
+    // 端到端通过通用工具（非 read_image/cua）返回嵌套真实 ImageAttachmentRef
+    const deferred: unknown[] = []
+    let receivedValue: unknown
+    const host = {
+      catalog: () => [
+        ...catalog,
+        { name: 'capture_ui', description: 'custom image tool', parameters: {}, isConcurrencySafe: () => true },
+      ],
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      programImage: (attachment: unknown) => new PtcImageLike('/sandbox/real_a.png', attachment as never),
+      createImageContext: (content: readonly unknown[]) => ({ kind: 'deferred-image', content }),
+      async callTool() {
+        return {
+          value: { frames: [{ type: 'image', attachment: realImgA }] },
+          content: [{ type: 'image', attachment: realImgA }],
+        }
+      },
+      runtime: () => ({
+        language: 'typescript',
+        programFormat: 'scoped-repl',
+        async run(spec: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          receivedValue = await spec.bindings[0]!.functions['capture_ui']!({})
+          // 漏调 inspect -> 触发 deferContext 兜底
+          return { output: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, createRules({}))
+    await (definition.execute as (args: unknown, exec: unknown) => Promise<unknown>)(
+      { code: 'await tools.capture_ui({})', description: 'nested image tool' },
+      { callId: 'c-nested-img', signal: new AbortController().signal, deferContext: (m: unknown) => deferred.push(m) },
+    )
+    const frames = (receivedValue as { frames: unknown[] }).frames
+    expect(frames[0]).toBeInstanceOf(PtcImageLike)
+    expect(deferred).toEqual([{ kind: 'deferred-image', content: [{ type: 'image', attachment: realImgA }] }])
+  })
+
+  it('0.2.3: outputTruncated 在成功、失败与中止路径均透传并追加标准截断提示', async () => {
+    let mode: 'ok-text' | 'ok-mixed' | 'fail' | 'abort' = 'ok-text'
+    const imgRef = {
+      attachmentId: 'sha256:trunc_img',
+      mediaType: 'image/png',
+      width: 10,
+      height: 10,
+      bytes: 100,
+    }
+    const host = {
+      catalog: () => catalog,
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      callTool: async () => ({ value: 'ok' }),
+      runtime: () => ({
+        language: 'typescript',
+        programFormat: 'scoped-repl',
+        async run(_spec: unknown, signal?: AbortSignal) {
+          if (mode === 'ok-text') {
+            return { output: [{ type: 'text' as const, text: 'line1' }], outputTruncated: true }
+          }
+          if (mode === 'ok-mixed') {
+            return {
+              output: [{ type: 'text' as const, text: 'preview' }, { type: 'image' as const, attachment: imgRef }],
+              outputTruncated: true,
+            }
+          }
+          if (mode === 'fail') {
+            return {
+              output: [{ type: 'text' as const, text: 'partial log' }],
+              outputTruncated: true,
+              error: { name: 'Error', message: 'boom' },
+            }
+          }
+          return {
+            output: [{ type: 'text' as const, text: 'before cancel' }],
+            outputTruncated: true,
+            error: { kind: 'abort' as const, message: signal?.aborted ? 'aborted by user' : 'aborted' },
+          }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, createRules({}))
+    const execute = definition.execute as (args: unknown, exec: unknown) => Promise<{
+      logs: string[]
+      output?: readonly unknown[]
+      outputTruncated?: boolean
+    }>
+
+    const textOut = await execute({ code: '1', description: 'trunc text' }, { callId: 'c-tr-1', signal: new AbortController().signal })
+    expect(textOut.outputTruncated).toBe(true)
+    const renderedText = definition.output.render({}, textOut) as Array<{ type: string; text?: string }>
+    expect(renderedText[0]?.text).toContain('Program completed. Output was truncated; read current state for missing information without repeating completed actions.')
+
+    mode = 'ok-mixed'
+    const mixedOut = await execute({ code: '2', description: 'trunc mixed' }, { callId: 'c-tr-2', signal: new AbortController().signal })
+    expect(mixedOut.outputTruncated).toBe(true)
+    const renderedMixed = definition.output.render({}, mixedOut) as Array<{ type: string; text?: string }>
+    expect(renderedMixed.some((block) => block.type === 'image')).toBe(true)
+    expect(renderedMixed.some((block) => block.type === 'text' && block.text?.includes('Program completed. Output was truncated'))).toBe(true)
+
+    mode = 'fail'
+    await expect(execute({ code: '3', description: 'trunc fail' }, { callId: 'c-tr-3', signal: new AbortController().signal }))
+      .rejects.toSatisfy((err: unknown) =>
+        err instanceof CodeRunFailedError
+        && err.code === 'CODE_RUN_FAILED'
+        && err.message.includes('Output was truncated.'))
+
+    mode = 'abort'
+    const ac = new AbortController()
+    ac.abort(new Error('user stop'))
+    await expect(execute({ code: '4', description: 'trunc abort' }, { callId: 'c-tr-4', signal: ac.signal }))
+      .rejects.toThrow(/Output was truncated\./)
+  })
+
+  it('0.2.3: inspectableValue 仅对纯文本对象的工具返回生效，且 dispose 后抛 CODE_RUN_UNAVAILABLE', async () => {
+    expect(CODE_RUN_ERROR_CODES).toEqual(['CODE_RUN_FAILED', 'CODE_RUN_UNAVAILABLE'])
+
+    const wrappedCalls: Array<{ value: object; text: string }> = []
+    const received: Record<string, unknown> = {}
+    const host = {
+      catalog: () => [
+        ...catalog,
+        { name: 'obj_tool', description: 'object result', parameters: {}, isConcurrencySafe: () => true },
+        { name: 'str_tool', description: 'string result', parameters: {}, isConcurrencySafe: () => true },
+      ],
+      stateOwner: () => ({}),
+      releaseOwner: async () => undefined,
+      inspectableValue: (value: object, text: string) => {
+        wrappedCalls.push({ value, text })
+        return { __wrapped: true, value, text }
+      },
+      async callTool(req: { name: string }) {
+        if (req.name === 'obj_tool') {
+          return {
+            value: { total: 7 },
+            content: [{ type: 'text', text: 'total=7' }],
+          }
+        }
+        return {
+          value: 'plain-string',
+          content: [{ type: 'text', text: 'plain-string' }],
+        }
+      },
+      runtime: () => ({
+        language: 'typescript',
+        programFormat: 'scoped-repl',
+        async run(spec: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          received['obj'] = await spec.bindings[0]!.functions['obj_tool']!({})
+          received['str'] = await spec.bindings[0]!.functions['str_tool']!({})
+          return { output: [] }
+        },
+      }),
+    }
+    const definition = createTransportDefinition(host as never, createRules({}))
+    await (definition.execute as (args: unknown, exec: unknown) => Promise<unknown>)(
+      { code: 'await tools.obj_tool({}); await tools.str_tool({})', description: 'inspectable' },
+      { callId: 'c-insp', signal: new AbortController().signal },
+    )
+    expect(wrappedCalls).toEqual([{ value: { total: 7 }, text: 'total=7' }])
+    expect(received['obj']).toEqual({ __wrapped: true, value: { total: 7 }, text: 'total=7' })
+    expect(received['str']).toBe('plain-string')
+
+    // retention.dispose() 后抛出 CODE_RUN_UNAVAILABLE
+    const retention = createRetention(() => undefined)
+    await retention.dispose()
+    await expect(retention.awaitPredecessors({ session: { id: 's-disposed' } }, new AbortController().signal))
+      .rejects.toSatisfy((err: unknown) =>
+        err instanceof CodeRunFailedError && err.code === 'CODE_RUN_UNAVAILABLE')
   })
 })

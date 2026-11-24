@@ -5,6 +5,9 @@
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../../common/context-overflow.ts'
 import {
   LlmError,
+  extractSystemText,
+  leadingSystemEndIndex,
+  midConversationSystemToUserMessage,
   type ContentBlock,
   type OutboundContentBlock,
   type FinishReason,
@@ -299,9 +302,9 @@ export const TOOL_CALL_PREAMBLE_REMINDER =
 function leadingSystemText(options: GenerateOptions): string | undefined {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
-  for (const message of options.messages) {
-    if (message.role !== 'system') continue
-    const text = textOf(message.content)
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = extractSystemText(options.messages[index]!.content, sanitizeText)
     if (text !== '') parts.push(text)
   }
   if (parts.length === 0) return undefined
@@ -314,7 +317,18 @@ function leadingSystemText(options: GenerateOptions): string | undefined {
 }
 
 function nonSystemMessages(options: GenerateOptions): Message[] {
-  return options.messages.filter((message) => message.role !== 'system')
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  const out: Message[] = []
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role !== 'system') {
+      out.push(message)
+      continue
+    }
+    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    if (reminder !== undefined) out.push(reminder)
+  }
+  return out
 }
 
 /**

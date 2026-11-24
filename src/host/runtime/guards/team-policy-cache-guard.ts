@@ -77,12 +77,14 @@ interface LoggerLike {
   warn(message: string, ...rest: unknown[]): void
 }
 
-/** 系统段（只读名字与正文）。 */
+/** 系统段（只读名字、正文与退役标记）。 */
 interface AssembledSectionLike {
   /** 段名。 */
   name?: unknown
   /** 段正文。 */
   text?: unknown
+  /** DSH 0.2.3+：该段注册已被卸载，正文为退役提示而非开启指引。 */
+  retire?: unknown
 }
 
 /** 一次装配的呈现面。 */
@@ -220,10 +222,12 @@ export function installTeamPolicyCacheGuard(
     if (sections === undefined) return result
     const kept: AssembledSectionLike[] = []
     let policy: string | undefined
+    let retired = false
     for (const section of sections) {
       if (section?.name === TEAM_POLICY_SECTION) {
         stats.seen = true
         policy = typeof section.text === 'string' ? section.text : ''
+        retired = section.retire === true
         continue
       }
       kept.push(section)
@@ -238,8 +242,8 @@ export function installTeamPolicyCacheGuard(
       return result
     }
     const state = stateOf(bucketOf(context?.scope ?? context?.agent))
-    if (policy.trim() === '') {
-      // 官方段在关闭时就是空串：上一次激活到此结束，下一步补一条撤销通知。
+    if (retired || policy.trim() === '') {
+      // 官方段在关闭或退役时结束本次激活；下一步补一条撤销通知。
       if (state.delivered) state.revoked = true
       state.delivered = false
       state.pending = undefined

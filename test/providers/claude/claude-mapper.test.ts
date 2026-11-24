@@ -264,7 +264,7 @@ describe('The Claude Code identity block', () => {
     expect(system[1]).toEqual({ type: 'text', text: 'You are DSH.', cache_control: { type: 'ephemeral', ttl: '5m' } })
   })
 
-  it('folds a one-shot system header and role:system messages into block 1 without a system role on the wire', () => {
+  it('folds leading system prompt into block 1 and keeps mid-conversation system in place as a reminder without a system role on the wire', () => {
     const built = buildClaudeRequestBody(options({
       system: 'Header prompt.',
       messages: [
@@ -275,9 +275,16 @@ describe('The Claude Code identity block', () => {
     }) as unknown as GenerateOptions)
     const system = systemBlocksOf(built)
     expect(system).toHaveLength(2)
-    expect(system[1]!.text).toBe('Header prompt.\n\nFirst system turn.\n\nLater system turn.')
-    // No system role survives on the wire.
+    // Only the leading system prompt enters block 1; the mid-conversation delta
+    // stays in place so the top-level cached system prefix is never rewritten.
+    expect(system[1]!.text).toBe('Header prompt.\n\nFirst system turn.')
+    // No system role survives on the wire; the mid-conversation system turns into
+    // an in-place <system-reminder> merged into the user turn.
     expect(messagesOf(built).map((message) => message.role)).toEqual(['user'])
+    expect(messagesOf(built)[0]!.content).toEqual([
+      { type: 'text', text: 'hi' },
+      { type: 'text', text: '<system-reminder>\nLater system turn.\n</system-reminder>', cache_control: { type: 'ephemeral', ttl: '5m' } },
+    ])
     expect(leadingSystemText(options())).toBe('You are DSH.')
     expect(leadingSystemText(options({ messages: [] }) as unknown as GenerateOptions)).toBeUndefined()
   })
@@ -1300,7 +1307,17 @@ describe('Request image edge limits', () => {
     const images = await resolveRequestImages(request, reader)
     // Only the wide image is projected; the twenty small ones go out byte-for-byte
     // as stored, so their part of the cached prefix does not change.
-    expect(requests).toEqual([{ id: 'wide', target: { width: 2000, height: 876, maxPixels: Math.floor(2000 * 2000 * (1272 / 2904)), maxBytes: 3.5 * 1024 * 1024 } }])
+    expect(requests).toEqual([{
+      id: 'wide',
+      target: {
+        width: 2000,
+        height: 876,
+        maxPixels: Math.floor(2000 * 2000 * (1272 / 2904)),
+        maxBytes: 3.5 * 1024 * 1024,
+        maxImageBytes: 3.5 * 1024 * 1024,
+        imageTargetBytes: 3.5 * 1024 * 1024,
+      },
+    }])
     expect(reads).toHaveLength(MANY_IMAGE_THRESHOLD)
     expect(reads).not.toContain('wide')
     expect(images.get('small-0')).toEqual({ kind: 'inline', mediaType: 'image/png', data: Buffer.from(STORED).toString('base64') })
@@ -1327,12 +1344,29 @@ describe('Request image edge limits', () => {
     const request = options({ messages: [{ role: 'user', source: { kind: 'user' }, content: [shot('tall', 4000, 8192)] }] }) as unknown as GenerateOptions
     const { reader, requests } = recordingReader()
     await resolveRequestImages(request, reader)
-    expect(requests).toEqual([{ id: 'tall', target: { width: 3906, height: 8000, maxPixels: 31250000, maxBytes: 3.5 * 1024 * 1024 } }])
+    expect(requests).toEqual([{
+      id: 'tall',
+      target: {
+        width: 3906,
+        height: 8000,
+        maxPixels: 31250000,
+        maxBytes: 3.5 * 1024 * 1024,
+        maxImageBytes: 3.5 * 1024 * 1024,
+        imageTargetBytes: 3.5 * 1024 * 1024,
+      },
+    }])
   })
 
   it('keeps the aspect ratio by the long edge and leaves a reference without dimensions alone', () => {
     expect(requestImageEdgeTarget({ width: 1200, height: 3000 } as never, MANY_IMAGE_EDGE))
-      .toEqual({ width: 800, height: 2000, maxPixels: 1600000, maxBytes: 3.5 * 1024 * 1024 })
+      .toEqual({
+        width: 800,
+        height: 2000,
+        maxPixels: 1600000,
+        maxBytes: 3.5 * 1024 * 1024,
+        maxImageBytes: 3.5 * 1024 * 1024,
+        imageTargetBytes: 3.5 * 1024 * 1024,
+      })
     expect(requestImageEdgeTarget({ width: 2000, height: 2000 } as never, MANY_IMAGE_EDGE)).toBeUndefined()
     expect(requestImageEdgeTarget({ attachmentId: 'legacy' } as never, MANY_IMAGE_EDGE)).toBeUndefined()
   })
@@ -1417,10 +1451,15 @@ describe('Mid-conversation system messages', () => {
     expect(systemBlocksOf(built).map(block => block.text)).toEqual([CLAUDE_CODE_IDENTITY_TEXT, 'You are DSH.'])
   })
 
-  it('folds a system message followed by another user turn', () => {
+  it('keeps an illegal-slot system message in place as a reminder without rewriting the top-level system prefix', () => {
     const built = build([user('first'), system('MID'), user('second')])
     expect(messagesOf(built).map(message => message.role)).not.toContain('system')
-    expect(String(systemBlocksOf(built).at(-1)?.text)).toContain('MID')
+    expect(String(systemBlocksOf(built).at(-1)?.text)).not.toContain('MID')
+    expect(messagesOf(built)[0]!.content.map(block => block.text)).toEqual([
+      'first',
+      '<system-reminder>\nMID\n</system-reminder>',
+      'second',
+    ])
   })
 
   it('applies the same placement rule to an unknown current-model id', () => {
@@ -1431,18 +1470,27 @@ describe('Mid-conversation system messages', () => {
     expect(String(systemBlocksOf(leading).at(-1)?.text)).toContain('LEADING')
   })
 
-  it('does not group consecutive system messages into a forbidden position', () => {
+  it('does not group consecutive system messages into a forbidden position and keeps them in place as reminders', () => {
     const built = build([user('ask'), system('FIRST'), system('SECOND'), assistant('answer')])
     expect(messagesOf(built).map(message => message.role)).not.toContain('system')
     const top = String(systemBlocksOf(built).at(-1)?.text)
-    expect(top).toContain('FIRST')
-    expect(top).toContain('SECOND')
+    expect(top).not.toContain('FIRST')
+    expect(top).not.toContain('SECOND')
+    expect(messagesOf(built)[0]!.content.map(block => block.text)).toEqual([
+      'ask',
+      '<system-reminder>\nFIRST\n</system-reminder>',
+      '<system-reminder>\nSECOND\n</system-reminder>',
+    ])
   })
 
-  it.each(['claude-sonnet-4-6', 'claude-sonnet-5'])('folds every historical system message for unsupported %s', model => {
+  it.each(['claude-sonnet-4-6', 'claude-sonnet-5'])('keeps mid-conversation system messages in place as reminders for unsupported %s', model => {
     const built = build([user('ask'), system('MID'), assistant('answer')], model)
     expect(messagesOf(built).map(message => message.role)).not.toContain('system')
-    expect(String(systemBlocksOf(built).at(-1)?.text)).toContain('MID')
+    expect(String(systemBlocksOf(built).at(-1)?.text)).not.toContain('MID')
+    expect(messagesOf(built)[0]!.content.map(block => block.text)).toEqual([
+      'ask',
+      '<system-reminder>\nMID\n</system-reminder>',
+    ])
   })
 })
 
@@ -1477,7 +1525,16 @@ describe('Per-image and per-request image budgets', () => {
     // The stored image fits the EDGE limit, so it is read as stored — and its
     // bytes are over the per-image ceiling, so the SAME scaling path is asked
     // again with a byte target and the source dimensions.
-    expect(requests).toEqual([{ id: 'fat', target: { width: 100, height: 100, maxBytes: 3.5 * 1024 * 1024 } }])
+    expect(requests).toEqual([{
+      id: 'fat',
+      target: {
+        width: 100,
+        height: 100,
+        maxBytes: 3.5 * 1024 * 1024,
+        maxImageBytes: 3.5 * 1024 * 1024,
+        imageTargetBytes: 3.5 * 1024 * 1024,
+      },
+    }])
     expect(images.get('fat')).toEqual({ kind: 'inline', mediaType: 'image/webp', data: Buffer.from(new Uint8Array(1024)).toString('base64') })
   })
 

@@ -145,7 +145,7 @@ export function createRetention(runtimeOf: () => PtcRuntimeLike | undefined): Co
       if (signal.aborted) {
         throw signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? 'tool call aborted'))
       }
-      if (disposed) throw new Error('PTC tool executor disposed')
+      if (disposed) throw new CodeRunFailedError('PTC tool executor disposed', 'CODE_RUN_UNAVAILABLE')
     },
     trackRun(run: ActiveRunHandle): () => void {
       const key = sessionKeyOf(run.agent)

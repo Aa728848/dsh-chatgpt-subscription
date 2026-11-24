@@ -11,6 +11,9 @@ import {
 } from '../_claude-shared/claude-code-first-party.ts'
 import {
   LlmError,
+  extractSystemText,
+  leadingSystemEndIndex,
+  midConversationSystemToUserMessage,
   type ContentBlock,
   type FinishReason,
   type GenerateOptions,
@@ -853,17 +856,30 @@ export function requestImageEdgeLimit(options: GenerateOptions): number {
 export function requestImageEdgeTarget(
   ref: ImageAttachmentRef,
   edge: number,
-): { width: number; height: number; maxPixels: number; maxBytes: number } | undefined {
+): {
+  width: number
+  height: number
+  maxPixels: number
+  maxBytes: number
+  maxImageBytes: number
+  imageTargetBytes: number
+} | undefined {
   const { width, height } = ref
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return undefined
   if (Math.max(width, height) <= edge) return undefined
-  // Older attachment stores consume maxPixels, newer stores consume width/height.
-  // Derive the old budget from the unrounded aspect ratio: multiplying rounded
-  // target dimensions can let a thin image exceed the long-edge ceiling.
+  // Older attachment stores consume maxPixels/maxBytes; 0.2.3+ stores consume
+  // width/height/maxImageBytes/imageTargetBytes. Derive the old budget from the
+  // unrounded aspect ratio: multiplying rounded target dimensions can let a thin
+  // image exceed the long-edge ceiling.
   const maxPixels = Math.max(1, Math.floor(edge * edge * (Math.min(width, height) / Math.max(width, height))))
+  const byteLimits = {
+    maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+    maxImageBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+    imageTargetBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+  }
   return width >= height
-    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
-    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxPixels, ...byteLimits }
+    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxPixels, ...byteLimits }
 }
 
 /**
@@ -959,11 +975,14 @@ async function scaledWithinPerImageLimit(
     return { kind: 'oversized' }
   }
   try {
-    const version = await attachments.readImageRequest(
-      ref,
-      { width, height, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES },
-      signal,
-    )
+    const target = {
+      width,
+      height,
+      maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+      maxImageBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+      imageTargetBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+    }
+    const version = await attachments.readImageRequest(ref, target, signal)
     const data = Buffer.from(version.data).toString('base64')
     if (data.length > MAX_SINGLE_REQUEST_IMAGE_BYTES) return { kind: 'oversized' }
     return { kind: 'inline', mediaType: version.mediaType, data }
@@ -1110,7 +1129,8 @@ export function claudeSystemMessagesInPlace(options: GenerateOptions, catalog?: 
   if (!claudeSupportsMidConversationSystemMessages(options.model, catalog)) return inPlace
 
   const messages = options.messages
-  for (let index = 0; index < messages.length; index += 1) {
+  const leadingEnd = leadingSystemEndIndex(messages)
+  for (let index = leadingEnd; index < messages.length; index += 1) {
     if (messages[index]?.role !== 'system') continue
     const previous = messages[index - 1]
     const next = messages[index + 1]
@@ -1124,15 +1144,26 @@ export function claudeSystemMessagesInPlace(options: GenerateOptions, catalog?: 
 /**
  * The conversation's messages as they reach the wire.
  *
- * A `role: "system"` message is dropped here when it is FOLDED into the
- * top-level `system` field, and kept when the vendor's placement rule allows
- * it to stay in place. The decision is read from
- * {@link claudeSystemMessagesInPlace}, so this list and the folded text can
- * never disagree about one message.
+ * Leading contiguous `role: "system"` messages are folded into the top-level
+ * `system` field. Mid-conversation `role: "system"` messages stay in place:
+ * as `role: "system"` when the model and placement rule accept it, or as an
+ * in-place `user` `<system-reminder>` turn otherwise, so dynamic system updates
+ * (DSH 0.2.3+ PR #6941) never rewrite the cached top-level system prefix.
  */
 function messagesForTheWire(options: GenerateOptions, catalog?: readonly ClaudeModelEntry[]): Message[] {
+  const leadingEnd = leadingSystemEndIndex(options.messages)
   const inPlace = claudeSystemMessagesInPlace(options, catalog)
-  return options.messages.filter((message, index) => message.role !== 'system' || inPlace.has(index))
+  const wire: Message[] = []
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index] as Message
+    if (message.role !== 'system' || inPlace.has(index)) {
+      wire.push(message)
+      continue
+    }
+    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    if (reminder !== undefined) wire.push(reminder)
+  }
+  return wire
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,14 +1230,13 @@ function replayBlockFor(message: Message, index: number): Record<string, unknown
  * turn-over-turn belongs in a trailing user message, not here, because one
  * changed byte at the head invalidates the whole cached prefix.
  */
-function foldedClaudeSystemText(options: GenerateOptions, catalog?: readonly ClaudeModelEntry[]): string | undefined {
+function foldedClaudeSystemText(options: GenerateOptions, _catalog?: readonly ClaudeModelEntry[]): string | undefined {
   const parts: string[] = []
-  const inPlace = claudeSystemMessagesInPlace(options, catalog)
-  options.messages.forEach((message, index) => {
-    if (message.role !== 'system' || inPlace.has(index)) return
-    const text = textOf(message.content)
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = extractSystemText(options.messages[index]!.content, sanitizeText)
     if (text !== '') parts.push(text)
-  })
+  }
   return parts.length === 0 ? undefined : parts.join('\n\n')
 }
 
@@ -1514,13 +1544,23 @@ function claudeWireTools(options: GenerateOptions, names: ClaudeToolNames): Anth
 function claudeSystemContent(message: Message, images: ResolvedRequestImages): AnthropicBlock[] {
   const blocks: AnthropicBlock[] = []
   if (!Array.isArray(message.content)) return blocks
+  const pendingText: string[] = []
+  const flushText = (): void => {
+    if (pendingText.length === 0) return
+    const joined = pendingText.length === 1
+      ? pendingText[0]!
+      : pendingText.map(part => part.trim()).filter(Boolean).join('\n\n')
+    pendingText.length = 0
+    if (joined !== '') blocks.push({ type: 'text', text: joined })
+  }
   for (const block of message.content) {
     if (!isRecord(block)) continue
     if (block.type === 'text' && typeof block.text === 'string') {
       const text = sanitizeText(block.text)
-      if (text !== '') blocks.push({ type: 'text', text })
+      if (text !== '') pendingText.push(text)
       continue
     }
+    flushText()
     if (block.type === 'image') {
       blocks.push(imageBlockFor(block, images))
     }
@@ -1538,6 +1578,7 @@ function claudeSystemContent(message: Message, images: ResolvedRequestImages): A
       })
     }
   }
+  flushText()
   return blocks
 }
 

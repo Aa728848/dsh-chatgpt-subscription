@@ -104,6 +104,9 @@ export interface MessageSource {
   readonly callId?: unknown
   readonly provider?: unknown
   readonly replayState?: unknown
+  readonly complete?: unknown
+  readonly reset?: unknown
+  readonly sections?: readonly unknown[]
 }
 
 /** One conversation message in the vocabulary the mappers read. */
@@ -179,14 +182,91 @@ function toolCallIdOf(raw: Record<string, unknown>, source: Record<string, unkno
 }
 
 /**
+ * Extract system-message text blocks joined by blank lines, matching DSH 0.2.3+
+ * `extractTextContent(content, { separator: '\n\n', trim: true })` (PR #6941).
+ *
+ * Since DSH 0.2.3-alpha.1 a single `system/message` can hold one `TextBlock`
+ * per prompt section with no trailing newline. Joining blocks with `''` glues
+ * sections together; joining trimmed non-empty blocks with `'\n\n'` preserves
+ * section boundaries for every provider line.
+ */
+export function extractSystemText(
+  content: unknown,
+  sanitize?: (text: string) => string,
+): string {
+  const clean = (value: string): string => (sanitize ? sanitize(value) : value).trim()
+  if (typeof content === 'string') return clean(content)
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== 'text' || typeof block.text !== 'string') continue
+    const text = clean(block.text)
+    if (text !== '') parts.push(text)
+  }
+  return parts.join('\n\n')
+}
+
+/**
+ * End index (exclusive) of the leading contiguous `role: 'system'` prefix.
+ *
+ * Only messages before this index belong to the initial top-level system prompt;
+ * any `role: 'system'` message at or after this index is a mid-conversation
+ * incremental update that must stay in-position to preserve prompt prefix caches.
+ */
+export function leadingSystemEndIndex(
+  messages: readonly Message[],
+  includeLeading?: (message: Message) => boolean,
+): number {
+  let end = 0
+  while (end < messages.length) {
+    const message = messages[end]
+    if (message === undefined || message.role !== 'system') break
+    if (includeLeading !== undefined && !includeLeading(message)) break
+    end += 1
+  }
+  return end
+}
+
+/**
+ * Wrap a mid-conversation `role: 'system'` update as a `<system-reminder>` tag,
+ * matching DSH's own pi-ai fallback (`packages/llm/llm-pi-ai/src/context.ts`).
+ */
+export function formatMidConversationSystemReminder(text: string): string {
+  const escaped = text.replaceAll('</system-reminder>', '<\\/system-reminder>')
+  return `<system-reminder>\n${escaped}\n</system-reminder>`
+}
+
+/**
+ * Convert a mid-conversation `role: 'system'` message into an in-place `user`
+ * `<system-reminder>` message, preserving any non-text blocks (e.g. images) if present.
+ * Returns `undefined` when the message carries neither non-empty text nor non-text blocks.
+ */
+export function midConversationSystemToUserMessage(
+  message: Message,
+  sanitize?: (text: string) => string,
+): Message | undefined {
+  const text = extractSystemText(message.content, sanitize)
+  const extras = Array.isArray(message.content)
+    ? message.content.filter((block) => block.type !== 'text' && block.type !== 'tool-addition' && block.type !== 'tool-removal')
+    : []
+  if (text === '' && extras.length === 0) return undefined
+  const content: ContentBlock[] = [
+    ...(text === '' ? [] : [{ type: 'text' as const, text: formatMidConversationSystemReminder(text) }]),
+    ...extras,
+  ]
+  return { ...message, role: 'user', content }
+}
+
+/**
  * Normalize one harness message list into {@link Message}.
  *
  * A 0.1.7 `role: 'tool'` message is re-wrapped as the user-role message holding
  * one {@link ToolResultBlock} that the mappers expect, keeping the tool
  * provenance (`kind: 'tool'`) they use to tell a real tool result from a user
  * turn. A message that already carries that block keeps its own body instead of
- * nesting a second `tool-result` around it. Everything a newer harness adds
- * beside that keeps its own shape.
+ * nesting a second `tool-result` around it. A 0.2.3+ multi-block text-only
+ * `role: 'system'` message is pre-joined with `'\n\n'` so downstream consumers
+ * never glue sections together. Everything else keeps its own shape.
  * @param messages - Messages straight off the request options, in either generation's shape.
  * @returns The same conversation in the pre-0.1.7 vocabulary.
  */
@@ -194,7 +274,7 @@ export function normalizeMessages(messages: readonly unknown[] | undefined): Mes
   const normalized: Message[] = []
   for (const raw of messages ?? []) {
     if (!isRecord(raw)) continue
-    const content = readBlocks(raw.content)
+    let content = readBlocks(raw.content)
     if (raw.role === 'tool') {
       const source = isRecord(raw.source) ? raw.source : undefined
       const embedded = embeddedToolResult(content)
@@ -213,9 +293,14 @@ export function normalizeMessages(messages: readonly unknown[] | undefined): Mes
       })
       continue
     }
+    const role = typeof raw.role === 'string' ? raw.role as Message['role'] : 'user'
+    if (role === 'system' && content.length >= 2 && content.every((block) => block.type === 'text')) {
+      const joined = extractSystemText(content)
+      content = joined === '' ? [] : [{ type: 'text', text: joined }]
+    }
     normalized.push({
       id: raw.id,
-      role: typeof raw.role === 'string' ? raw.role as Message['role'] : 'user',
+      role,
       content,
       ...(isRecord(raw.source) ? { source: raw.source as unknown as MessageSource } : {}),
     })

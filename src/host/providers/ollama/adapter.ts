@@ -15,6 +15,7 @@ import {
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   LlmError,
+  extractSystemText,
   normalizeGenerateOptions,
   type GenerateOptions,
   type Message,
@@ -693,7 +694,7 @@ export async function toOllamaRequest(
     // Deduplicate only a leading message whose text duplicates options.system;
     // nonleading repeated instructions in conversation context are preserved.
     if (index === 0 && trimmedSystem !== undefined && (message.role === 'system' || message.role === 'developer')) {
-      const leadingText = textOf(message.content).trim()
+      const leadingText = message.role === 'system' ? extractSystemText(message.content) : textOf(message.content).trim()
       if (leadingText === trimmedSystem) continue
     }
 
@@ -736,7 +737,7 @@ export async function toOllamaRequest(
     }
 
     if (message.role === 'system' || message.role === 'developer') {
-      const text = textOf(message.content).trim()
+      const text = message.role === 'system' ? extractSystemText(message.content) : textOf(message.content).trim()
       if (text !== '') {
         messages.push({ role: 'system', content: text })
       }

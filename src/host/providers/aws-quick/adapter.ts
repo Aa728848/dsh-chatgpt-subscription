@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto'
 import type {ImageAttachmentRef} from '@deepseek-ai/dsh-attachment'
 import {LlmAdapter,resolveRetryPolicy,type GenerateOptions as HarnessGenerateOptions,type LlmModelInfo,type LlmProviderInfo,type LlmResolvedModelInfo,type PreparedAdapterCall,type ResolvedRetryPolicy,type StreamChunk} from '@deepseek-ai/dsh-llm'
 import {localizedProviderName} from '../../common/i18n/index.ts'
-import {LlmError,normalizeGenerateOptions,type ContentBlock,type GenerateOptions,type Message,type ToolResultBlock} from '../../common/llm-compat.ts'
+import {LlmError,extractSystemText,normalizeGenerateOptions,type ContentBlock,type GenerateOptions,type Message,type ToolResultBlock} from '../../common/llm-compat.ts'
 import {STREAM_IDLE_TIMEOUT_CODE,STREAM_IDLE_TIMEOUT_MS,wrapStreamWithWatchdog} from '../../common/idle-watchdog.ts'
 import {requestImageTargetOrOriginal,resolveRequestImages,type AttachmentImageReader} from '../../common/request-images.ts'
 import {quickImageAttachments,quickImageLabel,quickToolResultContent,type QuickResultContent} from './images.ts'
@@ -19,7 +19,7 @@ const RETRY_POLICY=resolveRetryPolicy({mode:'normal',maxRetries:2,retryableCodes
 interface ThreadState{threadId:string;covered:number;fingerprint:string;model:string;effort?:string;toolFingerprint?:string}
 interface LiveTurn{connection:QuickConnection;state:ThreadState;catalog?:QuickToolCatalog;pending:Map<string,QuickToolCall>}
 function blockText(block:ContentBlock):string{const b=block as unknown as Record<string,unknown>;if(b.type==='text'&&typeof b.text==='string')return b.text;if(b.type==='tool-call')return `[Tool call ${String(b.name??'unknown')}: ${String(b.arguments??'')}]`;if(b.type==='tool-result'&&Array.isArray(b.content))return `[Tool result]\n${(b.content as ContentBlock[]).map(blockText).filter(Boolean).join('\n')}`;if(b.type==='image')return quickImageLabel(block);if(b.type==='image-url')throw new LlmError('AWS Quick requires an admitted DSH image attachment, not a remote image URL.','INVALID_REQUEST');return ''}
-function messageText(message:Message):string{return message.content.map(blockText).filter(Boolean).join('\n')}
+function messageText(message:Message):string{return message.role==='system'?extractSystemText(message.content):message.content.map(blockText).filter(Boolean).join('\n')}
 function renderMessage(message:Message):string{return `<${message.role}>\n${messageText(message)}\n</${message.role}>`}
 function renderTranscript(messages:Message[]):string{const conversation=messages.filter((message)=>message.role!=='system'&&message.role!=='developer');return `The following is the complete DSH conversation. Continue from its latest user request; do not repeat earlier tasks.\n\n${conversation.map(renderMessage).join('\n\n')}`}
 function systemContext(messages:Message[]):string{return messages.filter((message)=>message.role==='system'||message.role==='developer').map(messageText).filter((text)=>text.trim()).join('\n\n')}
