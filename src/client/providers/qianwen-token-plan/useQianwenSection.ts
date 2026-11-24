@@ -9,6 +9,7 @@ import type {
 } from '../../../shared/qianwen-token-plan-contracts.ts'
 import { contextDraftsFor } from '../../common/ContextWindowEditor.tsx'
 import { parsePositiveCapacity } from '../../common/format.ts'
+import { nextGroupSelection } from '../../common/model-vendors.ts'
 import { get, messageOf, post, request } from './api.ts'
 
 export interface QianwenSectionProps { onModelChange?: () => void }
@@ -89,6 +90,11 @@ export function useQianwenSection({ onModelChange }: QianwenSectionProps = {}) {
     if (status === null) return
     void update({ enabledModelIds: enabled ? status.models.map(model => model.id) : [] }, 'models').catch(() => undefined)
   }, [status, update])
+  const setModelGroup = useCallback((ids: string[], enabled: boolean) => {
+    if (status === null || ids.length === 0) return
+    const current = status.models.filter(model => model.enabled).map(model => model.id)
+    void update({ enabledModelIds: nextGroupSelection(current, ids, enabled) }, 'models').catch(() => undefined)
+  }, [status, update])
   const saveContextWindow = useCallback(async (id: string) => {
     const raw = contextDrafts[id] ?? ''
     const parsed = parsePositiveCapacity(raw)
@@ -120,7 +126,7 @@ export function useQianwenSection({ onModelChange }: QianwenSectionProps = {}) {
     status, loading, busy, error, connection, keyValue, contextDrafts, savingModel, pixelsDraft,
     setKeyValue, setPixelsDraft,
     setContextDraft: (id: string, draft: string) => setContextDrafts(current => ({ ...current, [id]: draft })),
-    saveKey, removeKey, testConnection, update, toggleModel, setAllModels,
+    saveKey, removeKey, testConnection, update, toggleModel, setAllModels, setModelGroup,
     saveContextWindow, resetContextWindow, resetAllContextWindows, savePixels,
     setDefaultEffort: (defaultReasoningEffort: QianwenReasoningEffort | null) => update({ defaultReasoningEffort }, 'effort'),
     setImageDetail: (imageDetail: QianwenImageDetail) => update({ imageDetail }, 'vision'),

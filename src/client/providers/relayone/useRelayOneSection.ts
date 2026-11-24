@@ -8,6 +8,7 @@ import type {
 } from '../../../shared/relayone-contracts.ts'
 import { contextDraftsFor } from '../../common/ContextWindowEditor.tsx'
 import { parsePositiveCapacity } from '../../common/format.ts'
+import { nextGroupSelection } from '../../common/model-vendors.ts'
 import { get, messageOf, post, request } from './api.ts'
 
 export interface RelayOneSectionProps { onModelChange?: () => void }
@@ -115,6 +116,11 @@ export function useRelayOneSection({ onModelChange }: RelayOneSectionProps = {})
     if (status === null) return
     void update({ enabledModelIds: enabled ? status.models.map(model => model.id) : [] }, 'models').catch(() => undefined)
   }, [status, update])
+  const setModelGroup = useCallback((ids: string[], enabled: boolean) => {
+    if (status === null || ids.length === 0) return
+    const current = status.models.filter(model => model.enabled).map(model => model.id)
+    void update({ enabledModelIds: nextGroupSelection(current, ids, enabled) }, 'models').catch(() => undefined)
+  }, [status, update])
   const saveContextWindow = useCallback(async (id: string) => {
     const parsed = parsePositiveCapacity(contextDrafts[id] ?? '')
     if (parsed === null) { setError('Invalid capacity: ' + (contextDrafts[id] ?? '')); return }
@@ -136,7 +142,7 @@ export function useRelayOneSection({ onModelChange }: RelayOneSectionProps = {})
     setKeyValue,
     setContextDraft: (id: string, draft: string) => setContextDrafts(current => ({ ...current, [id]: draft })),
     accountAction, testKey,
-    saveKey, removeKey, testConnection, refreshCatalog, update, toggleModel, setAllModels,
+    saveKey, removeKey, testConnection, refreshCatalog, update, toggleModel, setAllModels, setModelGroup,
     saveContextWindow, resetContextWindow, resetAllContextWindows,
     setDefaultEffort: (defaultReasoningEffort: RelayOneReasoningEffort | null) => update({ defaultReasoningEffort }, 'effort'),
     setImageModel: (imageModel: string | null) => update({ imageModel }, 'media'),

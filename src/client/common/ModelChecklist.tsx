@@ -6,10 +6,16 @@
  * switches to a left-vendor + right-model split view with cross-vendor search
  * and per-vendor batch toggle, keeping large catalogs (100+ models) scannable.
  * Single-vendor and ungrouped callers continue to render a compact flat list.
+ * A line whose catalog mixes vendors can pass `groupByVendor` instead of
+ * resolving groups itself; the split view's copy comes from this component's
+ * own locale namespace unless the caller overrides it.
  */
 import { useMemo, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { BrandMark, modelBrandMark, type ProviderMarkKey } from '../hub/brand-icons.tsx'
+import { useLineDict } from './line-locale.ts'
+import { modelChecklistZh, NS_MODEL_CHECKLIST } from './model-checklist-labels.ts'
+import { modelVendorGroup, type ModelVendorOptions } from './model-vendors.ts'
 
 export interface ModelChecklistGroup {
   key: string
@@ -57,8 +63,21 @@ interface Props {
   onToggleAll(enabled: boolean): void
   /** Optional batch toggle for the active vendor group in split-pane mode. */
   onToggleGroup?(ids: string[], enabled: boolean): void
+  /**
+   * Resolve each item's vendor from its id (items that already carry a `group`
+   * keep it). Two or more vendors switch the list to the split view, but only
+   * once the catalog reaches `minItems` (default 10): a short list reads better flat.
+   */
+  groupByVendor?: boolean | ModelChecklistGrouping
   labels: ModelChecklistLabels
 }
+
+export interface ModelChecklistGrouping extends ModelVendorOptions {
+  /** Smallest catalog that gets the split view; default {@link DEFAULT_GROUP_MIN_ITEMS}. */
+  minItems?: number
+}
+
+export const DEFAULT_GROUP_MIN_ITEMS = 10
 
 interface VendorBucket {
   key: string
@@ -83,7 +102,7 @@ function renderOptionRow(
   busy: boolean,
   onToggle: (id: string, enabled: boolean) => void,
 ): React.JSX.Element {
-  const mark = item.group?.mark !== undefined ? item.group.mark : modelBrandMark(item.id)
+  const mark = item.group?.mark ?? modelBrandMark(item.id)
   return <button
     key={item.id}
     type="button"
@@ -104,7 +123,19 @@ function renderOptionRow(
   </button>
 }
 
-export function ModelChecklist({ items, busy, onToggle, onToggleAll, onToggleGroup, labels }: Props): React.JSX.Element {
+export function ModelChecklist({ items: rawItems, busy, onToggle, onToggleAll, onToggleGroup, groupByVendor, labels }: Props): React.JSX.Element {
+  const copy = useLineDict(NS_MODEL_CHECKLIST, modelChecklistZh)
+  const otherLabel = copy.otherGroup
+  const minItems = typeof groupByVendor === 'object' ? (groupByVendor.minItems ?? DEFAULT_GROUP_MIN_ITEMS) : DEFAULT_GROUP_MIN_ITEMS
+  const grouping = groupByVendor !== undefined && groupByVendor !== false && rawItems.length >= minItems
+  // A string key keeps an inline `{ ignorePrefixes: [...] }` literal from
+  // re-deriving every group on each parent render.
+  const ignoreKey = typeof groupByVendor === 'object' ? (groupByVendor.ignorePrefixes ?? []).join('\n') : ''
+  const items = useMemo<ModelChecklistItem[]>(() => {
+    if (!grouping) return rawItems
+    const options: ModelVendorOptions = ignoreKey === '' ? {} : { ignorePrefixes: ignoreKey.split('\n') }
+    return rawItems.map((item) => item.group !== undefined ? item : { ...item, group: modelVendorGroup(item.id, otherLabel, options) })
+  }, [rawItems, grouping, ignoreKey, otherLabel])
   const enabledCount = items.filter((item) => item.enabled).length
   const count = (labels.countTemplate ?? '{count}/{total}')
     .replace('{count}', String(enabledCount))
@@ -128,7 +159,9 @@ export function ModelChecklist({ items, busy, onToggle, onToggleAll, onToggleGro
       bucket.items.push(item)
       if (item.enabled) bucket.enabledCount += 1
     }
-    return [...map.values()]
+    // The catch-all bucket goes last so named vendors lead the column.
+    const buckets = [...map.values()]
+    return [...buckets.filter((b) => b.key !== 'other'), ...buckets.filter((b) => b.key === 'other')]
   }, [items])
 
   const splitMode = vendors.length >= 2
@@ -188,8 +221,8 @@ export function ModelChecklist({ items, busy, onToggle, onToggleAll, onToggleGro
     </div>
   }
 
-  const allLabel = labels.allGroups ?? 'All'
-  const enabledLabel = labels.enabledGroup ?? 'Enabled'
+  const allLabel = labels.allGroups ?? copy.allGroups
+  const enabledLabel = labels.enabledGroup ?? copy.enabledGroup
   const paneTitle = searching
     ? `${visibleItems.length}/${items.length}`
     : activeTab === ALL_TAB
@@ -207,8 +240,8 @@ export function ModelChecklist({ items, busy, onToggle, onToggleAll, onToggleGro
         type="search"
         className="dsh-mcl-search"
         value={query}
-        placeholder={labels.searchPlaceholder ?? 'Search models…'}
-        aria-label={labels.searchPlaceholder ?? 'Search models…'}
+        placeholder={labels.searchPlaceholder ?? copy.searchPlaceholder}
+        aria-label={labels.searchPlaceholder ?? copy.searchPlaceholder}
         onChange={(event) => setQuery(event.currentTarget.value)}
         onKeyDown={handleSearchKeyDown}
       />
@@ -219,7 +252,7 @@ export function ModelChecklist({ items, busy, onToggle, onToggleAll, onToggleGro
     </div>
 
     <div className="dsh-mcl-split">
-      <div className="dsh-mcl-vendors" role="tablist" aria-orientation="vertical" aria-label={labels.groupsNav ?? labels.list}>
+      <div className="dsh-mcl-vendors" role="tablist" aria-orientation="vertical" aria-label={labels.groupsNav ?? copy.groupsNav}>
         <button
           type="button"
           role="tab"
@@ -294,7 +327,7 @@ export function ModelChecklist({ items, busy, onToggle, onToggleAll, onToggleGro
 
         <div className="dsh-mcl-pane-body">
           {visibleItems.length === 0 ? (
-            <p className="dsh-mcl-empty" role="status">{labels.noMatches ?? 'No matching models'}</p>
+            <p className="dsh-mcl-empty" role="status">{labels.noMatches ?? copy.noMatches}</p>
           ) : (
             <div className="dsh-mcl-list" role="group" aria-label={labels.list}>
               {visibleItems.map((item) => renderOptionRow(item, busy, onToggle))}

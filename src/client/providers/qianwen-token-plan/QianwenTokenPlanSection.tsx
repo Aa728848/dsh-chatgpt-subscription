@@ -71,7 +71,7 @@ export function QianwenTokenPlanSection(props: QianwenSectionProps = {}): React.
     <section className="dsha-group dshqw-models">
       <div className="dsha-grouphead"><h3>{t.modelsSection}</h3></div>
       <p className="dsha-muted">{t.modelsHint}</p>
-      <ModelChecklist items={models.map(model => ({ id: model.id, name: model.name, hint: model.hint, enabled: model.enabled }))} busy={busy !== null} onToggle={view.toggleModel} onToggleAll={view.setAllModels} labels={{ selectAll: t.selectAll, clearAll: t.clearAll, list: t.modelsSection }} />
+      <ModelChecklist items={models.map(model => ({ id: model.id, name: model.name, hint: model.hint, enabled: model.enabled }))} busy={busy !== null} onToggle={view.toggleModel} onToggleAll={view.setAllModels} onToggleGroup={view.setModelGroup} groupByVendor labels={{ selectAll: t.selectAll, clearAll: t.clearAll, list: t.modelsSection }} />
       <p className="dsha-muted">{t.selectionHint}</p>
     </section>
 

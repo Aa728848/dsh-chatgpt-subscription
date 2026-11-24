@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { ModelChecklist } from '../../common/ModelChecklist.tsx'
+import { nextGroupSelection } from '../../common/model-vendors.ts'
 import type { AntigravityAcpStatusDto } from '../../../shared/antigravity-acp-contracts.ts'
 import { AntigravityAcpApi } from './api.ts'
 import { zh, NS_ANTIGRAVITY_ACP } from './locales.ts'
@@ -102,6 +103,14 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
   const setAllModels = useCallback((selectAll: boolean) => {
     applyEnabled(selectAll ? null : [])
   }, [applyEnabled])
+
+  const setModelGroup = useCallback((ids: string[], checked: boolean) => {
+    if (status === null || ids.length === 0) return
+    const all = status.models ?? []
+    const current = all.filter(model => isModelEnabled(model.id)).map(model => model.id)
+    const next = nextGroupSelection(current, ids, checked)
+    applyEnabled(next.length === all.length ? null : next)
+  }, [status, isModelEnabled, applyEnabled])
 
   const signIn = useCallback(() => {
     setBusy('login')
@@ -318,6 +327,8 @@ export function AntigravityAcpSection(props: Props): React.ReactElement {
               busy={busy !== null}
               onToggle={(id, value) => toggleModel(id, value)}
               onToggleAll={(value) => setAllModels(value)}
+              onToggleGroup={setModelGroup}
+              groupByVendor
               labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
             />
           </>

@@ -59,6 +59,8 @@ import { dictionaries as compactAfterTurnDicts, NS_COMPACT_AFTER_TURN } from '..
 import { dictionary as compactAfterTurnRu } from '../../src/client/locales-ru/compact-after-turn.ts'
 import { dictionaries as sessionQuotaDicts, NS_SESSION_QUOTA } from '../../src/client/features/session-quota/locales.ts'
 import { dictionary as sessionQuotaRu } from '../../src/client/locales-ru/session-quota.ts'
+import { dictionaries as modelChecklistDicts, NS_MODEL_CHECKLIST } from '../../src/client/common/model-checklist-labels.ts'
+import { dictionary as modelChecklistRu } from '../../src/client/locales-ru/model-checklist.ts'
 
 /** Every namespace this pack covers, with all three dictionaries beside each other. */
 const NAMESPACES = [
@@ -86,6 +88,7 @@ const NAMESPACES = [
   { ns: NS_AWS_QUICK, zh: awsQuickDicts.zh as Record<string, string>, en: awsQuickDicts.en as Record<string, string>, ru: awsQuickRu },
   { ns: NS_COMPACT_AFTER_TURN, zh: compactAfterTurnDicts.zh as Record<string, string>, en: compactAfterTurnDicts.en as Record<string, string>, ru: compactAfterTurnRu },
   { ns: NS_SESSION_QUOTA, zh: sessionQuotaDicts.zh as Record<string, string>, en: sessionQuotaDicts.en as Record<string, string>, ru: sessionQuotaRu },
+  { ns: NS_MODEL_CHECKLIST, zh: modelChecklistDicts.zh as Record<string, string>, en: modelChecklistDicts.en as Record<string, string>, ru: modelChecklistRu },
 ]
 
 /** `{name}` placeholders in a template, in the order they appear. */

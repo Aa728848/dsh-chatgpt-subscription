@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AccountPoolSection, formatAccountDate } from '../../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../../common/ModelChecklist.tsx'
+import { nextGroupSelection } from '../../common/model-vendors.ts'
 import { formatCapacity, parsePositiveCapacity } from '../../common/format.ts'
 import type { AccountRotationStrategy } from '../../../shared/account-pool-contracts.ts'
 import {
@@ -570,6 +571,18 @@ const refreshUsage = useCallback(() => {
     })
   }, [run])
 
+  const setModelGroup = useCallback((ids: string[], checked: boolean) => {
+    if (status === null || ids.length === 0) return
+    const current = status.models.filter((model) => model.enabled).map((model) => model.id)
+    const next = nextGroupSelection(current, ids, checked)
+    const turnedOn = checked ? ids.filter((id) => !current.includes(id)) : []
+    void run('models', async () => {
+      // Same rule as a single tick: a model switched on also loses its hide.
+      for (const id of turnedOn) await API.setVisibility(id, true)
+      return await API.setEnabledModels(next.length === status.models.length ? null : next)
+    })
+  }, [status, run])
+
   const commitContext = useCallback((id: string) => {
     const model = status?.models.find((entry) => entry.id === id)
     if (model === undefined) return
@@ -863,6 +876,8 @@ const refreshUsage = useCallback(() => {
               busy={busyAny}
               onToggle={(id, enabled) => toggleModel(id, enabled)}
               onToggleAll={(enabled) => setAllModels(enabled)}
+              onToggleGroup={setModelGroup}
+              groupByVendor
               labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, countTemplate: t.modelChecklistCount, list: t.modelsSection }}
             />
             {enabledCount === 0 && <p className="dsha-muted" style={{ fontSize: 12 }}>{t.noModels}</p>}

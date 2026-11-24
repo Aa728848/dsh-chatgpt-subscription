@@ -4,6 +4,7 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ModelChecklist, type ModelChecklistItem } from '../../src/client/common/ModelChecklist.tsx'
 import { commandCodeModelVendor } from '../../src/client/providers/command-code/model-vendors.ts'
+import { modelVendorGroup, nextGroupSelection } from '../../src/client/common/model-vendors.ts'
 
 const LABELS = { selectAll: '全选', clearAll: '全不选', countTemplate: '已启用 {count}/{total}', list: '模型' }
 
@@ -173,6 +174,47 @@ describe('ModelChecklist', () => {
     await act(async () => enabledTab.click())
     expect(rows().map((r) => r.title)).toEqual(['claude-sonnet-5', 'deepseek/deepseek-v4-pro'])
   })
+
+  it('derives vendor groups itself under groupByVendor, keeping the catch-all bucket last', async () => {
+    const onToggleGroup = vi.fn()
+    await render({
+      items: [
+        { id: 'Auto', name: 'Auto', enabled: false },
+        { id: 'Qwen3.8-Max', name: 'Qwen3.8 Max', enabled: true },
+        { id: 'DeepSeek-V4-Pro', name: 'DeepSeek V4 Pro', enabled: false },
+        { id: 'qwen3.7-plus', name: 'Qwen3.7 Plus', enabled: false },
+      ],
+      onToggleGroup,
+      groupByVendor: { minItems: 4 },
+    })
+    expect(container.querySelector('.dsh-mcl-split')).not.toBeNull()
+    const vendorKeys = [...container.querySelectorAll<HTMLButtonElement>('.dsh-mcl-vendor[data-vendor]')].map((b) => b.dataset.vendor)
+    expect(vendorKeys).toEqual(['qwen', 'deepseek', 'other'])
+    // The first vendor is active and its batch toggle covers only its own ids.
+    expect(rows().map((r) => r.title)).toEqual(['Qwen3.8-Max', 'qwen3.7-plus'])
+    await act(async () => container.querySelector<HTMLButtonElement>('.dsh-mcl-pane-head .dsh-mcl-action')!.click())
+    expect(onToggleGroup).toHaveBeenCalledWith(['Qwen3.8-Max', 'qwen3.7-plus'], true)
+    // Without a caller label the split view uses the checklist's own copy.
+    expect(container.querySelector('.dsh-mcl-search')?.getAttribute('placeholder')).toBe('搜索模型或厂商…')
+  })
+
+  it('keeps a short mixed catalog flat under the default size threshold', async () => {
+    await render({ groupByVendor: true })
+    expect(container.querySelector('.dsh-mcl-split')).toBeNull()
+    expect(rows()).toHaveLength(ITEMS.length)
+  })
+
+  it('keeps a single-vendor catalog flat even under groupByVendor', async () => {
+    await render({
+      items: [
+        { id: 'claude-opus-5', name: 'Claude Opus 5', enabled: true },
+        { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', enabled: false },
+      ],
+      groupByVendor: { minItems: 0 },
+    })
+    expect(container.querySelector('.dsh-mcl-split')).toBeNull()
+    expect(rows()).toHaveLength(2)
+  })
 })
 
 describe('commandCodeModelVendor', () => {
@@ -185,5 +227,33 @@ describe('commandCodeModelVendor', () => {
     expect(commandCodeModelVendor({ id: 'MiniMaxAI/MiniMax-M3' }, '其他').key).toBe('minimax')
     expect(commandCodeModelVendor({ id: 'future-lab/next-1' }, '其他')).toEqual({ key: 'future-lab', label: 'Future Lab', mark: null })
     expect(commandCodeModelVendor({ id: 'alpha-large' }, '其他')).toEqual({ key: 'other', label: '其他', mark: null })
+  })
+})
+
+describe('modelVendorGroup', () => {
+  it('reads families from bare ids that carry no vendor prefix', () => {
+    expect(modelVendorGroup('qwen3.8-max', '其他').key).toBe('qwen')
+    expect(modelVendorGroup('Qwen3.7Plus', '其他').key).toBe('qwen')
+    expect(modelVendorGroup('hy4-preview', '其他').key).toBe('tencent')
+    expect(modelVendorGroup('llama3.1:8b', '其他').key).toBe('meta')
+    expect(modelVendorGroup('gpt-oss:20b', '其他').key).toBe('openai')
+    expect(modelVendorGroup('gemma3:27b', '其他').key).toBe('google')
+    expect(modelVendorGroup('k3.1-pro', '其他').key).toBe('moonshot')
+    expect(modelVendorGroup('MiniMax-M3', '其他').key).toBe('minimax')
+    expect(modelVendorGroup('Performance', '其他')).toEqual({ key: 'other', label: '其他', mark: null })
+  })
+
+  it('prefers the model family over an unknown namespace, and skips line-own prefixes', () => {
+    expect(modelVendorGroup('huihui_ai/deepseek-r1-abliterated', '其他').key).toBe('deepseek')
+    expect(modelVendorGroup('cline-pass/qwen3.8-max', '其他', { ignorePrefixes: ['cline-pass'] }).key).toBe('qwen')
+    // Without the skip the line prefix would read as a vendor of its own.
+    expect(modelVendorGroup('cline-pass/mystery', '其他').key).toBe('cline-pass')
+  })
+})
+
+describe('nextGroupSelection', () => {
+  it('adds or removes only the group ids, keeping the rest in order', () => {
+    expect(nextGroupSelection(['a', 'b'], ['c', 'a'], true)).toEqual(['a', 'b', 'c'])
+    expect(nextGroupSelection(['a', 'b', 'c'], ['a', 'c'], false)).toEqual(['b'])
   })
 })

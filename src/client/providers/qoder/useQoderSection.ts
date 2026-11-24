@@ -27,6 +27,7 @@ import {
 import type { AccountPoolLabels } from '../../common/AccountPoolSection.tsx'
 import { contextDraftsFor } from '../../common/ContextWindowEditor.tsx'
 import { formatCapacity, parsePositiveCapacity } from '../../common/format.ts'
+import { nextGroupSelection } from '../../common/model-vendors.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../../common/quota-follow-up.ts'
 import { get, messageOf, post } from './api.ts'
 import { zh } from './locales.ts'
@@ -210,6 +211,7 @@ export interface QoderSectionView {
     setStrategy(strategy: AccountRotationStrategy): Promise<void>
     toggleModel(modelId: string, enabled: boolean): void
     setAllModels(enabled: boolean): void
+    setModelGroup(ids: string[], enabled: boolean): void
     saveContextWindow(modelId: string): Promise<void>
     resetContextWindow(modelId: string): Promise<void>
     resetAllContextWindows(): Promise<void>
@@ -484,6 +486,13 @@ export function useQoderSection({ onModelChange }: QoderSectionProps = {}): Qode
     void applyEnabledModels(enabled ? status.models.map((model) => model.id) : [])
   }
 
+  const setModelGroup = (ids: string[], enabled: boolean): void => {
+    if (status === null || ids.length === 0) return
+    // Same explicit-list rule as a single toggle: an empty result means "none".
+    const current = status.models.filter((model) => model.enabled).map((model) => model.id)
+    void applyEnabledModels(nextGroupSelection(current, ids, enabled))
+  }
+
   const saveContextWindow = async (modelId: string): Promise<void> => {
     const raw = contextDrafts[modelId] ?? ''
     const parsed = parsePositiveCapacity(raw)
@@ -632,6 +641,7 @@ export function useQoderSection({ onModelChange }: QoderSectionProps = {}): Qode
       setStrategy,
       toggleModel,
       setAllModels,
+    setModelGroup,
       saveContextWindow,
       resetContextWindow,
       resetAllContextWindows,

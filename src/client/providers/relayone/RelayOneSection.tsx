@@ -90,7 +90,7 @@ export function RelayOneSection(props: RelayOneSectionProps = {}): React.JSX.Ele
       {status?.catalog.state === 'stale' && <p className="dsha-muted">{t.catalogStale}</p>}
       {models.length === 0
         ? <div className="dsha-empty">{status?.authenticated ? t.catalogLoading : t.catalogEmpty}</div>
-        : <ModelChecklist items={models.map(model => ({ id: model.id, name: model.name, hint: model.hint, enabled: model.enabled }))} busy={busy !== null} onToggle={view.toggleModel} onToggleAll={view.setAllModels} labels={{ selectAll: t.selectAll, clearAll: t.clearAll, list: t.modelsSection }} />}
+        : <ModelChecklist items={models.map(model => ({ id: model.id, name: model.name, hint: model.hint, enabled: model.enabled }))} busy={busy !== null} onToggle={view.toggleModel} onToggleAll={view.setAllModels} onToggleGroup={view.setModelGroup} groupByVendor labels={{ selectAll: t.selectAll, clearAll: t.clearAll, list: t.modelsSection }} />}
       <p className="dsha-muted">{t.selectionHint}</p>
     </section>
 

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { AccountPoolSection } from '../../common/AccountPoolSection.tsx'
 import { ModelChecklist } from '../../common/ModelChecklist.tsx'
+import { nextGroupSelection } from '../../common/model-vendors.ts'
 import type { AccountRotationStrategy } from '../../../shared/account-pool-contracts.ts'
 import {
   OLLAMA_REASONING_EFFORTS,
@@ -152,6 +153,14 @@ export function OllamaSection(props: Props): React.ReactElement {
     applyEnabled(selectAll ? null : [])
   }, [applyEnabled])
 
+  const setModelGroup = useCallback((ids: string[], checked: boolean) => {
+    if (status === null || ids.length === 0) return
+    const all = status.models ?? []
+    const current = all.filter(model => isModelEnabled(model.id)).map(model => model.id)
+    const next = nextGroupSelection(current, ids, checked)
+    applyEnabled(next.length === all.length ? null : next)
+  }, [status, isModelEnabled, applyEnabled])
+
   const setEffort = useCallback((value: string) => {
     // The dropdown's empty option is the card's 'not specified', which is null on
     // the wire and a real stored value rather than an absent patch: sending
@@ -287,6 +296,8 @@ export function OllamaSection(props: Props): React.ReactElement {
               busy={busy !== null}
               onToggle={(id, enabled) => void toggleModel(id, enabled)}
               onToggleAll={(enabled) => void setAllModels(enabled)}
+              onToggleGroup={setModelGroup}
+              groupByVendor
               labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
             />
           </>

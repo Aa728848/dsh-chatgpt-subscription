@@ -213,7 +213,7 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
   const sealedCount = status?.sealedAccounts ?? 0
   const {
     login, rescan, accountAction, deleteAccount, setStrategy, testConnection, refreshQuota,
-    checkinNow, updateCheckin, toggleModel, setAllModels, updateEffort, refreshCatalog,
+    checkinNow, updateCheckin, toggleModel, setAllModels, setModelGroup, updateEffort, refreshCatalog,
     saveContextWindow, resetContextWindow, resetAllContextWindows, updateContextDraft,
     updateOutboundIdentity, saveAtRestKey, clearAtRestKey, updateGuardrails,
   } = actions
@@ -568,6 +568,8 @@ export function WorkBuddySection({ onModelChange, loadModelDirectory }: WorkBudd
           busy={busy !== null}
           onToggle={(id, enabled) => void toggleModel(id, enabled)}
           onToggleAll={(enabled) => void setAllModels(enabled)}
+          onToggleGroup={(ids, enabled) => void setModelGroup(ids, enabled)}
+          groupByVendor
           labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
         />
       </section>

@@ -126,7 +126,7 @@ export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.J
   } = derived
   const {
     setRegion, login: startLogin, cancelLogin, submitPaste, setPasteValue, togglePaste, adopt,
-    clearAdoptResult, accountAction, setStrategy, toggleModel, setAllModels, saveContextWindow,
+    clearAdoptResult, accountAction, setStrategy, toggleModel, setAllModels, setModelGroup, saveContextWindow,
     resetContextWindow, resetAllContextWindows, updateContextDraft, setDefaultReasoningEffort,
     refreshQuota, refreshCatalog, testConnection,
   } = actions
@@ -445,6 +445,8 @@ export function QoderSection({ onModelChange }: QoderSectionProps = {}): React.J
               busy={busy !== null}
               onToggle={toggleModel}
               onToggleAll={setAllModels}
+              onToggleGroup={setModelGroup}
+              groupByVendor
               labels={{
                 selectAll: t.selectAll,
                 clearAll: t.unselectAll,

@@ -26,6 +26,7 @@ import { contextDraftsFor } from '../../common/ContextWindowEditor.tsx'
 import { formatCapacity, parsePositiveCapacity } from '../../common/format.ts'
 import { createLineApi } from '../../common/line-api.ts'
 import { useLineDict } from '../../common/line-locale.ts'
+import { nextGroupSelection } from '../../common/model-vendors.ts'
 import { createQuotaFollowUp, type QuotaFollowUp } from '../../common/quota-follow-up.ts'
 import { NS_WORKBUDDY, zh } from './locales.ts'
 
@@ -231,6 +232,7 @@ export interface WorkBuddySectionView {
     updateCheckin(checkin: Partial<WorkBuddyCheckinSettings>): Promise<void>
     toggleModel(modelId: string, enabled: boolean): Promise<void>
     setAllModels(enabled: boolean): Promise<void>
+    setModelGroup(ids: string[], enabled: boolean): Promise<void>
     updateEffort(effort: WorkBuddyReasoningEffort | null): Promise<void>
     refreshCatalog(): Promise<void>
     saveContextWindow(modelId: string): Promise<void>
@@ -620,6 +622,27 @@ export function useWorkBuddySection({ onModelChange, loadModelDirectory }: WorkB
     }
   }
 
+  const setModelGroup = async (ids: string[], enabled: boolean) => {
+    if (status === null || ids.length === 0) return
+    const current = status.models.filter((model) => model.enabled).map((model) => model.id)
+    try {
+      setBusy('models-all')
+      setError(null)
+      const updated = await api.request<WorkBuddyWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ enabledModelIds: nextGroupSelection(current, ids, enabled) }),
+      })
+      const normalized = normalizeStatus(updated)
+      setStatus(normalized)
+      setContextDrafts(contextDraftsFor(normalized))
+      notifyChange()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const updateEffort = async (effort: WorkBuddyReasoningEffort | null) => {
     try {
       setBusy('effort')
@@ -770,6 +793,7 @@ export function useWorkBuddySection({ onModelChange, loadModelDirectory }: WorkB
       updateCheckin,
       toggleModel,
       setAllModels,
+    setModelGroup,
       updateEffort,
       refreshCatalog,
       saveContextWindow,

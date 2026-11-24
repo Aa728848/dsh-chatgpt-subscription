@@ -20,6 +20,7 @@ import { installRussianLocale } from './locales-ru/index.ts'
 import { installStyles } from './providers/codex-chatgpt/styles.ts'
 import { installHubStyles } from './hub/hub-styles.ts'
 import { installModelChecklistStyles } from './common/model-checklist-styles.ts'
+import { dictionaries as modelChecklistDicts, NS_MODEL_CHECKLIST, type ModelChecklistLocaleKey } from './common/model-checklist-labels.ts'
 import { installPoolStyles } from './common/styles.ts'
 import { ClaudeComposerQuota } from './providers/claude/ClaudeComposerQuota.tsx'
 import { dictionaries as claudeDicts, NS_CLAUDE, type ClaudeLocaleKey } from './providers/claude/locales.ts'
@@ -123,6 +124,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-aws-quick': AwsQuickLocaleKey
     'dsh-compact-after-turn': CompactAfterTurnLocaleKey
     'dsh-session-quota': SessionQuotaLocaleKey
+    'dsh-model-checklist': ModelChecklistLocaleKey
   }
 }
 
@@ -153,6 +155,7 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     installModelChecklistStyles()
     return () => {}
   }, 'dsh-chatgpt-subscription: hub styles')
+  ctx.effect(() => ctx.locale.register(NS_MODEL_CHECKLIST, modelChecklistDicts), 'dsh-model-checklist: dictionaries')
   ctx.effect(() => ctx.locale.register(NS_CLAUDE, claudeDicts), 'dsh-claude: dictionaries')
   ctx.effect(() => {
     installClaudeStyles()
