@@ -1,5 +1,6 @@
 import type { RelayOneQuotaDto } from '../../shared/relayone-contracts.ts'
-import { relayOneCredentialFingerprint, type RelayOneCredentialStore } from './token-store.ts'
+import { relayOneCredentialFingerprint, type RelayOneCredentialStore, type RelayOneCredentials } from './token-store.ts'
+import type { RelayOneAccountPool } from './account-pool.ts'
 import { RELAYONE_ORIGIN, relayOneHeaders, relayOneSafeDetail } from './types.ts'
 
 export const RELAYONE_TOKEN_USAGE_URL = RELAYONE_ORIGIN + '/api/usage/token'
@@ -29,6 +30,17 @@ export interface RelayOneQuotaOptions {
   now?: () => number
 }
 
+/** The key this quota reading belongs to, from a single key or the pool. */
+async function quotaCredentials(
+  source: RelayOneCredentialStore | RelayOneAccountPool,
+): Promise<RelayOneCredentials | null> {
+  // The primary key, not the rotating one: a quota figure that jumped between
+  // keys whenever round-robin picked another account would describe none of
+  // them. The card states that these facts describe the current key.
+  if ('stableCredential' in source) return source.stableCredential().catch(() => null)
+  return source.read().catch(() => null)
+}
+
 /** Credential-scoped New API token quota with a 60-second single-flight cache. */
 export class RelayOneQuotaReader {
   private readonly fetchFn: typeof fetch
@@ -39,7 +51,10 @@ export class RelayOneQuotaReader {
   private refreshing: Promise<void> | null = null
   private epoch = 0
 
-  constructor(private readonly store: RelayOneCredentialStore, options: RelayOneQuotaOptions = {}) {
+  constructor(
+    private readonly store: RelayOneCredentialStore | RelayOneAccountPool,
+    options: RelayOneQuotaOptions = {},
+  ) {
     this.fetchFn = options.fetchFn ?? fetch
     this.ttlMs = options.ttlMs ?? RELAYONE_QUOTA_TTL_MS
     this.now = options.now ?? Date.now
@@ -54,7 +69,7 @@ export class RelayOneQuotaReader {
   startRefresh(force = false): void { void this.refresh(force).catch(() => undefined) }
 
   async refresh(force = false): Promise<void> {
-    const credentials = await this.store.read().catch(() => null)
+    const credentials = await quotaCredentials(this.store)
     if (credentials === null) { this.reset(); return }
     const nextScope = relayOneCredentialFingerprint(credentials)
     if (this.scope !== null && this.scope !== nextScope) {

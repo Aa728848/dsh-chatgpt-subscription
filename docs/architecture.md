@@ -43,7 +43,7 @@
 │   │   ├── step-code/               # Step Code 线路
 │   │   ├── workbuddy/               # WorkBuddy 线路
 │   │   ├── qianwen-token-plan/      # Qwen Token Plan：单 Key、Qwen4 显式缓存与密文思考回放
-│   │   ├── relayone/                # RelayOne：动态分组、三协议、单 Key 与媒体任务
+│   │   ├── relayone/                # RelayOne：动态分组、三协议、Key 号池与媒体任务
 │   │   ├── claude-api/              # Claude API：单 Key、官方 Claude Code 形态、服务端压缩与块存储
 │   │   ├── cache-warmup/            # 受控线路大结果投影与 ref:// 补读子包
 │   │   ├── codemode/                # Code Mode 工具发现、常驻 REPL 传输与恒定说明段

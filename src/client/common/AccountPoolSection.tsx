@@ -74,6 +74,15 @@ export interface AccountPoolSectionProps<
   accountCardClassName?: string
   /** Extra controls inside the group, after the account list. */
   children?: ReactNode
+  /**
+   * Whether this line offers rotation strategies at all.
+   *
+   * A line whose keys are switched BY HAND (relayone) has no strategy to pick:
+   * the active account is whatever the user selected, and rendering a
+   * round-robin picker over it would promise an automatic rotation that never
+   * happens. Absent means yes, which is every line that adopted the pool.
+   */
+  showStrategy?: boolean
 }
 
 /** Format one account timestamp the way every tab renders it. */
@@ -178,7 +187,7 @@ export function AccountPoolSection<TAccount extends PoolAccountSummaryDto = Pool
         )}
       </div>
 
-      {accounts.length > 1 && (
+      {props.showStrategy !== false && accounts.length > 1 && (
         <div className="dsha-pref-row">
           <div>
             <strong>{t.rotationStrategy}</strong>

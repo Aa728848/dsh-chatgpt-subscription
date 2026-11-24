@@ -292,6 +292,7 @@ import { registerQianwenTokenPlanRoutes } from './host/qianwen-token-plan/routes
 import { QianwenCredentialStore, QianwenSettingsStore } from './host/qianwen-token-plan/token-store.ts'
 import { QIANWEN_MODEL_CATALOG, catalogModelOptions as qianwenCatalogModelOptions } from './host/qianwen-token-plan/model-catalog.ts'
 import { PROVIDER_ID as QIANWEN_PROVIDER_ID, PROVIDER_NAME as QIANWEN_PROVIDER_NAME } from './host/qianwen-token-plan/types.ts'
+import { RelayOneAccountPool } from './host/relayone/account-pool.ts'
 import { RelayOneAdapter } from './host/relayone/adapter.ts'
 import { registerRelayOneRoutes, warmRelayOneCatalogOnStartup } from './host/relayone/routes.ts'
 import { RelayOneCredentialStore, RelayOneSettingsStore } from './host/relayone/token-store.ts'
@@ -1744,24 +1745,29 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       conflict: () => qianwenClaim.conflict(),
     })
 
-    // RelayOne: one encrypted key, credential-scoped live groups and three wire protocols. No pool.
+    // RelayOne: a multi-key pool over one line, credential-scoped live groups and
+    // three wire protocols. The pool mirrors its primary key into the pre-pool
+    // single-key file, so an existing install keeps working without re-entering it.
     const relayOneStore = new RelayOneCredentialStore()
     const relayOneSettings = new RelayOneSettingsStore()
-    const relayOneCatalog = new RelayOneCatalogManager(relayOneStore, {
+    const relayOnePool = new RelayOneAccountPool({ store: relayOneStore })
+    const relayOneCatalog = new RelayOneCatalogManager(relayOnePool, {
       fetchFn: proxyFetchFor(RELAYONE_PROVIDER_ID),
       onChanged: () => ctx.emit?.('llm/adapters-updated'),
     })
-    const relayOneQuota = new RelayOneQuotaReader(relayOneStore, { fetchFn: proxyFetchFor(RELAYONE_PROVIDER_ID) })
+    const relayOneQuota = new RelayOneQuotaReader(relayOnePool, { fetchFn: proxyFetchFor(RELAYONE_PROVIDER_ID) })
     const relayOneAdapter = new RelayOneAdapter(relayOneStore, relayOneSettings, relayOneCatalog, {
       fetchFn: modelFetch[RELAYONE_PROVIDER_ID],
       attachments: ctx.attachments,
       promptCache: promptCacheOverrides[RELAYONE_PROVIDER_ID],
+      accountPool: relayOnePool,
     })
     const relayOneClaim = claimProviderRoute(ctx, {
       providerId: RELAYONE_PROVIDER_ID, label: RELAYONE_PROVIDER_NAME, adapter: relayOneAdapter,
     })
     const disposeRelayOneRoutes = registerRelayOneRoutes(ctx, relayOneStore, relayOneSettings, relayOneCatalog, {
       quota: relayOneQuota,
+      accountPool: relayOnePool,
       serving: () => relayOneClaim.serving(),
       conflict: () => relayOneClaim.conflict(),
     })
@@ -2287,15 +2293,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       {
         id: 'relayone', providerId: RELAYONE_PROVIDER_ID, canToggle: true,
         read: async () => {
-          const [current, credentials] = await Promise.all([relayOneSettings.read(), relayOneStore.read(), relayOneCatalog.warm()])
+          const [current, accounts] = await Promise.all([relayOneSettings.read(), relayOnePool.listAccounts().catch(() => []), relayOneCatalog.warm()])
           const models = relayOneModelOptions(relayOneCatalog.snapshot().entries, current).filter(model => model.kind === 'chat')
           const total = catalogTotal(models.length)
           return {
             enabled: current.enabled,
-            accountCount: credentials === null ? 0 : 1,
-            authenticated: credentials !== null,
-            enabledModelCount: credentials === null ? null : models.filter(model => model.enabled).length,
-            totalModelCount: credentials === null ? null : total,
+            accountCount: accounts.length,
+            authenticated: accounts.length > 0,
+            enabledModelCount: accounts.length === 0 ? null : models.filter(model => model.enabled).length,
+            totalModelCount: accounts.length === 0 ? null : total,
           }
         },
       },
@@ -2361,7 +2367,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       : () => undefined
     // RelayOne media follows the SAME global mediaTools gate as Codex/Kimi/MiniMax.
     // The line's enabled flag and key are checked again at execution time.
-    const relayOneMediaStores = { store: relayOneStore, settingsStore: relayOneSettings, catalog: relayOneCatalog }
+    const relayOneMediaStores = { store: relayOneStore, settingsStore: relayOneSettings, catalog: relayOneCatalog, pool: relayOnePool }
     const disposeRelayOneImageTool = mediaToolsEnabled
       ? ctx.tools.register(createRelayOneImageTool(ctx.attachments, relayOneMediaStores, { fetchFn: proxyFetchFor(RELAYONE_PROVIDER_ID) }))
       : () => undefined

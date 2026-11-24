@@ -4,15 +4,27 @@ import type { RelayOneModelKind } from '../../shared/relayone-contracts.ts'
 import type { RelayOneCatalogManager } from './catalog-manager.ts'
 import type { RelayOneCredentialStore, RelayOneSettingsStore } from './token-store.ts'
 import type { RelayOneModelEntry } from './model-catalog.ts'
+import type { RelayOneAccountPool } from './account-pool.ts'
 
 export interface RelayOneMediaStores {
   store: RelayOneCredentialStore
   settingsStore: RelayOneSettingsStore
   catalog: RelayOneCatalogManager
+  /**
+   * The multi-key pool, when this line runs one.
+   *
+   * Media generation is not metered against a chat rate-limit window, so the
+   * pool is asked for any usable key rather than for the next rotation slot: a
+   * key that is resting after a 429 can still draw an image perfectly well.
+   */
+  pool?: RelayOneAccountPool | null
 }
 export async function relayOneMediaCredential(stores: RelayOneMediaStores): Promise<string> {
-  const [settings, credentials] = await Promise.all([stores.settingsStore.read(), stores.store.read()])
+  const settings = await stores.settingsStore.read()
   if (!settings.enabled) throw new HarnessError('RelayOne is disabled. Enable the line before using its media tools.', 'RELAYONE_LINE_DISABLED')
+  const credentials = stores.pool != null
+    ? await stores.pool.anyCredential().catch(() => null)
+    : await stores.store.read()
   if (credentials === null) throw new HarnessError('Configure a RelayOne API key in the subscription hub first.', 'RELAYONE_NOT_CONFIGURED')
   return credentials.apiKey
 }

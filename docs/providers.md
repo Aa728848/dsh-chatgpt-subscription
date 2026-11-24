@@ -50,7 +50,7 @@
 | `ollama` | Ollama | Ollama Native `/api/chat` + OpenAI `/v1/chat/completions` | 粘贴 Ollama Cloud API Key | 实时 `/api/tags` + `/api/show` 按模型元数据探测 | `/ollama/api` |
 | `antigravity-acp` | Antigravity（ACP） | ACP v1 / stdio JSON-RPC（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 | `/antigravity-acp/api` |
 | `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个 Token Plan 专属 API Key，系统加密存储；无账号池 | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 | `/qianwen-token-plan/api` |
-| `relayone` | RelayOne | Responses / Chat / Anthropic Messages | 单个 API Key，系统加密存储；无账号池 | 当前 Key live listing + 分组/端点元数据 + 凭据隔离快照 | `/relayone/api` |
+| `relayone` | RelayOne | Responses / Chat / Anthropic Messages | 多 API Key 存储 + 手动切换，系统加密存储 | 当前 Key live listing + 分组/端点元数据 + 凭据隔离快照 | `/relayone/api` |
 | `claude-api` | Claude API | Anthropic Messages（官方 Claude Code 形态） | 单个 API Key，系统加密存储；无账号池 | 当前 Key live listing + 随包能力表 + 凭据隔离快照 | `/claude-api/api` |
 
 > **合规与风险声明**：
@@ -373,14 +373,14 @@
 
 ## 17. RelayOne：`relayone`
 
-- **鉴权**：一个 RelayOne `sk-` API Key，Bearer 鉴权；Windows DPAPI / macOS Keychain / Linux Secret Service，无账号池。
-- **目录**：当前 Key 的 `GET /v1/models` 决定可用 id；公开 `/api/pricing` 只补充分组、端点、vendor 与媒体元数据。快照按 Key 指纹隔离，后台 TTL 刷新，内容变化才通知模型选择器。
+- **鉴权与多 Key**：可添加多个 RelayOne `sk-` API Key，Bearer 鉴权；号池文档走 Windows DPAPI / macOS Keychain / Linux Secret Service。**不自动轮询**：设置卡里手动「切换到此 Key」，选中的 Key 服务所有请求，直到再次切换，选择会持久化并在重启后生效。401/403 只标记该 Key 失效、429 只记 60 秒冷却，两者都不会偷偷换号——请求照常失败并提示切换，避免消耗用户没选的账号。新增的 Key 先向 `/v1/models` 验证再入库。升级前保存的单 Key 文件会被投影为主账号，并继续作为镜像回写目标，无需重新粘贴。
+- **目录**：当前选中的 Key 的 `GET /v1/models` 决定可用 id；公开 `/api/pricing` 只补充分组、端点、vendor 与媒体元数据。快照按 Key 指纹隔离，后台 TTL 刷新，内容变化才通知模型选择器。
 - **协议**：OpenAI 优先 `/v1/responses`，Claude 优先 `/v1/messages`，其他对话模型使用 `/v1/chat/completions`。仅明确协议不支持且在流输出前回退。
-- **额度**：通过官方 `GET /api/usage/token` 读取当前 Key 的授予/已用/剩余额度，结合 `/api/status` 的 `quota_per_unit` 显示百分比与美元；无限令牌与有限账户余额并存时取有效较小值。
+- **额度**：通过官方 `GET /api/usage/token` 读取当前选中 Key 的授予/已用/剩余额度，结合 `/api/status` 的 `quota_per_unit` 显示百分比与美元；无限令牌与有限账户余额并存时取有效较小值。切换 Key 会重新读取。
 - **会话粘性**：同一 Key、模型和 DSH 会话使用稳定的匿名标识：Responses 及 GPT 的 Chat 回退发送 `prompt_cache_key`，Anthropic Messages 发送 `metadata.user_id`。身份不明或辅助请求不共用主会话键。是否复用渠道取决于网关配置；缓存读取量以实际 `usage` 为准。
 - **GPT 本地策略**：默认上下文 272K，可覆盖 500K；完整推理档位原值透传，覆盖值作为独立元数据显示，不改变模型名。
 - **媒体**：`relayone_generate_image` 支持生图、参考图编辑与异步任务；`relayone_generate_video` 支持提交、轮询、下载和工作区播放。二者受全局 `mediaTools` 控制。
-- **路由**：`GET status`、`PUT/DELETE credentials`、`GET/PATCH settings`、`POST catalog/refresh`、`POST connection/test`；写操作全部同源校验。
+- **路由**：`GET status`、`POST accounts`（`add` / `test` / `use` / `set-primary` / `set-alias` / `delete` / `clear-cooldown`）、`PUT/DELETE credentials`、`GET/PATCH settings`、`POST catalog/refresh`、`POST connection/test`；写操作全部同源校验。`add` 与 `test` 都先向 `/v1/models` 验证 Key，验证不过不会入库；号池存在时旧的 `PUT credentials` 等价于 `add`，不会另存一份轮询看不到的副本。
 - **验证边界**：公开契约与离线 mock 已验证；没有真实 Key 时不声称付费生成成功。详见 [线路设计与证据](relayone-line-plan.md)。
 
 ## 18. Claude API：`claude-api`

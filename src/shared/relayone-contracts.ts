@@ -1,3 +1,5 @@
+import type { AccountPoolStatusDto, PoolAccountSummaryDto } from './account-pool-contracts.ts'
+
 /** Public host/client contract for RelayOne. No API key crosses this boundary. */
 export const RELAYONE_PROVIDER_ID = 'relayone'
 export const RELAYONE_PROVIDER_NAME = 'RelayOne'
@@ -51,11 +53,34 @@ export interface RelayOneQuotaDto {
   error: string | null
 }
 
+/** One pooled key as the settings card renders it. Never carries the key. */
+export interface RelayOneAccountSummaryDto extends PoolAccountSummaryDto {}
+
+/**
+ * Account actions the card may send.
+ *
+ * `add` is the one that takes a key: the pool is how a user enters several
+ * keys, and `test` verifies one without storing it.
+ */
+export type RelayOneAccountAction =
+  | 'add'
+  | 'test'
+  /** Make this key the one every request uses. */
+  | 'use'
+  | 'set-primary'
+  | 'set-alias'
+  | 'delete'
+  | 'clear-cooldown'
+
 export interface RelayOneStatusDto {
   providerId: typeof RELAYONE_PROVIDER_ID
   enabled: boolean
   authenticated: boolean
   storagePath: string
+  /** The pool slice: every key this line can rotate through. */
+  accounts: RelayOneAccountSummaryDto[]
+  activeAccountId?: string
+  rotationStrategy: AccountPoolStatusDto['rotationStrategy']
   models: readonly RelayOneModelDto[]
   mediaModels: readonly RelayOneModelDto[]
   contextWindowOverrides: Readonly<Record<string, number>>

@@ -17,7 +17,9 @@ import {
 import {
   relayOneCredentialFingerprint,
   type RelayOneCredentialStore,
+  type RelayOneCredentials,
 } from './token-store.ts'
+import type { RelayOneAccountPool } from './account-pool.ts'
 import {
   RELAYONE_CATALOG_TTL_MS,
   RELAYONE_MODELS_URL,
@@ -25,6 +27,21 @@ import {
   relayOneHeaders,
   relayOneSafeDetail,
 } from './types.ts'
+
+/**
+ * The key the catalog is currently scoped to.
+ *
+ * A pool answers with the digest of whichever account would serve the next
+ * request, which is what every snapshot name and every change-detection check
+ * below already keys on: listing models is not metered, so the pool's
+ * routing state is deliberately not consulted here.
+ */
+async function catalogCredentials(
+  source: RelayOneCredentialStore | RelayOneAccountPool,
+): Promise<{ credentials: RelayOneCredentials | null }> {
+  if ('stableCredential' in source) return { credentials: await source.stableCredential().catch(() => null) }
+  return { credentials: await source.read().catch(() => null) }
+}
 
 export interface RelayOneCatalogSnapshot {
   entries: readonly RelayOneModelEntry[]
@@ -64,7 +81,10 @@ export class RelayOneCatalogManager {
   private refreshScope: string | null = null
   private epoch = 0
 
-  constructor(private readonly store: RelayOneCredentialStore, options: RelayOneCatalogManagerOptions = {}) {
+  constructor(
+    private readonly store: RelayOneCredentialStore | RelayOneAccountPool,
+    options: RelayOneCatalogManagerOptions = {},
+  ) {
     this.fetchFn = options.fetchFn ?? fetch
     this.now = options.now ?? Date.now
     this.ttlMs = options.ttlMs ?? RELAYONE_CATALOG_TTL_MS
@@ -108,7 +128,7 @@ export class RelayOneCatalogManager {
     if (this.warming !== null) return this.warming
     const epoch = this.epoch
     this.warming = (async () => {
-      const credentials = await this.store.read().catch(() => null)
+      const { credentials } = await catalogCredentials(this.store)
       if (credentials === null) {
         if (epoch === this.epoch) {
           this.entries = []
@@ -159,7 +179,7 @@ export class RelayOneCatalogManager {
   /** Network refresh, deduplicated per credential. Never waits in warm(). */
   async refresh(force = false): Promise<boolean> {
     await this.warm()
-    const credentials = await this.store.read().catch(() => null)
+    const { credentials } = await catalogCredentials(this.store)
     if (credentials === null) return false
     const scope = relayOneCredentialFingerprint(credentials)
     if (this.credentialScope !== null && this.credentialScope !== scope) {

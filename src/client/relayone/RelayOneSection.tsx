@@ -4,6 +4,7 @@ import {
   isRelayOneReasoningEffort,
   type RelayOneReasoningEffort,
 } from '../../shared/relayone-contracts.ts'
+import { AccountPoolSection } from '../common/AccountPoolSection.tsx'
 import { ModelChecklist } from '../common/ModelChecklist.tsx'
 import { ContextWindowEditor } from '../common/ContextWindowEditor.tsx'
 import { formatCapacity } from '../common/format.ts'
@@ -34,17 +35,52 @@ export function RelayOneSection(props: RelayOneSectionProps = {}): React.JSX.Ele
       </div></div>
       <p className="dsha-muted">{t.pageDesc}</p>
       <div className="dsha-pref-row"><div><strong>{t.enabled}</strong></div><input type="checkbox" aria-label={t.enabled} checked={status?.enabled !== false} disabled={busy !== null} onChange={event => void view.update({ enabled: event.currentTarget.checked }).catch(() => undefined)} /></div>
-      <div className="dsha-empty">{status?.authenticated ? t.keyConfigured : t.keyMissing}</div>
-      {status?.authenticated && <div className="dsha-row"><span className="dsha-label">{t.storagePath}</span><span className="dsha-value">{status.storagePath}</span></div>}
       {status?.authenticated && status.quota !== undefined && status.quota.state !== 'idle' && <div className="dsha-row dshro-quota-row" title={status.quota.error ?? undefined}><span className="dsha-label">{t.quotaLabel}</span><span className="dsha-value">{relayOneQuotaAccountText(status.quota) ?? '—'}</span></div>}
-      <div className="dshro-key-row">
-        <input className="dsha-select" type="password" autoComplete="off" aria-label={t.keySection} placeholder={t.keyPlaceholder} value={view.keyValue} disabled={busy !== null} onChange={event => view.setKeyValue(event.currentTarget.value)} onKeyDown={event => { if (event.key === 'Enter') void view.saveKey() }} />
-        <button className="dsha-btn dsha-btn-primary" disabled={busy !== null || view.keyValue.trim() === ''} onClick={() => void view.saveKey()}>{busy === 'key' ? t.savingKey : t.saveKey}</button>
-      </div>
       <p className="dsha-muted">{status?.serving === false && status.conflict ? t.routeConflict.replace('{detail}', status.conflict) : t.routeOwned}</p>
       {view.connection !== null && <p className={view.connection.connected ? 'dsha-muted' : 'dsha-notice'}>{view.connection.connected
         ? t.connectionOk + ' · ' + t.latency.replace('{ms}', String(view.connection.latencyMs)) + ' · ' + t.modelCount.replace('{count}', String(view.connection.modelCount))
         : t.connectionFailed + ': ' + (view.connection.error ?? '—')}</p>}
+
+      {/* The shared account card every pooled line renders. The extra children
+          are this line's own: the paste-a-key form that feeds the rotation, and
+          the encrypted-storage sentence the pool path replaces. */}
+      <AccountPoolSection
+        accounts={status?.accounts ?? []}
+        activeAccountId={status?.activeAccountId}
+        rotationStrategy={status?.rotationStrategy ?? 'sequential'}
+        labels={t}
+        busy={busy}
+        onLogin={() => undefined}
+        renderLoginActions={() => (
+          <span className="dsha-muted">{status?.authenticated ? t.keyConfigured : t.keyMissing}</span>
+        )}
+        onSetPrimary={id => void view.accountAction('set-primary', 'set-primary', { accountId: id })}
+        onDelete={id => void view.accountAction('delete', 'delete', { accountId: id })}
+        onClearCooldown={id => void view.accountAction('clear-cooldown', 'clear-cooldown', { accountId: id })}
+        onSetStrategy={() => undefined}
+        showStrategy={false}
+        omitDetails={['email', 'expires']}
+        renderAccountActions={account => (
+          // Switching keys is the feature: this line never rotates on its own,
+          // so the chosen key is what every request uses until it is changed.
+          account.id === status?.activeAccountId ? null : (
+            <button
+              className="dsha-btn dsha-btn-primary"
+              disabled={busy !== null}
+              onClick={() => void view.accountAction('use:' + account.id, 'use', { accountId: account.id })}
+            >
+              {busy === 'use:' + account.id ? t.switchingKey : t.useKey}
+            </button>
+          )
+        )}
+      >
+        <div className="dshro-key-row">
+          <input className="dsha-select" type="password" autoComplete="off" aria-label={t.keySection} placeholder={t.keyPlaceholder} value={view.keyValue} disabled={busy !== null} onChange={event => view.setKeyValue(event.currentTarget.value)} onKeyDown={event => { if (event.key === 'Enter') void view.saveKey() }} />
+          <button className="dsha-btn" disabled={busy !== null || view.keyValue.trim() === ''} onClick={() => void view.testKey()}>{busy === 'test-key' ? t.testingConnection : t.testConnection}</button>
+          <button className="dsha-btn dsha-btn-primary" disabled={busy !== null || view.keyValue.trim() === ''} onClick={() => void view.saveKey()}>{busy === 'key' ? t.savingKey : t.saveKey}</button>
+        </div>
+        {status?.authenticated && <div className="dsha-row"><span className="dsha-label">{t.storagePath}</span><span className="dsha-value">{status.storagePath}</span></div>}
+      </AccountPoolSection>
     </section>
 
     <section className="dsha-group dshro-models">

@@ -3,7 +3,7 @@
 ## 范围与决策
 
 - Provider：`relayone`；站点：RelayOne（New API 部署），固定 Base URL `https://z1rry.cyou/v1`。
-- 单个 API Key，系统加密存储，不支持账号池。
+- 多个 API Key 存储，系统加密存储；**手动切换**当前 Key，不自动轮询。401/403 只标记该 Key 失效、429 只记 60 秒冷却，均不自动换号。升级前的单 Key 文件被投影为主账号并保持镜像回写。
 - 对话 + 工具调用 + 生图/编辑 + 异步视频；媒体模型不进入对话模型选择器。
 - 用户确认的协议策略：OpenAI 优先 Responses，Claude 优先 Anthropic Messages，其余模型优先 Chat Completions。
 - RelayOne 生图与视频工具和 Codex/Kimi/MiniMax 一样受全局 `mediaTools` 开关控制；执行时再检查线路启用与凭据。

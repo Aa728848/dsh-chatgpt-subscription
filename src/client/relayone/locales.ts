@@ -17,6 +17,21 @@ export const zh = {
   mediaNote: '支持 URL/base64 生图、参考图编辑及异步任务；视频轮询可取消，失败不会重复提交任务。', docs: 'RelayOne 文档', dashboard: '打开控制台',
   composerLabel: '额度', quotaLabel: '当前 Key 剩余额度', quotaAvailable: '剩余', quotaUsed: '已用', quotaGranted: '授予', quotaUnlimited: '当前 Key 为无限额度', quotaStale: '额度数据可能已过期', composerTooltip: '{count} 个当前可用对话模型{groups}', composerGroups: ' · 分组：', unknownGroup: '自动分组',
   invalidCapacity: '上下文窗口必须是正整数。', errorGeneric: 'RelayOne 操作失败。',
+  // Shared account-pool card labels. The card is the same one every other line
+  // renders, so only the wording that mentions "key" is this line's own.
+  accountPool: 'API Key 号池', addAccount: '添加 Key', accountCount: '已添加 {count} 个 Key',
+  useKey: '切换到此 Key', switchingKey: '切换中…',
+  primaryAccount: '主 Key', activeAccount: '当前使用', setPrimary: '设为主 Key', deleteAccount: '删除',
+  cooling: '冷却中', cooldownLeft: '剩 {minutes} 分', cooldownRemaining: '剩 {minutes} 分 {seconds} 秒',
+  cooldownRemainingSeconds: '剩 {seconds} 秒', clearCooldown: '重置冷却',
+  needsRelogin: 'Key 已被拒绝', relogin: '更换 Key',
+  rotationStrategy: '调度策略', strategySequential: '顺序耗尽（主 Key 优先，遇限流自动切换）',
+  strategyRoundRobin: '轮询调度（按 Key 循环均匀分摊）', strategySticky: '粘性会话（保持当前 Key，遇限流才切换）',
+  noAccounts: '暂无 Key，粘贴一个 RelayOne 令牌即可加入轮换。',
+  email: '邮箱', expires: '令牌到期', lastUsed: '上次调用', accountId: 'Key ID',
+  accountQuota: '额度', quotaNone: '尚无额度数据', quotaSnapshot: '快照 {time}', quotaResets: '重置',
+  quotaExhausted: '已用尽', quotaWindow: '额度窗口',
+  quotaFactsScope: '以下为当前 Key 的额度事实；每个 Key 自己的进度显示在它的卡片里。',
 } as const
 export type RelayOneLocaleKey = keyof typeof zh
 export const en: Record<RelayOneLocaleKey, string> = {
@@ -37,5 +52,18 @@ export const en: Record<RelayOneLocaleKey, string> = {
   mediaNote: 'URL/base64 images, reference-image edits and asynchronous tasks are supported. Video polling is cancellable and failures never resubmit a task.', docs: 'RelayOne documentation', dashboard: 'Open console',
   composerLabel: 'Quota', quotaLabel: 'Effective quota remaining on this key', quotaAvailable: 'Available', quotaUsed: 'Used', quotaGranted: 'Granted', quotaUnlimited: 'This key has unlimited quota', quotaStale: 'Quota data may be stale', composerTooltip: '{count} accessible chat models{groups}', composerGroups: ' · Groups: ', unknownGroup: 'Automatic group',
   invalidCapacity: 'Context window must be a positive integer.', errorGeneric: 'RelayOne operation failed.',
+  accountPool: 'API Key pool', addAccount: 'Add key', accountCount: '{count} key(s) added',
+  useKey: 'Use this key', switchingKey: 'Switching…',
+  primaryAccount: 'Primary', activeAccount: 'In Use', setPrimary: 'Set as primary', deleteAccount: 'Delete',
+  cooling: 'In Cooldown', cooldownLeft: '{minutes} min left', cooldownRemaining: '{minutes} min {seconds}s left',
+  cooldownRemainingSeconds: '{seconds}s left', clearCooldown: 'Clear cooldown',
+  needsRelogin: 'Key rejected', relogin: 'Replace key',
+  rotationStrategy: 'Scheduling strategy', strategySequential: 'Sequential drain (primary first, fail over on 429)',
+  strategyRoundRobin: 'Round-robin (spread evenly across keys)', strategySticky: 'Sticky session (keep the current key until limited)',
+  noAccounts: 'No keys yet. Paste a RelayOne token to add it to the rotation.',
+  email: 'Email', expires: 'Token expires', lastUsed: 'Last used', accountId: 'Key ID',
+  accountQuota: 'Quota', quotaNone: 'No quota read yet', quotaSnapshot: 'Snapshot {time}', quotaResets: 'Resets',
+  quotaExhausted: 'Exhausted', quotaWindow: 'Limit window',
+  quotaFactsScope: 'These facts describe the current key; each key’s own progress is shown on its card above.',
 }
 export const dictionaries = { zh, en }

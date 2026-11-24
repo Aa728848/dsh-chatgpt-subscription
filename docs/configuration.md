@@ -266,7 +266,7 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 
 ## RelayOne
 
-RelayOne 在设置卡粘贴单个 API Key。保存后自动读取该 Key 当前分组可用的模型；无需手工填写分组或协议。可配置对话模型勾选、上下文窗口覆盖、默认推理等级、默认生图/视频模型和独立代理。
+RelayOne 在设置卡粘贴 API Key，可添加多个并在账号卡片里手动切换当前使用的那个（不自动轮询）；每个 Key 在入库前先向 `/v1/models` 验证。保存后自动读取主 Key 当前分组可用的模型；无需手工填写分组或协议。可配置对话模型勾选、上下文窗口覆盖、默认推理等级、默认生图/视频模型和独立代理。
 
 `mediaTools: false` 会同时关闭 RelayOne 生图与视频工具；线路自身的启用开关在执行时仍会再次检查。目录快照只用于同一 Key 的冷启动，不会跨 Key 复用。
 

@@ -12,6 +12,7 @@ import { RELAYONE_PROVIDER_ID, type RelayOneStatusDto } from '../src/shared/rela
 function status(overrides: Partial<RelayOneStatusDto> = {}): RelayOneStatusDto {
   return {
     providerId: RELAYONE_PROVIDER_ID, enabled: true, authenticated: true, storagePath: 'encrypted',
+    accounts: [], rotationStrategy: 'sequential',
     models: [{ id: 'gpt-6-astra', name: 'gpt-6-astra', kind: 'chat', hint: 'OpenAI · Responses · openai', enabled: true, groups: ['openai'], endpoints: ['openai'], protocol: 'openai-responses', vendor: 'OpenAI', description: null, contextWindow: 256000, defaultContextWindow: 256000, maxOutputTokens: 32768, reasoningEfforts: ['low', 'medium', 'high'], supportsImages: true }],
     mediaModels: [{ id: 'image-one', name: 'image-one', kind: 'image', hint: 'OpenAI · Media · images', enabled: false, groups: ['images'], endpoints: ['image-generation'], protocol: null, vendor: 'OpenAI', description: null, contextWindow: 128000, defaultContextWindow: 128000, maxOutputTokens: 8192, reasoningEfforts: [], supportsImages: false }],
     contextWindowOverrides: {}, defaultReasoningEffort: null, imageModel: null, videoModel: null,
@@ -70,7 +71,9 @@ describe('RelayOne settings section', () => {
     expect(container.textContent).toContain('gpt-6-astra')
     expect(container.textContent).toContain('OpenAI · Responses · openai')
     expect(container.querySelector('.dshro-media select')).not.toBeNull()
-    expect(container.textContent).not.toContain('号池')
+    // The line now rotates several keys, so the shared account-pool card is
+    // part of this skeleton; it used to be absent when the line held one key.
+    expect(container.textContent).toContain('API Key 号池')
   })
   it('shows actionable signed-out and empty-media states without fake counts', async () => {
     mockFetch(status({ authenticated: false, models: [], mediaModels: [], catalog: { state: 'idle', fetchedAt: null, error: null, groups: [] } }))
@@ -87,6 +90,63 @@ describe('RelayOne settings section', () => {
     await act(async () => clear.click())
     expect(calls.some(call => call.url.endsWith('/relayone/api/settings') && JSON.stringify(call.body) === '{"enabledModelIds":[]}')).toBe(true)
   })
+  it('lists every pooled key with its identity, state and rotation strategy', async () => {
+    mockFetch(status({
+      accounts: [
+        { id: 'acc_a', alias: '主号', isPrimary: true, lastUsedAt: 1 },
+        { id: 'acc_b', alias: '备号', isPrimary: false, cooldownUntil: Date.now() + 120_000, cooldownReason: 'RelayOne 429' },
+      ],
+      activeAccountId: 'acc_a',
+      rotationStrategy: 'round-robin',
+    }))
+    await render()
+    const rows = container.querySelectorAll('.dsha-account-card')
+    expect(rows.length).toBe(2)
+    expect(container.textContent).toContain('主号')
+    expect(container.textContent).toContain('备号')
+    // A resting key says so.
+    expect(container.textContent).toContain('冷却中')
+    // This line switches keys by hand, so no rotation-strategy picker is drawn:
+    // offering round-robin over a manual selection would promise a rotation that
+    // never happens.
+    expect(container.textContent).not.toContain('调度策略')
+    // The key that is NOT active offers the switch; the active one does not.
+    const switches = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .filter(button => button.textContent === '切换到此 Key')
+    expect(switches).toHaveLength(1)
+  })
+
+  it('switches the active key through the pool route', async () => {
+    const calls = mockFetch(status({
+      accounts: [
+        { id: 'acc_a', alias: '主号', isPrimary: true },
+        { id: 'acc_b', alias: '备号', isPrimary: false },
+      ],
+      activeAccountId: 'acc_a',
+    }))
+    await render()
+    const switchButton = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent === '切换到此 Key')!
+    await act(async () => switchButton.click())
+    expect(calls.find(call => call.url.endsWith('/relayone/api/accounts'))?.body)
+      .toMatchObject({ action: 'use', accountId: 'acc_b' })
+  })
+
+  it('adds a key through the pool route rather than the single-key route', async () => {
+    const calls = mockFetch(status())
+    await render()
+    const input = [...container.querySelectorAll<HTMLInputElement>('input[type="password"]')][0]!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, 'sk-second')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const add = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '保存密钥')!
+    await act(async () => add.click())
+    const posted = calls.find(call => call.url.endsWith('/relayone/api/accounts'))
+    expect(posted?.body).toMatchObject({ action: 'add', apiKey: 'sk-second' })
+  })
+
   it('does not blank the section while an old host omits quota', async () => {
     const legacy = status()
     delete (legacy as unknown as Record<string, unknown>).quota

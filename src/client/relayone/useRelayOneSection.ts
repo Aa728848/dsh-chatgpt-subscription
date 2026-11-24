@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type {
+  RelayOneAccountAction,
   RelayOneConnectionDto,
   RelayOneReasoningEffort,
   RelayOneSettingsUpdateDto,
@@ -46,16 +47,47 @@ export function useRelayOneSection({ onModelChange }: RelayOneSectionProps = {})
     } catch (cause) { setError(messageOf(cause)); throw cause }
     finally { setBusy(null) }
   }, [adopt, onModelChange])
+  /**
+   * Add one key to the pool.
+   *
+   * The host verifies it against the upstream before storing it, so a refusal
+   * arrives here as an error and the rotation is left untouched.
+   */
   const saveKey = useCallback(async () => {
     const apiKey = keyValue.trim()
     if (apiKey === '') return
     setBusy('key'); setError(null)
     try {
-      adopt(await request<RelayOneStatusDto>('/credentials', { method: 'PUT', body: JSON.stringify({ apiKey }) }))
+      const next = await post<RelayOneStatusDto>('/accounts', { action: 'add', apiKey })
+      adopt(next)
       setKeyValue(''); setConnection(null); onModelChange?.()
     } catch (cause) { setError(messageOf(cause)) }
     finally { setBusy(null) }
   }, [adopt, keyValue, onModelChange])
+  /** Verify a key without storing it. */
+  const testKey = useCallback(async () => {
+    const apiKey = keyValue.trim()
+    if (apiKey === '') return
+    setBusy('test-key'); setError(null)
+    try {
+      adopt(await post<RelayOneStatusDto>('/accounts', { action: 'test', apiKey }))
+      setConnection(null); onModelChange?.()
+    } catch (cause) { setError(messageOf(cause)) }
+    finally { setBusy(null) }
+  }, [adopt, keyValue, onModelChange])
+  /** One pool action, named so the card can disable every control at once. */
+  const accountAction = useCallback(async (
+    label: string,
+    action: RelayOneAccountAction,
+    body: Record<string, unknown> = {},
+  ) => {
+    setBusy(label); setError(null)
+    try {
+      adopt(await post<RelayOneStatusDto>('/accounts', { action, ...body }))
+      onModelChange?.()
+    } catch (cause) { setError(messageOf(cause)) }
+    finally { setBusy(null) }
+  }, [adopt, onModelChange])
   const removeKey = useCallback(async () => {
     setBusy('remove-key'); setError(null)
     try { adopt(await request<RelayOneStatusDto>('/credentials', { method: 'DELETE' })); setConnection(null); onModelChange?.() }
@@ -103,6 +135,7 @@ export function useRelayOneSection({ onModelChange }: RelayOneSectionProps = {})
     status, loading, busy, error, connection, keyValue, contextDrafts, savingModel,
     setKeyValue,
     setContextDraft: (id: string, draft: string) => setContextDrafts(current => ({ ...current, [id]: draft })),
+    accountAction, testKey,
     saveKey, removeKey, testConnection, refreshCatalog, update, toggleModel, setAllModels,
     saveContextWindow, resetContextWindow, resetAllContextWindows,
     setDefaultEffort: (defaultReasoningEffort: RelayOneReasoningEffort | null) => update({ defaultReasoningEffort }, 'effort'),

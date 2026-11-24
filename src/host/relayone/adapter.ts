@@ -42,7 +42,9 @@ import {
   RelayOneCredentialStore,
   RelayOneSettingsStore,
   relayOneCredentialFingerprint,
+  type RelayOneCredentials,
 } from './token-store.ts'
+import type { RelayOneAccountPool } from './account-pool.ts'
 import {
   PROVIDER_ID,
   PROVIDER_NAME,
@@ -79,7 +81,18 @@ export interface RelayOneAdapterOptions {
   fetchFn?: typeof fetch
   attachments?: AttachmentImageReader
   promptCache?: PromptCacheOverride
+  /**
+   * The multi-key pool, when this line has one.
+   *
+   * Absent keeps the pre-pool behaviour exactly: one key from `store`, no
+   * rotation. Present makes every chat request resolve a key through the pool
+   * and rotate on a rejection or a 429.
+   */
+  accountPool?: RelayOneAccountPool | null
 }
+
+/** How long one key is rested after RelayOne answers 429 for it. */
+const RELAYONE_COOLDOWN_MS = 60_000
 interface ClassifiedError extends LlmError {
   status?: number
   relayOneStatus?: number
@@ -109,6 +122,8 @@ export async function classifyRelayOneResponse(response: Response, apiKey?: stri
 export class RelayOneAdapter extends LlmAdapter {
   private readonly fetchFn: typeof fetch
   private readonly fallbacks = new Map<string, RelayOneProtocol>()
+  /** The pool, when this line runs several keys; null means the single-key path. */
+  private readonly pool: RelayOneAccountPool | null
   constructor(
     private readonly store: RelayOneCredentialStore = new RelayOneCredentialStore(),
     private readonly settingsStore: RelayOneSettingsStore = new RelayOneSettingsStore(),
@@ -117,6 +132,19 @@ export class RelayOneAdapter extends LlmAdapter {
   ) {
     super()
     this.fetchFn = fetchWithContextBudgetRecovery(options.fetchFn ?? fetch)
+    this.pool = options.accountPool ?? null
+  }
+
+  /**
+   * Whether the line has any key at all.
+   *
+   * Through the pool this asks the pool, so an install that migrated its single
+   * key into the pool is not reported as unconfigured by a `store` that the
+   * mirror has not written yet.
+   */
+  private async hasCredential(): Promise<boolean> {
+    if (this.pool !== null) return (await this.pool.anyCredential().catch(() => null)) !== null
+    return (await this.store.read().catch(() => null)) !== null
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -129,9 +157,10 @@ export class RelayOneAdapter extends LlmAdapter {
   }
 
   async listModels(provider?: string): Promise<readonly LlmModelInfo[]> {
-    const [settings, credentials] = await Promise.all([this.settingsStore.read(), this.store.read().catch(() => null)])
+    const settings = await this.settingsStore.read()
+    const configured = await this.hasCredential()
     await this.catalog.warm()
-    if (!settings.enabled || credentials === null) return []
+    if (!settings.enabled || !configured) return []
     return relayOneModelOptions(this.catalog.snapshot().entries, settings)
       .filter(model => model.kind === 'chat' && model.enabled)
       .map(model => ({
@@ -235,14 +264,54 @@ export class RelayOneAdapter extends LlmAdapter {
     return response
   }
 
+  /**
+   * Resolve the key that serves this request.
+   *
+   * The pool answers with the key the user selected — there is no rotation, so
+   * this is stable across requests until the selection changes. A refusal still
+   * marks the account, so the card can show which key is bad and offer the next
+   * one, but it never retries on a different key behind the user's back.
+   */
+  private async resolveKey(): Promise<{ apiKey: string; accountId: string | null }> {
+    if (this.pool === null) {
+      const credentials = await this.store.read()
+      if (credentials === null) throw new LlmError('RelayOne API key is not configured.', 'MISSING_CREDENTIAL')
+      return { apiKey: credentials.apiKey, accountId: null }
+    }
+    const effective = await this.pool.getEffectiveCredential(undefined, this.fetchFn)
+    return { apiKey: effective.credentials.apiKey, accountId: effective.account.id }
+  }
+
+  /**
+   * Record what an upstream refusal means for the key that got it.
+   *
+   * Only a status that names this key is a verdict about this key: 401 and 403
+   * mean it is refused, 429 means its allowance is spent for now. Every other
+   * status is about the request and would fail identically on any key, so it is
+   * left to the harness retry policy.
+   */
+  private async noteAccountVerdict(accountId: string | null, error: ClassifiedError): Promise<void> {
+    if (this.pool === null || accountId === null) return
+    const status = error.relayOneStatus ?? error.status ?? 0
+    if (status === 401 || status === 403) {
+      await this.pool.markAuthFailed(accountId, 'RelayOne 拒绝了这个 API Key（' + status + '）。', 'invalid')
+        .catch(() => undefined)
+      return
+    }
+    if (status === 429) {
+      await this.pool.markCooldown(accountId, RELAYONE_COOLDOWN_MS, 'RelayOne 429').catch(() => undefined)
+    }
+  }
+
   private async *requestStream(
     rawOptions: GenerateOptions,
     entry: RelayOneModelEntry,
     signal: AbortSignal,
     activity?: StreamActivity,
   ): AsyncGenerator<StreamChunk> {
-    const [settings, credentials] = await Promise.all([this.settingsStore.read(), this.store.read()])
-    if (credentials === null) throw new LlmError('RelayOne API key is not configured.', 'MISSING_CREDENTIAL')
+    const settings = await this.settingsStore.read()
+    const { apiKey: key, accountId } = await this.resolveKey()
+    const credentials: RelayOneCredentials = { apiKey: key, authenticatedAt: 0 }
     const normalized = withStaticPrefixOrdering(PROVIDER_ID, normalizeGenerateOptions(rawOptions), this.options.promptCache)
     const images = await resolveRequestImages(normalized, this.options.attachments, signal)
     const requestOptions = offloadOldestRequestImages(normalized, RELAYONE_MAX_REQUEST_IMAGE_BYTES, images)
@@ -261,17 +330,23 @@ export class RelayOneAdapter extends LlmAdapter {
     let body = this.buildRequest(protocol, requestOptions, images, entry, settings, sessionKey)
     let response: Response
     try {
-      response = await this.openRequest(protocol, body, credentials.apiKey, signal)
+      response = await this.openRequest(protocol, body, key, signal)
     } catch (error) {
       const classified = error as ClassifiedError
+      // The selected key refused the request. Record what that means for it, so
+      // the card can show the state, but do NOT retry on another key: the user
+      // chose this one, and spending a different account silently is the
+      // behaviour this line deliberately does not have.
+      await this.noteAccountVerdict(accountId, classified)
       const fallback = fallbackRelayOneProtocol(entry, protocol)
       if (fallback === null || protocol !== primary
         || !isRelayOneProtocolUnsupported(classified.relayOneStatus ?? classified.status ?? 0, classified.relayOneDetail ?? '')) throw error
       this.fallbacks.set(fallbackKey, fallback)
       protocol = fallback
       body = this.buildRequest(protocol, requestOptions, images, entry, settings, sessionKey)
-      response = await this.openRequest(protocol, body, credentials.apiKey, signal)
+      response = await this.openRequest(protocol, body, key, signal)
     }
+    if (accountId !== null && this.pool !== null) await this.pool.recordModel(accountId, entry.id).catch(() => undefined)
     activity?.pulse()
     if (protocol === 'openai-responses') {
       try {
