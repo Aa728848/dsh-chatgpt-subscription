@@ -334,7 +334,7 @@ describe('a reported zero versus silence', () => {
 })
 
 describe('the thinking gate', () => {
-  it('lifts a disabled level to the model default on the chat wire', async () => {
+  it('lifts a disabled level to the lowest valid thinking effort on the chat wire', async () => {
     const bodies: Array<Record<string, unknown>> = []
     const fetchFn = (async (_url: string, init: RequestInit) => {
       bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>)
@@ -348,12 +348,12 @@ describe('the thinking gate', () => {
     })))
 
     // K3.1 Pro answers 400 for a disabled-thinking request, so the level is
-    // raised to the model's own default instead of failing the turn — and the
-    // chat wire never sees the "disabled" encoding.
-    expect(bodies[0]!.reasoning_effort).toBe('max')
-    expect(bodies[0]!.thinking).toMatchObject({ type: 'enabled', effort: 'max' })
+    // raised to the lowest valid thinking effort ('low') instead of failing
+    // the turn or jumping to 'max', and the chat wire never sees "disabled".
+    expect(bodies[0]!.reasoning_effort).toBe('low')
+    expect(bodies[0]!.thinking).toMatchObject({ type: 'enabled', effort: 'low' })
     expect(bodies[0]!.thinking).not.toEqual({ type: 'disabled' })
-    expect(getLastThinkingCoercion('sess-gate-1')).toMatchObject({ model: 'k3.1-pro', from: 'none', to: 'max' })
+    expect(getLastThinkingCoercion('sess-gate-1')).toMatchObject({ model: 'k3.1-pro', from: 'none', to: 'low' })
   })
 
   it('applies the same gate on the Anthropic wire too', async () => {
@@ -381,7 +381,34 @@ describe('the thinking gate', () => {
 
     expect(bodies[0]!.thinking).toMatchObject({ type: 'enabled' })
     expect(bodies[0]!.thinking).not.toEqual({ type: 'disabled' })
-    expect(getLastThinkingCoercion('sess-gate-2')).toMatchObject({ wire: 'anthropic', to: 'max' })
+    expect(getLastThinkingCoercion('sess-gate-2')).toMatchObject({ wire: 'anthropic', to: 'low' })
+  })
+
+  it('enforces thinking-only from the live catalog for models absent from the static registry', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchFn = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+      return sseResponse(CHAT_TURN)
+    }) as unknown as typeof fetch
+
+    const { adapter } = await buildAdapter({
+      fetchFn,
+      catalog: [{
+        id: 'k3.5-pro',
+        contextWindow: 1_048_576,
+        reasoningEfforts: ['high', 'max'],
+        defaultReasoningEffort: 'max',
+        thinkingType: 'only',
+      }],
+    })
+    await drain(adapter.stream(generateOptions('k3.5-pro', {
+      sessionId: 'sess-gate-live',
+      reasoningEffort: 'none' as never,
+    })))
+
+    expect(bodies[0]!.reasoning_effort).toBe('high')
+    expect(bodies[0]!.thinking).toMatchObject({ type: 'enabled', effort: 'high' })
+    expect(getLastThinkingCoercion('sess-gate-live')).toMatchObject({ model: 'k3.5-pro', from: 'none', to: 'high' })
   })
 
   it('leaves a switchable model free to disable thinking', async () => {

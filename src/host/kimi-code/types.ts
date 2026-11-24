@@ -520,28 +520,75 @@ export function thinkingTypeFor(modelId: string): KimiCodeThinkingType | undefin
   return kimiCodeModelDef(modelId)?.thinkingType
 }
 
+/** Live catalog fields consulted when coercing a disallowed thinking level. */
+export interface KimiCodeThinkingGateEntry {
+  readonly id: string
+  readonly thinkingType?: KimiCodeThinkingType
+  readonly reasoningEfforts?: readonly string[]
+  readonly defaultReasoningEffort?: string
+}
+
+/** Lowest-cost thinking order used when lifting a disallowed 'none' request. */
+const LOWEST_THINKING_EFFORT_ORDER: readonly KimiCodeReasoningEffort[] = ['low', 'high', 'max']
+
+function lowestAllowedThinkingEffort(
+  modelId: string,
+  entry?: KimiCodeThinkingGateEntry,
+): KimiCodeReasoningEffort | undefined {
+  const rawEfforts = entry?.reasoningEfforts !== undefined
+    ? entry.reasoningEfforts
+    : reasoningEffortsFor(modelId)
+  const allowed = rawEfforts.filter((level) => level !== 'none')
+  for (const candidate of LOWEST_THINKING_EFFORT_ORDER) {
+    if (allowed.includes(candidate)) return candidate
+  }
+  const entryDefault = entry?.defaultReasoningEffort
+  if (
+    entryDefault !== undefined
+    && entryDefault !== 'none'
+    && isKimiCodeReasoningEffort(entryDefault)
+    && (entry?.reasoningEfforts === undefined || allowed.includes(entryDefault))
+  ) {
+    return entryDefault
+  }
+  const staticDefault = defaultReasoningEffortFor(modelId)
+  if (
+    staticDefault !== undefined
+    && staticDefault !== 'none'
+    && (entry?.reasoningEfforts === undefined || allowed.includes(staticDefault))
+  ) {
+    return staticDefault
+  }
+  return undefined
+}
+
 /**
- * Raise a disabled-thinking request to a level the model can actually run.
+ * Raise a disabled-thinking request to the lowest level the model can actually run.
  *
  * Asking a thinking-only model for `none` is refused by the service with
  * HTTP 400 ("K3.1 Pro does not support disabled thinking mode"), and the user's
  * real intent there is "don't spend my quota on thinking", not "fail the turn".
- * So the effort is lifted to the model's own default — `max` for the K3.1 pair —
- * and the lift is REPORTED through `coercedFrom` so a caller can tell the user
- * what happened instead of silently spending more than they asked for.
+ * So the effort is lifted to the lowest valid non-`none` level (`low` for the
+ * K3.1 pair) instead of jumping to `max`, consulting the live catalog entry
+ * first when provided so newly published or updated models follow the server's
+ * declaration. The lift is REPORTED through `coercedFrom` so a caller can tell
+ * the user what happened instead of silently spending more than they asked for.
  *
  * A model that does not declare `only`, and any effort other than `none`, is
- * returned untouched. When a thinking-only row declares no default the effort
- * becomes `undefined`, which sends no level at all and leaves the service on its
- * own default — still never a disabled-thinking request.
+ * returned untouched. When a thinking-only row leaves no valid non-`none` level
+ * the effort becomes `undefined`, which sends no level at all and leaves the
+ * service on its own default — still never a disabled-thinking request.
  */
 export function coerceThinkingEffort(
   modelId: string,
   effort: KimiCodeReasoningEffort | undefined,
+  catalog?: readonly KimiCodeThinkingGateEntry[],
 ): { effort: KimiCodeReasoningEffort | undefined; coercedFrom: 'none' | null } {
   if (effort !== 'none') return { effort, coercedFrom: null }
-  if (thinkingTypeFor(modelId) !== 'only') return { effort, coercedFrom: null }
-  return { effort: defaultReasoningEffortFor(modelId), coercedFrom: 'none' }
+  const entry = catalog?.find((model) => model.id === modelId)
+  const effectiveThinkingType = entry?.thinkingType ?? thinkingTypeFor(modelId)
+  if (effectiveThinkingType !== 'only') return { effort, coercedFrom: null }
+  return { effort: lowestAllowedThinkingEffort(modelId, entry), coercedFrom: 'none' }
 }
 
 /**

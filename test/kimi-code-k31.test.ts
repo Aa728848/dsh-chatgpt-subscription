@@ -71,7 +71,7 @@ describe('the K3.1 Pro registry rows', () => {
     expect(row.maxTokens).toBe(32_768)
     expect(row.inputModalities).toEqual(['text', 'image', 'video'])
     expect(row.reasoningEfforts).toEqual(['low', 'high', 'max'])
-    expect(row.defaultReasoningEffort).toBe('max')
+    expect(row.defaultReasoningEffort).toBe('high')
     expect(row.thinkingType).toBe('only')
     expect(row.minimumPlan).toBe('Moderato')
     expect(row.contextPlan).toBe('Allegretto')
@@ -89,7 +89,7 @@ describe('the K3.1 Pro registry rows', () => {
     expect(row.maxTokens).toBe(32_768)
     expect(row.inputModalities).toEqual(['text', 'image', 'video'])
     expect(row.reasoningEfforts).toEqual(['low', 'high', 'max'])
-    expect(row.defaultReasoningEffort).toBe('max')
+    expect(row.defaultReasoningEffort).toBe('high')
     expect(row.thinkingType).toBe('only')
     expect(row.minimumPlan).toBe('Allegretto')
     expect(row.contextPlan).toBeNull()
@@ -114,21 +114,22 @@ describe('thinking-only semantics', () => {
       expect(thinkingTypeFor(id)).toBe('only')
       expect(reasoningEffortsFor(id)).toEqual(['low', 'high', 'max'])
       expect(reasoningEffortsFor(id)).not.toContain('none')
-      // Disabling thinking is a documented HTTP 400 for this family.
-      expect(coerceThinkingEffort(id, 'none')).toEqual({ effort: 'max', coercedFrom: 'none' })
+      // Disabling thinking is a documented HTTP 400 for this family, so 'none'
+      // is lifted to the lowest valid thinking effort ('low') rather than 'max'.
+      expect(coerceThinkingEffort(id, 'none')).toEqual({ effort: 'low', coercedFrom: 'none' })
     }
   })
 
   it('defaults to the declared level rather than to the last one in the list', () => {
-    expect(defaultReasoningEffortFor('k3.1-pro')).toBe('max')
-    expect(defaultReasoningEffortFor('k3.1-pro-highspeed')).toBe('max')
+    expect(defaultReasoningEffortFor('k3.1-pro')).toBe('high')
+    expect(defaultReasoningEffortFor('k3.1-pro-highspeed')).toBe('high')
   })
 
   it('applies the registry rule when the live listing is silent or absent', () => {
     // A cold start, an offline card, or a server that predates the declaration
     // must not turn a thinking-only model into a switchable one.
     expect(reasoningEffortsForEntry('k3.1-pro', [])).toEqual(['low', 'high', 'max'])
-    expect(defaultReasoningEffortForEntry('k3.1-pro', [])).toBe('max')
+    expect(defaultReasoningEffortForEntry('k3.1-pro', [])).toBe('high')
     const silent: KimiCodeCatalogModel[] = [{ id: 'k3.1-pro', contextWindow: 262_144 }]
     expect(reasoningEffortsForEntry('k3.1-pro', silent)).toEqual(['low', 'high', 'max'])
   })
@@ -163,12 +164,48 @@ describe('thinking-only semantics', () => {
     expect(defaultReasoningEffortForEntry('k3', onlyNone)).toBeUndefined()
   })
 
-  it('lifts a disabled-thinking request instead of failing the turn', () => {
+  it('lifts a disabled-thinking request to the lowest valid level instead of failing the turn', () => {
     // The service answers 400 for this request, and the user's intent is "spend
-    // less", not "fail" — so it is raised to the model's own default and the
-    // lift is reported.
-    expect(coerceThinkingEffort('k3.1-pro', 'none')).toEqual({ effort: 'max', coercedFrom: 'none' })
-    expect(coerceThinkingEffort('k3.1-pro-highspeed', 'none')).toEqual({ effort: 'max', coercedFrom: 'none' })
+    // less", not "fail" — so it is raised to the lowest valid thinking effort
+    // ('low') rather than 'max', and the lift is reported.
+    expect(coerceThinkingEffort('k3.1-pro', 'none')).toEqual({ effort: 'low', coercedFrom: 'none' })
+    expect(coerceThinkingEffort('k3.1-pro-highspeed', 'none')).toEqual({ effort: 'low', coercedFrom: 'none' })
+  })
+
+  it('consults the live catalog when coercing disabled-thinking requests', () => {
+    // A newly published thinking-only model not yet in the static table is
+    // lifted to its lowest advertised non-none level.
+    const liveOnlyHigh: KimiCodeCatalogModel[] = [{
+      id: 'k3.5-pro',
+      contextWindow: 1_048_576,
+      reasoningEfforts: ['high', 'max'],
+      defaultReasoningEffort: 'max',
+      thinkingType: 'only',
+    }]
+    expect(coerceThinkingEffort('k3.5-pro', 'none', liveOnlyHigh))
+      .toEqual({ effort: 'high', coercedFrom: 'none' })
+
+    // When a live thinking-only entry leaves no valid non-none level, fall back
+    // to undefined (service default) rather than emitting 'none'.
+    const liveOnlyNone: KimiCodeCatalogModel[] = [{
+      id: 'k3.5-broken',
+      contextWindow: 262_144,
+      reasoningEfforts: ['none'],
+      defaultReasoningEffort: 'none',
+      thinkingType: 'only',
+    }]
+    expect(coerceThinkingEffort('k3.5-broken', 'none', liveOnlyNone))
+      .toEqual({ effort: undefined, coercedFrom: 'none' })
+
+    // If the service later makes k3.1-pro toggleable, respect the live listing.
+    const liveToggleable: KimiCodeCatalogModel[] = [{
+      id: 'k3.1-pro',
+      contextWindow: 262_144,
+      reasoningEfforts: ['low', 'high', 'max', 'none'],
+      thinkingType: 'both',
+    }]
+    expect(coerceThinkingEffort('k3.1-pro', 'none', liveToggleable))
+      .toEqual({ effort: 'none', coercedFrom: null })
   })
 
   it('leaves every other effort and every other model untouched', () => {
@@ -232,7 +269,7 @@ describe('the chat-completions wire', () => {
     const option = optionFor('k3.1-pro')
     expect(option.thinkingType).toBe('only')
     expect(option.reasoningEfforts).toEqual(['low', 'high', 'max'])
-    expect(option.defaultReasoningEffort).toBe('max')
+    expect(option.defaultReasoningEffort).toBe('high')
     expect(option.minimumPlan).toBe('Moderato')
     expect(option.quotaMultiplier).toBe(2)
     // The registry says nothing about thinking for this id, so nothing is claimed.

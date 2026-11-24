@@ -81,6 +81,7 @@ import { AwsQuickToolBridge } from './host/aws-quick/tool-bridge.ts'
 import { registerAwsQuickRoutes } from './host/aws-quick/routes.ts'
 import { PROVIDER_ID as AWS_QUICK_PROVIDER_ID, PROVIDER_NAME as AWS_QUICK_PROVIDER_NAME, QUICK_MODELS } from './host/aws-quick/types.ts'
 import { KimiCodeAdapter } from './host/kimi-code/adapter.ts'
+import { resolvedKimiContextWindow } from './host/kimi-code/client.ts'
 import { KimiCodeAccountPool } from './host/kimi-code/account-pool.ts'
 import { registerKimiCodeRoutes } from './host/kimi-code/routes.ts'
 import { createKimiVideoTool } from './host/kimi-code/video-tool.ts'
@@ -901,11 +902,6 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     return () => guard.dispose()
   }, 'dsh-chatgpt-subscription: timeline cache guard')
 
-  ctx.effect(() => {
-    const guard = installCompactionPolicyGuard(ctx)
-    return () => guard.dispose()
-  }, 'dsh-chatgpt-subscription: compaction policy guard')
-
   // DeepSeek V4.1 Flash（含 1017）专属运行时优化总成：严格按模型门控，绝不触碰
   // 其它线路与其它模型。当全局 `reasoningCollapseGuard` 已显式启用时跳过内置坍塌
   // 守卫，避免同一流上叠两层监听器。
@@ -993,6 +989,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   const kimiCodeAccountPool = new KimiCodeAccountPool({ store: kimiCodeStore })
   const kimiCodeModelSettings = new KimiCodeModelSettingsStore()
   const kimiCodePreferences = registerKimiCodePreferenceStore(ctx.settings, kimiCodeModelSettings)
+
+  ctx.effect(() => {
+    const guard = installCompactionPolicyGuard(ctx, {
+      contextWindowFor: (model) =>
+        resolvedKimiContextWindow(model, kimiCodePreferences.status().contextWindowOverrides),
+    })
+    return () => guard.dispose()
+  }, 'dsh-chatgpt-subscription: compaction policy guard')
 
   // MiniMax Code owns its own credential file and keeps it fresh, so this line
   // reads and renews that file rather than keeping a second one of its own.

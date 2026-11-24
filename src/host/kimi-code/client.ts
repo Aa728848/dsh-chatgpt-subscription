@@ -5,6 +5,7 @@ import {
   PROVIDER_NAME,
   QUOTA_CACHE_TTL_MS,
   anthropicUrl,
+  effectiveContextWindow,
   inputModalitiesFor,
   maxOutputTokensFor,
   openAIUrl,
@@ -229,6 +230,29 @@ export function clearCachedCatalog(): void {
 
 export function getCachedCatalog(): KimiCodeCatalogModel[] {
   return catalogCache?.models ?? []
+}
+
+/**
+ * Synchronously resolve the effective context window currently honoured for one
+ * Kimi Code model id.
+ *
+ * Mirrors `KimiCodeAdapter.contextWindowFor` precedence: explicit user override
+ * first, then the cached live `/v1/models` entry, then the shipped static table,
+ * all folded through {@link effectiveContextWindow}. Returns `undefined` for an
+ * unknown model id that has neither an override nor a catalog entry.
+ */
+export function resolvedKimiContextWindow(
+  modelId: string,
+  overrides: Record<string, number> = {},
+  catalog: readonly KimiCodeCatalogModel[] = getCachedCatalog(),
+): number | undefined {
+  const override = overrides[modelId]
+  const entry = catalog.find((model) => model.id === modelId)
+  const declared = typeof override === 'number' && Number.isFinite(override) && override > 0
+    ? override
+    : entry?.contextWindow ?? kimiCodeModelDef(modelId)?.contextWindow
+  if (declared === undefined) return undefined
+  return effectiveContextWindow(declared)
 }
 
 /**

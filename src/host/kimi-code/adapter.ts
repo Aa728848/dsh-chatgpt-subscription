@@ -1678,7 +1678,8 @@ export class KimiCodeAdapter extends LlmAdapter {
     // that cannot stop reasoning ("K3.1 Pro does not support disabled thinking
     // mode"), and no wire can express "off" for such a model at all. The
     // caller's real intent is "spend less", not "fail", so the level is lifted
-    // to the model's own default and the lift is recorded rather than swallowed.
+    // to the lowest valid non-`none` level (`low` on K3.1 Pro) using the live
+    // catalog when available, and the lift is recorded rather than swallowed.
     // Applied here, before the body is built, so no builder can be reached with a
     // level the service would refuse.
     const gatedEffort = coerceThinkingEffort(
@@ -1686,6 +1687,7 @@ export class KimiCodeAdapter extends LlmAdapter {
       mapReasoningEffort(options.reasoningEffort === undefined || options.reasoningEffort === null
         ? undefined
         : String(options.reasoningEffort)),
+      catalog,
     )
     if (gatedEffort.coercedFrom !== null) {
       recordThinkingCoercion(

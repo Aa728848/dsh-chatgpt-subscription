@@ -135,13 +135,14 @@ function createFakeAgent(options: {
 
 describe('开源模型精准识别与隔离矩阵', () => {
   it('按物理架构准确归类全部主力开源模型，跨线路生效', () => {
-    // Kimi K3 / K3.1 / Coding
+    // Kimi K3 与 K3.1 精准分家族（短别名仅在 kimi-code 线路匹配）
     expect(matchOpenModelProfile('k3', 'kimi-code')?.family).toBe('kimi-k3')
     expect(matchOpenModelProfile('k3-256k', 'kimi-code')?.family).toBe('kimi-k3')
-    expect(matchOpenModelProfile('k3.1-pro', 'kimi-code')?.family).toBe('kimi-k3')
     expect(matchOpenModelProfile('kimi-for-coding', 'kimi-code')?.family).toBe('kimi-k3')
-    expect(matchOpenModelProfile('moonshotai/Kimi-K3.1-Pro', 'command-code')?.family).toBe('kimi-k3')
-    expect(matchOpenModelProfile('kimi-k3-1', 'workbuddy-subscription')?.family).toBe('kimi-k3')
+    expect(matchOpenModelProfile('k3.1-pro', 'kimi-code')?.family).toBe('kimi-k31')
+    expect(matchOpenModelProfile('k3.1-pro-highspeed', 'kimi-code')?.family).toBe('kimi-k31')
+    expect(matchOpenModelProfile('moonshotai/Kimi-K3.1-Pro', 'command-code')?.family).toBe('kimi-k31')
+    expect(matchOpenModelProfile('kimi-k3-1', 'workbuddy-subscription')?.family).toBe('kimi-k31')
 
     // GLM-5.x
     expect(matchOpenModelProfile('GLM-5.3', 'glm-coding-plan')?.family).toBe('glm-5')
@@ -225,11 +226,23 @@ describe('静态尾部纪律注入（零破缓存、末尾追加、差异化规�
     expect(kimi1.sections).toHaveLength(3)
     expect(kimi1.sections[0]?.name).toBe('persona')
     expect(kimi1.sections[1]?.name).toBe('tools:sdk')
-    expect(kimi1.sections[2]?.name).toBe('plugin:open-model-discipline:kimi-k3')
+    expect(kimi1.sections[2]?.name).toBe('plugin:open-model-discipline:kimi-k31')
     expect(kimi1.sections[2]?.interpolate).toBe(false)
     expect(kimi1.sections[2]?.text).toBe(kimi2.sections[2]?.text)
     expect(String(kimi1.sections[2]?.text)).toContain('plain valid JavaScript')
     expect(String(kimi1.sections[2]?.text)).toContain('[0m')
+    expect(String(kimi1.sections[2]?.text)).toContain('hardcoding expected outputs')
+    expect(String(kimi1.sections[2]?.text)).toContain('suspected prompt injection')
+
+    // 普通 Kimi K3：保留公共纪律，但不混入 K3.1 Pro 专属条款
+    const k3OnlyAgent = createFakeAgent({ provider: 'kimi-code', model: 'k3' })
+    const k3Only = await host.runWaterfall('system-prompt/assemble', [{}, { scope: k3OnlyAgent }], () => ({
+      sections: [{ name: 'persona', text: 'P' }],
+    }))
+    expect(k3Only.sections).toHaveLength(2)
+    expect(k3Only.sections[1]?.name).toBe('plugin:open-model-discipline:kimi-k3')
+    expect(String(k3Only.sections[1]?.text)).toContain('plain valid JavaScript')
+    expect(String(k3Only.sections[1]?.text)).not.toContain('hardcoding expected outputs')
 
     // DeepSeek-V4 Pro：有轻量执行纪律，但没有 V4.1-Flash 的强输出排版段
     const v4ProAgent = createFakeAgent({ provider: 'deepseek', model: 'deepseek-v4-pro' })
@@ -309,7 +322,7 @@ describe('零改前缀尾部 State Anchor（适配 SWA 短窗与 1M 稀疏/线�
       () => ({ kind: 'enter', messages: [] }),
     ) as { messages?: Array<{ content?: Array<{ text?: string }> }> }
     expect(watermarkRes.messages).toHaveLength(1)
-    expect(watermarkRes.messages?.[0]?.content?.[0]?.text).toContain('model=Kimi-K3')
+    expect(watermarkRes.messages?.[0]?.content?.[0]?.text).toContain('model=Kimi-K3.1')
     expect(watermarkRes.messages?.[0]?.content?.[0]?.text).toContain('trigger=watermark')
 
     // 3) 检索意图分类器必须跳过 `[Open-Model State Anchor]`

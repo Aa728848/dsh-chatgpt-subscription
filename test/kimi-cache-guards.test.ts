@@ -23,8 +23,12 @@ import {
   KIMI_CODE_MODELS,
   KIMI_COMPACTION_POLICY_DEFAULTS,
   KIMI_COMPACTION_PROVIDER,
+  KIMI_LONG_CONTEXT_RETAIN_TOKENS,
+  KIMI_LONG_CONTEXT_WINDOW_THRESHOLD,
   installCompactionPolicyGuard,
 } from '../src/host/compaction-policy-guard.ts'
+import { resolvedKimiContextWindow } from '../src/host/kimi-code/client.ts'
+import { kimiCodeModelDef } from '../src/host/kimi-code/model-catalog.ts'
 import {
   COMPACTION_INSTRUCTION,
   SHIPPED_INSTRUCTION_OPENING,
@@ -492,13 +496,13 @@ describe('installCompactionPolicyGuard', () => {
     guard.dispose()
   })
 
-  it('narrows a seeded Kimi model to the Kimi retention budget', () => {
+  it('narrows a seeded Kimi model to the Kimi retention budget tiered by context window', () => {
     const engine = new FakeEngine()
     const guard = installCompactionPolicyGuard(createHost(undefined).ctx)
     guard.patchEngine(engine)
     const { override, retention } = resolveTargetPolicy(engine.config, {
       provider: KIMI_COMPACTION_PROVIDER,
-      model: 'kimi-for-coding',
+      model: 'k3.1-pro',
     })
     expect(override).toBeDefined()
     expect(retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
@@ -506,6 +510,12 @@ describe('installCompactionPolicyGuard', () => {
     expect(override?.headroomTokens).toBe(KIMI_COMPACTION_POLICY_DEFAULTS.headroomTokens)
     expect(override?.maxTokens).toBe(KIMI_COMPACTION_POLICY_DEFAULTS.maxTokens)
     expect(override?.retainRatio).toBeUndefined()
+
+    const longTier = resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3.1-pro-highspeed',
+    })
+    expect(longTier.retention).toEqual({ retainTokens: KIMI_LONG_CONTEXT_RETAIN_TOKENS })
     guard.dispose()
   })
 
@@ -539,7 +549,7 @@ describe('installCompactionPolicyGuard', () => {
     guard.dispose()
   })
 
-  it('covers every pre-seeded Kimi model', () => {
+  it('covers every pre-seeded Kimi model with 256K vs 1M retention tiers', () => {
     const engine = new FakeEngine()
     const guard = installCompactionPolicyGuard(createHost(undefined).ctx)
     guard.patchEngine(engine)
@@ -548,9 +558,87 @@ describe('installCompactionPolicyGuard', () => {
         provider: KIMI_COMPACTION_PROVIDER,
         model,
       })
-      expect(retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
+      const declaredWindow = kimiCodeModelDef(model)?.contextWindow ?? 0
+      const expected = declaredWindow >= KIMI_LONG_CONTEXT_WINDOW_THRESHOLD
+        ? KIMI_LONG_CONTEXT_RETAIN_TOKENS
+        : KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens
+      expect(retention).toEqual({ retainTokens: expected })
     }
     guard.dispose()
+  })
+
+  it('tracks live contextWindowFor dynamically for 1M overrides, catalog updates, folding, and explicit caps', () => {
+    let overrides: Record<string, number> = {}
+    let liveCatalog: Array<{ id: string; contextWindow: number }> = []
+    const engine = new FakeEngine()
+    const guard = installCompactionPolicyGuard(createHost(undefined).ctx, {
+      contextWindowFor: (model) => resolvedKimiContextWindow(model, overrides, liveCatalog),
+    })
+    guard.patchEngine(engine)
+
+    // 默认静态表：k3.1-pro 为 256K（8192），k3.1-pro-highspeed 为 1M（16384）
+    expect(resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3.1-pro',
+    }).retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
+    expect(resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3.1-pro-highspeed',
+    }).retention).toEqual({ retainTokens: KIMI_LONG_CONTEXT_RETAIN_TOKENS })
+
+    // 实时 /v1/models 报告 Pro/Allegretto 1M 窗口时，k3.1-pro 立刻切到 16384
+    liveCatalog = [{ id: 'k3.1-pro', contextWindow: 1_048_576 }]
+    expect(resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3.1-pro',
+    }).retention).toEqual({ retainTokens: KIMI_LONG_CONTEXT_RETAIN_TOKENS })
+
+    // 用户显式覆盖压回 256K 时立刻回到 8192；覆盖抬到 1M 时优先于实时目录生效
+    overrides = { 'k3.1-pro': 262_144, 'k3': 1_048_576 }
+    expect(resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3.1-pro',
+    }).retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
+    expect(resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3',
+    }).retention).toEqual({ retainTokens: KIMI_LONG_CONTEXT_RETAIN_TOKENS })
+
+    // 开启 DSH_KIMI_CODE_BYTES_PER_TOKEN=8（2MB 折成 262,144）时，1M 模型也被折回 256K → 8192
+    vi.stubEnv('DSH_KIMI_CODE_BYTES_PER_TOKEN', '8')
+    expect(resolveTargetPolicy(engine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3.1-pro-highspeed',
+    }).retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
+    vi.unstubAllEnvs()
+
+    // 未知动态模型回退保守 8192
+    expect(resolvedKimiContextWindow('kimi-unknown-preview', {}, [])).toBeUndefined()
+    guard.dispose()
+
+    // 显式指定 options.retainTokens 且未给 longContextRetainTokens 时，保持固定值不翻倍
+    const pinnedEngine = new FakeEngine()
+    const pinnedGuard = installCompactionPolicyGuard(createHost(undefined).ctx, { retainTokens: 6144 })
+    pinnedGuard.patchEngine(pinnedEngine)
+    expect(resolveTargetPolicy(pinnedEngine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3.1-pro-highspeed',
+    }).retention).toEqual({ retainTokens: 6144 })
+    pinnedGuard.dispose()
+
+    // contextWindowFor 异常时旁路降级回 8192，不抛出
+    const faultEngine = new FakeEngine()
+    const faultGuard = installCompactionPolicyGuard(createHost(undefined).ctx, {
+      contextWindowFor: () => {
+        throw new Error('boom')
+      },
+    })
+    faultGuard.patchEngine(faultEngine)
+    expect(resolveTargetPolicy(faultEngine.config, {
+      provider: KIMI_COMPACTION_PROVIDER,
+      model: 'k3.1-pro-highspeed',
+    }).retention).toEqual({ retainTokens: KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens })
+    faultGuard.dispose()
   })
 
   it('lets an explicit user policy win over the Kimi default', () => {

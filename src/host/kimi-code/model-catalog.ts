@@ -222,15 +222,16 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     maxRequestBodyBytes: LONG_CONTEXT_MESSAGE_BODY_BYTES,
     inputModalities: ['text', 'image', 'video'],
     reasoningEfforts: ['low', 'high', 'max'],
-    // The official table states thinking defaults to max for this family.
-    defaultReasoningEffort: 'max',
+    // The official Kimi Code docs state thinking defaults to high for K3.1 Pro;
+    // a live `/v1/models` declaration still wins when present.
+    defaultReasoningEffort: 'high',
     // "K3.1 Pro does not support disabled thinking mode" (HTTP 400, see
     // error-reference.html): thinking cannot be turned off, so 'none' is never
     // offered for this id.
     thinkingType: 'only',
     minimumPlan: 'Moderato',
     contextPlan: 'Allegretto',
-    description: 'The K3.1 Pro flagship: 3T parameters, a 256K context window on Plus/Moderato and 1M on Pro/Allegretto and above. Thinking runs at low/high/max, defaults to max, and cannot be disabled.',
+    description: 'The K3.1 Pro flagship: 3T parameters, a 256K context window on Plus/Moderato and 1M on Pro/Allegretto and above. Thinking runs at low/high/max, defaults to high, and cannot be disabled.',
     supportsDynamicTools: true,
     // The official pages state no figure for this id. Recorded as 2 by decision:
     // the regular version is treated as consuming what K3 consumes, which the
@@ -254,7 +255,7 @@ export const KIMI_CODE_MODELS: readonly KimiCodeCatalogModel[] = [
     maxRequestBodyBytes: LONG_CONTEXT_MESSAGE_BODY_BYTES,
     inputModalities: ['text', 'image', 'video'],
     reasoningEfforts: ['low', 'high', 'max'],
-    defaultReasoningEffort: 'max',
+    defaultReasoningEffort: 'high',
     // Same official statement as k3.1-pro: "K3.1 Pro does not support disabled
     // thinking mode" (HTTP 400), so 'none' is never offered for this id either.
     thinkingType: 'only',

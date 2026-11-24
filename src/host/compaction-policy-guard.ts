@@ -69,6 +69,7 @@
  */
 import { replaceCompactionInstruction, type PromptMessage } from './compaction-prompt.ts'
 import { codexRemoteCompactionEnabled } from './codex-remote-compaction.ts'
+import { kimiCodeModelDef } from './kimi-code/model-catalog.ts'
 import { MINIMAX_CODE_MODELS } from './minimax-code/model-catalog.ts'
 
 /** 压缩服务的名字（`ctx.reflect.store` 与 `ctx.get` 都用它）。 */
@@ -79,11 +80,23 @@ export const KIMI_COMPACTION_PROVIDER = 'kimi-code'
 export const MINIMAX_COMPACTION_PROVIDER = 'minimax-code'
 export const CODEX_COMPACTION_PROVIDER = 'codex-chatgpt'
 
+/** 判定为 1M 长上下文档位的生效窗口阈值（>= 512K）。 */
+export const KIMI_LONG_CONTEXT_WINDOW_THRESHOLD = 524_288
+
 /**
- * Kimi Code 的压缩预算。
+ * 1M 长上下文档位的逐字保留尾巴（16K，约占 1M 窗口的 1.5%）。
  *
- * - `retainTokens: 8192`：压缩后逐字保留的尾巴，替代默认的 16% 比例
- *   （一条 256k 会话上就是 ~41k → ~8k）。
+ * 相比内置 `retainRatio: 0.16` 在 1M 上会产生的 ~168K 重建输入仍压缩了 90%+，
+ * 同时避免 8K 尾巴装不下超长程任务最近 1–2 轮完整 diff / 测试报错现场而引发压缩后重新读盘。
+ */
+export const KIMI_LONG_CONTEXT_RETAIN_TOKENS = 16384
+
+/**
+ * Kimi Code 的压缩预算（256K 档位基线）。
+ *
+ * - `retainTokens: 8192`：256K 档位压缩后逐字保留的尾巴，替代默认的 16% 比例
+ *   （一条 256k 会话上就是 ~41k → ~8k）；1M 长上下文档位（生效窗口 >= 512K）
+ *   自动切到 {@link KIMI_LONG_CONTEXT_RETAIN_TOKENS}（16K）。
  * - `thresholdRatio: 0.85`：更早触发压缩，别等溢出。
  * - `headroomTokens: 32768`：留给「还来得及压缩」的余量减半。
  * - `maxTokens: 32768`：摘要调用自身的输出上限。
@@ -121,8 +134,12 @@ export interface CompactionPolicyGuardOptions {
   thresholdRatio?: number
   /** 压力余量（token）。 */
   headroomTokens?: number
-  /** 压缩后逐字保留的尾巴（token）。 */
+  /** 256K 档位（以及未分档时）压缩后逐字保留的尾巴（token）。 */
   retainTokens?: number
+  /** 1M 长上下文档位（生效窗口 >= 512K）压缩后逐字保留的尾巴（token）。 */
+  longContextRetainTokens?: number
+  /** 同步查询指定 Kimi 模型当前生效的上下文窗口（用于区分 256K 与 1M 档位）。 */
+  contextWindowFor?: (model: string) => number | undefined
   /** 摘要调用自身的输出上限（token）。 */
   maxTokens?: number
 }
@@ -184,12 +201,34 @@ export function installCompactionPolicyGuard(
 ): CompactionPolicyGuard {
   const host = isRecord(ctx) ? (ctx as Record<string, unknown>) : undefined
   const provider = options.provider ?? KIMI_COMPACTION_PROVIDER
+  const baseRetainTokens = options.retainTokens ?? KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens
+  // 调用方显式指定固定 `retainTokens` 且未给 `longContextRetainTokens` 时，尊重固定值不自动翻倍。
+  const longContextRetainTokens = options.longContextRetainTokens
+    ?? (options.retainTokens !== undefined ? options.retainTokens : KIMI_LONG_CONTEXT_RETAIN_TOKENS)
+  const readContextWindow = (model: string): number | undefined => {
+    if (options.contextWindowFor !== undefined) {
+      try {
+        const resolved = options.contextWindowFor(model)
+        if (typeof resolved === 'number' && Number.isFinite(resolved) && resolved > 0) return resolved
+        return undefined
+      } catch {
+        return undefined
+      }
+    }
+    return kimiCodeModelDef(model)?.contextWindow
+  }
+  const retainTokensFor = (model: string): number => {
+    const window = readContextWindow(model)
+    return window !== undefined && window >= KIMI_LONG_CONTEXT_WINDOW_THRESHOLD
+      ? longContextRetainTokens
+      : baseRetainTokens
+  }
   const defaults: PolicyLike = {
     provider,
     model: '',
     thresholdRatio: options.thresholdRatio ?? KIMI_COMPACTION_POLICY_DEFAULTS.thresholdRatio,
     headroomTokens: options.headroomTokens ?? KIMI_COMPACTION_POLICY_DEFAULTS.headroomTokens,
-    retainTokens: options.retainTokens ?? KIMI_COMPACTION_POLICY_DEFAULTS.retainTokens,
+    retainTokens: baseRetainTokens,
     maxTokens: options.maxTokens ?? KIMI_COMPACTION_POLICY_DEFAULTS.maxTokens,
     compactionRetries: KIMI_COMPACTION_POLICY_DEFAULTS.compactionRetries,
     maxOverflowRetries: KIMI_COMPACTION_POLICY_DEFAULTS.maxOverflowRetries,
@@ -220,7 +259,12 @@ export function installCompactionPolicyGuard(
         ...MINIMAX_COMPACTION_POLICY_DEFAULTS,
       })
     }
-    return Object.freeze({ ...defaults, provider: targetProvider, model })
+    return Object.freeze({
+      ...defaults,
+      retainTokens: retainTokensFor(model),
+      provider: targetProvider,
+      model,
+    })
   }
 
   /**

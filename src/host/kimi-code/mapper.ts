@@ -3416,8 +3416,8 @@ export function getSessionImageBudgetStats(sessionId?: string): KimiCodeSessionI
  *
  * The service answers HTTP 400 for "thinking off" on a model that cannot stop
  * reasoning, and the user's real intent there is "spend less", not "fail the
- * turn" — so the latch lifts the level to the model's own default (see
- * coerceThinkingEffort). Lifting it silently would spend more quota than was
+ * turn" — so the latch lifts the level to the lowest valid non-`none` level
+ * (see coerceThinkingEffort). Lifting it silently would spend more quota than was
  * asked for with nothing saying why, which is why the lift is both RECORDED here
  * (so a caller can read it back per session, the way the drift cause is read
  * back) and ANNOUNCED on the process warning channel.
