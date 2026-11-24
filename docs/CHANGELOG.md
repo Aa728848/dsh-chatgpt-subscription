@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.85.0 - 2026-11-24
+
+- **[client] 会话详情面板新增额度卡片，输入框额度胶囊改为自动让位**：把各线路额度从底部输入框搬进 DSH 原生会话详情面板，注册为 `conversation.session.panel.section` 区块与折叠态 `.section.actions` 摘要。折叠时标题行只显示一行摘要（百分比 + 健康度），展开后按线路渲染额度进度条、重置倒计时与套餐信息；14 条线路（Codex、Claude 订阅/API、Kimi Code、MiniMax Code、Command Code、GLM Coding Plan、Step Code、Cline Pass、Qoder、OpenDesign、WorkBuddy、Antigravity ACP、千问 Token Plan、RelayOne）各配一个适配器，同一 provider 的卡片与摘要共用一份 60 秒轮询快照，页面不可见时暂停。透明层 `panel-availability.ts` 记录面板是否挂载：面板存在时底部 `conversation.input.right` 胶囊与其轮询自动让位，避免同一份额度显示两遍；旧版宿主没有该插槽时不注册、不计数，胶囊行为与之前完全一致。
+
+- **[hub] 线路总览重做为 Magpie 风格并统一品牌图标**：`HubOverview.tsx` 拆分为列表卡片 `HubProviderRow.tsx`、添加面板 `HubAddSheet.tsx` 与纯函数助手 `hub-overview-helpers.ts`（本地缓存、排序持久化、搜索匹配）。新增搜索框、多选批量启用/关闭/移出、右键置顶/上移/下移/置底、已关闭线路收纳区，添加面板按「订阅 / API Key / 本机 CLI」分组并带说明。宿主侧 `HubProviderSummaryDto` 新增可选 `accountHint`（当前账号的别名或套餐名，**不是凭据**）与 `modelIds`（供客户端搜索匹配），各行只读已有目录、不额外触发拉取。品牌图标统一为白底圆角方砖，新增官方 Ollama 羊驼标记，Qoder 底砖改白以与其他条目对齐。
+
+- **[command-code] 模型清单按厂商分组**：在 Command Code 的模型勾选清单里按厂商分组展示模型，`ModelChecklist` 组件拆出可复用的分组结构（`src/client/providers/command-code/model-vendors.ts` 负责厂商归类），配套调整清单样式与三语文案。仅影响设置页勾选体验，不改变模型目录与请求协议。
+
+
 ## 0.84.0 - 2026-11-24
 
 - **[harness] 适配 DSH `0.2.2-rc.5`（当前 `latest`/`next`）与 `0.2.3-alpha.2`（`alpha`），保持 `0.1.2-alpha.5` 起全代兼容**
