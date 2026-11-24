@@ -2,17 +2,20 @@
  * The shared "which models appear in the picker" list every provider section
  * renders.
  *
- * The visual language follows the claude-style model picker: one row per
- * model — vendor mark, name, a single quiet hint line (context window when
- * the catalog carries one) — with the selection state drawn as a trailing
- * check dot instead of a bare checkbox. Unlike the picker this list is
- * multi-select, so rows are `role="checkbox"` and the header carries the
- * select-all / clear-all pair the old checkbox blocks had.
- *
- * One component rather than eight near-identical blocks: sections differ only
- * in where the items come from and which dictionary supplies the labels.
+ * When items carry a `group` (vendor) and at least two groups exist, the list
+ * switches to a left-vendor + right-model split view with cross-vendor search
+ * and per-vendor batch toggle, keeping large catalogs (100+ models) scannable.
+ * Single-vendor and ungrouped callers continue to render a compact flat list.
  */
-import { BrandMark, modelBrandMark } from '../hub/brand-icons.tsx'
+import { useMemo, useState } from 'react'
+import type { KeyboardEvent } from 'react'
+import { BrandMark, modelBrandMark, type ProviderMarkKey } from '../hub/brand-icons.tsx'
+
+export interface ModelChecklistGroup {
+  key: string
+  label: string
+  mark?: ProviderMarkKey | null
+}
 
 export interface ModelChecklistItem {
   id: string
@@ -20,6 +23,8 @@ export interface ModelChecklistItem {
   /** One quiet line under the name (e.g. the context window); omit when none. */
   hint?: string
   enabled: boolean
+  /** Optional vendor/category group. Two or more distinct groups activate split view. */
+  group?: ModelChecklistGroup
 }
 
 export interface ModelChecklistLabels {
@@ -32,6 +37,16 @@ export interface ModelChecklistLabels {
   countTemplate?: string
   /** aria-label of the list itself; omit when the section header already names it. */
   list?: string
+  /** Label for the "All" tab in split-pane vendor mode. */
+  allGroups?: string
+  /** Label for the "Enabled" tab in split-pane vendor mode. */
+  enabledGroup?: string
+  /** Search input placeholder in split-pane vendor mode. */
+  searchPlaceholder?: string
+  /** Empty-state text when a search matches nothing. */
+  noMatches?: string
+  /** aria-label for the left vendor tablist in split-pane mode. */
+  groupsNav?: string
 }
 
 interface Props {
@@ -40,46 +55,253 @@ interface Props {
   busy: boolean
   onToggle(id: string, enabled: boolean): void
   onToggleAll(enabled: boolean): void
+  /** Optional batch toggle for the active vendor group in split-pane mode. */
+  onToggleGroup?(ids: string[], enabled: boolean): void
   labels: ModelChecklistLabels
 }
 
+interface VendorBucket {
+  key: string
+  label: string
+  mark: ProviderMarkKey | null
+  items: ModelChecklistItem[]
+  enabledCount: number
+}
+
+const ALL_TAB = '__all__'
+const ENABLED_TAB = '__enabled__'
+
 const CHECK_SVG = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 5"/></svg>'
 
-export function ModelChecklist({ items, busy, onToggle, onToggleAll, labels }: Props): React.JSX.Element {
+function vendorInitial(label: string): string {
+  const first = label.trim().charAt(0)
+  return first ? first.toUpperCase() : '?'
+}
+
+function renderOptionRow(
+  item: ModelChecklistItem,
+  busy: boolean,
+  onToggle: (id: string, enabled: boolean) => void,
+): React.JSX.Element {
+  const mark = item.group?.mark !== undefined ? item.group.mark : modelBrandMark(item.id)
+  return <button
+    key={item.id}
+    type="button"
+    role="checkbox"
+    aria-checked={item.enabled}
+    className="dsh-mcl-option"
+    data-enabled={item.enabled}
+    disabled={busy}
+    title={item.id}
+    onClick={() => onToggle(item.id, !item.enabled)}
+  >
+    {mark !== null ? <BrandMark mark={mark} size={18} /> : null}
+    <span className="dsh-mcl-copy">
+      <span className="dsh-mcl-name">{item.name}</span>
+      {item.hint !== undefined ? <span className="dsh-mcl-hint">{item.hint}</span> : null}
+    </span>
+    <span className="dsh-mcl-check" aria-hidden="true" dangerouslySetInnerHTML={{ __html: item.enabled ? CHECK_SVG : '' }} />
+  </button>
+}
+
+export function ModelChecklist({ items, busy, onToggle, onToggleAll, onToggleGroup, labels }: Props): React.JSX.Element {
   const enabledCount = items.filter((item) => item.enabled).length
   const count = (labels.countTemplate ?? '{count}/{total}')
     .replace('{count}', String(enabledCount))
     .replace('{total}', String(items.length))
-  return <div className="dsh-mcl">
+
+  const vendors = useMemo<VendorBucket[]>(() => {
+    const map = new Map<string, VendorBucket>()
+    for (const item of items) {
+      if (item.group === undefined) continue
+      let bucket = map.get(item.group.key)
+      if (bucket === undefined) {
+        bucket = {
+          key: item.group.key,
+          label: item.group.label,
+          mark: item.group.mark ?? null,
+          items: [],
+          enabledCount: 0,
+        }
+        map.set(item.group.key, bucket)
+      }
+      bucket.items.push(item)
+      if (item.enabled) bucket.enabledCount += 1
+    }
+    return [...map.values()]
+  }, [items])
+
+  const splitMode = vendors.length >= 2
+  const [selectedTab, setSelectedTab] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+
+  const activeTab = useMemo(() => {
+    if (!splitMode) return ALL_TAB
+    if (selectedTab === ALL_TAB) return ALL_TAB
+    if (selectedTab === ENABLED_TAB && enabledCount > 0) return ENABLED_TAB
+    if (selectedTab !== null && vendors.some((v) => v.key === selectedTab)) return selectedTab
+    return vendors[0]!.key
+  }, [splitMode, selectedTab, enabledCount, vendors])
+
+  const trimmedQuery = query.trim().toLowerCase()
+  const searching = splitMode && trimmedQuery.length > 0
+
+  const activeVendor = useMemo(
+    () => (activeTab === ALL_TAB || activeTab === ENABLED_TAB ? null : vendors.find((v) => v.key === activeTab) ?? null),
+    [activeTab, vendors],
+  )
+
+  const visibleItems = useMemo(() => {
+    if (!splitMode) return items
+    if (searching) {
+      const words = trimmedQuery.split(/\s+/).filter(Boolean)
+      return items.filter((item) => {
+        const hay = `${item.name} ${item.id} ${item.group?.label ?? ''} ${item.hint ?? ''}`.toLowerCase()
+        return words.every((word) => hay.includes(word))
+      })
+    }
+    if (activeTab === ALL_TAB) return items
+    if (activeTab === ENABLED_TAB) return items.filter((item) => item.enabled)
+    return activeVendor?.items ?? items
+  }, [splitMode, searching, trimmedQuery, activeTab, activeVendor, items])
+
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key === 'Escape' && query) {
+      event.preventDefault()
+      event.stopPropagation()
+      setQuery('')
+    }
+  }
+
+  if (!splitMode) {
+    return <div className="dsh-mcl">
+      <div className="dsh-mcl-head">
+        <span className="dsh-mcl-count">{count}</span>
+        <span className="dsh-mcl-head-actions">
+          <button type="button" className="dsh-mcl-action" disabled={busy || enabledCount === items.length} onClick={() => onToggleAll(true)}>{labels.selectAll}</button>
+          <button type="button" className="dsh-mcl-action" disabled={busy} onClick={() => onToggleAll(false)}>{labels.clearAll}</button>
+        </span>
+      </div>
+      <div className="dsh-mcl-list" role="group" aria-label={labels.list}>
+        {items.map((item) => renderOptionRow(item, busy, onToggle))}
+      </div>
+    </div>
+  }
+
+  const allLabel = labels.allGroups ?? 'All'
+  const enabledLabel = labels.enabledGroup ?? 'Enabled'
+  const paneTitle = searching
+    ? `${visibleItems.length}/${items.length}`
+    : activeTab === ALL_TAB
+      ? allLabel
+      : activeTab === ENABLED_TAB
+        ? enabledLabel
+        : activeVendor?.label ?? allLabel
+  const paneEnabledCount = visibleItems.filter((item) => item.enabled).length
+  const showGroupActions = onToggleGroup !== undefined && !searching && activeVendor !== null && activeVendor.items.length > 0
+
+  return <div className="dsh-mcl dsh-mcl-is-split">
     <div className="dsh-mcl-head">
       <span className="dsh-mcl-count">{count}</span>
+      <input
+        type="search"
+        className="dsh-mcl-search"
+        value={query}
+        placeholder={labels.searchPlaceholder ?? 'Search models…'}
+        aria-label={labels.searchPlaceholder ?? 'Search models…'}
+        onChange={(event) => setQuery(event.currentTarget.value)}
+        onKeyDown={handleSearchKeyDown}
+      />
       <span className="dsh-mcl-head-actions">
         <button type="button" className="dsh-mcl-action" disabled={busy || enabledCount === items.length} onClick={() => onToggleAll(true)}>{labels.selectAll}</button>
         <button type="button" className="dsh-mcl-action" disabled={busy} onClick={() => onToggleAll(false)}>{labels.clearAll}</button>
       </span>
     </div>
-    <div className="dsh-mcl-list" role="group" aria-label={labels.list}>
-      {items.map((item) => {
-        const mark = modelBrandMark(item.id)
-        return <button
-          key={item.id}
+
+    <div className="dsh-mcl-split">
+      <div className="dsh-mcl-vendors" role="tablist" aria-orientation="vertical" aria-label={labels.groupsNav ?? labels.list}>
+        <button
           type="button"
-          role="checkbox"
-          aria-checked={item.enabled}
-          className="dsh-mcl-option"
-          data-enabled={item.enabled}
-          disabled={busy}
-          title={item.id}
-          onClick={() => onToggle(item.id, !item.enabled)}
+          role="tab"
+          className="dsh-mcl-vendor"
+          aria-selected={!searching && activeTab === ALL_TAB}
+          onClick={() => { setQuery(''); setSelectedTab(ALL_TAB) }}
         >
-          {mark !== null ? <BrandMark mark={mark} size={18} /> : null}
-          <span className="dsh-mcl-copy">
-            <span className="dsh-mcl-name">{item.name}</span>
-            {item.hint !== undefined ? <span className="dsh-mcl-hint">{item.hint}</span> : null}
-          </span>
-          <span className="dsh-mcl-check" aria-hidden="true" dangerouslySetInnerHTML={{ __html: item.enabled ? CHECK_SVG : '' }} />
+          <span className="dsh-mcl-vendor-name">{allLabel}</span>
+          <span className="dsh-mcl-vendor-count" data-has-enabled={enabledCount > 0}>{enabledCount}/{items.length}</span>
         </button>
-      })}
+        {enabledCount > 0 ? (
+          <button
+            type="button"
+            role="tab"
+            className="dsh-mcl-vendor"
+            aria-selected={!searching && activeTab === ENABLED_TAB}
+            onClick={() => { setQuery(''); setSelectedTab(ENABLED_TAB) }}
+          >
+            <span className="dsh-mcl-vendor-name">{enabledLabel}</span>
+            <span className="dsh-mcl-vendor-count" data-has-enabled="true">{enabledCount}</span>
+          </button>
+        ) : null}
+        <div className="dsh-mcl-vendor-sep" role="separator" />
+        {vendors.map((vendor) => (
+          <button
+            key={vendor.key}
+            type="button"
+            role="tab"
+            className="dsh-mcl-vendor"
+            data-vendor={vendor.key}
+            aria-selected={!searching && activeTab === vendor.key}
+            onClick={() => { setQuery(''); setSelectedTab(vendor.key) }}
+          >
+            {vendor.mark !== null
+              ? <BrandMark mark={vendor.mark} size={14} />
+              : <span className="dsh-mcl-vendor-mono" aria-hidden="true">{vendorInitial(vendor.label)}</span>}
+            <span className="dsh-mcl-vendor-name">{vendor.label}</span>
+            <span className="dsh-mcl-vendor-count" data-has-enabled={vendor.enabledCount > 0}>
+              {vendor.enabledCount > 0 ? `${vendor.enabledCount}/${vendor.items.length}` : vendor.items.length}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <div className="dsh-mcl-pane">
+        <div className="dsh-mcl-pane-head">
+          <span className="dsh-mcl-pane-title">
+            {paneTitle}
+            {!searching ? <span className="dsh-mcl-pane-sub">{paneEnabledCount}/{visibleItems.length}</span> : null}
+          </span>
+          {showGroupActions ? (
+            <span className="dsh-mcl-head-actions">
+              <button
+                type="button"
+                className="dsh-mcl-action"
+                disabled={busy || activeVendor.enabledCount === activeVendor.items.length}
+                onClick={() => onToggleGroup(activeVendor.items.map((item) => item.id), true)}
+              >
+                {labels.selectAll}
+              </button>
+              <button
+                type="button"
+                className="dsh-mcl-action"
+                disabled={busy || activeVendor.enabledCount === 0}
+                onClick={() => onToggleGroup(activeVendor.items.map((item) => item.id), false)}
+              >
+                {labels.clearAll}
+              </button>
+            </span>
+          ) : null}
+        </div>
+
+        <div className="dsh-mcl-pane-body">
+          {visibleItems.length === 0 ? (
+            <p className="dsh-mcl-empty" role="status">{labels.noMatches ?? 'No matching models'}</p>
+          ) : (
+            <div className="dsh-mcl-list" role="group" aria-label={labels.list}>
+              {visibleItems.map((item) => renderOptionRow(item, busy, onToggle))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   </div>
 }

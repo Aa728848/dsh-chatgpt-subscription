@@ -30,6 +30,7 @@ import { LineProxySection } from '../../common/LineProxySection.tsx'
 import { formatCapacity, formatDate, parsePositiveCapacity } from '../../common/format.ts'
 import type { AccountRotationStrategy } from '../../../shared/account-pool-contracts.ts'
 import { zh, NS_COMMAND_CODE } from './locales.ts'
+import { commandCodeModelVendor } from './model-vendors.ts'
 
 const API = '/command-code/api'
 const api = createLineApi(API, 'Command Code')
@@ -301,6 +302,16 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
     void applyEnabled(selectAll ? status.models.map((model) => model.id) : [])
   }
 
+  const toggleModelGroup = (ids: string[], enabled: boolean) => {
+    if (!status || ids.length === 0) return
+    const target = new Set(ids)
+    const current = status.models.filter((model) => model.enabled).map((model) => model.id)
+    const next = enabled
+      ? [...new Set([...current, ...ids])]
+      : current.filter((id) => !target.has(id))
+    void applyEnabled(next)
+  }
+
   const handleUpdateEffort = async (effort: CommandCodeReasoningEffort | null) => {
     try {
       const updated = await api.request<CommandCodeWebStatus>('/settings', {
@@ -475,13 +486,26 @@ export function CommandCodeSection({ onModelChange, loadModelDirectory }: Props)
           items={(status?.models ?? []).map((model: CommandCodeModelOption) => ({
             id: model.id,
             name: model.name,
-            hint: wireLabel(model.wire, t),
+            hint: model.defaultContextWindow > 0
+              ? `${wireLabel(model.wire, t)} · ${formatCapacity(model.defaultContextWindow)}`
+              : wireLabel(model.wire, t),
             enabled: model.enabled,
+            group: commandCodeModelVendor(model, t.otherVendor),
           }))}
           busy={busy !== null}
           onToggle={toggleModel}
           onToggleAll={setAllModels}
-          labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }}
+          onToggleGroup={toggleModelGroup}
+          labels={{
+            selectAll: t.selectAll,
+            clearAll: t.unselectAll,
+            list: t.modelsSection,
+            allGroups: t.allVendors,
+            enabledGroup: t.enabledModels,
+            searchPlaceholder: t.searchModelsPlaceholder,
+            noMatches: t.noMatchingModels,
+            groupsNav: t.vendorsNav,
+          }}
         />
       </section>
 

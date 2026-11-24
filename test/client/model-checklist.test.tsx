@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ModelChecklist, type ModelChecklistItem } from '../../src/client/common/ModelChecklist.tsx'
+import { commandCodeModelVendor } from '../../src/client/providers/command-code/model-vendors.ts'
 
 const LABELS = { selectAll: '全选', clearAll: '全不选', countTemplate: '已启用 {count}/{total}', list: '模型' }
 
@@ -121,5 +122,68 @@ describe('ModelChecklist', () => {
     // this component existed.
     await render({ labels: { selectAll: '全选', clearAll: '全不选' } })
     expect(container.querySelector('.dsh-mcl-list')?.getAttribute('aria-label')).toBeNull()
+  })
+
+  it('switches to a left-vendor + right-model split view when two or more groups exist', async () => {
+    const grouped: ModelChecklistItem[] = [
+      { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', hint: 'Anthropic · 1M', enabled: true, group: { key: 'anthropic', label: 'Anthropic', mark: 'claude' } },
+      { id: 'claude-opus-5', name: 'Claude Opus 5', hint: 'Anthropic · 1M', enabled: false, group: { key: 'anthropic', label: 'Anthropic', mark: 'claude' } },
+      { id: 'gpt-6-astra', name: 'GPT-6 Astra', hint: 'OpenAI · 1M', enabled: false, group: { key: 'openai', label: 'OpenAI', mark: 'openai' } },
+      { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', hint: 'OpenAI · 128K', enabled: true, group: { key: 'deepseek', label: 'DeepSeek', mark: 'deepseek' } },
+    ]
+    const onToggleGroup = vi.fn()
+    await render({
+      items: grouped,
+      onToggleGroup,
+      labels: { ...LABELS, allGroups: '全部', enabledGroup: '已启用', searchPlaceholder: '搜索模型…', noMatches: '无匹配' },
+    })
+
+    // Defaults to first vendor (Anthropic) with only its 2 models shown on the right.
+    expect(container.querySelector('.dsh-mcl-split')).not.toBeNull()
+    expect(rows().map((r) => r.title)).toEqual(['claude-sonnet-5', 'claude-opus-5'])
+
+    // Clicking a vendor on the left switches the right pane.
+    const openaiTab = container.querySelector<HTMLButtonElement>('.dsh-mcl-vendor[data-vendor="openai"]')!
+    await act(async () => openaiTab.click())
+    expect(rows().map((r) => r.title)).toEqual(['gpt-6-astra'])
+
+    // Group select-all targets only the active vendor's ids.
+    const groupSelectAll = container.querySelector<HTMLButtonElement>('.dsh-mcl-pane-head .dsh-mcl-action')!
+    await act(async () => groupSelectAll.click())
+    expect(onToggleGroup).toHaveBeenCalledWith(['gpt-6-astra'], true)
+
+    // Cross-vendor search matches across all vendors regardless of active tab.
+    const search = container.querySelector<HTMLInputElement>('.dsh-mcl-search')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setter.call(search, 'deepseek')
+      search.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(rows().map((r) => r.title)).toEqual(['deepseek/deepseek-v4-pro'])
+
+    // Pressing Escape clears search and returns to the active vendor.
+    await act(async () => {
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    })
+    expect(rows().map((r) => r.title)).toEqual(['gpt-6-astra'])
+
+    // Clicking "Enabled" tab shows only enabled models across vendors.
+    const enabledTab = [...container.querySelectorAll<HTMLButtonElement>('.dsh-mcl-vendor')]
+      .find((btn) => btn.querySelector('.dsh-mcl-vendor-name')?.textContent === '已启用')!
+    await act(async () => enabledTab.click())
+    expect(rows().map((r) => r.title)).toEqual(['claude-sonnet-5', 'deepseek/deepseek-v4-pro'])
+  })
+})
+
+describe('commandCodeModelVendor', () => {
+  it('merges vendor aliases, recognizes bare families, and formats new prefixes', () => {
+    expect(commandCodeModelVendor({ id: 'claude-sonnet-5-5' }, '其他')).toEqual({ key: 'anthropic', label: 'Anthropic', mark: 'claude' })
+    expect(commandCodeModelVendor({ id: 'gpt-6-astra' }, '其他')).toEqual({ key: 'openai', label: 'OpenAI', mark: 'openai' })
+    expect(commandCodeModelVendor({ id: 'z-ai/glm-5.3-flash' }, '其他').key).toBe('zai')
+    expect(commandCodeModelVendor({ id: 'zai-org/GLM-5.3' }, '其他').key).toBe('zai')
+    expect(commandCodeModelVendor({ id: 'minimax/minimax-m3.1-flash' }, '其他').key).toBe('minimax')
+    expect(commandCodeModelVendor({ id: 'MiniMaxAI/MiniMax-M3' }, '其他').key).toBe('minimax')
+    expect(commandCodeModelVendor({ id: 'future-lab/next-1' }, '其他')).toEqual({ key: 'future-lab', label: 'Future Lab', mark: null })
+    expect(commandCodeModelVendor({ id: 'alpha-large' }, '其他')).toEqual({ key: 'other', label: '其他', mark: null })
   })
 })
