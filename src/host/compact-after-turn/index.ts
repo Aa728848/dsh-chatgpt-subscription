@@ -18,7 +18,11 @@
  *   pressing Stop means "not now", not "summarise what I just interrupted".
  * - **A busy refusal is not a failure.** A message that arrives between the idle
  *   transition and the compaction reopens the session; the switch stays armed
- *   and the next idle transition tries again.
+ *   and the next idle transition tries again. Busy is recognised from what the
+ *   controller itself observes (the agent leaving idle or a turn opening while
+ *   the attempt is in flight, or another compaction's unmatched
+ *   `compaction/start`), so it does not depend on the wording of the
+ *   `/compact` command's human-readable refusal.
  * - **The switch is free while nothing runs.** Arming and disarming are refused
  *   only while the compaction itself is in flight.
  *
@@ -78,6 +82,14 @@ interface SessionState {
   /** Reason kind of the latest `turn/end` seen while armed. */
   lastTurnEnd: string | null
   abort: AbortController | null
+  /**
+   * The agent left idle, or a turn opened, while this session's attempt was in
+   * flight. Manual compaction runs as agent maintenance with the public status
+   * kept `idle`, so either signal means a turn contended for the agent.
+   */
+  contended: boolean
+  /** A `compaction/start` without its `compaction/end` was seen for this session. */
+  compactionOpen: boolean
 }
 
 /** Refusal raised by {@link CompactAfterTurnController.setArmed}. */
@@ -138,12 +150,31 @@ export class CompactAfterTurnController {
     return this.state(sessionId)
   }
 
-  /** `session/event` listener: remembers how an armed session's turn ended. */
+  /**
+   * `session/event` listener: remembers how an armed session's turn ended, and
+   * tracks the structural signals that classify a refused attempt as busy.
+   */
   observe(session: { readonly id?: unknown } | undefined, event: CompactAfterTurnEvent | undefined): void {
     const id = sessionIdOf(session)
-    if (id === undefined || event?.type !== 'turn/end') return
+    if (id === undefined) return
     const state = this.sessions.get(id)
-    if (state?.phase !== 'armed') return
+    if (state === undefined) return
+    switch (event?.type) {
+      case 'compaction/start':
+        state.compactionOpen = true
+        return
+      case 'compaction/end':
+        state.compactionOpen = false
+        return
+      case 'turn/start':
+        if (state.phase === 'compacting') state.contended = true
+        return
+      case 'turn/end':
+        break
+      default:
+        return
+    }
+    if (state.phase !== 'armed') return
     const reason = (event.data as { reason?: { kind?: unknown } } | undefined)?.reason?.kind
     state.lastTurnEnd = typeof reason === 'string' ? reason : 'completed'
   }
@@ -154,8 +185,11 @@ export class CompactAfterTurnController {
     const id = sessionIdOf(agent.session)
     if (id === undefined) return
     this.agents.set(id, agent)
-    if (status !== 'idle') return
     const state = this.sessions.get(id)
+    if (status !== 'idle') {
+      if (state?.phase === 'compacting') state.contended = true
+      return
+    }
     // No turn has ended since the switch was armed: arming while idle waits for
     // the next turn instead of compacting on the spot.
     if (state?.phase !== 'armed' || state.lastTurnEnd === null) return
@@ -172,6 +206,7 @@ export class CompactAfterTurnController {
     }
     state.phase = 'compacting'
     state.lastTurnEnd = null
+    state.contended = false
     const abort = new AbortController()
     state.abort = abort
     this.defer(() => { void this.run(id, state, agent, compactNow, abort) })
@@ -200,13 +235,15 @@ export class CompactAfterTurnController {
     abort: AbortController,
   ): Promise<void> {
     let rearm = false
+    // Our own attempt has not appended its marker yet, so an open one is foreign.
+    const lockedBefore = state.compactionOpen
     try {
       if (abort.signal.aborted) throw abort.signal.reason
       const result = await compactNow(agent, abort.signal)
       state.last = { kind: result === null || result === undefined ? 'nothing' : 'compacted', at: this.now() }
       this.deps.logger?.info?.(`compact-after-turn: session ${id} ${state.last.kind}`)
     } catch (error) {
-      if (errorCode(error) === 'busy' && !abort.signal.aborted) {
+      if (!abort.signal.aborted && (errorCode(error) === 'busy' || state.contended || lockedBefore)) {
         // The session reopened before the engine got to it; try at the next idle.
         rearm = true
       } else {
@@ -232,7 +269,7 @@ export class CompactAfterTurnController {
       this.sessions.set(sessionId, state)
       return state
     }
-    state = { phase: 'off', last: null, lastTurnEnd: null, abort: null }
+    state = { phase: 'off', last: null, lastTurnEnd: null, abort: null, contended: false, compactionOpen: false }
     this.sessions.set(sessionId, state)
     if (this.sessions.size > MAX_TRACKED_SESSIONS) {
       for (const [key, value] of this.sessions) {
@@ -300,9 +337,10 @@ function compactorOf(host: CompactAfterTurnHost, options: CompactAfterTurnOption
           if (result === undefined) throw new CompactAfterTurnError('unavailable', 'This session has no compact command.')
           if (result.kind === 'success') return result.sourceEventSeq === undefined ? null : result
           const message = typeof result.text === 'string' ? result.text : 'Manual compaction failed.'
-          // The public command result intentionally carries human text rather
-          // than ManualCompactionError.code. Preserve the controller's rearm
-          // behavior for the backend's stable busy diagnostic.
+          // The public command result carries human text rather than
+          // ManualCompactionError.code. The controller classifies busy from
+          // the events it observes; matching the current wording is only an
+          // extra hint for a refusal those events did not reveal.
           const busy = message.includes('active compaction') || message.includes('not idle')
           throw Object.assign(new Error(message), { code: busy ? 'busy' : 'summary' })
         }

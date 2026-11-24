@@ -105,6 +105,63 @@ describe('CompactAfterTurnController', () => {
     expect(controller.state('s1')).toMatchObject({ phase: 'off', last: { kind: 'compacted' } })
   })
 
+  // A refusal whose wording carries no busy code: the controller must classify
+  // it from what it observed, not from the text of the /compact diagnostic.
+  const reworded = () => new Error('Compaction refused (reworded by a newer Host).')
+
+  it.each([
+    ['the agent leaves idle', (controller: CompactAfterTurnController) => controller.onStatus(AGENT, 'running')],
+    ['a turn opens', (controller: CompactAfterTurnController) => controller.observe(SESSION, { type: 'turn/start', data: { turn: 2 } })],
+  ])('re-arms a reworded refusal when %s during the attempt', async (_label, contend) => {
+    const compactNow = vi.fn<CompactNow>()
+      .mockRejectedValueOnce(reworded())
+      .mockResolvedValueOnce({ id: 'c2' })
+    const { controller, flush } = setup(compactNow)
+    controller.setArmed('s1', true)
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    // A message lands before the deferred attempt claims the agent.
+    contend(controller)
+    await flush()
+    expect(controller.state('s1')).toMatchObject({ phase: 'armed', last: null })
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(compactNow).toHaveBeenCalledTimes(2)
+    expect(controller.state('s1')).toMatchObject({ phase: 'off', last: { kind: 'compacted' } })
+  })
+
+  it('re-arms a reworded refusal while another compaction holds the session lock', async () => {
+    const compactNow = vi.fn<CompactNow>()
+      .mockRejectedValueOnce(reworded())
+      .mockResolvedValueOnce({ id: 'c2' })
+    const { controller, flush } = setup(compactNow)
+    controller.setArmed('s1', true)
+    controller.observe(SESSION, { type: 'compaction/start', data: {} })
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(controller.state('s1')).toMatchObject({ phase: 'armed', last: null })
+    controller.observe(SESSION, { type: 'compaction/end', data: {} })
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(controller.state('s1')).toMatchObject({ phase: 'off', last: { kind: 'compacted' } })
+  })
+
+  it('records a reworded refusal as a failure when nothing contended for the session', async () => {
+    const compactNow = vi.fn<CompactNow>().mockRejectedValueOnce(reworded())
+    const { controller, flush } = setup(compactNow)
+    controller.setArmed('s1', true)
+    // A compaction that already finished does not hold the lock.
+    controller.observe(SESSION, { type: 'compaction/start', data: {} })
+    controller.observe(SESSION, { type: 'compaction/end', data: {} })
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(controller.state('s1')).toMatchObject({ phase: 'off', last: { kind: 'failed', detail: 'Compaction refused (reworded by a newer Host).' } })
+  })
+
   it('locks the switch only while compacting, and refuses to arm without an engine', async () => {
     let release: (value: unknown) => void = () => undefined
     const { controller, flush } = setup(vi.fn(() => new Promise((resolve) => { release = resolve })))
