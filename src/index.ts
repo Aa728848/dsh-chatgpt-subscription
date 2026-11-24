@@ -1977,13 +1977,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     // page's opening screen.
     const routable = (accounts: readonly { authStatus?: string }[]): boolean =>
       accounts.some((account) => account.authStatus === undefined || account.authStatus === 'ok')
-    // What the overview card's "N/M models" counts. Every line already holds its
-    // catalog: Command Code, Kimi Code and Ollama persist the last
-    // successful sync in their model settings, while Claude and MiniMax Code
-    // keep it in memory. All of these are reads of what the line
-    // already has — opening the settings page must not trigger a catalog fetch —
-    // and a line that has never synced one reports null rather than a zero that
-    // would read as "this line has no models".
+    const accountHintOf = (
+      accounts: readonly { isPrimary?: boolean; alias?: string; email?: string; planType?: string; nickname?: string }[],
+    ): string | undefined => {
+      const active = accounts.find((a) => a.isPrimary) ?? accounts[0]
+      if (!active) return undefined
+      const label = active.alias?.trim() || active.planType?.trim() || active.nickname?.trim() || active.email?.trim()
+      return label && label.length > 0 ? label : undefined
+    }
     const hubSources: HubSummarySource[] = [
       {
         id: 'chatgpt',
@@ -1992,12 +1993,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         read: async () => {
           const current = preferences.status()
           const accounts = await codexAccountPool.listAccounts().catch(() => [])
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: current.visibleModelIds.length,
             totalModelCount: CODEX_MODEL_CATALOG.length,
+            ...(accountHint ? { accountHint } : {}),
+            ...(current.visibleModelIds.length > 0 ? { modelIds: current.visibleModelIds } : {}),
           }
         },
       },
@@ -2009,12 +2013,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           const current = commandCodePreferences.status()
           const accounts = await commandCodeAccountPool.listAccounts().catch(() => [])
           const total = catalogTotal((await commandCodeModelSettings.read()).catalogModels.length)
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(current.enabledModelIds?.length ? { modelIds: current.enabledModelIds } : {}),
           }
         },
       },
@@ -2026,12 +2033,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           const current = kimiCodePreferences.status()
           const accounts = await kimiCodeAccountPool.listAccounts().catch(() => [])
           const total = catalogTotal((await kimiCodeModelSettings.read()).catalogModels.length)
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(current.enabledModelIds?.length ? { modelIds: current.enabledModelIds } : {}),
           }
         },
       },
@@ -2043,12 +2053,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           const current = minimaxCodePreferences.status()
           const accounts = await minimaxCodeAccountPool.listAccounts().catch(() => [])
           const total = catalogTotal(minimaxCodeCatalogSize())
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(current.enabledModelIds?.length ? { modelIds: current.enabledModelIds } : {}),
           }
         },
       },
@@ -2060,12 +2073,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           const current = claudePreferences.status()
           const accounts = await claudeAccountPool.listAccounts().catch(() => [])
           const total = catalogTotal(getCachedClaudeCatalog().length)
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(current.enabledModelIds?.length ? { modelIds: current.enabledModelIds } : {}),
           }
         },
       },
@@ -2085,13 +2101,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           await claudeApiCatalog.warm()
           const snapshot = claudeApiCatalog.snapshot()
           const models = claudeApiModelOptions(snapshot.entries, current, snapshot.live)
+          const enabledModels = models.filter(model => model.enabled)
           const total = catalogTotal(models.length)
           return {
             enabled: current.enabled,
             accountCount: 1,
             authenticated: true,
-            enabledModelCount: models.filter(model => model.enabled).length,
+            enabledModelCount: enabledModels.length,
             totalModelCount: total,
+            ...(enabledModels.length > 0 ? { modelIds: enabledModels.map(model => model.id) } : {}),
           }
         },
       },
@@ -2102,16 +2120,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         read: async () => {
           const current = glmCodingPlanPreferences.status()
           const accounts = await glmCodingPlanAccountPool.listAccounts().catch(() => [])
-          // This line ships its catalog with the build (the live listing only
-          // refreshes the per-account context windows), so the packaged size is
-          // the total there is.
           const total = catalogTotal(glmCodingPlanCatalogSize())
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(current.enabledModelIds?.length ? { modelIds: current.enabledModelIds } : {}),
           }
         },
       },
@@ -2126,12 +2144,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           // The selection is a tri-state: null is "no filter" (every synced
           // model), an array is explicit — and an empty one switches all off.
           const selected = current.enabledModelIds === null ? total : current.enabledModelIds.length
+          const accountHint = accountHintOf(accounts)
+          const modelIds = current.enabledModelIds ?? current.catalogModels.map(model => model.id)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: total === null || selected === null ? null : Math.min(selected, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(modelIds.length > 0 ? { modelIds } : {}),
           }
         },
       },
@@ -2167,12 +2189,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
             void antigravityAcpAuth.read().catch(() => undefined)
           }
           const authenticated = cachedAuth?.authenticated === true
+          const modelIds = current.enabledModelIds ?? catalog?.models.map(model => model.id) ?? []
           return {
             enabled: true,
             accountCount: authenticated ? 1 : 0,
             authenticated,
             enabledModelCount: total === null || selected === null ? null : Math.min(selected, total),
             totalModelCount: total,
+            ...(modelIds.length > 0 ? { modelIds } : {}),
           }
         },
       },
@@ -2183,16 +2207,16 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         read: async () => {
           const current = stepCodePreferences.status()
           const accounts = await stepCodeAccountPool.listAccounts().catch(() => [])
-          // This line ships no model catalog at all (the official one is empty too),
-          // so the packaged size is 0 and catalogTotal reports "nothing synced yet"
-          // rather than a fabricated count; the real list is discovered at runtime.
           const total = catalogTotal(stepCodeCatalogSize())
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(current.enabledModelIds?.length ? { modelIds: current.enabledModelIds } : {}),
           }
         },
       },
@@ -2207,25 +2231,18 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         read: async () => {
           const current = qoderPreferences.status()
           const accounts = await qoderAccountPool.listAccounts().catch(() => [])
-          // 目录与适配器同一个读口（运行时目录优先、随包兜底表垫底）。分子分母必须
-          // 取自**同一份**目录：两区的随包表条目数不同（全球区 15、中国站 9），
-          // 混用会让卡片显示一个根本不存在的总数。
           const region = accounts.find((account) => account.isPrimary)?.region
             ?? accounts[0]?.region
             ?? 'global'
           const catalog = cachedQoderModelCatalog(region)
           const total = catalogTotal(catalog.length)
-          // 勾选是三态：null = 不过滤（可用模型数就是目录总数），数组 = 白名单。
-          // 白名单里残留的 id 不算可用——它们在上游已经不存在了，把它们计进分子
-          // 会让卡片显示「3/2 个模型可用」。
-          //
-          // 口径与适配器、状态面**同一处**（convergeQoderSelection）：兜底表阶段不按
-          // 白名单筛。否则冷启动时这张卡会说「0 个可用」，而选择器里明明有模型。
           const selected = convergeQoderSelection(
             current.enabledModelIds,
             qoderCatalogIsLive(region),
             catalog,
           )
+          const accountHint = accountHintOf(accounts)
+          const modelIds = selected ?? catalog.map(model => model.id)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
@@ -2236,6 +2253,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
                 ? total
                 : Math.min(selected.length, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(modelIds.length > 0 ? { modelIds } : {}),
           }
         },
       },
@@ -2249,12 +2268,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           const current = workBuddyPreferences.status()
           const accounts = await workBuddyAccountPool.listAccounts().catch(() => [])
           const total = catalogTotal(getCachedWorkBuddyCatalog().length)
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled !== false,
             accountCount: accounts.length,
             authenticated: routable(accounts),
             enabledModelCount: total === null ? null : Math.min(current.enabledModelIds?.length ?? 0, total),
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(current.enabledModelIds?.length ? { modelIds: current.enabledModelIds } : {}),
           }
         },
       },
@@ -2262,12 +2284,14 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         id: 'qianwen-token-plan', providerId: QIANWEN_PROVIDER_ID, canToggle: true,
         read: async () => {
           const [current, credentials] = await Promise.all([qianwenSettings.read(), qianwenStore.read()])
+          const enabledModels = qianwenCatalogModelOptions(current).filter(model => model.enabled)
           return {
             enabled: current.enabled,
             accountCount: credentials === null ? 0 : 1,
             authenticated: credentials !== null,
-            enabledModelCount: qianwenCatalogModelOptions(current).filter(model => model.enabled).length,
+            enabledModelCount: enabledModels.length,
             totalModelCount: QIANWEN_MODEL_CATALOG.length,
+            ...(enabledModels.length > 0 ? { modelIds: enabledModels.map(model => model.id) } : {}),
           }
         },
       },
@@ -2286,13 +2310,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           }
           await relayOneCatalog.warm()
           const models = relayOneModelOptions(relayOneCatalog.snapshot().entries, current).filter(model => model.kind === 'chat')
+          const enabledModels = models.filter(model => model.enabled)
           const total = catalogTotal(models.length)
+          const accountHint = accountHintOf(accounts)
           return {
             enabled: current.enabled,
             accountCount: accounts.length,
             authenticated: true,
-            enabledModelCount: models.filter(model => model.enabled).length,
+            enabledModelCount: enabledModels.length,
             totalModelCount: total,
+            ...(accountHint ? { accountHint } : {}),
+            ...(enabledModels.length > 0 ? { modelIds: enabledModels.map(model => model.id) } : {}),
           }
         },
       },
@@ -2301,8 +2329,15 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         read: async () => {
           const current = await awsQuickSettings.read()
           const auth = awsQuickOutpost.cachedAuth()
-          const enabledCount = current.enabledModelIds === null ? QUICK_MODELS.length : current.enabledModelIds.length
-          return { enabled: current.enabled, accountCount: auth.authenticated ? 1 : 0, authenticated: auth.authenticated, enabledModelCount: enabledCount, totalModelCount: QUICK_MODELS.length }
+          const modelIds = current.enabledModelIds ?? QUICK_MODELS.map(model => model.id)
+          return {
+            enabled: current.enabled,
+            accountCount: auth.authenticated ? 1 : 0,
+            authenticated: auth.authenticated,
+            enabledModelCount: modelIds.length,
+            totalModelCount: QUICK_MODELS.length,
+            ...(modelIds.length > 0 ? { modelIds } : {}),
+          }
         },
       },
     ]

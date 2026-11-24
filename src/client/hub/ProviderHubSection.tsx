@@ -1,7 +1,8 @@
 import { useCallback, useState } from 'react'
+import type { KeyboardEvent } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS } from '../providers/codex-chatgpt/locales.ts'
-import { HubOverview } from './HubOverview.tsx'
+import { HubOverview, type HubToolbarMeta } from './HubOverview.tsx'
 import { hubCardName, hubProviderDescriptor, HUB_PROVIDERS } from './providers.tsx'
 import { UpdateCheck } from './UpdateCheck.tsx'
 import type { HubProviderId } from './brand-icons.tsx'
@@ -54,10 +55,20 @@ const BACK_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" st
  */
 export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): React.JSX.Element {
   const [view, setView] = useState<HubView>(readStoredView)
+  const [query, setQuery] = useState('')
+  const [selecting, setSelecting] = useState(false)
+  const [toolbarMeta, setToolbarMeta] = useState<HubToolbarMeta>({ hasMainList: false, canSelect: false })
+
+  const handleToolbarMetaChange = useCallback((next: HubToolbarMeta): void => {
+    setToolbarMeta((current) => (
+      current.hasMainList === next.hasMainList && current.canSelect === next.canSelect ? current : next
+    ))
+  }, [])
 
   const open = useCallback((id: HubProviderId): void => {
     const next: HubView = { view: 'detail', id }
     storeView(next)
+    setSelecting(false)
     setView(next)
   }, [])
 
@@ -67,22 +78,48 @@ export function ProviderHubSection({ t, onModelChange, ...runtime }: Props): Rea
     setView(next)
   }, [])
 
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key === 'Escape' && query) {
+      event.preventDefault()
+      event.stopPropagation()
+      setQuery('')
+    }
+  }
+
   if (view.view === 'overview') {
     return <section className="dsh-codex-page" aria-labelledby="dsh-hub-title">
-      {/* The title and the page's one control share a header row: status text and
-          its icon button on the right, the section title on the left. The control
-          reports on the plugin as a whole, which is the section's scope, not one
-          of the provider lines the cards below enumerate. */}
       <header className="dsh-hub-head">
         <h2 id="dsh-hub-title" className="dsh-codex-title dsh-hub-head-title">{t('hubTitle')}</h2>
+        {toolbarMeta.hasMainList ? (
+          <div className="dsh-hub-toolbar dsh-hub-head-tools">
+            <input
+              type="search"
+              className="dsh-hub-search"
+              value={query}
+              placeholder={t('hubSearchPlaceholder')}
+              aria-label={t('hubSearchPlaceholder')}
+              onChange={(event) => setQuery(event.currentTarget.value)}
+              onKeyDown={handleSearchKeyDown}
+            />
+            {toolbarMeta.canSelect && !selecting ? (
+              <button type="button" className="dsh-hub-tool-btn" onClick={() => setSelecting(true)}>
+                {t('hubSelectMode')}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <UpdateCheck t={t} />
       </header>
-      {/* The overview's whole job is the cards. A local sign-in belongs to the
-          ONE provider whose account pool it would join, so it lives on that
-          provider's detail page next to its own rows: an overview that answered
-          for three providers at once had to tell users to visit the page they
-          were already one click away from. */}
-      <HubOverview t={t} onOpen={open} />
+      <HubOverview
+        t={t}
+        onOpen={open}
+        query={query}
+        onQueryChange={setQuery}
+        selecting={selecting}
+        onSelectingChange={setSelecting}
+        hideToolbar
+        onToolbarMetaChange={handleToolbarMetaChange}
+      />
     </section>
   }
 

@@ -39,6 +39,10 @@ export interface HubProviderSummaryDto {
   enabledModelCount: number | null
   /** Total catalog size when locally known; null otherwise. */
   totalModelCount: number | null
+  /** Optional masked display hint for the active account/plan (never raw credentials). */
+  accountHint?: string
+  /** Optional enabled model ids for client-side search matching. */
+  modelIds?: readonly string[]
   /** True when this line's summary could not be read and the counts are placeholders. */
   error?: boolean
 }

@@ -365,11 +365,11 @@ describe('where the control lives', () => {
     globalThis.fetch = originalFetch
   })
 
-  it('leaves the overview with just its hint paragraph', async () => {
+  it('keeps the update control out of the overview body', async () => {
     globalThis.fetch = vi.fn(async () => Response.json({ ok: true, value: { providers: [] } })) as typeof fetch
     await act(async () => root.render(createElement(HubOverview, { t, onOpen: () => undefined } as never)))
-    expect(container.querySelector('.dsh-hub-hint')?.textContent).toBe(zh.hubOverviewHint)
-    // The control belongs to the section header, not to the list of cards.
+    expect(container.querySelector('.dsh-hub-overview')).not.toBeNull()
+    // The control belongs to the section header, not to the overview body.
     expect(container.querySelector('.dsh-hub-update')).toBeNull()
     expect(container.querySelector('.dsh-hub-hintrow')).toBeNull()
   })
@@ -385,7 +385,8 @@ describe('where the control lives', () => {
     // icon holds still.
     expect(header.lastElementChild?.className).toBe('dsh-hub-update')
     expect(header.lastElementChild?.querySelector('.dsh-hub-update-button')).not.toBeNull()
-    // …and the overview below it is still the plain hint plus the cards.
-    expect(container.querySelector('.dsh-hub-hint')?.textContent).toBe(zh.hubOverviewHint)
+    // The overview sits below the header without duplicating the update control.
+    expect(container.querySelector('.dsh-hub-overview')).not.toBeNull()
+    expect(container.querySelector('.dsh-hub-overview .dsh-hub-update')).toBeNull()
   })
 })

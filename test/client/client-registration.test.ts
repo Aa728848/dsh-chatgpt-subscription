@@ -430,7 +430,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'claude-api', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone'] as const
+    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'claude-api', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone', 'aws-quick'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch

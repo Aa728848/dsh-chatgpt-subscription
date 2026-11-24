@@ -60,19 +60,20 @@ describe('provider hub overview styles', () => {
   it('ships the overview card, the switch and the back bar as one tagged sheet', () => {
     installHubStyles()
     const css = document.querySelector<HTMLStyleElement>(HUB_SELECTOR)?.textContent ?? ''
-    // The card is a full-width row: brand tile, copy block, switch + chevron.
-    expect(css).toContain('.dsh-hub-card{')
+    // Rounded card group + single-row entries + inline add sheet.
+    expect(css).toContain('.dsh-hub-list{')
+    expect(css).toContain('.dsh-hub-row{')
     expect(css).toContain('.dsh-hub-brand-tile{')
     // The switch is a sliding pill, not a native checkbox.
     expect(css).toContain('.dsh-hub-switch[aria-checked=true]')
     expect(css).toContain('.dsh-hub-switch::after')
-    expect(css).toContain('.dsh-hub-drag-handle{')
-    expect(css).toContain('.dsh-hub-proxy-select{')
+    expect(css).toContain('.dsh-hub-logo-handle{')
+    expect(css).toContain('.dsh-hub-sheet{')
     expect(css).toContain('[data-drop-target=true]')
     // The detail page's back bar, which replaced the tab strip.
     expect(css).toContain('.dsh-hub-backbar{')
     expect(css).toContain('.dsh-hub-back{')
-    // A disabled line's card reads as such.
+    // A disabled line's row reads as such.
     expect(css).toContain('[data-enabled=false]')
   })
 
