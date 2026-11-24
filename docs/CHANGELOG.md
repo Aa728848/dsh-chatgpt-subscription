@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.86.0 - 2026-11-25
+
+- **[client] 按厂商分栏的模型清单扩展到多厂商线路**：厂商识别从 Command Code 提升为共享的 `src/client/common/model-vendors.ts`，并能从不带厂商前缀的模型 id（如 `qwen3.8-max`、`hy4-preview`、`llama3.1:8b`、`gpt-oss:20b`、`k3.1-pro`）识别厂商。`ModelChecklist` 新增 `groupByVendor`：识别出至少两个厂商、且目录不少于 10 个模型时切换为「左厂商 + 右模型」分栏，未识别的模型归入排在最后的「其他」；分栏文案由组件自带的 `dsh-model-checklist` 命名空间提供（zh / en / ru）。千问 Token Plan、RelayOne、Qoder、WorkBuddy、Cline Pass、OpenDesign、Ollama、Antigravity 已接入，并支持按厂商整组勾选（各线路沿用自己原有的选择语义）；单厂商线路保持平铺列表。
+
+- **[hub] 「添加供应商」只加入总览，不再跳转详情页**：在添加面板点选供应商后，只把它加入总览列表；处于关闭状态的线路会出现在自动展开的「已关闭的供应商」中并滚动到该行，需要配置时再点该行进入详情页。
+
 ## 0.85.0 - 2026-11-24
 
 - **[client] 会话详情面板新增额度卡片，输入框额度胶囊改为自动让位**：把各线路额度从底部输入框搬进 DSH 原生会话详情面板，注册为 `conversation.session.panel.section` 区块与折叠态 `.section.actions` 摘要。折叠时标题行只显示一行摘要（百分比 + 健康度），展开后按线路渲染额度进度条、重置倒计时与套餐信息；14 条线路（Codex、Claude 订阅/API、Kimi Code、MiniMax Code、Command Code、GLM Coding Plan、Step Code、Cline Pass、Qoder、OpenDesign、WorkBuddy、Antigravity ACP、千问 Token Plan、RelayOne）各配一个适配器，同一 provider 的卡片与摘要共用一份 60 秒轮询快照，页面不可见时暂停。透明层 `panel-availability.ts` 记录面板是否挂载：面板存在时底部 `conversation.input.right` 胶囊与其轮询自动让位，避免同一份额度显示两遍；旧版宿主没有该插槽时不注册、不计数，胶囊行为与之前完全一致。
