@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
-import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import { toToolCallId as ToolCallId } from '../../src/host/common/brand-compat.ts'
 import type { GenerateOptions, Message } from '../../src/host/common/llm-compat.ts'
 import { normalizeGenerateOptions } from '../../src/host/common/llm-compat.ts'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'

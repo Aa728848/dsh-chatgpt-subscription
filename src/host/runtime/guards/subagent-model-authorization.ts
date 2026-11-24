@@ -101,10 +101,16 @@ export interface SubagentRoutingOverrides {
   readonly allowParentForkByMainModel?: Readonly<Record<string, boolean>>
 }
 
-/** Resolved model-selection preference read from the Host settings document. */
+/** Resolved model-selection preference read from the Host settings document or live service. */
 export interface SubagentModelSelectionPreference {
   readonly enabled: boolean
   readonly allowedModels: readonly AllowedModelRoute[]
+  /**
+   * True when this preference came from DSH 0.2.3+'s live `ctx.subagentModelSelection`
+   * service (PR #8604), which no longer writes per-Session `subagent/model-selection-policy`
+   * events and instead governs every Session directly.
+   */
+  readonly liveService?: boolean
   /**
    * The fallback route list, when the deployment configured one. Absent means
    * "no per-main-model routing", which leaves `allowedModels` in charge.
@@ -318,6 +324,61 @@ export function subagentModelSelectionPreference(
     // leaves delegations exactly as the built-in tool resolves them.
     return undefined
   }
+}
+
+/**
+ * Read the live allowlist exposed by DSH 0.2.3+'s `ctx.subagentModelSelection`
+ * service (PR #8604), which replaced durable `subagent/model-selection-policy`
+ * session events with live per-call reads.
+ *
+ * Accepts either a service object exposing `allowedRoutes()`, a lazy getter
+ * returning that service, or a Cordis-like context exposing `get('subagentModelSelection')`.
+ * @param source - Live service, lazy getter, or Host context.
+ * @returns resolved live preference, or undefined when no 0.2.3+ service is mounted.
+ */
+export function liveSubagentModelSelectionPreference(
+  source: unknown,
+): SubagentModelSelectionPreference | undefined {
+  let candidate: unknown = source
+  if (typeof candidate === 'function') {
+    try {
+      candidate = (candidate as () => unknown)()
+    } catch {
+      return undefined
+    }
+  }
+  const getter = asRecord(candidate)?.['get']
+  if (typeof getter === 'function' && typeof asRecord(candidate)?.['allowedRoutes'] !== 'function') {
+    try {
+      candidate = (getter as (name: string) => unknown).call(candidate, 'subagentModelSelection')
+    } catch {
+      return undefined
+    }
+  }
+  const allowedRoutesFn = asRecord(candidate)?.['allowedRoutes']
+  if (typeof allowedRoutesFn !== 'function') return undefined
+  let raw: unknown
+  try {
+    raw = (allowedRoutesFn as () => unknown).call(candidate)
+  } catch {
+    // INVALID_MODEL_SELECTION_SETTINGS (enabled with empty/malformed routes):
+    // leave the native tool in charge of surfacing its configuration error.
+    return { enabled: true, allowedModels: [], liveService: true }
+  }
+  if (raw === undefined) {
+    return { enabled: false, allowedModels: [], liveService: true }
+  }
+  if (!Array.isArray(raw)) return undefined
+  const routes: AllowedModelRoute[] = []
+  for (const entry of raw) {
+    const record = asRecord(entry)
+    const provider = asString(record?.['provider'])
+    const model = asString(record?.['model'])
+    if (provider === undefined || model === undefined) continue
+    if (provider.length === 0 || model.length === 0) continue
+    routes.push({ provider, model })
+  }
+  return { enabled: true, allowedModels: routes, liveService: true }
 }
 
 /**
@@ -785,9 +846,20 @@ export function effectiveAllowedRoutes(
   // An explicit "off" suspends plugin enforcement.
   if (preference?.enabled === false) return undefined
   const recorded = authorizedRoutesFor(agent, sessions)
-  const baseRoutes = recorded ?? (scope === 'preference' ? preference?.allowedModels : undefined)
+  // DSH 0.2.3+ (PR #8604) no longer writes `subagent/model-selection-policy`
+  // events into new Sessions; the live `ctx.subagentModelSelection` service is
+  // authoritative for every Session without a legacy recorded policy.
+  const liveAuthoritative = preference?.liveService === true ? preference.allowedModels : undefined
+  const baseRoutes = recorded ?? liveAuthoritative ?? (scope === 'preference' ? preference?.allowedModels : undefined)
   if (baseRoutes === undefined || baseRoutes.length === 0) return undefined
-  return mainModelRoutesFor(agent, sessions, preference, baseRoutes, lockSnapshot, recorded !== undefined)
+  return mainModelRoutesFor(
+    agent,
+    sessions,
+    preference,
+    baseRoutes,
+    lockSnapshot,
+    recorded !== undefined || liveAuthoritative !== undefined,
+  )
 }
 
 /**
@@ -1330,6 +1402,11 @@ export function delegationDenialReason(
 export interface SubagentAuthorizationOptions {
   /** Live settings service, when composed; absent leaves recorded policies in charge. */
   readonly settings?: unknown
+  /**
+   * Live DSH 0.2.3+ `subagentModelSelection` service (or lazy getter returning it).
+   * Sampled on every call so edits take effect immediately across all Sessions.
+   */
+  readonly modelSelection?: unknown
   /** Session registry used for ancestor lookup. */
   readonly sessions: SessionsResolver
   /** Exact delegation tool names this guard authorizes (explicit route selection). */
@@ -1394,7 +1471,11 @@ export function createSubagentAuthorization(
  * @returns the merged preference, or undefined when neither seam says anything.
  */
 export function readSubagentRoutingPreference(
-  options: { readonly settings?: unknown; readonly routingOverrides?: () => SubagentRoutingOverrides | undefined },
+  options: {
+    readonly settings?: unknown
+    readonly modelSelection?: unknown
+    readonly routingOverrides?: () => SubagentRoutingOverrides | undefined
+  },
 ): SubagentModelSelectionPreference | undefined {
   let overrides: SubagentRoutingOverrides | undefined
   try {
@@ -1404,7 +1485,9 @@ export function readSubagentRoutingPreference(
     // which is exactly the behavior this guard had before overrides existed.
     overrides = undefined
   }
-  return mergePreferenceOverrides(subagentModelSelectionPreference(options.settings), overrides)
+  const base = subagentModelSelectionPreference(options.settings)
+    ?? liveSubagentModelSelectionPreference(options.modelSelection)
+  return mergePreferenceOverrides(base, overrides)
 }
 
 /** Delegation names this guard recognizes when configuration omits them. */
@@ -1548,11 +1631,19 @@ export function installSubagentModelAuthorization(
     )
   }
   const scope = validateAuthorizationScope(config.scope ?? 'session')
-  // A 0.1.7 `SettingsForms` service has no register seam; the preference read
-  // below checks for it and leaves recorded policies in charge when it is gone.
+  // A 0.1.7 `SettingsForms` service has no register seam; on 0.2.3+ the live
+  // `subagentModelSelection` service supplies the authoritative allowlist.
   const settings = (ctx as unknown as { get?(name: string): unknown }).get?.('settings')
+  const readModelSelection = (): unknown => {
+    try {
+      return (ctx as unknown as { get?(name: string): unknown }).get?.('subagentModelSelection')
+    } catch {
+      return undefined
+    }
+  }
   const authorize = createSubagentAuthorization({
     settings,
+    modelSelection: readModelSelection,
     sessions,
     toolNames,
     inheritToolNames,
@@ -1562,7 +1653,11 @@ export function installSubagentModelAuthorization(
   })
   // Discovery, prompt assembly and dispatch all resolve the same policy.
   const currentPreference = (): SubagentModelSelectionPreference | undefined =>
-    readSubagentRoutingPreference({ settings, routingOverrides: config.routingOverrides })
+    readSubagentRoutingPreference({
+      settings,
+      modelSelection: readModelSelection,
+      routingOverrides: config.routingOverrides,
+    })
   const disposeGuard = ctx.tools.guard(exec => {
     const agent = exec.agent as AuthorizationAgent | undefined
     if (exec.name === 'list_subagent_models') {

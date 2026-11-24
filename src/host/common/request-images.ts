@@ -309,6 +309,22 @@ export const REQUEST_IMAGE_MAX_EDGE = 1024
 const REQUEST_IMAGE_VERSION_MAX_BYTES = 256 * 1024
 
 /**
+ * Cross-generation request-image target accepted by every harness in the peer
+ * range:
+ * - DSH `0.2.3-alpha.1+` reads `width`, `height`, `maxImageBytes`, and `imageTargetBytes`
+ * - DSH `0.1.3`..`0.2.2-rc.5` reads `width`, `height`, and `maxBytes`
+ * - DSH `0.1.2-alpha.5` reads `maxPixels` and `maxBytes`
+ */
+export interface CompatImageRequestTarget {
+  width: number
+  height: number
+  maxImageBytes: number
+  imageTargetBytes: number
+  maxBytes: number
+  maxPixels?: number
+}
+
+/**
  * Request-version target for one stored image whose long edge is over the
  * ceiling, or undefined when it fits and is sent as stored.
  *
@@ -318,18 +334,32 @@ const REQUEST_IMAGE_VERSION_MAX_BYTES = 256 * 1024
 export function requestImageTarget(
   ref: ImageAttachmentRef,
   edge: number = REQUEST_IMAGE_MAX_EDGE,
-): { width: number; height: number; maxPixels: number; maxBytes: number } | undefined {
+): (CompatImageRequestTarget & { maxPixels: number }) | undefined {
   const { width, height } = ref
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return undefined
   if (Math.max(width, height) <= edge) return undefined
   const maxPixels = Math.max(1, Math.floor(edge * edge * (Math.min(width, height) / Math.max(width, height))))
+  const byteLimits = {
+    maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+    maxImageBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+    imageTargetBytes: REQUEST_IMAGE_VERSION_MAX_BYTES,
+  }
   return width >= height
-    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
-    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxPixels, maxBytes: REQUEST_IMAGE_VERSION_MAX_BYTES }
+    ? { width: edge, height: Math.max(1, Math.round(edge * height / width)), maxPixels, ...byteLimits }
+    : { width: Math.max(1, Math.round(edge * width / height)), height: edge, maxPixels, ...byteLimits }
 }
 
-export function requestImageTargetOrOriginal(ref: ImageAttachmentRef): { width: number; height: number; maxBytes: number } {
-  return requestImageTarget(ref) ?? { width: ref.width, height: ref.height, maxBytes: ref.bytes }
+export function requestImageTargetOrOriginal(
+  ref: ImageAttachmentRef,
+  edge: number = REQUEST_IMAGE_MAX_EDGE,
+): CompatImageRequestTarget {
+  return requestImageTarget(ref, edge) ?? {
+    width: ref.width,
+    height: ref.height,
+    maxBytes: ref.bytes,
+    maxImageBytes: ref.bytes,
+    imageTargetBytes: ref.bytes,
+  }
 }
 
 /**

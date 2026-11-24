@@ -14,7 +14,14 @@
  * breakpoints, signed-thinking replay).
  */
 
-import type { ContentBlock, GenerateOptions, Message } from '../../common/llm-compat.ts'
+import {
+  extractSystemText,
+  leadingSystemEndIndex,
+  midConversationSystemToUserMessage,
+  type ContentBlock,
+  type GenerateOptions,
+  type Message,
+} from '../../common/llm-compat.ts'
 import { stripMetaSchema } from '../../common/tool-schema.ts'
 import {
   buildClaudeCodeSystemBlocks,
@@ -291,12 +298,22 @@ function userContent(message: Message, images: ResolvedRequestImages, entry: Cla
 /** One system-role turn: text, images, and tool_addition / tool_removal blocks (claude/mapper.ts shape). */
 function systemContent(message: Message, images: ResolvedRequestImages, entry: ClaudeApiModelEntry): Block[] {
   const blocks: Block[] = []
+  const pendingText: string[] = []
+  const flushText = (): void => {
+    if (pendingText.length === 0) return
+    const joined = pendingText.length === 1
+      ? pendingText[0]!
+      : pendingText.map(part => part.trim()).filter(Boolean).join('\n\n')
+    pendingText.length = 0
+    if (joined !== '') blocks.push({ type: 'text', text: joined })
+  }
   for (const block of message.content) {
     if (block.type === 'text' && typeof block.text === 'string') {
       const text = sanitizeText(block.text)
-      if (text !== '') blocks.push({ type: 'text', text })
+      if (text !== '') pendingText.push(text)
       continue
     }
+    flushText()
     if (block.type === 'image') {
       blocks.push(imageBlockFor(block as unknown as Record<string, unknown>, images, entry))
       continue
@@ -310,6 +327,7 @@ function systemContent(message: Message, images: ResolvedRequestImages, entry: C
       })
     }
   }
+  flushText()
   return blocks
 }
 
@@ -534,7 +552,8 @@ export function buildClaudeApiRequest(
   // user role: a system message directly after the block is not in a legal slot.
   // Leading system messages always fold (no predecessor), so the first non-system message
   // is the first wire entry.
-  const headIndex = options.messages.findIndex(message => message.role !== 'system')
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  const headIndex = leadingEnd < options.messages.length ? leadingEnd : -1
   const headMessage = headIndex >= 0 ? options.messages[headIndex] : undefined
   let headStored: { content: string; signature: string; toolChanges?: unknown } | undefined
   if (headMessage !== undefined && headMessage.source?.kind === 'compact-checkpoint' && context.compactionBlocks !== undefined) {
@@ -546,12 +565,20 @@ export function buildClaudeApiRequest(
     : options.messages
   const inPlace = systemMessagesInPlace(placementMessages, entry)
   const foldedSystemTexts: string[] = []
-  options.messages.forEach((message, index) => {
-    if (message.role !== 'system' || inPlace.has(index)) return
-    const text = textOf(message.content)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = extractSystemText(options.messages[index]!.content, sanitizeText)
     if (text !== '') foldedSystemTexts.push(text)
-  })
-  const wire = placementMessages.filter((message, index) => message.role !== 'system' || inPlace.has(index))
+  }
+  const wire: Message[] = []
+  for (let index = leadingEnd; index < placementMessages.length; index += 1) {
+    const message = placementMessages[index] as Message
+    if (message.role !== 'system' || inPlace.has(index)) {
+      wire.push(message)
+      continue
+    }
+    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    if (reminder !== undefined) wire.push(reminder)
+  }
   const turnScoped = turnScopedIndices(wire, entry)
 
   const entries: WireEntry[] = []

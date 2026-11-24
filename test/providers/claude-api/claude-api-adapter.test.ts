@@ -747,7 +747,8 @@ describe('Claude API adapter system-role correction', () => {
     expect(bodyOf(s.calls[0]!).messages.some((m: { role: string }) => m.role === 'system')).toBe(true)
     const retried = bodyOf(s.calls[1]!)
     expect(retried.messages.some((m: { role: string }) => m.role === 'system')).toBe(false)
-    expect(retried.system[2].text).toContain('extra rule')
+    expect(JSON.stringify(retried.system)).not.toContain('extra rule')
+    expect(JSON.stringify(retried.messages)).toContain('<system-reminder>\\nextra rule\\n</system-reminder>')
     const memory = new ClaudeApiCapabilityMemory()
     await memory.warm()
     expect(memory.get(CLAUDE_API_DEFAULT_BASE_URL, MODEL).systemRoleUnsupported).toBe(true)
@@ -804,7 +805,8 @@ describe('Claude API adapter system-role correction', () => {
     expect(bodyOf(s.calls[1]!).messages.some((m: { role: string }) => m.role === 'system')).toBe(true)
     expect(bodyOf(s.calls[2]!)).not.toHaveProperty('speed')
     expect(bodyOf(s.calls[2]!).messages.some((m: { role: string }) => m.role === 'system')).toBe(false)
-    expect(bodyOf(s.calls[2]!).system[2].text).toContain('extra rule')
+    expect(JSON.stringify(bodyOf(s.calls[2]!).system)).not.toContain('extra rule')
+    expect(JSON.stringify(bodyOf(s.calls[2]!).messages)).toContain('<system-reminder>\\nextra rule\\n</system-reminder>')
   })
   it('keeps an earlier system-role correction when speed is refused afterwards', async () => {
     const s = setup(async index => {
@@ -825,7 +827,8 @@ describe('Claude API adapter system-role correction', () => {
     expect(s.calls).toHaveLength(3)
     expect(bodyOf(s.calls[2]!)).not.toHaveProperty('speed')
     expect(bodyOf(s.calls[2]!).messages.some((m: { role: string }) => m.role === 'system')).toBe(false)
-    expect(bodyOf(s.calls[2]!).system[2].text).toContain('extra rule')
+    expect(JSON.stringify(bodyOf(s.calls[2]!).system)).not.toContain('extra rule')
+    expect(JSON.stringify(bodyOf(s.calls[2]!).messages)).toContain('<system-reminder>\\nextra rule\\n</system-reminder>')
   })
 
   it('drops thinking-token-count once and persists the conclusion for a second adapter', async () => {

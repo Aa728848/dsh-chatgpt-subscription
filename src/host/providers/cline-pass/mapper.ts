@@ -19,6 +19,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import {
   LlmError,
+  extractSystemText,
   type ContentBlock as CompatContentBlock,
   type GenerateOptions,
   type Message,
@@ -267,7 +268,8 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
       // rather than prose, so its text is the notice PLUS whatever the harness
       // wrote. A message with neither is dropped: an empty system message is
       // payload the model gains nothing from, and some gateways reject it.
-      const content = [toolUpdateNotice(message.content), flattenText(message.content)]
+      const text = message.role === 'system' ? extractSystemText(message.content) : flattenText(message.content)
+      const content = [toolUpdateNotice(message.content), text]
         .filter((part) => part.length > 0)
         .join('\n')
       if (content.length === 0) continue

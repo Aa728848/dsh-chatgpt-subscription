@@ -31,6 +31,8 @@ import type { QoderReasoningEffort } from '../../../shared/qoder-contracts.ts'
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow, isHttpContextOverflow } from '../../common/context-overflow.ts'
 import {
   LlmError,
+  extractSystemText,
+  midConversationSystemToUserMessage,
   type FinishReason,
   type GenerateOptions,
   type Message,
@@ -277,17 +279,36 @@ function isToolResultMessage(message: Message): boolean {
   return message.source?.kind === 'tool'
 }
 
-function nonSystemMessages(options: GenerateOptions): Message[] {
-  return options.messages.filter((message) => message.role !== 'system')
+function leadingInstructionEndIndex(messages: readonly Message[]): number {
+  let end = 0
+  while (end < messages.length && (messages[end]?.role === 'system' || messages[end]?.role === 'developer')) {
+    end += 1
+  }
+  return end
 }
 
-/** 收集全部 system 贡献到一条领头的 system 文本。 */
+function nonSystemMessages(options: GenerateOptions): Message[] {
+  const leadingEnd = leadingInstructionEndIndex(options.messages)
+  const out: Message[] = []
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role !== 'system' && message.role !== 'developer') {
+      out.push(message)
+      continue
+    }
+    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    if (reminder !== undefined) out.push(reminder)
+  }
+  return out
+}
+
+/** 收集前导连续 system/developer 贡献到领头的 system 文本；中置增量留在历史原位保缓存。 */
 function leadingSystemText(options: GenerateOptions): string | undefined {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
-  for (const message of options.messages) {
-    if (message.role !== 'system' && message.role !== 'developer') continue
-    const text = textOf(message.content)
+  const leadingEnd = leadingInstructionEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = extractSystemText(options.messages[index]!.content, sanitizeText)
     if (text !== '') parts.push(text)
   }
   return parts.length === 0 ? undefined : parts.join('\n\n')

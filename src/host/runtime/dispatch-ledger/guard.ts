@@ -287,6 +287,7 @@ export function createDispatchLedgerCache(limit = 64): DispatchLedgerCache {
 export function routesForSession(
   session: DispatchLedgerSessionLike | undefined,
   sessions: DispatchLedgerSessions | undefined,
+  fallbackRoutes?: readonly DispatchPolicyRoute[],
 ): DispatchPolicyRoute[] {
   let current = session
   for (let depth = 0; depth < 8 && current !== undefined; depth += 1) {
@@ -295,8 +296,11 @@ export function routesForSession(
       return audited.map(route => ({ provider: route.provider, model: route.model }))
     }
     const parentId = parentSessionIdOfSession(current)
-    if (parentId === undefined) return []
+    if (parentId === undefined) break
     current = sessions?.get(parentId)
+  }
+  if (fallbackRoutes !== undefined && fallbackRoutes.length > 0) {
+    return fallbackRoutes.map(route => ({ provider: route.provider, model: route.model }))
   }
   return []
 }
@@ -306,14 +310,16 @@ export function routesForSession(
  * @param session - 会话。
  * @param sessions - 会话注册表。
  * @param dispatchTools - 派发工具名。
+ * @param fallbackRoutes - 无会话级录制事件时的实时授权回退路由（DSH 0.2.3+）。
  * @returns 策略描述符。
  */
 export function policyForSession(
   session: DispatchLedgerSessionLike | undefined,
   sessions: DispatchLedgerSessions | undefined,
   dispatchTools: readonly string[] = DEFAULT_GUARD_DISPATCH_TOOLS,
+  fallbackRoutes?: readonly DispatchPolicyRoute[],
 ): DispatchPolicyDescriptor {
-  return dispatchPolicyDescriptor({ tools: dispatchTools, routes: routesForSession(session, sessions) })
+  return dispatchPolicyDescriptor({ tools: dispatchTools, routes: routesForSession(session, sessions, fallbackRoutes) })
 }
 
 /**

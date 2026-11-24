@@ -2,6 +2,8 @@
 import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../../common/context-overflow.ts'
 import {
   LlmError,
+  extractSystemText,
+  midConversationSystemToUserMessage,
   type FinishReason,
   type GenerateOptions,
   type Message,
@@ -98,12 +100,20 @@ function replayAssistantReasoning(message: Message, model: string): ReplayRead {
   return out
 }
 
+function leadingInstructionEndIndex(messages: readonly Message[]): number {
+  let end = 0
+  while (end < messages.length && (messages[end]?.role === 'system' || messages[end]?.role === 'developer')) {
+    end += 1
+  }
+  return end
+}
+
 function leadingSystemText(options: GenerateOptions): string {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
-  for (const message of options.messages) {
-    if (message.role !== 'system' && message.role !== 'developer') continue
-    const text = textOf(message.content)
+  const leadingEnd = leadingInstructionEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = extractSystemText(options.messages[index]!.content, clean)
     if (text !== '') parts.push(text)
   }
   return parts.join('\n\n')
@@ -204,7 +214,17 @@ export function buildQianwenChatRequest(
   const messages: WireMessage[] = []
   const system = leadingSystemText(options)
   if (system !== '') messages.push({ role: 'system', content: [{ type: 'text', text: system }] })
-  const conversation = options.messages.filter(message => message.role !== 'system' && message.role !== 'developer')
+  const leadingEnd = leadingInstructionEndIndex(options.messages)
+  const conversation: Message[] = []
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role !== 'system' && message.role !== 'developer') {
+      conversation.push(message)
+      continue
+    }
+    const reminder = midConversationSystemToUserMessage(message, clean)
+    if (reminder !== undefined) conversation.push(reminder)
+  }
   let encryptedReplays = 0
   let missingEncryptedContent = 0
   for (let index = 0; index < conversation.length; index += 1) {

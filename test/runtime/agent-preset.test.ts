@@ -264,6 +264,17 @@ describe('the dispatch definition', () => {
     const { Context } = await import('@deepseek-ai/cordis')
     const ctx = new Context()
     try {
+      try {
+        const sessionProjectionPkg = '@deepseek-ai/dsh-session-projection'
+        const projections = (await import(sessionProjectionPkg)) as {
+          default?: unknown
+          SessionProjections?: unknown
+        }
+        const SessionProjections = projections.default ?? projections.SessionProjections ?? projections
+        if (SessionProjections) await (ctx.plugin as (plugin: unknown) => unknown)(SessionProjections)
+      } catch {
+        // Older harness generations without a standalone session-projection plugin.
+      }
       const config = personaRow!.config as { prefix: string; suffix?: string }
       await ctx.plugin(SystemPrompt, {
         personaPrefix: config.prefix,

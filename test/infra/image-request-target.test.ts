@@ -18,8 +18,22 @@ const small = {
  * dimensions differ; the 256 KiB encoded-byte target stays shared, which is why
  * the per-image budget and the body-fit guard are unaffected.
  */
-const SHARED_LARGE_TARGET = { width: 1024, height: 512, maxPixels: 524_288, maxBytes: 256 * 1024 }
-const KIMI_LARGE_TARGET = { width: 2000, height: 1000, maxPixels: 2_000_000, maxBytes: 256 * 1024 }
+const SHARED_LARGE_TARGET = {
+  width: 1024,
+  height: 512,
+  maxPixels: 524_288,
+  maxBytes: 256 * 1024,
+  maxImageBytes: 256 * 1024,
+  imageTargetBytes: 256 * 1024,
+}
+const KIMI_LARGE_TARGET = {
+  width: 2000,
+  height: 1000,
+  maxPixels: 2_000_000,
+  maxBytes: 256 * 1024,
+  maxImageBytes: 256 * 1024,
+  imageTargetBytes: 256 * 1024,
+}
 
 describe('adapter image request targets', () => {
   for (const [provider, model, adapter, largeTarget] of [
@@ -33,7 +47,11 @@ describe('adapter image request targets', () => {
 
     it(`${provider} preserves an image that already fits`, () => {
       expect(adapter.imageRequestTarget(provider, model, small)).toEqual({
-        width: 800, height: 600, maxBytes: 100_000,
+        width: 800,
+        height: 600,
+        maxBytes: 100_000,
+        maxImageBytes: 100_000,
+        imageTargetBytes: 100_000,
       })
     })
   }

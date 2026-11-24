@@ -1937,7 +1937,11 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       const target = sessions.get(sessionId)
       if (target === undefined) throw new Error(`Unknown session "${sessionId}".`)
       const agent = { session: target as unknown as PolicySession }
-      const preference = readSubagentRoutingPreference({ settings: ctx.settings, routingOverrides: readSubagentRoutingOverrides })
+      const preference = readSubagentRoutingPreference({
+        settings: ctx.settings,
+        modelSelection: () => (ctx as unknown as { get?(name: string): unknown }).get?.('subagentModelSelection'),
+        routingOverrides: readSubagentRoutingOverrides,
+      })
       const allowed = effectiveAllowedRoutes(agent, preference, sessions, pluginConfig.subagentModelScope)
       const allowParentFork = allowed !== undefined && effectiveAllowParentFork(agent, preference, sessions)
       return Promise.resolve({

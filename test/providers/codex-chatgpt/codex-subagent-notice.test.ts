@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions as HarnessGenerateOptions } from '@deepseek-ai/dsh-llm'
-import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import { toToolCallId as ToolCallId } from '../../../src/host/common/brand-compat.ts'
 import { OAuthService } from '../../../src/host/providers/codex-chatgpt/oauth-service.ts'
 import { ResponsesClient, parseResponsesStream } from '../../../src/host/providers/codex-chatgpt/responses-client.ts'
 import { buildResponsesPayload } from '../../../src/host/providers/codex-chatgpt/responses-mapper.ts'

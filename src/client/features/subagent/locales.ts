@@ -45,7 +45,7 @@ export const zh = {
 
   subagentModelSelectionTitle: '模型选择',
   subagentModelSelectionToggle: '允许 Agent 为子智能体选择模型',
-  subagentModelSelectionChoose: '开启后，Agent 可以从下方授权模型中，为每个子智能体选择提供方、模型和推理强度。仅影响新会话。',
+  subagentModelSelectionChoose: '开启后，Agent 可以从下方授权模型中，为每个子智能体选择提供方、模型和推理强度。修改会立即对所有会话生效。',
   subagentModelSelectionAllowed: 'Agent 可选择的模型',
   subagentModelSelectionLoading: '正在加载模型…',
   subagentModelSelectionLoadFailed: '无法加载模型。',
@@ -106,7 +106,7 @@ export const en: Record<SubagentLocaleKey, string> = {
 
   subagentModelSelectionTitle: 'Model selection',
   subagentModelSelectionToggle: 'Allow agents to choose models for Subagents',
-  subagentModelSelectionChoose: 'When enabled, agents can choose a provider, model, and reasoning effort for each Subagent from the authorized models below. Applies only to new sessions.',
+  subagentModelSelectionChoose: 'When enabled, agents can choose a provider, model, and reasoning effort for each Subagent from the authorized models below. Changes apply immediately to every session.',
   subagentModelSelectionAllowed: 'Models agents may choose',
   subagentModelSelectionLoading: 'Loading models…',
   subagentModelSelectionLoadFailed: 'Models could not be loaded.',

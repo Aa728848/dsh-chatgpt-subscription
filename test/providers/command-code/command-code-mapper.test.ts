@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
-import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
+import { toToolCallId as ToolCallId } from '../../../src/host/common/brand-compat.ts'
 import type { GenerateOptions, StreamChunk } from '../../../src/host/common/llm-compat.ts'
 import { PLUGIN_MESSAGE_SOURCE_KIND, normalizeGenerateOptions } from '../../../src/host/common/llm-compat.ts'
 import {

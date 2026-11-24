@@ -23,7 +23,14 @@
  */
 
 import { createHash } from 'node:crypto'
-import type { ContentBlock, GenerateOptions, Message, ToolResultBlock } from '../../common/llm-compat.ts'
+import {
+  extractSystemText,
+  leadingSystemEndIndex,
+  type ContentBlock,
+  type GenerateOptions,
+  type Message,
+  type ToolResultBlock,
+} from '../../common/llm-compat.ts'
 import type { ResolvedRequestImages } from '../../common/request-images.ts'
 import { imageBlockToInline, unavailableImageText } from '../../common/request-images.ts'
 
@@ -227,20 +234,32 @@ export function canContinue(
  * traffic with a bounded plain-text archive.
  * ------------------------------------------------------------------------- */
 
-/** Indices of the messages a replay carries, with superseded instruction copies dropped. */
+/** Whether a system message carries DSH 0.2.3+ section attribution (incremental deltas). */
+function hasSectionedSystemSource(message: Message | undefined): boolean {
+  return message?.role === 'system'
+    && message.source?.kind === 'system-prompt'
+    && Array.isArray(message.source.sections)
+}
+
+/** Indices of the messages a replay carries, with superseded legacy snapshots dropped. */
 function keptIndices(messages: readonly Message[]): number[] {
-  const newest: Record<'system' | 'developer', number> = { system: -1, developer: -1 }
+  const leadingEnd = leadingSystemEndIndex(messages)
+  let newestDeveloper = -1
+  let hasSectionedSystem = false
   for (let index = 0; index < messages.length; index += 1) {
-    const role = messages[index]?.role
-    if (role === 'system' || role === 'developer') newest[role] = index
+    const message = messages[index]
+    if (message?.role === 'developer') newestDeveloper = index
+    if (hasSectionedSystemSource(message)) hasSectionedSystem = true
   }
+  // Legacy DSH (<=0.2.2) stacked full system snapshots at the head without
+  // section attribution; keep only the newest leading snapshot there while
+  // preserving every mid-conversation incremental system delta (DSH 0.2.3+).
+  const newestLeadingSystem = leadingEnd - 1
   const kept: number[] = []
   for (let index = 0; index < messages.length; index += 1) {
     const role = messages[index]?.role
-    // DSH re-sends the instructions of every earlier turn; replaying all of them
-    // buries the turn being answered, and the newest copy carries the same rules.
-    if (role === 'system' && index !== newest.system) continue
-    if (role === 'developer' && index !== newest.developer) continue
+    if (role === 'system' && !hasSectionedSystem && index < leadingEnd && index !== newestLeadingSystem) continue
+    if (role === 'developer' && index !== newestDeveloper) continue
     kept.push(index)
   }
   return kept
@@ -455,7 +474,9 @@ function appendMessage(
     if (typeof rendered === 'string') textParts.push(rendered)
     else trailing.push(rendered)
   }
-  const text = textParts.join('\n').trim()
+  const text = message.role === 'system'
+    ? extractSystemText(message.content)
+    : textParts.join('\n').trim()
   if (text !== '') blocks.push({ type: 'text', text: decorate(message, text) })
   blocks.push(...trailing)
 }

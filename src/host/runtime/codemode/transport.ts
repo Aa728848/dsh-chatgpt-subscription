@@ -74,12 +74,27 @@ export class ToolCallLimitExceededError extends Error {
 }
 
 /**
- * 程序运行自身失败时抛出的结构化错误（对齐内核 `CodeRunFailedError`，`code: 'CODE_RUN_FAILED'`）。
+ * 所有 {@link CodeRunFailedError} 错误码（对齐内核 `@deepseek-ai/dsh-tool-executor-ptc`）：
+ * - `CODE_RUN_FAILED`：程序运行自身失败，或运行时抛出未带业务码的异常；
+ * - `CODE_RUN_UNAVAILABLE`：执行器在运行启动前已被销毁。
+ */
+export const CODE_RUN_ERROR_CODES = ['CODE_RUN_FAILED', 'CODE_RUN_UNAVAILABLE'] as const
+
+/** {@link CodeRunFailedError} 的业务码。 */
+export type CodeRunErrorCode = (typeof CODE_RUN_ERROR_CODES)[number]
+
+/**
+ * 程序运行自身失败或不可用时抛出的结构化错误（对齐内核 `CodeRunFailedError`）。
  */
 export class CodeRunFailedError extends HarnessError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, 'CODE_RUN_FAILED', options)
+  override readonly code: CodeRunErrorCode
+
+  constructor(message: string, codeOrOptions?: CodeRunErrorCode | ErrorOptions, options?: ErrorOptions) {
+    const code: CodeRunErrorCode = typeof codeOrOptions === 'string' ? codeOrOptions : 'CODE_RUN_FAILED'
+    const errOptions = typeof codeOrOptions === 'string' ? options : codeOrOptions
+    super(message, code, errOptions)
     this.name = 'CodeRunFailedError'
+    this.code = code
   }
 }
 
@@ -252,6 +267,13 @@ export interface CodemodeHost {
    */
   programImage?(attachment: unknown, fallbackPath?: string): unknown
   /**
+   * 将工具成功返回的对象/数组与其面向模型的纯文本渲染绑定为 `PtcInspectableValue`
+   * （DSH 0.2.3+ PR #8447），使程序内直接 `inspect(val)` 时按工具原生文本格式展示。
+   *
+   * 老代运行时未导出 `PtcInspectableValue` 时返回 `undefined` 或原对象。
+   */
+  inspectableValue?(value: object, text: string): unknown
+  /**
    * 重写一条子调用回放记录的内容块（内核 `tools/ptc-dispatch-log` 瀑布）。
    *
    * 实现**必须**自己吞掉监听器的失败并回落到原始内容（内核 `ptc.ts` 同此）：这里决定的
@@ -373,6 +395,8 @@ export interface PtcRunResultLike {
   readonly logs?: readonly string[]
   /** 新代（0.2.2-rc.2+）有序图文混排输出块。 */
   readonly output?: readonly PtcOutputBlock[]
+  /** 新代（0.2.3+）捕获输出超过上限被截断的标记。 */
+  readonly outputTruncated?: boolean
   /** 失败信息。 */
   readonly error?: { readonly kind: string; readonly message: string }
   /** 文件策略与观察到的拒绝。 */
@@ -385,28 +409,35 @@ export interface TransportOutput {
   readonly logs: readonly string[]
   /** 程序返回值。 */
   readonly result?: unknown
+  /** 捕获输出是否因超出上限而被截断（DSH 0.2.3+）。 */
+  readonly outputTruncated?: boolean
   /** 文件沙箱观察。 */
   readonly sandbox?: PtcSandboxSummary
 }
 
+/** 输出被截断时追加给模型的标准提示（对齐内核 `ptc.ts`）。 */
+const OUTPUT_TRUNCATED_NOTICE = 'Program completed. Output was truncated; read current state for missing information without repeating completed actions.'
+
 /** 与 `@deepseek-ai/dsh-ptc-runtime` 的 `PTC_IMAGE_TAG` 对齐的跨包协议符号。 */
 export const PTC_IMAGE_TAG = Symbol.for('dsh.ptc.image')
 
-/** 图片附件引用结构（对齐 `@deepseek-ai/dsh-llm` 的 `ImageAttachmentRef`）。 */
+/**
+ * 图片附件引用结构（同时兼容真实 DSH `@deepseek-ai/dsh-attachment` 的 `ImageAttachmentRef`
+ * `{ attachmentId, mediaType, bytes, width, height }` 与早期测试桩 `{ kind: 'image-attachment', byteLength }`）。
+ */
 export interface PtcImageAttachmentRefLike {
-  readonly kind: 'image-attachment'
+  readonly kind?: 'image-attachment'
   readonly attachmentId: string
   readonly mediaType: string
   readonly width: number
   readonly height: number
-  readonly byteLength: number
+  readonly bytes?: number
+  readonly byteLength?: number
+  readonly name?: string
 }
 
 /**
- * 程序内一等公民图片句柄（协议兼容 `@deepseek-ai/dsh-ptc-runtime` 的 `PtcImage`）。
- *
- * `ptc-runtime-node` 的 `encodeWireValue` 通过 `Symbol.for('dsh.ptc.image') === true` + `path` + `attachment`
- * 判定图片句柄并在 worker 侧还原为 `PtcImage` 实例，使程序可读 `.path` / `.width` / `.height` 并传给 `inspect(img)`。
+ * 程序内一等公民图片句柄的跨代兜底类（无宿主 `PtcImage` 导出时使用）。
  */
 export class PtcImageLike {
   readonly [PTC_IMAGE_TAG] = true
@@ -435,16 +466,71 @@ export class PtcImageLike {
   }
 }
 
-/** 判定一个值是否为合法的 `ImageAttachmentRef`。 */
+/** 判定一个值是否为合法的 `ImageAttachmentRef`（兼容真实 `bytes` 与测试桩 `byteLength`）。 */
 export function isImageAttachmentRefLike(value: unknown): value is PtcImageAttachmentRefLike {
   if (typeof value !== 'object' || value === null) return false
   const candidate = value as Record<string, unknown>
-  return candidate['kind'] === 'image-attachment'
-    && typeof candidate['attachmentId'] === 'string' && candidate['attachmentId'].length > 0
+  if (candidate['kind'] !== undefined && candidate['kind'] !== 'image-attachment') return false
+  const size = candidate['bytes'] ?? candidate['byteLength']
+  return typeof candidate['attachmentId'] === 'string' && candidate['attachmentId'].length > 0
     && typeof candidate['mediaType'] === 'string' && candidate['mediaType'].length > 0
     && typeof candidate['width'] === 'number' && Number.isInteger(candidate['width']) && candidate['width'] > 0
     && typeof candidate['height'] === 'number' && Number.isInteger(candidate['height']) && candidate['height'] > 0
-    && typeof candidate['byteLength'] === 'number' && Number.isInteger(candidate['byteLength']) && candidate['byteLength'] > 0
+    && typeof size === 'number' && Number.isInteger(size) && size > 0
+}
+
+/**
+ * 将工具返回 JSON 中嵌套的 `{ type: 'image', attachment }` 替换为程序图片句柄
+ * （对齐内核 `packages/core/tool-executor-ptc/src/program-images.ts`）。
+ *
+ * 只有当结果内容块中的**每一张**图片都成功替换时才返回替换后的值与替换 id 列表；
+ * 任一结果图片缺失或无法映射为程序图片时返回 `undefined`，交给调用方走 `deferContext` 兜底。
+ */
+export function substituteProgramImages(
+  value: unknown,
+  images: readonly PtcImageAttachmentRefLike[],
+  toProgramImage: (ref: PtcImageAttachmentRefLike) => unknown,
+): { readonly value: unknown; readonly substitutedIds: readonly string[] } | undefined {
+  if (images.length === 0) return undefined
+  const refs = new Map<string, PtcImageAttachmentRefLike>()
+  for (const ref of images) refs.set(ref.attachmentId, ref)
+  const substituted = new Set<string>()
+  const unreadable = new Set<string>()
+
+  const mapNode = (node: unknown): unknown => {
+    if (node === null || typeof node !== 'object') return node
+    if (Array.isArray(node)) {
+      const items = node.map((item) => mapNode(item))
+      return items.some((item, index) => item !== node[index]) ? items : node
+    }
+    const record = node as Record<string, unknown>
+    const attachment = record['attachment']
+    if (
+      record['type'] === 'image'
+      && typeof attachment === 'object'
+      && attachment !== null
+      && !Array.isArray(attachment)
+      && typeof (attachment as Record<string, unknown>)['attachmentId'] === 'string'
+    ) {
+      const id = (attachment as Record<string, unknown>)['attachmentId'] as string
+      const ref = refs.get(id)
+      if (ref !== undefined) {
+        const programImage = toProgramImage(ref)
+        if (programImage === undefined) unreadable.add(id)
+        else {
+          substituted.add(id)
+          return programImage
+        }
+      }
+    }
+    const entries = Object.entries(record)
+    const mapped = entries.map(([key, item]) => [key, mapNode(item)] as const)
+    return mapped.some(([, item], index) => item !== entries[index]?.[1]) ? Object.fromEntries(mapped) : node
+  }
+
+  const mappedValue = mapNode(value)
+  if (unreadable.size > 0 || substituted.size !== refs.size) return undefined
+  return { value: mappedValue, substitutedIds: [...substituted] }
 }
 
 /** 语言相关的工具描述与 `code` 参数描述（对齐内核 `ptc.ts`）。 */
@@ -567,6 +653,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
         properties: {
           logs: { type: 'array', items: { type: 'string' } },
           result: {},
+          outputTruncated: { type: 'boolean' },
           sandbox: {
             type: 'object',
             additionalProperties: false,
@@ -588,11 +675,15 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             value.sandbox,
             host.runtime()?.sandboxMode,
             runToolName,
+            value.outputTruncated,
           )
         }
         const logs = (value.logs ?? []).join('\n')
         const rendered = value.result === undefined ? '' : renderProgramValue(value.result)
         const parts = [logs, rendered].filter((part) => part.length > 0)
+        if (value.outputTruncated === true) {
+          parts.push(OUTPUT_TRUNCATED_NOTICE)
+        }
         if (value.sandbox?.enforcement === 'partial') {
           parts.push('File sandbox enforcement is partial on this host.')
         }
@@ -662,7 +753,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
       const owner = host.stateOwner(exec.agent)
       let maxSubCalls: number = rules.options.maxSubCalls
       let attempts = 0
-      const deferredProgramImages: { readonly attachmentId?: string; readonly content: readonly unknown[] }[] = []
+      const deferredProgramImages: { readonly attachmentIds: readonly string[]; readonly content: readonly unknown[] }[] = []
       const lane = createCommitLane(rules.options.maxParallelSubCalls, () => runController.signal.aborted)
       const definitions = new Map<string, CatalogEntry>()
       for (const entry of catalog) definitions.set(entry.name, entry)
@@ -730,22 +821,41 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
               let programImageValue: unknown
               if (
                 !isError
-                && (entry.name === 'read_image' || entry.name === 'cua')
                 && runtime.language !== 'python'
                 && typeof host.programImage === 'function'
                 && Array.isArray(outcome.content)
               ) {
-                const imageRef = firstImageAttachmentOf(outcome.content)
-                if (imageRef !== undefined) {
-                  const fallbackPath = isRecord(outcome.value) && typeof outcome.value['path'] === 'string'
-                    ? outcome.value['path']
-                    : (isRecord(parsed) && typeof parsed['file_path'] === 'string' ? parsed['file_path'] : undefined)
-                  programImageValue = host.programImage(imageRef, fallbackPath)
-                  if (programImageValue !== undefined) {
-                    deferredProgramImages.push({
-                      attachmentId: imageRef.attachmentId,
-                      content: outcome.content,
-                    })
+                const imageRefs = imageAttachmentsOf(outcome.content)
+                if (imageRefs.length > 0) {
+                  if (entry.name === 'read_image' || entry.name === 'cua') {
+                    const imageRef = imageRefs[0]!
+                    const fallbackPath = isRecord(outcome.value) && typeof outcome.value['path'] === 'string'
+                      ? outcome.value['path']
+                      : (isRecord(parsed) && typeof parsed['file_path'] === 'string' ? parsed['file_path'] : undefined)
+                    programImageValue = host.programImage(imageRef, fallbackPath)
+                    if (programImageValue !== undefined) {
+                      deferredProgramImages.push({
+                        attachmentIds: [imageRef.attachmentId],
+                        content: outcome.content,
+                      })
+                    }
+                  } else if (outcome.value !== undefined) {
+                    try {
+                      const substituted = substituteProgramImages(
+                        outcome.value,
+                        imageRefs,
+                        (ref) => host.programImage!(ref),
+                      )
+                      if (substituted !== undefined) {
+                        programImageValue = substituted.value
+                        deferredProgramImages.push({
+                          attachmentIds: substituted.substitutedIds,
+                          content: outcome.content,
+                        })
+                      }
+                    } catch {
+                      // 替换失败时保持原始 value 并走下方 deferContext 兜底，不中断提交队列。
+                    }
                   }
                 }
               }
@@ -776,7 +886,20 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
               }
               if (outcome.error !== undefined) throw new Error(outcome.error)
               if (programImageValue !== undefined) return programImageValue
-              return outcome.value !== undefined ? outcome.value : outcome.text ?? null
+              const rawValue = outcome.value !== undefined ? outcome.value : outcome.text ?? null
+              if (
+                rawValue !== null
+                && typeof rawValue === 'object'
+                && Array.isArray(outcome.content)
+                && outcome.content.length > 0
+                && outcome.content.every(isTextContentBlock)
+                && typeof host.inspectableValue === 'function'
+              ) {
+                const renderedText = outcome.content.map((block) => block.text).join('\n')
+                const wrapped = host.inspectableValue(rawValue, renderedText)
+                if (wrapped !== undefined) return wrapped
+              }
+              return rawValue
             },
             abandon(): never {
               throw new Error(runToolName + ' run is over; ' + entry.name + ' tool call abandoned')
@@ -909,7 +1032,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
             }
           }
           for (const pending of deferredProgramImages) {
-            if (pending.attachmentId !== undefined && inspectedIds.has(pending.attachmentId)) continue
+            if (pending.attachmentIds.length > 0 && pending.attachmentIds.every((id) => inspectedIds.has(id))) continue
             const imageMsg = host.createImageContext?.(pending.content)
             if (imageMsg !== undefined) exec.deferContext?.(imageMsg)
           }
@@ -919,8 +1042,10 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
           const limitError = runController.signal.reason instanceof ToolCallLimitExceededError
             ? runController.signal.reason
             : undefined
+          const truncation = result.outputTruncated === true ? '\nOutput was truncated.' : ''
           if (result.error.kind === 'abort' && exec.signal.aborted && limitError === undefined) {
-            const message = runtime.retainsState ? `tool call aborted: ${result.error.message}` : 'tool call aborted'
+            const message = (runtime.retainsState ? `tool call aborted: ${result.error.message}` : 'tool call aborted')
+              + truncation
             const abortError = new HarnessError(message, 'ABORTED')
             abortError.name = 'AbortError'
             throw abortError
@@ -944,7 +1069,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
           const failureText = limitError === undefined || limitError.message === result.error.message
             ? result.error.message
             : `${limitError.message}\n${result.error.message}`
-          throw new CodeRunFailedError('program failed (' + result.error.kind + '): ' + failureText + logsText + sandboxText + hint)
+          throw new CodeRunFailedError('program failed (' + result.error.kind + '): ' + failureText + logsText + sandboxText + hint + truncation)
         }
         const logs = extractLogsList(result)
         // 新代 scoped-repl 若已产生显式 output（inspect / stdout / 图片），不再回传末尾隐式完成值，
@@ -955,6 +1080,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
         const output: TransportOutput = {
           logs,
           ...(effectiveValue === undefined ? {} : { result: effectiveValue }),
+          ...(result.outputTruncated === true ? { outputTruncated: true } : {}),
           ...(result.sandbox === undefined
             ? {}
             : {
@@ -975,6 +1101,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
                 output.sandbox,
                 runtime.sandboxMode,
                 runToolName,
+                output.outputTruncated,
               ),
             })
           }
@@ -1048,15 +1175,22 @@ function hasImageBlock(content: readonly unknown[]): boolean {
   return content.some((block) => typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'image')
 }
 
-function firstImageAttachmentOf(content: readonly unknown[]): PtcImageAttachmentRefLike | undefined {
+function imageAttachmentsOf(content: readonly unknown[]): PtcImageAttachmentRefLike[] {
+  const refs: PtcImageAttachmentRefLike[] = []
   for (const block of content) {
     if (typeof block !== 'object' || block === null) continue
     const record = block as { readonly type?: unknown; readonly attachment?: unknown }
     if (record.type === 'image' && isImageAttachmentRefLike(record.attachment)) {
-      return record.attachment
+      refs.push(record.attachment)
     }
   }
-  return undefined
+  return refs
+}
+
+function isTextContentBlock(block: unknown): block is { readonly type: 'text'; readonly text: string } {
+  return typeof block === 'object' && block !== null
+    && (block as { readonly type?: unknown }).type === 'text'
+    && typeof (block as { readonly text?: unknown }).text === 'string'
 }
 
 /**
@@ -1102,6 +1236,7 @@ function renderStructuredOutputBlocks(
   sandbox: PtcSandboxSummary | undefined,
   sandboxMode: unknown,
   runToolName: string,
+  outputTruncated?: boolean,
 ): { readonly type: string; readonly [key: string]: unknown }[] {
   const out: { readonly type: string; readonly [key: string]: unknown }[] = []
   let pendingText = ''
@@ -1124,15 +1259,18 @@ function renderStructuredOutputBlocks(
       ? renderedValue
       : (pendingText.endsWith('\n') ? pendingText + renderedValue : pendingText + '\n' + renderedValue)
   }
-  const sandboxNotes: string[] = []
+  const notes: string[] = []
+  if (outputTruncated === true) {
+    notes.push(OUTPUT_TRUNCATED_NOTICE)
+  }
   if (sandbox?.enforcement === 'partial') {
-    sandboxNotes.push('File sandbox enforcement is partial on this host.')
+    notes.push('File sandbox enforcement is partial on this host.')
   }
   if (sandbox?.denied === true) {
-    sandboxNotes.push('The ' + sandbox.mode + ' file sandbox denied an operation.' + escalationGuidance(sandboxMode))
+    notes.push('The ' + sandbox.mode + ' file sandbox denied an operation.' + escalationGuidance(sandboxMode))
   }
-  if (sandboxNotes.length > 0) {
-    const noteText = sandboxNotes.join('\n')
+  if (notes.length > 0) {
+    const noteText = notes.join('\n')
     pendingText = pendingText.length === 0
       ? noteText
       : (pendingText.endsWith('\n') ? pendingText + noteText : pendingText + '\n' + noteText)

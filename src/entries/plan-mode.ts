@@ -21,14 +21,17 @@ export const EXIT_PLAN_MODE = 'exit_plan_mode'
 /** 官方实现用来承载计划指引的 prompt 段名（这个 fork 刻意**不注册**它）。 */
 export const PLAN_POLICY_SECTION = 'plan:policy'
 
+/** 官方 0.2.3+ 实现用来承载计划模式激活状态的 prompt 段名（这个 fork 刻意**不注册**它）。 */
+export const PLAN_STATUS_SECTION = 'plan:status'
+
 /** plan 投影的 key。跨 preset 共享，不能改名。 */
 export const PLAN_PROJECTION_KEY = 'plan'
 
 /** 会话日志里记录计划模式开关的事件类型（与官方同名，投影可互换折叠）。 */
 export const PLAN_MODE_EVENT = 'plan/mode'
 
-/** 最新一代的投影状态版本（0.2.2-alpha 起：含 entered）。 */
-export const PLAN_STATE_VERSION = 4
+/** 最新一代的投影状态版本（0.2.3-alpha.1 起为 5，移除 activeAtLastHeader；0.2.2 为 4）。 */
+export const PLAN_STATE_VERSION = 5
 
 /** 旧一代（≤0.2.1-rc.5）的投影状态版本：没有 entered。 */
 export const LEGACY_PLAN_STATE_VERSION = 3
@@ -178,9 +181,10 @@ export interface PlanProjectionDefinition {
 /**
  * 投影状态 schema。
  *
- * 刻意**不用 strict()、并给 entered 一个默认值**：同一个 key 可能被按 v3 注册的
- * 另一份定义（≤0.2.1-rc.5，没有 entered 字段）写进持久化缓存，严格的 schema 会让
- * 那份缓存整行作废，进而把服务从「共享」变成「冲突」。
+ * 刻意**不用 strict()、并给跨代增删的字段提供默认值**：
+ * - `entered` 在 v3（≤0.2.1-rc.5）不存在，默认 `false`；
+ * - `activeAtLastHeader` 在 v5（≥0.2.3-alpha.1）被移除，默认 `null`。
+ * 同一个 key 可能被另一代定义写进持久化缓存，宽松 schema 保证跨代共享无损。
  */
 const planUnitStateSchema = zod.object({
   active: zod.boolean(),
@@ -189,7 +193,7 @@ const planUnitStateSchema = zod.object({
     commandId: zod.string(),
     wanted: zod.boolean(),
   }).nullable(),
-  activeAtLastHeader: zod.boolean().nullable(),
+  activeAtLastHeader: zod.boolean().nullable().optional().default(null),
   entered: zod.boolean().default(false),
 })
 

@@ -73,12 +73,14 @@ type Listener = (...args: never[]) => unknown
 /** `ctx.on` 的第三个参数形态（布尔是 `prepend` 的简写）。 */
 type ListenerOptions = boolean | { prepend?: boolean }
 
-/** 系统段（只读名字与正文）。 */
+/** 系统段（只读名字、正文与退役标记）。 */
 interface AssembledSectionLike {
   /** 段名。 */
   name?: unknown
   /** 段正文。 */
   text?: unknown
+  /** DSH 0.2.3+：该段注册已被卸载，正文为退役提示。 */
+  retire?: unknown
 }
 
 /** 一次装配的呈现面。 */
@@ -328,8 +330,13 @@ export function installPtcSdkCacheGuard(
     const index = sections.findIndex(section => section?.name === PTC_SDK_SECTION_NAME)
     if (index < 0) return result
     const section = sections[index]
-    const text = typeof section?.text === 'string' ? section.text : ''
     const bucket = bucketOf(scope)
+    if (section?.retire === true) {
+      // DSH 0.2.3+ 退役段：清除旧缓存并原样放行退役通知。
+      cache.delete(bucket)
+      return result
+    }
+    const text = typeof section?.text === 'string' ? section.text : ''
     const fingerprint = toolFingerprint(currentTools, scope)
     const cached = cache.get(bucket)
     if (cached !== undefined && cached.key === fingerprint && cached.text.length > 0) {

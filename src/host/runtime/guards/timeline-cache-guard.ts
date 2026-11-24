@@ -96,12 +96,14 @@ interface LoggerLike {
   warn(message: string, ...rest: unknown[]): void
 }
 
-/** 系统段（只读名字与正文）。 */
+/** 系统段（只读名字、正文与退役标记）。 */
 interface AssembledSectionLike {
   /** 段名。 */
   name?: unknown
   /** 段正文。 */
   text?: unknown
+  /** DSH 0.2.3+：该段注册已被卸载，正文为退役提示。 */
+  retire?: unknown
 }
 
 /** 一次装配的呈现面。 */
@@ -304,9 +306,14 @@ export function installTimelineCacheGuard(
     }
     stats.seen = true
     const current = sections[index]
+    const state = stateOf(bucketOf(scope))
+    if (current?.retire === true) {
+      // DSH 0.2.3+ 退役段：原样放行退役通知，不以旧冻结正文覆盖，也不再投递过期更新。
+      state.pending = undefined
+      return result
+    }
     const text = typeof current?.text === 'string' ? current.text : ''
     if (text === '') return result
-    const state = stateOf(bucketOf(scope))
     if (state.frozen === '') {
       // 首次见到：这一份就是本会话的基线，原样放行。
       state.frozen = text

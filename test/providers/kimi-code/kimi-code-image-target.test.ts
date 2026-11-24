@@ -42,9 +42,18 @@ function expectedTarget(width: number, height: number) {
   const short = Math.min(width, height)
   const scaledShort = Math.max(1, Math.round(CLI_EDGE * short / long))
   const maxPixels = Math.floor(CLI_EDGE * CLI_EDGE * (short / long))
+  const byteLimits = {
+    maxBytes: VERSION_MAX_BYTES,
+    maxImageBytes: VERSION_MAX_BYTES,
+    imageTargetBytes: VERSION_MAX_BYTES,
+  }
   return width >= height
-    ? { width: CLI_EDGE, height: scaledShort, maxPixels, maxBytes: VERSION_MAX_BYTES }
-    : { width: scaledShort, height: CLI_EDGE, maxPixels, maxBytes: VERSION_MAX_BYTES }
+    ? { width: CLI_EDGE, height: scaledShort, maxPixels, ...byteLimits }
+    : { width: scaledShort, height: CLI_EDGE, maxPixels, ...byteLimits }
+}
+
+function originalTarget(width: number | undefined, height: number | undefined, bytes: number) {
+  return { width, height, maxBytes: bytes, maxImageBytes: bytes, imageTargetBytes: bytes }
 }
 
 describe('kimi-code image request target', () => {
@@ -64,13 +73,13 @@ describe('kimi-code image request target', () => {
   it('no longer scales an image whose long edge is between 1025 and 2000', () => {
     // The band the old shared ceiling reshaped and the official one does not.
     for (const [width, height] of [[1440, 1000], [1920, 1080], [2000, 1500], [1500, 2000]]) {
-      expect(targetOf(ref({ width, height, bytes: 420_000 }))).toEqual({ width, height, maxBytes: 420_000 })
+      expect(targetOf(ref({ width, height, bytes: 420_000 }))).toEqual(originalTarget(width, height, 420_000))
     }
   })
 
   it('sends an image inside the 2000 px edge exactly as stored', () => {
-    expect(targetOf(ref({ width: 2000, height: 2000, bytes: 900_000 }))).toEqual({ width: 2000, height: 2000, maxBytes: 900_000 })
-    expect(targetOf(ref({ width: 800, height: 600, bytes: 100_000 }))).toEqual({ width: 800, height: 600, maxBytes: 100_000 })
+    expect(targetOf(ref({ width: 2000, height: 2000, bytes: 900_000 }))).toEqual(originalTarget(2000, 2000, 900_000))
+    expect(targetOf(ref({ width: 800, height: 600, bytes: 100_000 }))).toEqual(originalTarget(800, 600, 100_000))
   })
 
   it('keeps the shared 256 KiB per-image budget and its derived maxPixels', () => {
@@ -83,20 +92,29 @@ describe('kimi-code image request target', () => {
       throw new Error('a 4000 px image must resolve to a scaled target carrying maxPixels, not the original image')
     }
     expect(target.maxBytes).toBe(VERSION_MAX_BYTES)
+    expect(target.maxImageBytes).toBe(VERSION_MAX_BYTES)
+    expect(target.imageTargetBytes).toBe(VERSION_MAX_BYTES)
     expect(target.maxPixels).toBe(Math.floor(CLI_EDGE * CLI_EDGE * (1000 / 4000)))
     // Four request versions plus conversation text still fit the shared body.
     expect(Math.ceil(VERSION_MAX_BYTES / 3) * 4 * 4).toBeLessThan(1_500_000)
   })
 
   it('has no target for a reference without usable dimensions', () => {
-    expect(targetOf(ref({ bytes: 10 }))).toEqual({ width: undefined, height: undefined, maxBytes: 10 })
-    expect(targetOf(ref({ width: 0, height: 100, bytes: 10 }))).toEqual({ width: 0, height: 100, maxBytes: 10 })
+    expect(targetOf(ref({ bytes: 10 }))).toEqual(originalTarget(undefined, undefined, 10))
+    expect(targetOf(ref({ width: 0, height: 100, bytes: 10 }))).toEqual(originalTarget(0, 100, 10))
   })
 
   it('leaves every other route on the shared 1024 px ceiling', () => {
     const stepCode = new StepCodeAdapter()
     expect(stepCode.imageRequestTarget('step-code', 'step-3.5-flash', ref({ width: 2048, height: 1024 })))
-      .toEqual({ width: 1024, height: 512, maxPixels: 524_288, maxBytes: VERSION_MAX_BYTES })
+      .toEqual({
+        width: 1024,
+        height: 512,
+        maxPixels: 524_288,
+        maxBytes: VERSION_MAX_BYTES,
+        maxImageBytes: VERSION_MAX_BYTES,
+        imageTargetBytes: VERSION_MAX_BYTES,
+      })
   })
 })
 

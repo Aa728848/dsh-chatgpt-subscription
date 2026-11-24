@@ -1,5 +1,11 @@
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
-import type { ContentBlock, GenerateOptions, Message } from '../../common/llm-compat.ts'
+import {
+  extractSystemText,
+  leadingSystemEndIndex,
+  type ContentBlock,
+  type GenerateOptions,
+  type Message,
+} from '../../common/llm-compat.ts'
 import { gptEngineeringGuidance } from '../../common/gpt-engineering-guidance.ts'
 import { createHash } from 'node:crypto'
 import { codexDefaultOutputVerbosity, codexModelSupportsImageInput, codexModelSupportsReasoningSummary, codexModelUsesResponsesLite, codexWireReasoningEffort } from '../../../shared/model-catalog.ts'
@@ -228,9 +234,10 @@ export async function buildResponsesPayload(
   const useResponsesLite = wire.useResponsesLite ?? codexModelUsesResponsesLite(options.model)
   const resolveLocalRawImages = supportsImageInput(options)
   const normalizeCallId = createCallIdNormalizer()
+  const leadingEnd = leadingSystemEndIndex(options.messages)
   const instructionParts = [
     options.system?.trim(),
-    latestSystemPrompt(options.messages),
+    leadingSystemPrompt(options.messages, leadingEnd),
     gptEngineeringGuidance(options.tools),
     commandToolInstruction(options.tools),
     runCodeInstruction(options.tools),
@@ -240,12 +247,19 @@ export async function buildResponsesPayload(
   const knownToolCalls = new Map<string, string | undefined>()
   const localImageStats: LocalRawImageStats = { attempted: 0, resolved: 0, failed: 0 }
   const nativeCompaction = latestCodexCompaction(options.messages, options.model, wire.compHash ?? null)
-  for (let messageIndex = 0; messageIndex < options.messages.length; messageIndex += 1) {
+  for (let messageIndex = leadingEnd; messageIndex < options.messages.length; messageIndex += 1) {
     const message = options.messages[messageIndex]!
-    if (message.role === 'system') continue
     // The opaque checkpoint replaces earlier wire input only; DSH keeps the
     // original transcript for display, editing and a later local fallback.
     if (nativeCompaction !== null && messageIndex < nativeCompaction.index && message.role !== 'developer') continue
+    if (message.role === 'system') {
+      // Mid-conversation incremental system updates (DSH 0.2.3+ PR #6941) stay
+      // in-place as developer input items so the base_instructions prefix cache
+      // stays intact and initial system rules are never discarded.
+      const text = extractSystemText(message.content)
+      if (text !== '') input.push({ role: 'developer', content: [{ type: 'input_text', text }] })
+      continue
+    }
     const replayItems = normalizeReplayCallIds(replayOutputItems(message, options.model, wire.compHash ?? null), normalizeCallId)
     if (message.role === 'assistant' && replayItems !== null) {
       input.push(...replayItems)
@@ -748,19 +762,22 @@ function isRunCodeParserError(output: string): boolean {
 }
 
 /**
- * The effective system prompt of a loop-built request. DSH keeps an earlier
- * `system` node as cached history whenever the rendered prompt changes, so only
- * the newest non-empty node is the complete prompt; concatenating every node
- * would resend superseded instructions.
+ * The initial system prompt folded into the leading `base_instructions` item.
+ *
+ * Only leading contiguous `system` messages belong here; any `system` message
+ * appended mid-conversation (DSH 0.2.3+ incremental system updates) stays in
+ * `input` at its original position so the base prompt is preserved and the
+ * prompt cache prefix is not invalidated.
  */
-function latestSystemPrompt(messages: readonly Message[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
+function leadingSystemPrompt(messages: readonly Message[], leadingEnd: number): string | undefined {
+  const parts: string[] = []
+  for (let index = 0; index < leadingEnd; index += 1) {
     const message = messages[index]
-    if (message === undefined || message.role !== 'system') continue
-    const text = blocksToText(message.content).trim()
-    if (text) return text
+    if (message === undefined) continue
+    const text = extractSystemText(message.content)
+    if (text !== '') parts.push(text)
   }
-  return undefined
+  return parts.length === 0 ? undefined : parts.join('\n\n')
 }
 
 async function mapContent(

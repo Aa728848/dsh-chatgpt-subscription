@@ -19,6 +19,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import {
   LlmError,
+  extractSystemText,
   type ContentBlock as CompatContentBlock,
   type GenerateOptions,
   type Message,
@@ -249,7 +250,7 @@ export function serializeMessages(messages: readonly Message[], images: Resolved
   for (const message of messages) {
     if (message.role === 'system' || message.role === 'developer') {
       flushToolImages()
-      const text = flattenText(message.content)
+      const text = message.role === 'system' ? extractSystemText(message.content) : flattenText(message.content)
       if (text.length > 0) emit({ role: 'system', content: text })
       const additions = toolAdditionNames(message)
       if (additions.length > 0) emit({ role: 'system', content: additionNotice(additions) })

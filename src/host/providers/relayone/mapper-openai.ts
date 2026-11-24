@@ -1,5 +1,5 @@
 import type { GenerateOptions, Message, OutboundContentBlock, StreamChunk, TokenUsage } from '../../common/llm-compat.ts'
-import { LlmError } from '../../common/llm-compat.ts'
+import { LlmError, formatMidConversationSystemReminder } from '../../common/llm-compat.ts'
 import { toToolCallId } from '../../common/brand-compat.ts'
 import { stripMetaSchema } from '../../common/tool-schema.ts'
 import type { ResolvedRequestImages } from '../../common/request-images.ts'
@@ -12,6 +12,7 @@ import {
   relayOneEffort,
   relayOneImageParts,
   relayOneInstructionText,
+  relayOneLeadingInstructionEndIndex,
   relayOneNumber,
   relayOneReplayOutputItems,
   relayOneSafeJson,
@@ -41,22 +42,28 @@ function usesCacheableDeveloperPrefix(id: string): boolean {
   return major > 6 || (major === 6 && Number(version?.[2] ?? 0) >= 2)
 }
 
-function relayOneResponsesInstructions(options: GenerateOptions, entry: RelayOneModelEntry): { base: string; current: string } {
-  if (!usesCacheableDeveloperPrefix(entry.id)) return { base: '', current: relayOneGptSystemText(options, entry) }
+function relayOneResponsesInstructions(options: GenerateOptions, entry: RelayOneModelEntry): { base: string; current: string; leadingEnd: number; developerInInstructions: boolean } {
+  const leadingEnd = relayOneLeadingInstructionEndIndex(options.messages)
+  if (!usesCacheableDeveloperPrefix(entry.id)) {
+    return { base: '', current: relayOneGptSystemText(options, entry), leadingEnd, developerInInstructions: false }
+  }
   const base = [options.system?.trim() ?? '']
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = relayOneInstructionText(options.messages[index]!)
+    if (text !== '') base.push(text)
+  }
   const current: string[] = []
-  let pastPrefix = false
-  for (const message of options.messages) {
-    if (message.role !== 'system' && message.role !== 'developer') {
-      pastPrefix = true
-      continue
-    }
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role !== 'developer') continue
     const text = relayOneInstructionText(message)
-    if (text !== '') (pastPrefix ? current : base).push(text)
+    if (text !== '') current.push(text)
   }
   return {
     base: relayOneGptGuidance(base.filter(Boolean).join('\n\n'), options, entry),
     current: current.join('\n\n'),
+    leadingEnd,
+    developerInInstructions: true,
   }
 }
 
@@ -86,10 +93,16 @@ export function buildRelayOneResponsesRequest(
 ): Record<string, unknown> {
   const input: Record<string, unknown>[] = []
   const knownCalls = new Set<string>()
-  const { base, current } = relayOneResponsesInstructions(options, entry)
+  const { base, current, leadingEnd, developerInInstructions } = relayOneResponsesInstructions(options, entry)
   if (base !== '') input.push({ type: 'message', role: 'developer', content: [{ type: 'input_text', text: base }] })
-  for (const message of options.messages) {
-    if (message.role === 'system' || message.role === 'developer') continue
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role === 'developer' && developerInInstructions) continue
+    if (message.role === 'system' || message.role === 'developer') {
+      const text = relayOneInstructionText(message)
+      if (text !== '') input.push({ type: 'message', role: 'developer', content: [{ type: 'input_text', text }] })
+      continue
+    }
     const toolResult = relayOneToolResult(message)
     if (toolResult !== undefined) {
       const callId = String(toolResult.toolCallId)
@@ -178,9 +191,15 @@ export function buildRelayOneChatRequest(
   const messages: Record<string, unknown>[] = []
   const system = relayOneGptSystemText(options, entry)
   if (system !== '') messages.push({ role: 'system', content: system })
+  const leadingEnd = relayOneLeadingInstructionEndIndex(options.messages)
   const knownCalls = new Set<string>()
-  for (const message of options.messages) {
-    if (message.role === 'system' || message.role === 'developer') continue
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role === 'system' || message.role === 'developer') {
+      const text = relayOneInstructionText(message)
+      if (text !== '') messages.push({ role: 'user', content: formatMidConversationSystemReminder(text) })
+      continue
+    }
     const toolResult = relayOneToolResult(message)
     if (toolResult !== undefined) {
       const callId = String(toolResult.toolCallId)

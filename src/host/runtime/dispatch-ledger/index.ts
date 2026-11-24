@@ -24,6 +24,7 @@ import {
 } from './guard.ts'
 import { createDispatchLedgerTool, DISPATCH_LEDGER_TOOL } from './tool.ts'
 import type { DispatchPolicyDescriptor } from './policy.ts'
+import { liveSubagentModelSelectionPreference } from '../guards/subagent-model-authorization.ts'
 
 /** 宿主装配选项。 */
 export interface DispatchLedgerHostOptions {
@@ -132,8 +133,12 @@ export function installDispatchLedger(
     }
   }
   const dispatchTools = options.dispatchTools
+  const liveRoutes = () => {
+    const pref = liveSubagentModelSelectionPreference(ctx)
+    return pref?.enabled === true && pref.allowedModels.length > 0 ? pref.allowedModels : undefined
+  }
   const policyFor = options.policyFor
-    ?? ((session: DispatchLedgerSessionLike) => policyForSession(session, sessions(), dispatchTools))
+    ?? ((session: DispatchLedgerSessionLike) => policyForSession(session, sessions(), dispatchTools, liveRoutes()))
 
   const tool = createDispatchLedgerTool({
     cache,

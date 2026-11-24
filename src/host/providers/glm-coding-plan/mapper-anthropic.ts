@@ -4,6 +4,9 @@
 import { createHash } from 'node:crypto'
 import {
   LlmError,
+  extractSystemText,
+  leadingSystemEndIndex,
+  midConversationSystemToUserMessage,
   type ContentBlock,
   type FinishReason,
   type GenerateOptions,
@@ -559,9 +562,9 @@ export function glmAnthropicMarkCacheBreakpoint(content: AnthropicBlock[]): Anth
 export function glmAnthropicSystemBlocks(options: GenerateOptions): AnthropicBlock[] {
   const parts: string[] = []
   if (typeof options.system === 'string' && options.system.trim() !== '') parts.push(options.system)
-  for (const message of options.messages) {
-    if (message.role !== 'system') continue
-    const text = textOf(message.content)
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  for (let index = 0; index < leadingEnd; index += 1) {
+    const text = extractSystemText(options.messages[index]!.content, sanitizeText)
     if (text !== '') parts.push(text)
   }
   if (parts.length === 0) return []
@@ -579,7 +582,18 @@ function isToolResultMessage(message: Message): boolean {
 }
 
 function nonSystemMessages(options: GenerateOptions): Message[] {
-  return options.messages.filter((message) => message.role !== 'system')
+  const leadingEnd = leadingSystemEndIndex(options.messages)
+  const out: Message[] = []
+  for (let index = leadingEnd; index < options.messages.length; index += 1) {
+    const message = options.messages[index]!
+    if (message.role !== 'system') {
+      out.push(message)
+      continue
+    }
+    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    if (reminder !== undefined) out.push(reminder)
+  }
+  return out
 }
 
 /** 本面送不出去的选项，报 `UNSUPPORTED_OPTION` 而不是丢掉。 */
