@@ -92,6 +92,8 @@ export function HubOverview({
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => readIdSet(HUB_HIDDEN_PROVIDERS_STORAGE_KEY))
 
   const [addSheetOpen, setAddSheetOpen] = useState(false)
+  const [justAddedId, setJustAddedId] = useState<string | null>(null)
+  const overviewRef = useRef<HTMLDivElement | null>(null)
   const [addSheetQuery, setAddSheetQuery] = useState('')
   const addBtnRef = useRef<HTMLButtonElement | null>(null)
 
@@ -343,8 +345,19 @@ export function HubOverview({
     })
     setAddSheetOpen(false)
     setAddSheetQuery('')
-    onOpen(descriptor.id)
-  }, [onOpen])
+    // Adding only puts the line on the overview; a line that is switched off
+    // lands in "Turned off", so unfold it to show where the pick went.
+    const summary = summaries?.get(descriptor.id)
+    if (summary !== undefined && summary.canToggle && !summary.enabled) setOffFolded(false)
+    setJustAddedId(descriptor.id)
+  }, [summaries])
+
+  useEffect(() => {
+    if (justAddedId === null) return
+    const row = overviewRef.current?.querySelector<HTMLElement>(`.dsh-hub-card[data-id="${justAddedId}"]`)
+    row?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
+    setJustAddedId(null)
+  }, [justAddedId])
 
   const handleCloseAddSheet = useCallback((): void => {
     setAddSheetOpen(false)
@@ -419,7 +432,7 @@ export function HubOverview({
 
   const menuOnIndex = menu === null ? -1 : onRows.findIndex((entry) => entry.descriptor.id === menu.id)
 
-  return <div className="dsh-hub-overview">
+  return <div ref={overviewRef} className="dsh-hub-overview">
     {loadError !== null && summaries === null ? (
       <p className="dsh-codex-error" role="alert">
         {loadError}{' '}

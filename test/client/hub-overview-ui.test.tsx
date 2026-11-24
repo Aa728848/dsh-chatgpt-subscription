@@ -209,7 +209,7 @@ describe('HubOverview (Magpie-style)', () => {
     expect(container.querySelector<HTMLButtonElement>('.dsh-hub-fold')!.disabled).toBe(true)
   })
 
-  it('opens the inline "+ Add provider" sheet, filters presets, and opens the picked provider', async () => {
+  it('opens the inline "+ Add provider" sheet, filters presets, and adds the pick without leaving the overview', async () => {
     mockFetch()
     const onOpen = await render()
     const addBtn = container.querySelector<HTMLButtonElement>('.dsh-hub-add-btn')!
@@ -219,17 +219,25 @@ describe('HubOverview (Magpie-style)', () => {
     expect(sheet).not.toBeNull()
     expect(sheet.querySelectorAll('.dsh-hub-tile')).toHaveLength(HUB_PROVIDERS.length)
 
-    // Filter inside add sheet and pick claude-api
+    // GLM is switched off with no account, so it is not on the overview yet.
+    expect(cards().map((c) => c.dataset.id)).not.toContain('glm-coding-plan')
+
+    // Filter inside add sheet and pick it
     const sheetSearch = sheet.querySelector<HTMLInputElement>('.dsh-hub-search')!
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
-      setter.call(sheetSearch, 'claude-api')
+      setter.call(sheetSearch, 'glm-coding-plan')
       sheetSearch.dispatchEvent(new Event('input', { bubbles: true }))
     })
     const tiles = [...sheet.querySelectorAll<HTMLButtonElement>('.dsh-hub-tile')]
     expect(tiles).toHaveLength(1)
     await act(async () => tiles[0]!.click())
-    expect(onOpen).toHaveBeenCalledWith('claude-api')
+
+    // Picking adds the line to "Turned off" (unfolded to show it) instead of opening its page.
+    expect(onOpen).not.toHaveBeenCalled()
+    expect(container.querySelector('.dsh-hub-sheet')).toBeNull()
+    expect(container.querySelector('.dsh-hub-fold')!.getAttribute('aria-expanded')).toBe('true')
+    expect(cards('[data-group="disabled"] .dsh-hub-card').map((c) => c.dataset.id)).toEqual(['command-code', 'glm-coding-plan'])
   })
 
   it('auto-opens the add sheet when no providers are enabled or configured yet', async () => {
