@@ -2,13 +2,19 @@
 
 ## Unreleased
 
+## 0.84.0 - 2026-11-24
+
 - **[harness] 适配 DSH `0.2.2-rc.5`（当前 `latest`/`next`）与 `0.2.3-alpha.2`（`alpha`），保持 `0.1.2-alpha.5` 起全代兼容**
   - **依赖与打包**：将全部 18 项常规 `@deepseek-ai/dsh-*` 与可选 peer `@deepseek-ai/dsh-tool-executor-native` 扩至 `^0.2.2-rc.5 || ^0.2.3-alpha.1 || ^0.2.3-alpha.2`，补齐 `@deepseek-ai/cordis` (`4.2.0-alpha.1`)、`cordis-plugin-loader` (`1.2.0-alpha.1`)、`schemastery` (`3.20.0-alpha.1`) 依赖范围，`devDependencies` 升至 `^0.2.3-alpha.2` 并同步重生成锁文件；`tsdown.config.ts` 将 `@deepseek-ai/dsh-ptc-runtime` 加入 `neverBundle`，避免打包副本破坏宿主 `instanceof PtcImage` / `PtcInspectableValue` 校验。
   - **全线路增量 `system/message` 与多块拼接缓存保护（对齐 PR #6941）**：DSH `0.2.3` 改为增量追加中置 `system/message` 并在单条 `system` 内携带多块 `TextBlock`。`src/host/common/llm-compat.ts` 新增 `extractSystemText`、`leadingSystemEndIndex`、`formatMidConversationSystemReminder`、`midConversationSystemToUserMessage`，`normalizeMessages` 按 `\n\n` 拼接多块 `system`，`sharedPrefixGroupKey` 仅哈希前导连续 `system`。全部 16 条线路（Codex Responses、Antigravity ACP、Claude、Claude API、Kimi Code、MiniMax Code、GLM Coding Plan、Command Code、Step Code、Qoder、Qianwen Token Plan、WorkBuddy、RelayOne、Cline Pass、OpenDesign、Ollama / AWS Quick）统一将头部 `system` 冻结在前导连续段，中置增量 `system` 不再覆盖或改写顶部系统缓存头，按协议原位保持或转为 `developer` / `<system-reminder>`（并转义嵌套闭合标签）。
   - **计划模式与四大缓存守卫适配（`plan:status` / `stateVersion: 5` / `retire: true`）**：`src/entries/plan-mode.ts` 同步 `PLAN_STATUS_SECTION = 'plan:status'`、`PLAN_STATE_VERSION = 5`（保留版本冲突自动协商重试）与可选默认 `null` 的 `activeAtLastHeader`；`plan-mode-cache-guard` 同时摘除 `plan:policy` 与 `plan:status` 并以 `plan:status` 判定激活，根治退出计划模式后常驻非空 `plan:policy` 误投问题；`plan-mode` / `team-policy` / `timeline` / `ptc-sdk` 四大守卫统一正确处理 `retire: true` 退役段，不误投、不用旧冻结副本覆盖。
   - **子代理实时模型授权与路由审计（对齐 PR #8604）**：DSH `0.2.3` 不再写入 `subagent/model-selection-policy` 会话事件，改为实时读取 `ctx.subagentModelSelection.allowedRoutes()`。`subagent-model-authorization`、`subagent-route-audit`、`dispatch-ledger` 接入实时服务回退（异常安全降级、旧会话录制事件继续优先），子代理设置卡文案同步更新为即时生效说明。
-  - **图片目标双代契约与 Code Mode 对齐 0.2.3 PTC**：`requestImageTarget` / `requestImageTargetOrOriginal` 及 Claude / Kimi 图片目标同时输出 `maxBytes`（`0.2.3+`）与 `maxImageBytes` / `imageTargetBytes`（`≤0.2.2`）；`src/entries/codemode.ts` 动态解析宿主真实 `PtcImage` / `PtcInspectableValue`，`codemode/transport` 兼容真实 `ImageAttachmentRef.bytes` 字段并新增 `substituteProgramImages` 嵌套图片替换、`outputTruncated` 全路径透传与 `CODE_RUN_UNAVAILABLE` 错误码；测试文件全部迁移出已移除的 `@deepseek-ai/dsh-llm/brand` 子路径，并在挂载 `SystemPrompt` 时兼容新注入依赖 `SessionProjections`。
+  - **图片目标双代契约与 Code Mode 对齐 0.2.3 PTC**：`requestImageTarget` / `requestImageTargetOrOriginal` 及 Claude / Kimi 图片目标同时输出 `maxBytes`（`0.2.3+`）与 `maxImageBytes` / `imageTargetBytes`（`≤0.2.2`）；`src/entries/codemode.ts` 按宿主运行目录与 `realpath` 解析 `@deepseek-ai/dsh-ptc-runtime` 并以 `rawRuntime instanceof mod.PtcRuntime` 做严格同源校验（解决 Junction / symlink 或独立安装目录加载时因双模块实例引发的 `ToolCallError: binding resolution must be lossless JSON`，未命中同源时安全回退普通 lossless JSON 与 `deferContext` 兜底）；`codemode/transport` 兼容真实 `ImageAttachmentRef.bytes` 字段并新增 `substituteProgramImages` 嵌套图片替换、`outputTruncated` 全路径透传与 `CODE_RUN_UNAVAILABLE` 错误码；测试文件全部迁移出已移除的 `@deepseek-ai/dsh-llm/brand` 子路径，并在挂载 `SystemPrompt` 时兼容新注入依赖 `SessionProjections`。
   - **验证**：新增 `test/runtime/dsh-023-compat.test.ts`（11 例跨代回归）并扩充 `test/runtime/codemode.test.ts` / `test/runtime/codemode-entry.test.ts`。主基线 `0.2.3-alpha.2` 强制 host/client/test/scripts 类型检查 0 错误、构建通过、`npm ci --dry-run` 通过、`npm pack --dry-run` 打包预演通过；精确 `0.2.2-rc.5`（52 个可达 DSH 包）与 `0.1.5-rc.1`（36 个可达 DSH 包）外部 Clean Room 均已全量实测通过（详见 `.dsh/skills/dsh-harness-upgrade/references/0.2.3-alpha.2.md`）。
+
+- **[hub] 加速总览加载与异步系统代理探测**：在 `localStorage` 缓存总览摘要与代理快照实现秒开渲染；各线路总览读取增加 2.5 秒超时隔离，避免单个卡顿提供方阻塞整体视图；新增非阻塞异步系统代理探测（30 秒缓存 TTL + 并发去重）；跳过未认证的 `claude-api` / `relayone` 目录预热并收紧 ACP 认证探测超时。
+
+- **[runtime / ui / repo] 细节修复与仓库目录整理**：为注入的系统提示词段补齐有限 `order` 值；对齐「本轮结束后压缩」开关胶囊与宿主皮肤配色令牌；按模块重组 `src/`、`test/`、`docs/`、`config/`、`assets/` 目录结构并精简用户文档与提示文案。
 
 ## 0.83.0 - 2026-11-28
 
