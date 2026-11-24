@@ -5,6 +5,7 @@ import { CODEX_CHATGPT_PROVIDER_ID } from '../../../compat.ts'
 import type { PluginStatusDto } from '../../../shared/contracts.ts'
 import { SubscriptionApi } from './api.ts'
 import { QuotaCapsule, quotaLevel } from '../../common/ComposerQuotaBadge.tsx'
+import { useSessionPanelQuotaActive } from '../../features/session-quota/panel-availability.ts'
 import { useStore } from '../../common/use-store.ts'
 import { NS } from './locales.ts'
 import { selectQuotaForModel } from './quota.ts'
@@ -23,6 +24,7 @@ export function CodexComposerQuota({ api, directory, loadModelDirectory, t }: Pr
   const mountedRef = useRef(false)
   const selected = modelState.current
   const isCodex = selected?.provider === CODEX_CHATGPT_PROVIDER_ID
+  const hiddenByPanel = useSessionPanelQuotaActive()
 
   useEffect(() => {
     loadModelDirectory()
@@ -36,7 +38,7 @@ export function CodexComposerQuota({ api, directory, loadModelDirectory, t }: Pr
   }, [])
 
   useEffect(() => {
-    if (!isCodex) return
+    if (!isCodex || hiddenByPanel) return
     let disposed = false
     const refresh = async (): Promise<void> => {
       setLoading(true)
@@ -57,10 +59,10 @@ export function CodexComposerQuota({ api, directory, loadModelDirectory, t }: Pr
       disposed = true
       window.clearInterval(timer)
     }
-  }, [api, isCodex])
+  }, [api, hiddenByPanel, isCodex])
 
   const quota = useMemo(() => selectQuotaForModel(status?.quota, selected?.model), [selected?.model, status?.quota])
-  if (!isCodex || status?.preferences.quickQuotaVisible !== true) return null
+  if (hiddenByPanel || !isCodex || status?.preferences.quickQuotaVisible !== true) return null
   return <QuotaCapsule
     label={t('quickQuotaLabel')}
     text={quota === null ? (loading ? t('quickQuotaLoading') : '—') : formatPercent(quota.remainingPercent)}

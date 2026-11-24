@@ -369,6 +369,9 @@ describe('client registration', () => {
       'sidebar.right.pane.tab',
       'sidebar.right.pane.tab.title',
       'settings.section',
+      // 会话详情栏订阅额度卡片与其折叠摘要读数。
+      'conversation.session.panel.section',
+      'conversation.session.panel.section.actions',
       // MiniMax 视频的 `/video` 参数弹窗：渲染座位挂在输入框的 overlay 槽上。
       // 弹窗本身是全局的（命令回调在一段没有 React 树的代码里，靠模块级句柄
       // 打开它），但 overlay 是宿主唯一为「盖在输入框上的层」准备的槽位。

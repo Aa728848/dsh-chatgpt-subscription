@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { SnapshotStore } from '../providers/codex-chatgpt/store.ts'
+import { useSessionPanelQuotaActive } from '../features/session-quota/panel-availability.ts'
 import { useStore } from './use-store.ts'
 
 export interface ComposerQuotaFacts {
@@ -77,6 +78,7 @@ export function ComposerQuotaBadge<Status extends { authenticated: boolean }>(
 
   const selected = modelState.current
   const isSelected = selected?.provider === providerId
+  const hiddenByPanel = useSessionPanelQuotaActive()
 
   useEffect(() => {
     loadModelDirectory()
@@ -106,7 +108,7 @@ export function ComposerQuotaBadge<Status extends { authenticated: boolean }>(
   }, [])
 
   useEffect(() => {
-    if (!isSelected) return
+    if (!isSelected || hiddenByPanel) return
     void fetchStatus(false)
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void fetchStatus(false)
@@ -114,13 +116,14 @@ export function ComposerQuotaBadge<Status extends { authenticated: boolean }>(
     return () => {
       window.clearInterval(timer)
     }
-  }, [fetchStatus, isSelected])
+  }, [fetchStatus, hiddenByPanel, isSelected])
 
   const facts = useMemo(() => selectRef.current(status, selected?.model), [status, selected?.model])
 
   // Inert unless the conversation is actually on this provider: the badge is one
-  // per line and six of them must never be visible at once.
-  if (!isSelected || status === null || !status.authenticated || facts === null) return null
+  // per line and six of them must never be visible at once. Also yields to the
+  // native session details panel when that slot is mounted.
+  if (hiddenByPanel || !isSelected || status === null || !status.authenticated || facts === null) return null
 
   return <QuotaCapsule
     label={label}

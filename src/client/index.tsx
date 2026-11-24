@@ -86,6 +86,9 @@ import { dictionaries as dispatchLedgerDicts, NS_DISPATCH_LEDGER, type DispatchL
 import { CodeRunToolView } from './features/codemode/CodeRunToolView.tsx'
 import { installCodemodeStyles } from './features/codemode/styles.ts'
 import { CODE_RUN_TOOL_NAME } from './features/codemode/tool-name.ts'
+import { installSessionQuotaPanel } from './features/session-quota/index.ts'
+import { dictionaries as sessionQuotaDicts, NS_SESSION_QUOTA, type SessionQuotaLocaleKey } from './features/session-quota/locales.ts'
+import { installSessionQuotaStyles } from './features/session-quota/styles.ts'
 import { RELAYONE_IMAGE_TOOL_NAME, RELAYONE_VIDEO_TOOL_NAME } from '../shared/relayone-contracts.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -119,6 +122,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-claude-api': ClaudeApiLocaleKey
     'dsh-aws-quick': AwsQuickLocaleKey
     'dsh-compact-after-turn': CompactAfterTurnLocaleKey
+    'dsh-session-quota': SessionQuotaLocaleKey
   }
 }
 
@@ -219,6 +223,8 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
   }, 'dsh-relayone: styles')
   ctx.effect(() => ctx.locale.register(NS_COMPACT_AFTER_TURN, compactAfterTurnDicts), 'dsh-compact-after-turn: dictionaries')
   ctx.effect(() => installCompactAfterTurnStyles(), 'dsh-compact-after-turn: styles')
+  ctx.effect(() => ctx.locale.register(NS_SESSION_QUOTA, sessionQuotaDicts), 'dsh-session-quota: dictionaries')
+  ctx.effect(() => installSessionQuotaStyles(), 'dsh-session-quota: styles')
   // Claude API: dictionaries and styles only. The line has no quota badge, so it
   // registers no conversation.input.right slot (a user decision).
   ctx.effect(() => ctx.locale.register(NS_CLAUDE_API, claudeApiDicts), 'dsh-claude-api: dictionaries')
@@ -429,6 +435,10 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
   // 单独一个子模块（./progress-updates/），与 kimi-code 这些线路同一种
   // 组织方式：入口只负责调用，注册细节留在子模块里。
   installProgressUpdatesClient(ctx)
+
+  // 会话详情栏订阅额度卡片：挂到 DSH 原生 `conversation.session.panel.section`
+  // 槽位；检测到槽位可用时自动隐藏底部输入框胶囊，旧版宿主无此槽位时保持原胶囊。
+  installSessionQuotaPanel(ctx)
 
   // MiniMax 视频的第二个用户入口：`/video` 斜杠命令 + 参数弹窗。
   //
