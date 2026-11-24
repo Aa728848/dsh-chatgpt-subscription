@@ -3,8 +3,9 @@
  *
  * The browser arms a session from the composer's model menu. The Host then waits
  * for that session's agent to settle (`agent/status` → `idle`) and runs one
- * manual compaction through the same engine entry `/compact` uses
- * (`compaction.compactNow`). However that attempt ends, the switch turns itself
+ * manual compaction through the agent's canonical `/compact` command (with
+ * direct `compaction.compactNow` as a compatibility fallback). However that
+ * attempt ends, the switch turns itself
  * off again: it is a one-shot, not a mode.
  *
  * Rules this controller keeps:
@@ -274,11 +275,43 @@ export interface CompactAfterTurnOptions {
   readonly engine?: () => unknown
 }
 
+interface CompactCommandRuntime {
+  find(agent: CompactAfterTurnAgent, name: string): unknown
+  execute(agent: CompactAfterTurnAgent, line: string, attachments: readonly [], signal: AbortSignal): Promise<{
+    result?: { kind?: unknown; text?: unknown; sourceEventSeq?: unknown }
+  } | undefined>
+}
+
 /**
- * Resolve the Host compaction engine lazily: it may load after this plugin and
- * may be replaced on a profile reload.
+ * Resolve manual compaction lazily. Preset services live in an isolated Cordis
+ * realm that is NOT agent.ctx's realm; the preset registry shares only scoped
+ * contributions such as /compact with the agent. Prefer that canonical command
+ * and retain direct-engine lookup for older or non-preset Host compositions.
  */
 function compactorOf(host: CompactAfterTurnHost, options: CompactAfterTurnOptions, agent: CompactAfterTurnAgent | undefined): CompactNow | undefined {
+  if (agent !== undefined) {
+    try {
+      const commands = host.get?.('commands') as CompactCommandRuntime | undefined
+      if (typeof commands?.find === 'function' && typeof commands.execute === 'function'
+        && commands.find(agent, 'compact') !== undefined) {
+        return async (target, signal) => {
+          const execution = await commands.execute(target, '/compact', [], signal)
+          const result = execution?.result
+          if (result === undefined) throw new CompactAfterTurnError('unavailable', 'This session has no compact command.')
+          if (result.kind === 'success') return result.sourceEventSeq === undefined ? null : result
+          const message = typeof result.text === 'string' ? result.text : 'Manual compaction failed.'
+          // The public command result intentionally carries human text rather
+          // than ManualCompactionError.code. Preserve the controller's rearm
+          // behavior for the backend's stable busy diagnostic.
+          const busy = message.includes('active compaction') || message.includes('not idle')
+          throw Object.assign(new Error(message), { code: busy ? 'busy' : 'summary' })
+        }
+      }
+    } catch {
+      // An older Host may not expose the command runtime; try the engine below.
+    }
+  }
+
   let engine: unknown
   try {
     engine = agent?.ctx?.get?.('compaction') ?? options.engine?.() ?? host.get?.('compaction')

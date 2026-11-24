@@ -227,6 +227,41 @@ describe('installCompactAfterTurn engine lookup', () => {
     expect(compactNow).toHaveBeenCalledWith(agent, expect.any(AbortSignal))
   })
 
+  it('uses the agent-scoped compact command when its engine lives in an isolated preset realm', async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ commandId: 'cmd-1', result: { kind: 'error', text: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.' } })
+      .mockResolvedValueOnce({ commandId: 'cmd-2', result: { kind: 'success', sourceEventSeq: 1 } })
+    const find = vi.fn(() => ({ name: 'compact' }))
+    const listeners = new Map<string, (...args: any[]) => void>()
+    let route: { handler: (req: IncomingMessage, res: ServerResponse) => unknown } | undefined
+    installCompactAfterTurn({
+      on: (event, listener) => { listeners.set(event, listener); return () => undefined },
+      get: (name: string) => name === 'commands' ? { find, execute } : undefined,
+      webServer: { register: (entry) => { route = entry; return () => undefined } },
+    })
+    // The real preset registry shares scoped command contributions with the
+    // agent, but its isolated Cordis service realm is NOT agent.ctx's realm.
+    const agent = { session: SESSION, status: 'idle', ctx: { get: () => undefined } }
+    listeners.get('agent/status')!({ agent, status: 'running' })
+    const read = response()
+    await route!.handler(request('GET', `${COMPACT_AFTER_TURN_PATH}?session=s1`), read)
+    expect(JSON.parse(read.body).value.available).toBe(true)
+    await route!.handler(request('POST', COMPACT_AFTER_TURN_PATH, { sessionId: 's1', armed: true }), response())
+    listeners.get('session/event')!(SESSION, turnEnd('completed'))
+    listeners.get('agent/status')!({ agent, status: 'idle' })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(execute).toHaveBeenCalledTimes(1)
+    const busy = response()
+    await route!.handler(request('GET', `${COMPACT_AFTER_TURN_PATH}?session=s1`), busy)
+    expect(JSON.parse(busy.body).value.phase).toBe('armed')
+    listeners.get('session/event')!(SESSION, turnEnd('completed'))
+    listeners.get('agent/status')!({ agent, status: 'idle' })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(find).toHaveBeenCalledWith(agent, 'compact')
+    expect(execute).toHaveBeenCalledTimes(2)
+    expect(execute).toHaveBeenCalledWith(agent, '/compact', [], expect.any(AbortSignal))
+  })
+
   it('prefers the engine the caller tracks over a plain lookup', async () => {
     const compactNow = vi.fn(async () => ({ id: 'c1' }))
     const listeners = new Map<string, (...args: any[]) => void>()
