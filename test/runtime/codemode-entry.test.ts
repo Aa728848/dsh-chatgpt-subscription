@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { apply } from '../../src/entries/codemode.ts'
+import { apply, resolveHostPtcRuntimeClasses } from '../../src/entries/codemode.ts'
 import { PTC_IMAGE_TAG, PtcImageLike, SandboxEscalationError } from '../../src/host/runtime/codemode/transport.ts'
 
 /** 一个按内核契约校验「必须先 resolve」的假运行时。 */
@@ -541,5 +541,93 @@ describe('Code Mode 入口的会话授权', () => {
     expect((galleryItem as { path: string }).path).toBe('/sandbox/attachments/nested_shot.png')
     // 嵌套图片未被 inspect，自动通过 deferContext 兜底补发
     expect(deferred).toHaveLength(1)
+  })
+
+  it('0.2.3 回归：异源 PtcRuntime 副本绝不注入插件自有 PtcInspectableValue/PtcImage（杜绝 binding resolution must be lossless JSON）', async () => {
+    // 模拟真实宿主从独立目录加载了另一份 PtcRuntime（如 Junction 链接插件时插件与宿主各有副本）
+    class PtcRuntime {}
+    class ForeignNodePtcRuntime extends PtcRuntime {
+      readonly language = 'typescript'
+      readonly programFormat = 'scoped-repl'
+      readonly executionInstructions = 'Call inspect(value) to show output or images.'
+      resolve(request: Record<string, unknown>) {
+        return { ...request, sandboxPolicy: request['sandboxPolicy'] ?? { mode: 'read-only' } }
+      }
+      async run(spec: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+        // 严格模拟 ptc-runtime-node/src/bindings.ts 的 lossless JSON 校验：拒绝所有非 plain object 类实例
+        const assertLossless = (val: unknown): void => {
+          if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+            const proto = Object.getPrototypeOf(val)
+            if (proto !== Object.prototype && proto !== null) {
+              throw new Error('binding resolution must be lossless JSON')
+            }
+          }
+        }
+        const summary = await spec.bindings[0]!.functions['win_bash']!({})
+        assertLossless(summary)
+        const shot = await spec.bindings[0]!.functions['read_image']!({ file_path: 'a.png' })
+        assertLossless(shot)
+        return { output: [{ type: 'text' as const, text: JSON.stringify(summary) }] }
+      }
+    }
+
+    const foreignRuntime = new ForeignNodePtcRuntime()
+    // 1. 铁闸校验必须拒绝异源副本，返回 hostMatched: false 且不暴露异源类
+    const classes = await resolveHostPtcRuntimeClasses(foreignRuntime)
+    expect(classes.hostMatched).toBe(false)
+    expect(classes.PtcInspectableValue).toBeUndefined()
+    expect(classes.PtcImage).toBeUndefined()
+
+    // 2. 端到端运行：工具返回对象+纯文本时不包装异源 PtcInspectableValue；图片工具安全退回 deferContext
+    const imgRef = {
+      attachmentId: 'sha256:foreign_shot',
+      mediaType: 'image/png',
+      width: 640,
+      height: 480,
+      bytes: 4096,
+    }
+    const { registered, executor } = createContext({
+      runtime: foreignRuntime,
+      exposeExecutor: true,
+      attachments: { imageHostPath: () => 'C:/dsh-home/attachments/foreign_shot.png' },
+      fs: { processPathFromHostPath: (p: string) => p.replace('C:/dsh-home/attachments', '/sandbox/attachments') },
+      execute: async (input: unknown) => {
+        const req = input as { calls: Array<{ callId: string; name: string }> }
+        return {
+          results: req.calls.map((call) => call.name === 'win_bash'
+            ? { callId: call.callId, result: { isError: false, value: { exitCode: 0, stdout: 'ok' }, content: [{ type: 'text', text: 'ok' }] } }
+            : { callId: call.callId, result: { isError: false, value: { path: 'a.png' }, content: [{ type: 'image', attachment: imgRef }] } }),
+        }
+      },
+    })
+    const describe = (executor as { describe(tools: readonly unknown[]): unknown }).describe.bind(executor)
+    describe([
+      { name: 'win_bash', description: 'shell', parameters: {} },
+      { name: 'read_image', description: 'image', parameters: {} },
+    ])
+    const codeRun = registered.find((entry) => entry.name === 'code_run')!
+    const deferred: unknown[] = []
+    const out = await codeRun.execute(
+      { code: 'await tools.win_bash({}); await tools.read_image({ file_path: "a.png" })', description: 'foreign runtime' },
+      { callId: 'c-foreign', signal: new AbortController().signal, agent: { session }, deferContext: (m: unknown) => deferred.push(m) },
+    ) as { logs: string[] }
+    expect(out.logs).toEqual(['{"exitCode":0,"stdout":"ok"}'])
+    // 异源运行时下图片未转成异源 PtcImageLike，而是通过 deferContext 零丢图兜底
+    expect(deferred).toHaveLength(1)
+
+    // 3. 当 runtime 确实继承自宿主同源 PtcRuntime（且经 Cordis 代理包装）时，通过 instanceof 铁闸返回同源类
+    const ptcMod = await import('@deepseek-ai/dsh-ptc-runtime').catch(() => undefined) as {
+      PtcRuntime?: new (...args: unknown[]) => object
+      PtcImage?: unknown
+      PtcInspectableValue?: unknown
+    } | undefined
+    if (typeof ptcMod?.PtcRuntime === 'function') {
+      const sameOrigin = Object.create(ptcMod.PtcRuntime.prototype) as object
+      const proxied = { [Symbol('cordis.original')]: sameOrigin }
+      const matched = await resolveHostPtcRuntimeClasses(proxied)
+      expect(matched.hostMatched).toBe(true)
+      expect(matched.PtcImage).toBe(ptcMod.PtcImage)
+      expect(matched.PtcInspectableValue).toBe(ptcMod.PtcInspectableValue)
+    }
   })
 })

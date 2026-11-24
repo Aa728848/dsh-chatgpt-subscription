@@ -23,11 +23,16 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/codemode
  */
 
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import * as dshLlm from '@deepseek-ai/dsh-llm'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 
 import { PLUGIN_MESSAGE_SOURCE_KIND } from '../host/common/llm-compat.ts'
+import { candidatePackageRoots } from '../host/runtime/presets/preset-sync.ts'
 import { createDiscoveryDefinitions } from '../host/runtime/codemode/discovery.ts'
 import { createCodemodeExecutor } from '../host/runtime/codemode/executor.ts'
 import { createRetention } from '../host/runtime/codemode/retention.ts'
@@ -67,40 +72,237 @@ export const inject = ['tools', 'systemPrompt']
 /** 决策环长度：只留给 `code_debug`。 */
 const DEBUG_RING = 50
 
-interface PtcRuntimeClasses {
+/** 宿主 `@deepseek-ai/dsh-ptc-runtime` 真实类引用。 */
+export interface HostPtcRuntimeClasses {
+  /** 是否通过了与运行中宿主 `PtcRuntime` 原型链的 `instanceof` 同源校验。 */
+  readonly hostMatched: boolean
   readonly PtcImage?: new (path: string, attachment: unknown) => unknown
   readonly PtcInspectableValue?: new (value: object, text: string) => unknown
 }
 
-let cachedPtcClasses: PtcRuntimeClasses | undefined
-let ptcClassesPromise: Promise<PtcRuntimeClasses> | undefined
+const CORDIS_ORIGINAL_DESCRIPTION = 'cordis.original'
+const PTC_RUNTIME_PACKAGE = '@deepseek-ai/dsh-ptc-runtime'
+
+const resolvedPtcClassesByProto = new WeakMap<object, HostPtcRuntimeClasses>()
+const pendingPtcClassesByProto = new WeakMap<object, Promise<HostPtcRuntimeClasses>>()
+
+/** 展开 Cordis 代理链，拿到最底层真实的 runtime 对象。 */
+function unwrapRuntimeInstance(runtime: unknown): object | undefined {
+  if (typeof runtime !== 'object' || runtime === null) return undefined
+  let current: object = runtime
+  for (let depth = 0; depth < 8; depth += 1) {
+    let next: unknown
+    for (const sym of Object.getOwnPropertySymbols(current)) {
+      if (sym.description === CORDIS_ORIGINAL_DESCRIPTION) {
+        next = (current as Record<symbol, unknown>)[sym]
+        break
+      }
+    }
+    if (typeof next !== 'object' || next === null || next === current) break
+    current = next
+  }
+  return current
+}
+
+/** 判定 runtime 实例是否继承自真实的 `PtcRuntime` 类（而非测试里的普通 mock 对象）。 */
+function isRealPtcRuntimeInstance(runtime: object | undefined): boolean {
+  if (runtime === undefined) return false
+  let proto: unknown = Object.getPrototypeOf(runtime)
+  for (let depth = 0; depth < 12 && typeof proto === 'object' && proto !== null && proto !== Object.prototype; depth += 1) {
+    const ctor = (proto as { constructor?: unknown }).constructor
+    if (typeof ctor === 'function' && ctor.name === 'PtcRuntime') return true
+    proto = Object.getPrototypeOf(proto)
+  }
+  return false
+}
+
+/** 从 Cordis ctx / loader 上尽量收集宿主运行根目录。 */
+function contextBaseDirs(source: unknown, roots: Set<string>): void {
+  if (typeof source !== 'object' || source === null) return
+  const record = source as Record<string, unknown>
+  const addDir = (value: unknown): void => {
+    if (typeof value === 'string' && value.trim().length > 0) roots.add(value.trim())
+  }
+  addDir(record['baseDir'])
+  const root = record['root']
+  if (typeof root === 'object' && root !== null && root !== source) {
+    addDir((root as Record<string, unknown>)['baseDir'])
+    const rootLoader = (root as Record<string, unknown>)['loader']
+    if (typeof rootLoader === 'object' && rootLoader !== null) {
+      addDir((rootLoader as Record<string, unknown>)['baseDir'])
+    }
+  }
+  const loader = record['loader']
+  if (typeof loader === 'object' && loader !== null) {
+    addDir((loader as Record<string, unknown>)['baseDir'])
+  }
+  if (typeof record['get'] === 'function') {
+    try {
+      const loaderService = (record['get'] as (name: string) => unknown).call(source, 'loader')
+      if (typeof loaderService === 'object' && loaderService !== null) {
+        addDir((loaderService as Record<string, unknown>)['baseDir'])
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/** 从给定根目录解析 `@deepseek-ai/dsh-ptc-runtime` 的真实入口 file:// URL（经过 realpathSync 归一化）。 */
+function resolvePtcRuntimeModuleUrl(rootDir: string): string | undefined {
+  let req: NodeRequire
+  try {
+    req = createRequire(join(rootDir, 'package.json'))
+  } catch {
+    return undefined
+  }
+  let entryPath: string | undefined
+  try {
+    entryPath = req.resolve(PTC_RUNTIME_PACKAGE)
+  } catch {
+    // 若未来改为 import-only 导出条件导致 require.resolve 失败，则直接读其 package.json 的 exports/main。
+    try {
+      const manifestPath = req.resolve(`${PTC_RUNTIME_PACKAGE}/package.json`)
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        main?: unknown
+        exports?: Record<string, unknown>
+      }
+      const dot = manifest.exports?.['.']
+      const rel = typeof dot === 'string'
+        ? dot
+        : typeof dot === 'object' && dot !== null
+          ? (dot as Record<string, unknown>)['import'] ?? (dot as Record<string, unknown>)['default']
+          : manifest.main
+      if (typeof rel === 'string' && rel.length > 0) {
+        const candidate = resolve(dirname(manifestPath), rel)
+        if (existsSync(candidate)) entryPath = candidate
+      }
+    } catch {
+      return undefined
+    }
+  }
+  if (entryPath === undefined) return undefined
+  try {
+    return pathToFileURL(realpathSync(entryPath)).href
+  } catch {
+    return pathToFileURL(entryPath).href
+  }
+}
+
+/** 从已导入模块提取 `PtcImage` / `PtcInspectableValue` 构造函数。 */
+function extractPtcClasses(mod: Record<string, unknown>, hostMatched: boolean): HostPtcRuntimeClasses {
+  return {
+    hostMatched,
+    ...(typeof mod['PtcImage'] === 'function'
+      ? { PtcImage: mod['PtcImage'] as HostPtcRuntimeClasses['PtcImage'] }
+      : {}),
+    ...(typeof mod['PtcInspectableValue'] === 'function'
+      ? { PtcInspectableValue: mod['PtcInspectableValue'] as HostPtcRuntimeClasses['PtcInspectableValue'] }
+      : {}),
+  }
+}
 
 /**
- * 懒加载宿主真实的 `@deepseek-ai/dsh-ptc-runtime` 类引用（`tsdown` 设为 `neverBundle`）。
+ * 解析与当前运行中宿主 `ptcRuntime` 同源的 `@deepseek-ai/dsh-ptc-runtime` 类引用。
  *
- * `ptc-runtime-node` 通过 `instanceof PtcImage` 与 `instanceof PtcInspectableValue`
- * 校验类身份，因此必须用宿主真实构造函数实例化；老代未导出相应类时退回空对象。
+ * `ptc-runtime-node` 的 `bindings.ts` 使用 `instanceof PtcImage` 与 `instanceof PtcInspectableValue`
+ * 校验返回值；当本插件通过 Junction/symlink 或独立安装目录加载时，直接 `import('@deepseek-ai/dsh-ptc-runtime')`
+ * 可能加载到插件自己 `node_modules` 中的副本，导致 `instanceof` 为 `false` 并触发
+ * `binding resolution must be lossless JSON`。
+ *
+ * 因此当 `runtime` 是真实 `PtcRuntime` 子类实例时，必须优先从宿主运行目录（`ctx`/`loader`/profile/`argv[1]`）
+ * 解析 `realpath` 入口并以 `rawRuntime instanceof mod.PtcRuntime` 做严格身份铁闸校验；无法确认同源时返回空对象，
+ * 宁可退回普通 lossless JSON 与 `deferContext`，也绝不将异源类实例交给宿主运行时。
  */
-function loadPtcRuntimeClasses(): Promise<PtcRuntimeClasses> {
-  if (cachedPtcClasses !== undefined) return Promise.resolve(cachedPtcClasses)
-  if (ptcClassesPromise === undefined) {
-    const specifier = '@deepseek-ai/dsh-ptc-runtime'
-    ptcClassesPromise = import(specifier).then((mod: Record<string, unknown>) => {
-      cachedPtcClasses = {
-        ...(typeof mod['PtcImage'] === 'function'
-          ? { PtcImage: mod['PtcImage'] as PtcRuntimeClasses['PtcImage'] }
-          : {}),
-        ...(typeof mod['PtcInspectableValue'] === 'function'
-          ? { PtcInspectableValue: mod['PtcInspectableValue'] as PtcRuntimeClasses['PtcInspectableValue'] }
-          : {}),
+export async function resolveHostPtcRuntimeClasses(
+  runtime: unknown,
+  ctx?: unknown,
+  extraRoots?: readonly string[],
+): Promise<HostPtcRuntimeClasses> {
+  const rawRuntime = unwrapRuntimeInstance(runtime)
+  const isReal = isRealPtcRuntimeInstance(rawRuntime)
+
+  if (isReal && rawRuntime !== undefined) {
+    const roots = new Set<string>()
+    if (extraRoots !== undefined) {
+      for (const dir of extraRoots) {
+        if (typeof dir === 'string' && dir.trim().length > 0) roots.add(dir.trim())
       }
-      return cachedPtcClasses
-    }, () => {
-      cachedPtcClasses = {}
-      return cachedPtcClasses
-    })
+    }
+    contextBaseDirs(ctx, roots)
+    contextBaseDirs((rawRuntime as Record<string, unknown>)['ctx'], roots)
+    for (const dir of candidatePackageRoots()) roots.add(dir)
+
+    const seenUrls = new Set<string>()
+    const tryModule = async (specifier: string): Promise<HostPtcRuntimeClasses | undefined> => {
+      if (seenUrls.has(specifier)) return undefined
+      seenUrls.add(specifier)
+      try {
+        const mod = (await import(specifier)) as Record<string, unknown>
+        const HostPtcRuntime = mod['PtcRuntime']
+        if (typeof HostPtcRuntime === 'function' && rawRuntime instanceof (HostPtcRuntime as new (...args: never[]) => unknown)) {
+          return extractPtcClasses(mod, true)
+        }
+      } catch {
+        // 忽略无法加载的候选，继续尝试下一个目录。
+      }
+      return undefined
+    }
+
+    for (const rootDir of roots) {
+      const url = resolvePtcRuntimeModuleUrl(rootDir)
+      if (url === undefined) continue
+      const matched = await tryModule(url)
+      if (matched !== undefined) return matched
+    }
+    // 最后兜底一次裸 specifier（同样须通过 instanceof 铁闸）。
+    const fallbackMatched = await tryModule(PTC_RUNTIME_PACKAGE)
+    if (fallbackMatched !== undefined) return fallbackMatched
+    return { hostMatched: false }
   }
-  return ptcClassesPromise
+
+  // 非真实 PtcRuntime 子类（如单元测试 mock runtime）：加载当前进程的包即可，缺包时返回空。
+  try {
+    const mod = (await import(PTC_RUNTIME_PACKAGE)) as Record<string, unknown>
+    return extractPtcClasses(mod, false)
+  } catch {
+    return { hostMatched: false }
+  }
+}
+
+/** 按 runtime 原型缓存并读取宿主同源类引用。 */
+function runtimeCacheKey(runtime: unknown): object | undefined {
+  const raw = unwrapRuntimeInstance(runtime)
+  if (raw === undefined) return undefined
+  const proto: unknown = Object.getPrototypeOf(raw)
+  return typeof proto === 'object' && proto !== null && proto !== Object.prototype ? proto : raw
+}
+
+function getCachedPtcClasses(runtime: unknown): HostPtcRuntimeClasses | undefined {
+  const key = runtimeCacheKey(runtime)
+  return key === undefined ? undefined : resolvedPtcClassesByProto.get(key)
+}
+
+function loadPtcRuntimeClassesFor(runtime: unknown, ctx?: unknown): Promise<HostPtcRuntimeClasses> {
+  const key = runtimeCacheKey(runtime)
+  if (key === undefined) return Promise.resolve({ hostMatched: false })
+  const existing = resolvedPtcClassesByProto.get(key)
+  if (existing !== undefined) return Promise.resolve(existing)
+  let pending = pendingPtcClassesByProto.get(key)
+  if (pending === undefined) {
+    pending = resolveHostPtcRuntimeClasses(runtime, ctx).then((resolved) => {
+      resolvedPtcClassesByProto.set(key, resolved)
+      pendingPtcClassesByProto.delete(key)
+      return resolved
+    }, () => {
+      const empty: HostPtcRuntimeClasses = { hostMatched: false }
+      resolvedPtcClassesByProto.set(key, empty)
+      pendingPtcClassesByProto.delete(key)
+      return empty
+    })
+    pendingPtcClassesByProto.set(key, pending)
+  }
+  return pending
 }
 
 /** 本行会读到的服务（结构探测，不 import 内核类型）。 */
@@ -240,7 +442,8 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
 
   const rules = createRules(config)
   // 预热宿主 `@deepseek-ai/dsh-ptc-runtime` 类引用（不阻塞同步 apply）。
-  void loadPtcRuntimeClasses()
+  const initialRuntime = runtimeOf()
+  if (initialRuntime !== undefined) void loadPtcRuntimeClassesFor(initialRuntime, ctx)
   const retention = createRetention(runtimeOf)
   if (typeof context.effect === 'function') {
     context.effect(() => () => { void retention.dispose() }, 'codemode retained environments')
@@ -404,10 +607,14 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       }
       if (!isImageAttachmentRefLike(attachment)) return undefined
       const makeImage = (readonlyPath: string): unknown => {
-        const HostPtcImage = cachedPtcClasses?.PtcImage
-        return HostPtcImage !== undefined
-          ? new HostPtcImage(readonlyPath, attachment)
-          : new PtcImageLike(readonlyPath, attachment)
+        const ptcClasses = getCachedPtcClasses(runtime)
+        const HostPtcImage = ptcClasses?.PtcImage
+        if (HostPtcImage !== undefined) return new HostPtcImage(readonlyPath, attachment)
+        // 真实 PtcRuntime 子类若未能拿到宿主同源 PtcImage 类，绝不塞入异源 PtcImageLike
+        //（否则 ptc-runtime-node 会因 instanceof 失败报 binding resolution must be lossless JSON），
+        // 返回 undefined 走 transport.ts 的 deferContext 零丢图兜底。
+        if (isRealPtcRuntimeInstance(unwrapRuntimeInstance(runtime))) return undefined
+        return new PtcImageLike(readonlyPath, attachment)
       }
       const resolveAccess = (dshLlm as Record<string, unknown>)['resolveImageAttachmentAccess']
       if (typeof resolveAccess === 'function') {
@@ -439,14 +646,17 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       return undefined
     },
     inspectableValue(value: object, text: string): unknown {
-      const HostInspectable = cachedPtcClasses?.PtcInspectableValue
+      const HostInspectable = getCachedPtcClasses(runtimeOf())?.PtcInspectableValue
       return HostInspectable !== undefined ? new HostInspectable(value, text) : value
     },
     trackRun: (run) => retention.trackRun(run),
     shapeDispatchLog,
     async callTool(request: CallToolRequest): Promise<CallToolOutcome> {
-      // 确保首次工具返回前已完成宿主 `PtcImage` / `PtcInspectableValue` 类解析。
-      if (cachedPtcClasses === undefined) await loadPtcRuntimeClasses()
+      // 确保首次工具返回前已完成与宿主 runtime 同源的 `PtcImage` / `PtcInspectableValue` 类解析。
+      const activeRuntime = runtimeOf()
+      if (getCachedPtcClasses(activeRuntime) === undefined) {
+        await loadPtcRuntimeClassesFor(activeRuntime, ctx)
+      }
       const call = {
         type: 'tool-call',
         id: request.callId,
