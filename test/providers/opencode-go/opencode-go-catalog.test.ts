@@ -42,13 +42,18 @@ describe('OpenCode Go model catalog and quota', () => {
     const { OpenCodeGoCatalogManager } = await import('../../../src/host/providers/opencode-go/model-catalog.ts')
     const manager = new OpenCodeGoCatalogManager()
     let release: (() => void) | undefined
-    const first = manager.refresh({ account: { id: 'acc_a' }, credentials: credential('acc_a') }, async () => {
+    let started: (() => void) | undefined
+    const fetching = new Promise<void>(resolve => { started = resolve })
+    const first = manager.warm({ account: { id: 'acc_a' }, credentials: credential('acc_a') }, async () => {
+      started?.()
       await new Promise<void>(resolve => { release = resolve })
       return jsonResponse({ data: [{ id: 'model-a', type: 'chat' }] })
-    })
-    const second = manager.refresh({ account: { id: 'acc_b' }, credentials: credential('acc_b') }, async () => jsonResponse({ data: [{ id: 'model-b', type: 'chat' }] }))
+    }, true)
+    await fetching
+    const second = manager.warm({ account: { id: 'acc_b' }, credentials: credential('acc_b') }, async () => jsonResponse({ data: [{ id: 'model-b', type: 'chat' }] }), true)
     release?.()
-    await Promise.all([first, second])
+    const [firstEntries] = await Promise.all([first, second])
+    expect(firstEntries.map(entry => entry.id)).toEqual(['model-a'])
     expect(manager.snapshot().scope).toBe('acc_b')
     expect(manager.snapshot().entries.map(entry => entry.id)).toEqual(['model-b'])
   })

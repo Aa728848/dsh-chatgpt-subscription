@@ -22,11 +22,12 @@ describe('OpenCode Go routes', () => {
   beforeEach(() => { filePath = path.join(tmpdir(), 'opencode-go-' + randomUUID() + '.json'); settingsStore = new OpenCodeGoSettingsStore(filePath) })
   afterEach(async () => { await fs.unlink(filePath).catch(() => undefined) })
 
-  function setup(fetchFn: typeof fetch): { emit: ReturnType<typeof vi.fn> } {
+  function setup(fetchFn: typeof fetch): { emit: ReturnType<typeof vi.fn>; pool: OpenCodeGoAccountPool } {
     const emit = vi.fn()
+    const pool = new OpenCodeGoAccountPool({ backend: memoryBackend() })
     const ctx = { emit, webServer: { register: (route: { handler: typeof handler }) => { handler = route.handler; return () => undefined } } } as unknown as Context
-    registerOpenCodeGoRoutes(ctx, new OpenCodeGoAccountPool({ backend: memoryBackend() }), settingsStore, new OpenCodeGoCatalogManager(), { fetchFn })
-    return { emit }
+    registerOpenCodeGoRoutes(ctx, pool, settingsStore, new OpenCodeGoCatalogManager(), { fetchFn })
+    return { emit, pool }
   }
 
   async function call(method: string, url: string, body?: unknown): Promise<{ status: number; json: any }> {
@@ -42,7 +43,7 @@ describe('OpenCode Go routes', () => {
   }
 
   it('adds a verified key without returning it, refreshes models and reads all quota windows', async () => {
-    const { emit } = setup(async (url) => {
+    const { emit, pool } = setup(async (url) => {
       if (url.toString().endsWith('/v1/models')) return new Response(JSON.stringify({ data: rawModels }), { status: 200 })
       if (url.toString().endsWith('/v1/usage')) return new Response(JSON.stringify({ usage }), { status: 200 })
       throw new Error('unexpected ' + url)
@@ -52,13 +53,15 @@ describe('OpenCode Go routes', () => {
     expect(JSON.stringify(added.json)).not.toContain('oc_sk_secret')
     const refreshed = await call('POST', '/opencode-go/api/models/refresh')
     expect(refreshed.json.value.models).toHaveLength(1)
+    const accountId = (await pool.read()).accounts[0]!.id
+    await pool.markCooldown(accountId, 60_000, 'limited')
     const quota = await call('POST', '/opencode-go/api/quota/refresh')
     expect(quota.json.value.accounts[0].quota.windows).toHaveLength(3)
     expect(emit).toHaveBeenCalledWith('llm/adapters-updated')
   })
 
   it('applies model settings and runs an explicit connection test', async () => {
-    setup(async (url) => {
+    const { pool } = setup(async (url) => {
       if (url.toString().endsWith('/v1/models')) return new Response(JSON.stringify({ data: rawModels }), { status: 200 })
       if (url.toString().endsWith('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), { status: 200 })
       throw new Error('unexpected ' + url)
@@ -68,6 +71,7 @@ describe('OpenCode Go routes', () => {
     const updated = await call('POST', '/opencode-go/api/settings', { enabledModelIds: [], defaultReasoningEffort: 'low' })
     expect(updated.json.value.models[0].enabled).toBe(false)
     expect(updated.json.value.defaultReasoningEffort).toBe('low')
+    await pool.markCooldown((await pool.read()).accounts[0]!.id, 60_000, 'limited')
     const connection = await call('POST', '/opencode-go/api/connection/test')
     expect(connection.json.value.connected).toBe(true)
     expect(connection.json.value.model).toBe('deepseek-v4.1-flash')

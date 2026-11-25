@@ -47,6 +47,22 @@ describe('OpenCode Go request and stream mapping', () => {
     expect(openCodeGoPlanFromBillingSource(state.billingSource)).toBe('Go Plus')
   })
 
+  it('maps official OpenCode billed cache and reasoning tokens', () => {
+    const state = createOpenCodeGoChatStreamState()
+    processOpenCodeGoStreamLine('data: ' + JSON.stringify({
+      choices: [],
+      usage: {
+        prompt_tokens: 10, completion_tokens: 4,
+        opencode: { tokens: { input: 1, output: 4, reasoning: 2, cache_read: 6, cache_write_5m: 2, cache_write_1h: 1 } },
+      },
+    }), state)
+    const chunks = processOpenCodeGoStreamLine('data: [DONE]', state)
+    expect(chunks.find(chunk => chunk.type === 'usage')).toEqual({
+      type: 'usage',
+      usage: { inputTokens: 1, outputTokens: 4, cacheReadTokens: 6, cacheWriteTokens: 3, reasoningTokens: 2 },
+    })
+  })
+
   it('omits tool declarations when an aggregated model declares no tool support', () => {
     const body = buildOpenCodeGoChatRequest({ provider: 'opencode-go', model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }], tools: [{ name: 'probe', description: 'probe', parameters: { type: 'object' } }] } as never, new Map(), modelEntry({ supportsTools: false }), settings())
     expect(body.tools).toBeUndefined()

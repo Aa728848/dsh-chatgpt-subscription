@@ -92,8 +92,13 @@ function parseSettingsPatch(body: Record<string, unknown>, knownIds: Set<string>
 export function registerOpenCodeGoRoutes(ctx: Context, pool: OpenCodeGoAccountPool, settingsStore: OpenCodeGoSettingsStore, catalog: OpenCodeGoCatalogManager, options: OpenCodeGoRouteOptions = {}): () => void {
   const status = () => getOpenCodeGoWebStatus(pool, settingsStore, catalog, options)
   const targetFor = async () => {
-    const settings = await settingsStore.read()
-    return pool.getEffectiveCredential(undefined, options.fetchFn ?? fetch, { preferAccountIds: settings.selectedAccountId === null ? undefined : [settings.selectedAccountId] })
+    const [settings, data] = await Promise.all([settingsStore.read(), pool.read()])
+    const accountId = settings.selectedAccountId ?? data.activeAccountId ?? data.accounts.find(account => account.isPrimary)?.id ?? data.accounts[0]?.id
+    const account = data.accounts.find(entry => entry.id === accountId)
+    if (account === undefined) throw new Error('OpenCode Go is not configured')
+    // Cooldown is routing state, not a reason to block status probes; known-invalid credentials still follow the shared refusal contract.
+    const credentials = await pool.getFreshCredential(account.id, options.fetchFn ?? fetch)
+    return { account, credentials }
   }
   return ctx.webServer.register({
     kind: 'prefix', path: OPENCODE_GO_ROUTE_PREFIX,

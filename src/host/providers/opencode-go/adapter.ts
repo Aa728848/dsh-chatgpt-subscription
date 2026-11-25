@@ -6,13 +6,15 @@ import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../../common/conte
 import { fetchWithContextBudgetRecovery } from '../../common/context-budget-fetch.ts'
 import { STREAM_IDLE_TIMEOUT_CODE, STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from '../../common/idle-watchdog.ts'
 import { outputReservation } from '../../common/output-reservation.ts'
-import { offloadOldestRequestImages, requestImageTargetOrOriginal, resolveRequestImages, type AttachmentImageReader } from '../../common/request-images.ts'
+import { requestImageTargetOrOriginal, resolveRequestImages, type AttachmentImageReader } from '../../common/request-images.ts'
+import { withStaticPrefixOrdering } from '../../common/prefix-stability.ts'
+import type { PromptCacheOverride } from '../../common/prompt-cache-policy.ts'
 import { retryAfterMs } from '../../infra/network/wire-auth.ts'
 import type { OpenCodeGoAccountPool, OpenCodeGoPoolAccount } from './account-pool.ts'
 import { OpenCodeGoCatalogManager, openCodeGoModelOptions, resolveOpenCodeGoModel, type OpenCodeGoModelEntry } from './model-catalog.ts'
 import { OpenCodeGoSettingsStore } from './token-store.ts'
 import { OPENCODE_GO_CHAT_URL, OPENCODE_GO_COOLDOWN_MS, PROVIDER_ID, PROVIDER_NAME, opencodeGoHeaders, opencodeGoSessionId, type OpenCodeGoCredentials } from './types.ts'
-import { assertOpenCodeGoStreamComplete, buildOpenCodeGoChatRequest, closeOpenCodeGoStream, createOpenCodeGoChatStreamState, openCodeGoPlanFromBillingSource, processOpenCodeGoStreamLine } from './mapper.ts'
+import { assertOpenCodeGoStreamComplete, buildOpenCodeGoChatRequest, closeOpenCodeGoStream, createOpenCodeGoChatStreamState, offloadOldestOpenCodeGoRequestImages, openCodeGoPlanFromBillingSource, processOpenCodeGoStreamLine } from './mapper.ts'
 
 const RETRY_POLICY = resolveRetryPolicy({ mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'], backoff: { initialDelayMs: 1500, maxDelayMs: 15000, jitterRatio: 0.2 } }, 'dsh-chatgpt-subscription.opencode-go.retry')
 
@@ -20,6 +22,7 @@ export interface OpenCodeGoAdapterOptions {
   fetchFn?: typeof fetch
   attachments?: AttachmentImageReader
   accountPool?: OpenCodeGoAccountPool | null
+  promptCache?: PromptCacheOverride
 }
 
 export function classifyOpenCodeGoFailure(status: number, detail: string): LlmError {
@@ -96,9 +99,9 @@ export class OpenCodeGoAdapter extends LlmAdapter {
   private async *requestStream(options: GenerateOptions, signal: AbortSignal, activity?: StreamActivity): AsyncGenerator<StreamChunk> {
     if (this.pool === null) throw new LlmError('OpenCode Go is not configured.', 'MISSING_CREDENTIAL')
     const settings = await this.settingsStore.read()
-    const normalized = normalizeGenerateOptions(options)
+    const normalized = withStaticPrefixOrdering(PROVIDER_ID, normalizeGenerateOptions(options), this.options.promptCache)
     const images = await resolveRequestImages(normalized, this.options.attachments, signal)
-    const requestOptions = offloadOldestRequestImages(normalized, 12 * 1024 * 1024, images)
+    const requestOptions = offloadOldestOpenCodeGoRequestImages(normalized, images)
     const tried = new Set<string>()
     let produced = false
 
@@ -123,7 +126,10 @@ export class OpenCodeGoAdapter extends LlmAdapter {
       if (!response.ok) {
         const detail = (await response.text().catch(() => '')).slice(0, 600)
         const failure = classifyOpenCodeGoFailure(response.status, detail)
-        if (response.status === 401) await this.pool.markAuthFailed(picked.account.id, failure.message).catch(() => undefined)
+        if (response.status === 401) {
+          await this.pool.markAuthFailed(picked.account.id, failure.message).catch(() => undefined)
+          if (!produced && await this.pool.hasAnotherAvailableAccount(tried)) continue
+        }
         if (response.status === 429) {
           await this.pool.markCooldown(picked.account.id, retryAfterMs(response.headers) ?? OPENCODE_GO_COOLDOWN_MS, failure.message).catch(() => undefined)
           if (!produced && await this.pool.hasAnotherAvailableAccount(tried)) continue

@@ -22,6 +22,7 @@ export function openCodeGoAccountKey(credentials: OpenCodeGoCredentials): string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
+function defaultAlias(position: number): string { return 'OpenCode Go #' + position }
 
 export function parseOpenCodeGoPoolData(value: unknown): PoolData<OpenCodeGoPoolAccount> {
   if (!isRecord(value)) throw new Error('OpenCode Go pool payload is invalid')
@@ -32,7 +33,7 @@ export function parseOpenCodeGoPoolData(value: unknown): PoolData<OpenCodeGoPool
     try { credentials = parseOpenCodeGoCredentials(raw.credentials) } catch { continue }
     const account: OpenCodeGoPoolAccount = {
       id: raw.id,
-      alias: typeof raw.alias === 'string' && raw.alias !== '' ? raw.alias : 'OpenCode Go 账号 ' + (accounts.length + 1),
+      alias: typeof raw.alias === 'string' && raw.alias !== '' ? raw.alias : defaultAlias(accounts.length + 1),
       credentials,
       addedAt: typeof raw.addedAt === 'number' ? raw.addedAt : Date.now(),
       isPrimary: raw.isPrimary === true,
@@ -67,7 +68,7 @@ export class OpenCodeGoAccountPool extends AccountPoolCore<OpenCodeGoCredentials
       keychainService: 'dsh-opencode-go-pool',
       parsePoolData: parseOpenCodeGoPoolData,
       dedupeKey: openCodeGoAccountKey,
-      defaultAlias: (_credentials, position) => 'OpenCode Go 账号 ' + position,
+      defaultAlias: (_credentials, position) => defaultAlias(position),
       createAccount: ({ id, alias, credentials, addedAt, isPrimary }) => ({ id, alias, credentials, addedAt, isPrimary }),
       legacyAccount: async () => {
         const apiKey = process.env.OPENCODE_API_KEY?.trim()

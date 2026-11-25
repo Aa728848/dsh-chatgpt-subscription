@@ -36,6 +36,12 @@ describe('prompt cache policy defaults', () => {
       })
     }
   })
+
+  it('enables only the documented OpenCode session-cache mechanisms', () => {
+    expect(promptCachePolicyOf('opencode-go')).toMatchObject({
+      mode: 'automatic', staticPrefix: true, coldStart: 'off', affinity: false, waitWarmup: false, hint: false,
+    })
+  })
 })
 
 describe('prompt cache overrides', () => {

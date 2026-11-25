@@ -167,10 +167,23 @@ function parseUsage(raw: unknown): TokenUsage | null {
   const prompt = numberValue(raw.prompt_tokens) ?? 0
   const output = numberValue(raw.completion_tokens) ?? 0
   const details = isRecord(raw.prompt_tokens_details) ? raw.prompt_tokens_details : {}
-  const cached = numberValue(details.cached_tokens)
-  const written = numberValue(details.cache_write_tokens) ?? numberValue(details.cache_creation_input_tokens)
-  const reasoning = numberValue(isRecord(raw.completion_tokens_details) ? raw.completion_tokens_details.reasoning_tokens : undefined)
-  return { inputTokens: Math.max(0, prompt - (cached ?? 0) - (written ?? 0)), outputTokens: output, ...(cached === undefined ? {} : { cacheReadTokens: cached }), ...(written === undefined ? {} : { cacheWriteTokens: written }), ...(reasoning === undefined ? {} : { reasoningTokens: Math.min(reasoning, output) }) }
+  const metadata = isRecord(raw.opencode) ? raw.opencode : {}
+  const billed = isRecord(metadata.tokens) ? metadata.tokens : {}
+  const cached = numberValue(details.cached_tokens) ?? numberValue(billed.cache_read)
+  const write5m = numberValue(billed.cache_write_5m)
+  const write1h = numberValue(billed.cache_write_1h)
+  const billedWrite = write5m === undefined && write1h === undefined ? undefined : (write5m ?? 0) + (write1h ?? 0)
+  const written = numberValue(details.cache_write_tokens) ?? numberValue(details.cache_creation_input_tokens) ?? billedWrite
+  const billedOutput = numberValue(billed.output)
+  const reasoning = numberValue(isRecord(raw.completion_tokens_details) ? raw.completion_tokens_details.reasoning_tokens : undefined) ?? numberValue(billed.reasoning)
+  const effectiveOutput = billedOutput ?? output
+  return {
+    inputTokens: numberValue(billed.input) ?? Math.max(0, prompt - (cached ?? 0) - (written ?? 0)),
+    outputTokens: effectiveOutput,
+    ...(cached === undefined ? {} : { cacheReadTokens: cached }),
+    ...(written === undefined ? {} : { cacheWriteTokens: written }),
+    ...(reasoning === undefined ? {} : { reasoningTokens: Math.min(reasoning, effectiveOutput) }),
+  }
 }
 function toolKey(raw: Record<string, unknown>, position: number): string { const index = numberValue(raw.index); return index !== undefined ? 'index:' + index : 'id:' + (stringValue(raw.id) ?? position.toString()) }
 

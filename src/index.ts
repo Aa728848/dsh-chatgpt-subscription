@@ -1788,6 +1788,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const openCodeGoCatalog = new OpenCodeGoCatalogManager()
     const openCodeGoAdapter = new OpenCodeGoAdapter(openCodeGoSettings, openCodeGoCatalog, {
       fetchFn: modelFetch[OPENCODE_GO_PROVIDER_ID], attachments: ctx.attachments, accountPool: openCodeGoPool,
+      promptCache: promptCacheOverrides[OPENCODE_GO_PROVIDER_ID],
     })
     const openCodeGoClaim = claimProviderRoute(ctx, { providerId: OPENCODE_GO_PROVIDER_ID, label: OPENCODE_GO_PROVIDER_NAME, adapter: openCodeGoAdapter })
     const disposeOpenCodeGoRoutes = registerOpenCodeGoRoutes(ctx, openCodeGoPool, openCodeGoSettings, openCodeGoCatalog, {

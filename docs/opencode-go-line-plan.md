@@ -27,8 +27,9 @@
 
 - 真实公开目录包含 `deepseek-v4.1-flash`，`canonical_id=deepseek/deepseek-v4.1-flash-1017`。
 - 真实 Go Key 下，`glm-5.3` 与该 DeepSeek 快照均完成流式文本、工具调用、工具结果续轮、同一会话头和三窗额度读取；成功请求 `cost = 0`。
-- 26 项新线路离线测试通过，覆盖 mapper、目录/快照、账号池、adapter、路由与正式 UI。
+- 30 项新线路离线测试通过，覆盖 mapper、目录/快照、账号池、adapter、路由与正式 UI；冷却期状态探测、401 换号、多账号并发目录、静态前缀顺序和官方缓存计费字段均有回归覆盖。
 - 正式 `OpenCodeGoAdapter` 的真实 DeepSeek 调用已验证：流式 `OK`、`probe_echo` 工具调用、`TOOL_OK` 续轮、稳定会话头与三窗额度；耗时约 25 秒。
+- 最终验收：强制 Host/Client/Test/Scripts 类型检查通过；全量 434 个测试文件、7577 项测试通过（另 3 个文件、10 项测试跳过）；构建、`npm ci --dry-run` 与 `npm pack --dry-run` 通过。
 
 ## 风险与未验证项
 

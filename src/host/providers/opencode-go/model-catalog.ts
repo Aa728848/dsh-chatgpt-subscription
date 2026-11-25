@@ -144,10 +144,12 @@ export class OpenCodeGoCatalogManager {
       const raw = await fetchOpenCodeGoModels(target.credentials, fetchFn)
       const entries = parseOpenCodeGoModelEntries(raw) ?? []
       if (entries.length === 0) throw new Error('OpenCode Go returned no usable chat models for this key')
-      if (this.scope !== scope) return this.entries
+      const fetchedAt = Date.now()
+      void writeCatalogSnapshot(catalogSnapshotName('opencode-go', scope), persistedOpenCodeGoModelEntries(entries), fetchedAt)
+      // A concurrent warmer may switch the visible account; this caller still needs its own catalog.
+      if (this.scope !== scope) return entries
       this.entries = entries
-      this.fetchedAt = Date.now()
-      void writeCatalogSnapshot(catalogSnapshotName('opencode-go', scope), persistedOpenCodeGoModelEntries(entries), this.fetchedAt)
+      this.fetchedAt = fetchedAt
       return entries
     })()
     return this.inFlight.finally(() => { this.inFlight = null })

@@ -16,6 +16,13 @@ describe('OpenCode Go account pool', () => {
     expect(openCodeGoAccountKey(credential())).toBe(openCodeGoAccountKey(credential()))
   })
 
+  it('uses a language-neutral default alias', async () => {
+    const pool = new OpenCodeGoAccountPool({ backend: memoryBackend() })
+    const account = await pool.addAccount(credential())
+    expect(account.alias).toBe('OpenCode Go #1')
+    expect(parseOpenCodeGoPoolData({ accounts: [{ id: account.id, credentials: credential() }] }).accounts[0]?.alias).toBe('OpenCode Go #1')
+  })
+
   it('replaces a key in place and clears auth/cooldown state', async () => {
     const backend = memoryBackend()
     const pool = new OpenCodeGoAccountPool({ backend })

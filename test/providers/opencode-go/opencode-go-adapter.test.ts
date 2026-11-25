@@ -48,6 +48,48 @@ describe('OpenCodeGoAdapter', () => {
     expect((await pool.read()).accounts[0]?.id).toBe(account.id)
   })
 
+  it('rotates to a healthy account when an earlier key is rejected', async () => {
+    const pool = new OpenCodeGoAccountPool({ backend: memoryBackend() })
+    await pool.addAccount(credential('oc_sk_revoked'), '失效账号')
+    await pool.addAccount(credential('oc_sk_healthy'), '健康账号')
+    const keys: string[] = []
+    const fetchFn: typeof fetch = async (_url, init) => {
+      const authorization = (init?.headers as Record<string, string>).authorization
+      keys.push(authorization)
+      if (keys.length === 1) return jsonResponse({ error: { message: 'revoked' } }, 401)
+      return sse([JSON.stringify({ choices: [{ delta: { content: 'OK' } }] })])
+    }
+    const adapter = new OpenCodeGoAdapter(store(), catalog(), { accountPool: pool, fetchFn })
+    const call = await adapter.prepareCall('opencode-go', 'deepseek-v4.1-flash')
+    const chunks = await collect(call.stream(options()))
+    expect(keys).toEqual(['Bearer oc_sk_revoked', 'Bearer oc_sk_healthy'])
+    expect(chunks.some(chunk => (chunk as { type?: string; text?: string }).type === 'text-delta' && (chunk as { text?: string }).text === 'OK')).toBe(true)
+  })
+
+  it('orders static bootstrap messages and honors the cache-policy override', async () => {
+    const pool = new OpenCodeGoAccountPool({ backend: memoryBackend() })
+    await pool.addAccount(credential(), '主账号')
+    const bodies: Array<{ messages: Array<{ content: unknown }> }> = []
+    const fetchFn: typeof fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as { messages: Array<{ content: unknown }> })
+      return sse([])
+    }
+    const request = {
+      provider: 'opencode-go', model: 'deepseek-v4.1-flash', sessionId: 'session-1',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'do the task' }] },
+        { role: 'user', content: [{ type: 'text', text: '<system-reminder>workspace</system-reminder>' }], source: { kind: 'agent-instructions' } },
+      ],
+    } as never
+    const ordered = new OpenCodeGoAdapter(store(), catalog(), { accountPool: pool, fetchFn })
+    await collect((await ordered.prepareCall('opencode-go', 'deepseek-v4.1-flash')).stream(request))
+    expect(bodies[0]?.messages.map(message => message.content)).toEqual(['<system-reminder>workspace</system-reminder>', 'do the task'])
+
+    const disabled = new OpenCodeGoAdapter(store(), catalog(), { accountPool: pool, fetchFn, promptCache: { staticPrefix: false } })
+    await collect((await disabled.prepareCall('opencode-go', 'deepseek-v4.1-flash')).stream(request))
+    expect(bodies[1]?.messages.map(message => message.content)).toEqual(['do the task', '<system-reminder>workspace</system-reminder>'])
+  })
+
   it('rotates to the next account on 429 before any output', async () => {
     const pool = new OpenCodeGoAccountPool({ backend: memoryBackend() })
     await pool.addAccount(credential('oc_sk_first'), '第一个')
