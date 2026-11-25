@@ -40,6 +40,21 @@ function quotaWindow(value: unknown, key: 'rolling' | 'weekly' | 'monthly') {
   }
 }
 
+export function parseOpenCodeGoQuotaSnapshot(value: unknown): OpenCodeGoQuotaSnapshotDto | undefined {
+  if (!isRecord(value) || typeof value.fetchedAt !== 'number' || !Number.isFinite(value.fetchedAt) || !Array.isArray(value.windows)) return undefined
+  const windows: OpenCodeGoQuotaSnapshotDto['windows'] = []
+  for (const raw of value.windows) {
+    if (!isRecord(raw) || (raw.key !== 'rolling' && raw.key !== 'weekly' && raw.key !== 'monthly')) return undefined
+    if (typeof raw.usedPercent !== 'number' || !Number.isFinite(raw.usedPercent)) return undefined
+    windows.push({
+      key: raw.key,
+      usedPercent: Math.max(0, Math.min(100, raw.usedPercent)),
+      resetsAt: typeof raw.resetsAt === 'number' && Number.isFinite(raw.resetsAt) ? raw.resetsAt : null,
+    })
+  }
+  return { windows, planName: typeof value.planName === 'string' ? value.planName : null, fetchedAt: value.fetchedAt }
+}
+
 const quotaCache = new Map<string, OpenCodeGoQuotaSnapshotDto>()
 export function getCachedOpenCodeGoQuota(accountId: string): OpenCodeGoQuotaSnapshotDto | null { return quotaCache.get(accountId) ?? null }
 

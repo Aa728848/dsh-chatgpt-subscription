@@ -135,9 +135,10 @@ export interface OpenCodeGoChatStreamState {
   sawUsage: boolean
   usage: TokenUsage | null
   billingSource: string | null
+  allowance: number | null
   finished: boolean
 }
-export function createOpenCodeGoChatStreamState(): OpenCodeGoChatStreamState { return { blocks: [], open: null, tools: new Map(), finishReason: null, sawDone: false, sawUsage: false, usage: null, billingSource: null, finished: false } }
+export function createOpenCodeGoChatStreamState(): OpenCodeGoChatStreamState { return { blocks: [], open: null, tools: new Map(), finishReason: null, sawDone: false, sawUsage: false, usage: null, billingSource: null, allowance: null, finished: false } }
 function closeChatText(state: OpenCodeGoChatStreamState): StreamChunk[] {
   const open = state.open
   if (open === null) return []
@@ -194,6 +195,8 @@ export function feedOpenCodeGoChatPayload(state: OpenCodeGoChatStreamState, payl
   if (usage !== null) { state.sawUsage = true; state.usage = usage }
   const metadata = isRecord(payload.usage) && isRecord(payload.usage.opencode) ? payload.usage.opencode : null
   if (metadata !== null && typeof metadata.billing_source === 'string') state.billingSource = metadata.billing_source
+  const allowance = metadata === null ? undefined : numberValue(metadata.allowance)
+  if (allowance !== undefined) state.allowance = allowance
   const choices = Array.isArray(payload.choices) ? payload.choices : []
   const choice = choices.length > 0 && isRecord(choices[0]) ? choices[0] : null
   if (choice === null) return []
@@ -243,7 +246,7 @@ export function closeOpenCodeGoStream(state: OpenCodeGoChatStreamState): StreamC
   const reason = state.finishReason === 'length' ? { kind: 'max-tokens' as const }
     : state.finishReason === 'content_filter' ? { kind: 'error' as const, failure: { message: 'OpenCode Go content filter stopped the response.', code: 'CONTENT_FILTER' } }
       : validTools > 0 || state.finishReason === 'tool_calls' ? { kind: 'tool-calls' as const } : { kind: 'stop' as const }
-  out.push({ type: 'finish', reason, replayState: { response: { provider: 'opencode-go', protocol: 'openai-chat', ...(state.billingSource === null ? {} : { billingSource: state.billingSource }) } } })
+  out.push({ type: 'finish', reason, replayState: { response: { provider: 'opencode-go', protocol: 'openai-chat', ...(state.billingSource === null ? {} : { billingSource: state.billingSource }), ...(state.allowance === null ? {} : { allowance: state.allowance }) } } })
   return out
 }
 

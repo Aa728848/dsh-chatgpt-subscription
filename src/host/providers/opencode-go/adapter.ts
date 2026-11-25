@@ -13,8 +13,11 @@ import { retryAfterMs } from '../../infra/network/wire-auth.ts'
 import type { OpenCodeGoAccountPool, OpenCodeGoPoolAccount } from './account-pool.ts'
 import { OpenCodeGoCatalogManager, openCodeGoModelOptions, resolveOpenCodeGoModel, type OpenCodeGoModelEntry } from './model-catalog.ts'
 import { OpenCodeGoSettingsStore } from './token-store.ts'
-import { OPENCODE_GO_CHAT_URL, OPENCODE_GO_COOLDOWN_MS, PROVIDER_ID, PROVIDER_NAME, opencodeGoHeaders, opencodeGoSessionId, type OpenCodeGoCredentials } from './types.ts'
-import { assertOpenCodeGoStreamComplete, buildOpenCodeGoChatRequest, closeOpenCodeGoStream, createOpenCodeGoChatStreamState, offloadOldestOpenCodeGoRequestImages, openCodeGoPlanFromBillingSource, processOpenCodeGoStreamLine } from './mapper.ts'
+import { OPENCODE_GO_COOLDOWN_MS, PROVIDER_ID, PROVIDER_NAME, opencodeGoHeaders, opencodeGoSessionId, type OpenCodeGoCredentials } from './types.ts'
+import { offloadOldestOpenCodeGoRequestImages, openCodeGoPlanFromBillingSource } from './mapper.ts'
+import { streamOpenCodeGoResponses } from './mapper-responses.ts'
+import { streamOpenCodeGoGeminiResponse } from './mapper-gemini.ts'
+import { createOpenCodeGoLineDriver, isOpenCodeGoProtocolUnsupported, openCodeGoProtocolTarget } from './protocol.ts'
 
 const RETRY_POLICY = resolveRetryPolicy({ mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'], backoff: { initialDelayMs: 1500, maxDelayMs: 15000, jitterRatio: 0.2 } }, 'dsh-chatgpt-subscription.opencode-go.retry')
 
@@ -103,20 +106,34 @@ export class OpenCodeGoAdapter extends LlmAdapter {
     const images = await resolveRequestImages(normalized, this.options.attachments, signal)
     const requestOptions = offloadOldestOpenCodeGoRequestImages(normalized, images)
     const tried = new Set<string>()
+    const allowanceModel = this.catalog.snapshot().entries.find(entry => entry.id === options.model)
     let produced = false
 
     while (true) {
-      const picked = await this.pool.getEffectiveCredential(tried, this.options.fetchFn ?? fetch, { preferAccountIds: settings.selectedAccountId === null ? undefined : [settings.selectedAccountId] })
+      const picked = await this.pool.getEffectiveCredential(tried, this.options.fetchFn ?? fetch, {
+        preferAccountIds: settings.selectedAccountId === null ? undefined : [settings.selectedAccountId],
+        ...(allowanceModel === undefined ? {} : { model: allowanceModel }),
+      })
       tried.add(picked.account.id)
       const entries = await this.catalog.warm(picked, this.options.fetchFn ?? fetch)
       const entry = resolveOpenCodeGoModel(entries, options.model)
-      const body = buildOpenCodeGoChatRequest(requestOptions, images, entry, settings)
       const sessionId = opencodeGoSessionId(options.sessionId, picked.account.id)
+      let protocol = entry.protocol
       let response: Response
       try {
-        response = await fetchWithContextBudgetRecovery(this.options.fetchFn ?? fetch)(OPENCODE_GO_CHAT_URL, {
-          method: 'POST', headers: { ...opencodeGoHeaders(picked.credentials, sessionId), accept: 'text/event-stream' }, body: JSON.stringify(body), signal,
-        })
+        for (;;) {
+          const target = openCodeGoProtocolTarget(protocol, requestOptions, images, entry, settings)
+          response = await fetchWithContextBudgetRecovery(this.options.fetchFn ?? fetch)(target.url, {
+            method: 'POST',
+            headers: { ...opencodeGoHeaders(picked.credentials, sessionId), accept: 'text/event-stream' },
+            body: JSON.stringify(target.body), signal,
+          })
+          if (protocol !== 'chat-completions' && !response.ok) {
+            const detail = await response.clone().text().catch(() => '')
+            if (isOpenCodeGoProtocolUnsupported(response.status, detail)) { protocol = 'chat-completions'; continue }
+          }
+          break
+        }
         activity?.pulse()
       } catch (error) {
         if (signal.aborted) throw new LlmError('OpenCode Go request was aborted.', 'ABORTED', { cause: error })
@@ -136,10 +153,30 @@ export class OpenCodeGoAdapter extends LlmAdapter {
         }
         throw failure
       }
+      if (protocol === 'responses') {
+        let billingSource: string | null = null
+        let allowance: number | null = null
+        for await (const chunk of streamOpenCodeGoResponses(response, signal, activity, metadata => {
+          billingSource = metadata?.billingSource ?? null
+          allowance = metadata?.allowance ?? null
+        })) { produced = true; yield chunk }
+        await this.finishAccount(picked.account, entry, billingSource, allowance)
+        return
+      }
+      if (protocol === 'generate-content') {
+        let billingSource: string | null = null
+        let allowance: number | null = null
+        for await (const chunk of streamOpenCodeGoGeminiResponse(response, signal, activity, metadata => {
+          billingSource = metadata?.billingSource ?? null
+          allowance = metadata?.allowance ?? null
+        })) { produced = true; yield chunk }
+        await this.finishAccount(picked.account, entry, billingSource, allowance)
+        return
+      }
       if (response.body === null) throw new LlmError('OpenCode Go returned an empty response body.', 'PROVIDER_ERROR')
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
-      const state = createOpenCodeGoChatStreamState()
+      const driver = createOpenCodeGoLineDriver(protocol)
       let buffer = ''
       try {
         while (true) {
@@ -151,20 +188,20 @@ export class OpenCodeGoAdapter extends LlmAdapter {
           buffer = lines.pop() ?? ''
           for (const line of lines) {
             activity?.pulse()
-            for (const chunk of processOpenCodeGoStreamLine(line, state)) { produced = true; yield chunk }
-            if (state.finished) {
-              await this.finishAccount(picked.account, options.model, state.billingSource)
+            for (const chunk of driver.process(line)) { produced = true; yield chunk }
+            if (driver.finished()) {
+              await this.finishAccount(picked.account, entry, driver.billingSource(), driver.allowance())
               return
             }
           }
         }
         buffer += decoder.decode()
-        if (buffer.trim() !== '') for (const line of buffer.split('\n')) for (const chunk of processOpenCodeGoStreamLine(line, state)) { produced = true; yield chunk }
-        if (!state.finished) {
-          assertOpenCodeGoStreamComplete(state)
-          for (const chunk of closeOpenCodeGoStream(state)) { produced = true; yield chunk }
+        if (buffer.trim() !== '') for (const line of buffer.split('\n')) for (const chunk of driver.process(line)) { produced = true; yield chunk }
+        if (!driver.finished()) {
+          driver.assertComplete()
+          for (const chunk of driver.close()) { produced = true; yield chunk }
         }
-        await this.finishAccount(picked.account, options.model, state.billingSource)
+        await this.finishAccount(picked.account, entry, driver.billingSource(), driver.allowance())
         return
       } finally {
         void reader.cancel().catch(() => undefined)
@@ -172,11 +209,12 @@ export class OpenCodeGoAdapter extends LlmAdapter {
     }
   }
 
-  private async finishAccount(account: OpenCodeGoPoolAccount, model: string, billingSource: string | null): Promise<void> {
+  private async finishAccount(account: OpenCodeGoPoolAccount, entry: OpenCodeGoModelEntry, billingSource: string | null, allowance: number | null): Promise<void> {
     if (this.pool === null) return
-    await this.pool.recordModel(account.id, model)
+    await this.pool.recordModel(account.id, entry.id)
     const plan = openCodeGoPlanFromBillingSource(billingSource)
     if (plan !== undefined) await this.pool.recordPlan(account.id, plan)
+    if (allowance !== null) await this.pool.recordAllowance(account.id, entry, allowance, plan)
   }
 }
 

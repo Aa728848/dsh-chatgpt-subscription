@@ -12,6 +12,10 @@ export function isOpenCodeGoReasoningEffort(value: unknown): value is OpenCodeGo
   return typeof value === 'string' && (OPENCODE_GO_REASONING_EFFORTS as readonly string[]).includes(value)
 }
 
+export type OpenCodeGoProtocol = 'chat-completions' | 'responses' | 'messages' | 'generate-content'
+export type OpenCodeGoPlanId = 'go' | 'go-plus' | 'go-teams'
+export type OpenCodeGoMonthlyUsage = Partial<Record<OpenCodeGoPlanId, number>>
+
 export type OpenCodeGoQuotaWindowKey = 'rolling' | 'weekly' | 'monthly'
 export interface OpenCodeGoQuotaWindowDto {
   key: OpenCodeGoQuotaWindowKey
@@ -41,6 +45,7 @@ export interface OpenCodeGoModelOption {
   training: boolean | null
   zdr: boolean | null
   limitedRegions: boolean | null
+  protocol: OpenCodeGoProtocol
 }
 
 export interface OpenCodeGoAccountSummaryDto extends PoolAccountSummaryDto {

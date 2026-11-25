@@ -27,9 +27,16 @@
 
 - 真实公开目录包含 `deepseek-v4.1-flash`，`canonical_id=deepseek/deepseek-v4.1-flash-1017`。
 - 真实 Go Key 下，`glm-5.3` 与该 DeepSeek 快照均完成流式文本、工具调用、工具结果续轮、同一会话头和三窗额度读取；成功请求 `cost = 0`。
-- 30 项新线路离线测试通过，覆盖 mapper、目录/快照、账号池、adapter、路由与正式 UI；冷却期状态探测、401 换号、多账号并发目录、静态前缀顺序和官方缓存计费字段均有回归覆盖。
+- 38 项新线路离线测试通过，覆盖 mapper、目录/快照、账号池、adapter、路由与正式 UI；冷却期状态探测、401 换号、多账号并发目录、静态前缀顺序、官方缓存计费字段、额度预测和三种原生协议均有回归覆盖。
 - 正式 `OpenCodeGoAdapter` 的真实 DeepSeek 调用已验证：流式 `OK`、`probe_echo` 工具调用、`TOOL_OK` 续轮、稳定会话头与三窗额度；耗时约 25 秒。
-- 最终验收：强制 Host/Client/Test/Scripts 类型检查通过；全量 434 个测试文件、7577 项测试通过（另 3 个文件、10 项测试跳过）；构建、`npm ci --dry-run` 与 `npm pack --dry-run` 通过。
+- 最终验收：强制 Host/Client/Test/Scripts 类型检查通过；全量 435 个测试文件、7587 项测试通过（另 3 个文件、10 项测试跳过）；构建、`npm ci --dry-run` 与 `npm pack --dry-run` 通过。
+
+## 额度预测与原生协议
+
+- 官方额度快照与本地预测分开保存。每次响应的 `opencode.allowance` 累加到快照后的实际消耗；同模型平均消耗只用于估计下一次请求。5 小时、周、月窗口分别按月度额度的 20%、50%、100% 折算压力，自动选号按「有余量 → 未知 → 预测耗尽」排序，用户 pin 不变。
+- 目录 `api` 键决定协议，`base_url` 仅用于核对官方固定端点，异常来源一律回退官方 Chat，避免 API Key 被目录内容诱导外发。只有明确的协议不支持错误才同账号回退 Chat，401/429 仍走账号轮换。
+- Responses 并行读取流副本中的 `usage.opencode`；Messages 直接观察 message usage；Gemini 流式读取 `usageMetadata` 并发送活动脉冲。三种协议统一 `opencode-go` 回放和 allowance 记录；Claude 自适应模型使用 `thinking: adaptive` / `output_config.effort`，空 Gemini candidates 明确报错。
+- 原生协议目前只有离线一致性证据，尚未宣称线上延迟或缓存命中收益。Gemini 使用 `streamGenerateContent?alt=sse`，未注入官方文档未确认的 thinking 配置。
 
 ## 风险与未验证项
 

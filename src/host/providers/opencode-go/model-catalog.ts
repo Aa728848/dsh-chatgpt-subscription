@@ -1,6 +1,7 @@
 import { catalogSnapshotName, catalogSnapshotPath, rehydrateCatalogCache, writeCatalogSnapshot } from '../../common/catalog-snapshot.ts'
 import { LlmError } from '../../common/llm-compat.ts'
-import { OPENCODE_GO_REASONING_EFFORTS, type OpenCodeGoModelOption, type OpenCodeGoReasoningEffort } from '../../../shared/opencode-go-contracts.ts'
+import { OPENCODE_GO_REASONING_EFFORTS, type OpenCodeGoModelOption, type OpenCodeGoMonthlyUsage, type OpenCodeGoProtocol, type OpenCodeGoReasoningEffort } from '../../../shared/opencode-go-contracts.ts'
+import { OPENCODE_GO_GEMINI_BASE_URL, OPENCODE_GO_MESSAGES_BASE_URL, OPENCODE_GO_OPENAI_BASE_URL } from './types.ts'
 import type { OpenCodeGoSettings } from './token-store.ts'
 import { fetchOpenCodeGoModels } from './client.ts'
 import type { OpenCodeGoCredentials } from './types.ts'
@@ -18,11 +19,40 @@ export interface OpenCodeGoModelEntry {
   training: boolean | null
   zdr: boolean | null
   limitedRegions: boolean | null
+  monthlyUsage: OpenCodeGoMonthlyUsage
+  protocol: OpenCodeGoProtocol
+  apiBaseUrl: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
 function positiveInt(value: unknown, fallback: number): number { return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : fallback }
 function optionalBool(value: unknown): boolean | null { return typeof value === 'boolean' ? value : null }
+function protocol(value: unknown): { protocol: OpenCodeGoProtocol; apiBaseUrl: string } {
+  const official = {
+    'chat-completions': OPENCODE_GO_OPENAI_BASE_URL,
+    responses: OPENCODE_GO_OPENAI_BASE_URL,
+    messages: OPENCODE_GO_MESSAGES_BASE_URL,
+    'generate-content': OPENCODE_GO_GEMINI_BASE_URL,
+  } as const
+  if (isRecord(value)) {
+    for (const key of ['chat-completions', 'responses', 'messages', 'generate-content'] as const) {
+      const config = value[key]
+      if (!isRecord(config) || typeof config.base_url !== 'string') continue
+      // Never send the API key to a catalog-supplied origin; only the documented Go endpoints qualify.
+      if (config.base_url.replace(/\/$/, '') === official[key]) return { protocol: key, apiBaseUrl: official[key] }
+    }
+  }
+  return { protocol: 'chat-completions', apiBaseUrl: OPENCODE_GO_OPENAI_BASE_URL }
+}
+function monthlyUsage(value: unknown): OpenCodeGoMonthlyUsage {
+  if (!isRecord(value)) return {}
+  const out: OpenCodeGoMonthlyUsage = {}
+  for (const plan of ['go', 'go-plus', 'go-teams'] as const) {
+    const limit = value[plan]
+    if (typeof limit === 'number' && Number.isFinite(limit) && limit > 0) out[plan] = limit
+  }
+  return out
+}
 
 export function parseOpenCodeGoModelEntries(value: unknown): OpenCodeGoModelEntry[] | undefined {
   if (!Array.isArray(value)) return undefined
@@ -49,6 +79,8 @@ export function parseOpenCodeGoModelEntries(value: unknown): OpenCodeGoModelEntr
       training: optionalBool(go.training),
       zdr: optionalBool(go.zdr),
       limitedRegions: optionalBool(go.limited_regions),
+      monthlyUsage: monthlyUsage(go.monthly_usage),
+      ...protocol(raw.api),
     })
   }
   return entries
@@ -74,6 +106,8 @@ export function parsePersistedOpenCodeGoModelEntries(value: unknown): OpenCodeGo
       training: optionalBool(raw.training),
       zdr: optionalBool(raw.zdr),
       limitedRegions: optionalBool(raw.limitedRegions),
+      monthlyUsage: monthlyUsage(raw.monthlyUsage),
+      ...protocol(raw.protocol === undefined && raw.apiBaseUrl === undefined ? undefined : { [String(raw.protocol ?? 'chat-completions')]: { base_url: raw.apiBaseUrl } }),
     })
   }
   return entries
@@ -91,6 +125,7 @@ export function openCodeGoModelOptions(entries: readonly OpenCodeGoModelEntry[],
     const capabilities: string[] = []
     capabilities.push(contextWindow >= 1_000_000 ? '1M' : Math.round(contextWindow / 1000) + 'K')
     capabilities.push(entry.supportsImages ? 'text+image' : 'text')
+    capabilities.push(entry.protocol)
     if (entry.reasoningEfforts.length > 0) capabilities.push('effort ' + entry.reasoningEfforts.join('/'))
     if (entry.supportsTools === false) capabilities.push('no tools')
     if (entry.training === true) capabilities.push('training enabled')
@@ -99,7 +134,7 @@ export function openCodeGoModelOptions(entries: readonly OpenCodeGoModelEntry[],
       id: entry.id, name: entry.name, hint: capabilities.join(' · '), enabled: settings.enabledModelIds === null || settings.enabledModelIds.includes(entry.id),
       defaultContextWindow: entry.contextWindow, contextWindow, defaultMaxTokens: entry.maxOutputTokens,
       reasoningEfforts: entry.reasoningEfforts, supportsTools: entry.supportsTools, supportsImages: entry.supportsImages, description: entry.description,
-      canonicalId: entry.canonicalId, training: entry.training, zdr: entry.zdr, limitedRegions: entry.limitedRegions,
+      canonicalId: entry.canonicalId, training: entry.training, zdr: entry.zdr, limitedRegions: entry.limitedRegions, protocol: entry.protocol,
     }
   })}
 

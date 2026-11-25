@@ -7,7 +7,7 @@ import type { OpenCodeGoWebStatus } from '../../../src/shared/opencode-go-contra
 
 export function credential(apiKey = 'oc_sk_test'): { apiKey: string; authenticatedAt: number } { return { apiKey, authenticatedAt: 1_700_000_000_000 } }
 export function modelEntry(overrides: Partial<OpenCodeGoModelEntry> = {}): OpenCodeGoModelEntry {
-  return { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', description: null, canonicalId: 'deepseek/deepseek-v4.1-flash-1017', contextWindow: 1_000_000, maxOutputTokens: 384_000, reasoningEfforts: ['low', 'high', 'max'], supportsTools: true, supportsImages: true, training: false, zdr: true, limitedRegions: false, ...overrides }
+  return { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', description: null, canonicalId: 'deepseek/deepseek-v4.1-flash-1017', contextWindow: 1_000_000, maxOutputTokens: 384_000, reasoningEfforts: ['low', 'high', 'max'], supportsTools: true, supportsImages: true, training: false, zdr: true, limitedRegions: false, monthlyUsage: { go: 100, 'go-plus': 200, 'go-teams': 105 }, protocol: 'chat-completions', apiBaseUrl: 'https://opencode.ai/inference/go/openai/v1', ...overrides }
 }
 export function settings(overrides: Partial<OpenCodeGoSettings> = {}): OpenCodeGoSettings {
   return { enabled: true, enabledModelIds: null, contextWindowOverrides: {}, defaultReasoningEffort: null, selectedAccountId: null, ...overrides }
@@ -32,7 +32,7 @@ export function webStatus(): OpenCodeGoWebStatus {
     enabled: true, providerId: 'opencode-go', serving: true, conflict: null, authenticated: true,
     accounts: [{ id: 'acc_1', alias: '主账号', isPrimary: true, authKind: 'api-key', planName: 'Go Plus', quota: { fetchedAt: 1_700_000_000_000, windows } }],
     activeAccountId: 'acc_1', rotationStrategy: 'sticky', selectedAccountId: null,
-    models: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', hint: '1M · text+image', enabled: true, defaultContextWindow: 1_000_000, contextWindow: 1_000_000, defaultMaxTokens: 384_000, reasoningEfforts: ['low', 'high', 'max'], supportsTools: true, supportsImages: true, description: null, canonicalId: 'deepseek/deepseek-v4.1-flash-1017', training: false, zdr: true, limitedRegions: false }],
+    models: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', hint: '1M · text+image', enabled: true, defaultContextWindow: 1_000_000, contextWindow: 1_000_000, defaultMaxTokens: 384_000, reasoningEfforts: ['low', 'high', 'max'], supportsTools: true, supportsImages: true, description: null, canonicalId: 'deepseek/deepseek-v4.1-flash-1017', training: false, zdr: true, limitedRegions: false, protocol: 'chat-completions' }],
     contextWindowOverrides: {}, defaultReasoningEffort: null, catalogSynced: true, catalogCount: 1, quotaError: null, connection: null,
   }
 }

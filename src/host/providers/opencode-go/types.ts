@@ -5,7 +5,10 @@ export const PROVIDER_ID = OPENCODE_GO_PROVIDER_ID
 export const PROVIDER_NAME = OPENCODE_GO_PROVIDER_NAME
 
 export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/inference/go'
-export const OPENCODE_GO_CHAT_URL = OPENCODE_GO_BASE_URL + '/openai/v1/chat/completions'
+export const OPENCODE_GO_OPENAI_BASE_URL = OPENCODE_GO_BASE_URL + '/openai/v1'
+export const OPENCODE_GO_MESSAGES_BASE_URL = OPENCODE_GO_BASE_URL + '/anthropic/v1'
+export const OPENCODE_GO_GEMINI_BASE_URL = OPENCODE_GO_BASE_URL + '/google/v1beta'
+export const OPENCODE_GO_CHAT_URL = OPENCODE_GO_OPENAI_BASE_URL + '/chat/completions'
 export const OPENCODE_GO_MODELS_URL = OPENCODE_GO_BASE_URL + '/v1/models'
 export const OPENCODE_GO_USAGE_URL = OPENCODE_GO_BASE_URL + '/v1/usage'
 export const OPENCODE_GO_USER_AGENT = 'dsh-opencode-go/1.0.0'

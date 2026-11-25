@@ -167,7 +167,8 @@ export function registerOpenCodeGoRoutes(ctx: Context, pool: OpenCodeGoAccountPo
           if (!isSameOriginMutation(request)) return crossOrigin(response)
           try {
             const target = await targetFor()
-            await fetchOpenCodeGoUsage(target.account.id, target.credentials, options.fetchFn ?? fetch)
+            const snapshot = await fetchOpenCodeGoUsage(target.account.id, target.credentials, options.fetchFn ?? fetch)
+            await pool.recordQuota(target.account.id, snapshot)
             lastQuotaError = null
           } catch (error) { lastQuotaError = error instanceof Error ? error.message : String(error) }
           return sendJson(response, 200, { ok: true, value: await status() })

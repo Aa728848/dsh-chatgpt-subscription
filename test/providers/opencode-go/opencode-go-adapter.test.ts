@@ -5,7 +5,7 @@ import type { OpenCodeGoCatalogManager } from '../../../src/host/providers/openc
 import type { OpenCodeGoSettingsStore } from '../../../src/host/providers/opencode-go/token-store.ts'
 import { credential, memoryBackend, modelEntry, settings, sse, jsonResponse } from './helpers.ts'
 
-function catalog(): OpenCodeGoCatalogManager { return { warm: async () => [modelEntry()] } as unknown as OpenCodeGoCatalogManager }
+function catalog(): OpenCodeGoCatalogManager { const entries = [modelEntry()]; return { warm: async () => entries, snapshot: () => ({ entries }) } as unknown as OpenCodeGoCatalogManager }
 function store(): OpenCodeGoSettingsStore { return { read: async () => settings() } as unknown as OpenCodeGoSettingsStore }
 function options() { return { provider: 'opencode-go', model: 'deepseek-v4.1-flash', sessionId: 'session-1', messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply OK' }] }] } as never }
 async function collect(stream: AsyncIterable<unknown>): Promise<unknown[]> { const chunks: unknown[] = []; for await (const chunk of stream) chunks.push(chunk); return chunks }
@@ -17,7 +17,7 @@ describe('OpenCodeGoAdapter', () => {
     const sessions: string[] = []
     const fetchFn: typeof fetch = async (_url, init) => {
       sessions.push((init?.headers as Record<string, string>)['x-opencode-session'])
-      return sse([JSON.stringify({ choices: [{ delta: { content: 'OK' } }] }), JSON.stringify({ choices: [], usage: { prompt_tokens: 2, completion_tokens: 1 } })])
+      return sse([JSON.stringify({ choices: [{ delta: { content: 'OK' } }] }), JSON.stringify({ choices: [], usage: { prompt_tokens: 2, completion_tokens: 1, opencode: { billing_source: 'go-plus', allowance: 0.5 } } })])
     }
     const adapter = new OpenCodeGoAdapter(store(), catalog(), { accountPool: pool, fetchFn })
     const first = await adapter.prepareCall('opencode-go', 'deepseek-v4.1-flash')
@@ -28,6 +28,10 @@ describe('OpenCodeGoAdapter', () => {
     expect(sessions[0]).toBe(sessions[1])
     expect(sessions[0]).toMatch(/^ses_dsh_/)
     expect(chunks.some(chunk => (chunk as { type?: string }).type === 'finish')).toBe(true)
+    const stored = (await pool.read()).accounts[0]!
+    expect(stored.allowanceSinceQuota).toBe(1)
+    expect(stored.allowanceCosts?.['deepseek-v4.1-flash']).toMatchObject({ averageAmount: 0.5, uses: 2 })
+    expect(stored.planName).toBe('Go Plus')
   })
 
   it('treats an unreadable pool as unconfigured instead of throwing', async () => {
