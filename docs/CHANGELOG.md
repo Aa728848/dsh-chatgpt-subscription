@@ -8,7 +8,7 @@
 
 - **[opencode-go] 新增 OpenCode Go 官方订阅线路**：支持 Console API Key 独立账号池、实时聊天模型目录与账号隔离快照、rolling / weekly / monthly 三窗额度、OpenAI Chat Completions 文本/推理/工具/图片流式调用，以及按 DSH 会话和账号派生的稳定 `x-opencode-session`。账号卡复用 Kimi 外壳与三窗额度展示，新增 Georgia 白色 OPENCODE 字标逐字悬停上升动效、14px 按钮圆角、官方品牌图标和中英俄文案。401/403/429 分类处理，401/429 仅在已有输出前换号，冷却期仍可查询额度与测试连接；多账号并发目录按调用方隔离。接入保守的 `staticPrefix` 缓存策略，映射官方 `usage.opencode.tokens` 缓存读写与推理计数；目录与能力只取官方字段，不编造套餐、缓存命中率或隐私能力。
 
-- **[hub] 恢复各线路代理快捷设置**：供应商总览每行重新提供「系统代理 / 自定义代理 / 直连」紧凑下拉，只写当前线路并立即刷新共享快照；自定义代理未保存地址时进入对应详情页补全。移除重复代理徽章，保持原有行高、开关位置、禁用状态与窄屏布局；下拉左右内边距对称，避免文字与箭头视觉偏移。
+- **[hub] 恢复各线路代理快捷设置**：供应商总览每行重新提供「系统代理 / 自定义代理 / 直连」紧凑下拉，只写当前线路并立即刷新共享快照；自定义代理未保存地址时进入对应详情页补全。移除重复代理徽章，保持原有行高、开关位置、禁用状态与窄屏布局；下拉左右内边距对称，状态、下拉与开关的外侧间距统一，避免文字与控件视觉偏移。
 
 - **[opencode-go] 增加额度感知轮换与原生协议**：持久化官方三窗额度快照、快照后的 `opencode.allowance` 消耗和同模型平均消耗，按 5 小时 / 周 / 月窗口预测压力并重排自动选号；用户 pin 优先，未知额度排在预测耗尽账号之前。模型目录接入权威 `api` / `base_url` 和 `monthly_usage`，原生支持 OpenAI Responses、Anthropic Messages 与 Gemini generateContent，统一文本、推理、工具、缓存 usage 和 `opencode-go` 回放，明确协议不支持时同账号回退 Chat Completions；Gemini 使用 `streamGenerateContent` SSE 流式响应并保留活动脉冲，不注入未确认的 thinking 字段。
 
