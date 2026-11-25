@@ -335,9 +335,10 @@ describe('DeepSeek V4.1 Flash Append-Only SWA-128 state anchor & effort drift gu
     await run(3, [user('Update migration notes')])
     const thirdTurn = await run(3, [])
     const thirdTurnText = anchorText(thirdTurn)
-    expect(thirdTurnText).toContain('Fix stream parser races | Keep legacy adapters working')
-    expect(thirdTurnText).toContain('Add regression coverage')
-    expect(thirdTurnText).toContain('Update migration notes')
+    expect(thirdTurnText).toContain('GOAL: Update migration notes\n')
+    expect(thirdTurnText).toContain('EARLIER (context only): Fix stream parser races | Keep legacy adapters working | Add regression coverage')
+    expect(thirdTurnText).toContain('EARLIER is context only and loses on any conflict')
+    expect(thirdTurnText).not.toContain('Stay locked')
     expect(thirdTurnText.length).toBeLessThan(480)
 
     await run(4, [
@@ -346,13 +347,41 @@ describe('DeepSeek V4.1 Flash Append-Only SWA-128 state anchor & effort drift gu
     ])
     const fourthTurn = await run(4, [])
     const fourthTurnText = anchorText(fourthTurn)
-    expect(fourthTurnText).toContain('Add regression coverage')
-    expect(fourthTurnText).toContain('Update migration notes')
-    expect(fourthTurnText).toContain('Refresh compatibility matrix')
+    expect(fourthTurnText).toContain('GOAL: Refresh compatibility matrix\n')
+    expect(fourthTurnText).toContain('EARLIER (context only): Add regression coverage | Update migration notes')
     expect(fourthTurnText).not.toContain('Fix stream parser races')
     expect(fourthTurnText).not.toContain('Keep legacy adapters working')
     expect(fourthTurnText).not.toContain('ignored notice')
 
+    dispose()
+  })
+
+  it('lets the latest turn override a contradicting earlier one, and drops EARLIER once tasks exist', async () => {
+    const { ctx, emitWaterfall } = createEventHost()
+    const dispose = installDeepSeekV41FlashStateAnchor(ctx, { stepInterval: 1, contextWatermarks: [], estimateContextTokens: () => 0 })
+    const flashAgent = makeAgent('opendesign', 'deepseek-v4.1-flash-1017', 'sess-override', 'high')
+    const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] })
+    const run = async (turn: number, messages: unknown[]) => await emitWaterfall(
+      'agent/pre-step',
+      [{ agent: flashAgent, turn, messages }],
+      () => ({ kind: 'enter', messages }),
+    ) as { messages: Array<{ content: Array<{ text: string }> }> }
+    await run(1, [user('Refactor the parser with approach A')])
+    await run(2, [user('Do not use approach A; switch to approach B')])
+    const text = (await run(2, [])).messages[0]!.content[0]!.text
+    expect(text).toContain('GOAL: Do not use approach A; switch to approach B\n')
+    expect(text).toContain('EARLIER (context only): Refactor the parser with approach A')
+    expect(text).toContain('loses on any conflict')
+
+    await emitWaterfall(
+      'tools/post-execute',
+      [{ name: 'todo_write', agent: flashAgent, arguments: { todos: [{ content: 'Port parser to approach B', status: 'in_progress' }] } }, { isError: false, content: [] }],
+      () => ({ kind: 'accept' }),
+    )
+    const withTasks = (await run(2, [])).messages[0]!.content[0]!.text
+    expect(withTasks).toContain('TASKS: 0/1 done | NOW: Port parser to approach B')
+    expect(withTasks).not.toContain('EARLIER')
+    expect(withTasks).not.toContain('approach A\n')
     dispose()
   })
 

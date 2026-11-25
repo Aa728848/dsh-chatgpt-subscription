@@ -89,6 +89,8 @@ interface EventHostLike {
 
 interface AnchorSessionState {
   goal: string
+  /** 目标由同回合多条用户消息合并而成（后补充的在后）。 */
+  goalMerged: boolean
   turn: number
   stepsInTurn: number
   lastAnchoredStep: number
@@ -129,6 +131,7 @@ function isEnabled(read: (() => boolean) | undefined): boolean {
 function createSessionState(): AnchorSessionState {
   return {
     goal: '',
+    goalMerged: false,
     turn: 0,
     stepsInTurn: 0,
     lastAnchoredStep: 0,
@@ -248,13 +251,14 @@ export function renderOpenModelStateAnchorText(input: {
   readonly approxTokens: number
   readonly reason: 'periodic' | 'watermark' | 'consecutive-errors'
   readonly goal: string
+  readonly goalMerged?: boolean | undefined
   readonly activeFiles: readonly string[]
   readonly consecutiveErrors: number
   readonly lastErrorTool?: string
 }): string {
   const header = `${OPEN_MODEL_ANCHOR_PREFIX} | model=${input.profile.label} | step=${input.step} | ctx~${formatApproxTokens(input.approxTokens)} | trigger=${input.reason}]`
   const lines = [header]
-  if (input.goal.length > 0) lines.push(`GOAL: ${input.goal}`)
+  if (input.goal.length > 0) lines.push(`${input.goalMerged === true ? 'GOAL (later parts override earlier)' : 'GOAL'}: ${input.goal}`)
   if (input.activeFiles.length > 0) lines.push(`FILES: ${input.activeFiles.join(', ')}`)
   if (input.reason === 'consecutive-errors') {
     const toolLabel = input.lastErrorTool ? ` (${input.lastErrorTool})` : ''
@@ -375,6 +379,7 @@ export function installOpenModelStateAnchor(
     const newGoals = findRealUserGoals(incoming)
     if (newGoals.length > 0) {
       const incomingGoal = newGoals.reduce(mergeGoalUpdate, '')
+      state.goalMerged = newGoals.length > 1 || (isSameTurn && state.goal.length > 0)
       state.goal = isSameTurn ? mergeGoalUpdate(state.goal, incomingGoal) : incomingGoal
       state.stepsInTurn = 0
       state.lastAnchoredStep = 0
@@ -404,6 +409,7 @@ export function installOpenModelStateAnchor(
           const recovered = compactGoalSummary(extractTextFromContent(msg['content']))
           if (recovered.length > 0) {
             state.goal = recovered
+            state.goalMerged = false
             break
           }
         }
@@ -445,6 +451,7 @@ export function installOpenModelStateAnchor(
       approxTokens,
       reason: trigger,
       goal: state.goal,
+      goalMerged: state.goalMerged,
       activeFiles: state.activeFiles,
       consecutiveErrors: state.consecutiveToolErrors,
       lastErrorTool: state.lastErrorTool,

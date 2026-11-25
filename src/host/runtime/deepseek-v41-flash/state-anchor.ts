@@ -112,7 +112,10 @@ interface EventHostLike {
 }
 
 interface AnchorSessionState {
+  /** 最新一个用户回合的目标（同回合插话已合并，后补充的在后）。 */
   goal: string
+  /** 更早回合的目标，仅作参考；有任务清单时不渲染。 */
+  earlierGoal: string
   goalTurns: Array<{ turn: number; goal: string }>
   stepsInTurn: number
   lastAnchoredStep: number
@@ -160,6 +163,7 @@ function isEnabled(read: (() => boolean) | undefined): boolean {
 function createSessionState(): AnchorSessionState {
   return {
     goal: '',
+    earlierGoal: '',
     goalTurns: [],
     stepsInTurn: 0,
     lastAnchoredStep: 0,
@@ -367,13 +371,15 @@ export type StateAnchorTrigger = 'periodic' | 'watermark' | 'compaction' | 'cons
 /**
  * 渲染紧凑状态锚正文，整体不超过 {@link MAX_ANCHOR_CHARS}。
  *
- * 预算优先级：头部、ALERT、GOAL、RULE 始终保留；剩余空间先给 TASKS，再按新到旧给 FILES。
+ * 预算优先级：头部、ALERT、GOAL、RULE 始终保留；剩余空间依次给 TASKS、EARLIER，再按新到旧给 FILES。
+ * GOAL 只含最新回合；更早回合标注为仅供参考，且有任务清单时由 TASKS 承接连续性而不再渲染。
  */
 export function renderStateAnchorText(input: {
   readonly step: number
   readonly approxTokens: number
   readonly reason: StateAnchorTrigger
   readonly goal: string
+  readonly earlierGoal?: string | undefined
   readonly tasks?: string | undefined
   readonly activeFiles: readonly string[]
   readonly consecutiveErrors: number
@@ -385,7 +391,11 @@ export function renderStateAnchorText(input: {
   const alertLine = input.reason === 'consecutive-errors'
     ? `ALERT: ${input.consecutiveErrors} consecutive tool failures${toolLabel}. Do NOT retry the same approach; switch to minimal verification or inspect the root definition.`
     : undefined
-  const ruleLine = 'RULE: Stay locked on GOAL; verify via tools/PTC instead of long speculation; finish once acceptance criteria pass.'
+  const hasTasks = input.tasks !== undefined && input.tasks.length > 0
+  const earlier = !hasTasks && input.earlierGoal !== undefined ? input.earlierGoal : ''
+  const ruleLine = earlier.length > 0
+    ? 'RULE: GOAL is the latest request and later parts override earlier ones; EARLIER is context only and loses on any conflict; verify via tools/PTC instead of long speculation; finish once acceptance criteria pass.'
+    : 'RULE: GOAL is the latest request and later parts override earlier ones; verify via tools/PTC instead of long speculation; finish once acceptance criteria pass.'
 
   const fixed = [header, goalLine, alertLine, ruleLine].filter((line): line is string => line !== undefined)
   let remaining = MAX_ANCHOR_CHARS - fixed.reduce((sum, line) => sum + line.length + 1, 0)
@@ -396,6 +406,15 @@ export function renderStateAnchorText(input: {
     if (full.length + 1 <= remaining) tasksLine = full
     else if (remaining - 1 >= 'TASKS: '.length + 8) tasksLine = full.slice(0, remaining - 4).trimEnd() + '...'
     if (tasksLine !== undefined) remaining -= tasksLine.length + 1
+  }
+
+  let earlierLine: string | undefined
+  if (earlier.length > 0) {
+    const prefix = 'EARLIER (context only): '
+    const full = `${prefix}${earlier}`
+    if (full.length + 1 <= remaining) earlierLine = full
+    else if (remaining - 1 >= prefix.length + 8) earlierLine = full.slice(0, remaining - 4).trimEnd() + '...'
+    if (earlierLine !== undefined) remaining -= earlierLine.length + 1
   }
 
   let filesLine: string | undefined
@@ -410,6 +429,7 @@ export function renderStateAnchorText(input: {
   const lines = [header]
   if (goalLine !== undefined) lines.push(goalLine)
   if (tasksLine !== undefined) lines.push(tasksLine)
+  if (earlierLine !== undefined) lines.push(earlierLine)
   if (filesLine !== undefined) lines.push(filesLine)
   if (alertLine !== undefined) lines.push(alertLine)
   lines.push(ruleLine)
@@ -562,7 +582,9 @@ export function installDeepSeekV41FlashStateAnchor(
           state.goalTurns.splice(0, state.goalTurns.length - MAX_GOAL_TURNS)
         }
       }
-      state.goal = state.goalTurns.reduce((goal, entry) => mergeGoalUpdate(goal, entry.goal), '')
+      // 最新回合才是当前指令；更早回合只作参考，避免被否定或无关的旧命令盖过新命令。
+      state.goal = state.goalTurns[state.goalTurns.length - 1]?.goal ?? incomingGoal
+      state.earlierGoal = state.goalTurns.slice(0, -1).reduce((goal, entry) => mergeGoalUpdate(goal, entry.goal), '')
       state.stepsInTurn = 0
       state.lastAnchoredStep = 0
       state.consecutiveToolErrors = 0
@@ -590,6 +612,7 @@ export function installDeepSeekV41FlashStateAnchor(
           const recovered = compactGoalSummary(extractTextFromContent(msg['content']))
           if (recovered.length > 0) {
             state.goal = recovered
+            state.earlierGoal = ''
             state.goalTurns = [{ turn: currentTurn ?? 0, goal: recovered }]
             break
           }
@@ -634,6 +657,7 @@ export function installDeepSeekV41FlashStateAnchor(
       approxTokens,
       reason: trigger,
       goal: state.goal,
+      earlierGoal: state.earlierGoal,
       tasks: state.taskLine,
       activeFiles: state.activeFiles,
       consecutiveErrors: state.consecutiveToolErrors,

@@ -364,7 +364,7 @@ describe('零改前缀尾部 State Anchor（适配 SWA 短窗与 1M 稀疏/线�
     ])
     const steered = await run(1, [])
     const steeredText = steered.messages?.[0]?.content?.[0]?.text ?? ''
-    expect(steeredText).toContain('GOAL: Fix parser edge case in auth.ts')
+    expect(steeredText).toContain('GOAL (later parts override earlier): Fix parser edge case in auth.ts')
     expect(steeredText).toContain(' | Also update regression tests')
     expect(steeredText).not.toContain('ignored notice')
 
