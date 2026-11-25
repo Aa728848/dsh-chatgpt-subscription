@@ -80,6 +80,12 @@ import { AwsQuickOutpost } from './host/providers/aws-quick/outpost.ts'
 import { AwsQuickToolBridge } from './host/providers/aws-quick/tool-bridge.ts'
 import { registerAwsQuickRoutes } from './host/providers/aws-quick/routes.ts'
 import { PROVIDER_ID as AWS_QUICK_PROVIDER_ID, PROVIDER_NAME as AWS_QUICK_PROVIDER_NAME, QUICK_MODELS } from './host/providers/aws-quick/types.ts'
+import { OpenCodeGoAdapter } from './host/providers/opencode-go/adapter.ts'
+import { OpenCodeGoAccountPool } from './host/providers/opencode-go/account-pool.ts'
+import { OpenCodeGoCatalogManager, openCodeGoModelOptions } from './host/providers/opencode-go/model-catalog.ts'
+import { OpenCodeGoSettingsStore } from './host/providers/opencode-go/token-store.ts'
+import { registerOpenCodeGoRoutes } from './host/providers/opencode-go/routes.ts'
+import { OPENCODE_GO_PROVIDER_ID, OPENCODE_GO_PROVIDER_NAME } from './shared/opencode-go-contracts.ts'
 import { KimiCodeAdapter } from './host/providers/kimi-code/adapter.ts'
 import { resolvedKimiContextWindow } from './host/providers/kimi-code/client.ts'
 import { KimiCodeAccountPool } from './host/providers/kimi-code/account-pool.ts'
@@ -1777,6 +1783,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       settings: awsQuickSettings, outpost: awsQuickOutpost, tools: awsQuickToolBridge, conflict: () => awsQuickClaim.conflict(),
     })
 
+    const openCodeGoSettings = new OpenCodeGoSettingsStore()
+    const openCodeGoPool = new OpenCodeGoAccountPool()
+    const openCodeGoCatalog = new OpenCodeGoCatalogManager()
+    const openCodeGoAdapter = new OpenCodeGoAdapter(openCodeGoSettings, openCodeGoCatalog, {
+      fetchFn: modelFetch[OPENCODE_GO_PROVIDER_ID], attachments: ctx.attachments, accountPool: openCodeGoPool,
+    })
+    const openCodeGoClaim = claimProviderRoute(ctx, { providerId: OPENCODE_GO_PROVIDER_ID, label: OPENCODE_GO_PROVIDER_NAME, adapter: openCodeGoAdapter })
+    const disposeOpenCodeGoRoutes = registerOpenCodeGoRoutes(ctx, openCodeGoPool, openCodeGoSettings, openCodeGoCatalog, {
+      fetchFn: proxyFetchFor(OPENCODE_GO_PROVIDER_ID), serving: () => openCodeGoClaim.serving(), conflict: () => openCodeGoClaim.conflict(),
+    })
+
     // The ChatGPT account pool. Its mirror store is the same platform store the
     // plugin used before the pool existed, so a pre-pool sign-in is projected as
     // the primary account and nothing has to be migrated up front.
@@ -2341,6 +2358,24 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           }
         },
       },
+      {
+        id: 'opencode-go', providerId: OPENCODE_GO_PROVIDER_ID, canToggle: true,
+        read: async () => {
+          const [current, data] = await Promise.all([openCodeGoSettings.read(), openCodeGoPool.read()])
+          const activeId = current.selectedAccountId ?? data.activeAccountId ?? data.accounts.find(account => account.isPrimary)?.id ?? data.accounts[0]?.id
+          if (activeId !== undefined) await openCodeGoCatalog.restore(activeId)
+          const accounts = openCodeGoPool.summariesOf(data)
+          const models = openCodeGoModelOptions(openCodeGoCatalog.snapshot().entries, current)
+          const enabledModels = models.filter(model => model.enabled)
+          const accountHint = accountHintOf(accounts)
+          return {
+            enabled: current.enabled, accountCount: accounts.length, authenticated: accounts.length > 0,
+            enabledModelCount: enabledModels.length, totalModelCount: catalogTotal(models.length),
+            ...(accountHint ? { accountHint } : {}),
+            ...(enabledModels.length > 0 ? { modelIds: enabledModels.map(model => model.id) } : {}),
+          }
+        },
+      },
     ]
     const disposeHubOverview = registerHubOverviewRoutes(ctx, hubSources)
     // 概览页右端的「检测更新 / 更新插件」。注册在这里而不是 routes.ts：它不属于任何
@@ -2505,6 +2540,8 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeAwsQuickRoutes()
       awsQuickClaim.dispose()
       void awsQuickAdapter.dispose().catch(() => undefined)
+      disposeOpenCodeGoRoutes()
+      openCodeGoClaim.dispose()
     }
   }, 'dsh-chatgpt-subscription: adapter, routes, and lifecycle')
 }
@@ -3455,3 +3492,9 @@ export { ClaudeApiCatalogManager } from './host/providers/claude-api/catalog-man
 export { ClaudeApiClientVersionResolver } from './host/providers/claude-api/client-version.ts'
 export { ClaudeApiCompactionStore } from './host/providers/claude-api/compaction-store.ts'
 export * from './shared/claude-api-contracts.ts'
+export { OpenCodeGoAdapter } from './host/providers/opencode-go/adapter.ts'
+export { OpenCodeGoAccountPool, parseOpenCodeGoPoolData } from './host/providers/opencode-go/account-pool.ts'
+export { OpenCodeGoCatalogManager } from './host/providers/opencode-go/model-catalog.ts'
+export { OpenCodeGoSettingsStore } from './host/providers/opencode-go/token-store.ts'
+export { registerOpenCodeGoRoutes, getOpenCodeGoWebStatus } from './host/providers/opencode-go/routes.ts'
+export * from './shared/opencode-go-contracts.ts'

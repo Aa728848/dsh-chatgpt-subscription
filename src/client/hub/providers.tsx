@@ -29,6 +29,8 @@ import { ClaudeSection } from '../providers/claude/ClaudeSection.tsx'
 import { OllamaSection } from '../providers/ollama/OllamaSection.tsx'
 import { AntigravityAcpSection } from '../providers/antigravity-acp/AntigravityAcpSection.tsx'
 import { AwsQuickSection } from '../providers/aws-quick/AwsQuickSection.tsx'
+import { OpenCodeGoSection } from '../providers/opencode-go/OpenCodeGoSection.tsx'
+import { OPENCODE_GO_PROVIDER_NAME, OPENCODE_GO_ROUTE_PREFIX } from '../../shared/opencode-go-contracts.ts'
 import { StepCodeSection } from '../providers/step-code/StepCodeSection.tsx'
 import { ClinePassSection } from '../providers/cline-pass/ClinePassSection.tsx'
 import { CLINE_PASS_PROVIDER_NAME, CLINE_PASS_ROUTE_PREFIX } from '../../shared/cline-pass-contracts.ts'
@@ -260,6 +262,14 @@ export const HUB_PROVIDERS: readonly HubProviderDescriptor[] = [
     category: 'local',
     setEnabled: (enabled) => postLineSettings('/aws-quick/api', { enabled }),
     renderDetail: ({ onModelChange }) => <AwsQuickSection onModelChange={onModelChange} />,
+  },
+  {
+    id: 'opencode-go',
+    proxyLine: 'opencode-go',
+    name: OPENCODE_GO_PROVIDER_NAME,
+    category: 'api-key',
+    setEnabled: (enabled) => postLineSettings(OPENCODE_GO_ROUTE_PREFIX, { enabled }),
+    renderDetail: ({ onModelChange }) => <OpenCodeGoSection onModelChange={onModelChange} />,
   },
 ]
 

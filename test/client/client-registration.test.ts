@@ -347,6 +347,8 @@ describe('client registration', () => {
       'conversation.input.right',
       // RelayOne：order 50。
       'conversation.input.right',
+      // OpenCode Go：order 51。
+      'conversation.input.right',
       // 模型菜单里的「本轮结束后压缩」一次性开关。
       'conversation.input.model.options',
       'tool.call.toolview',
@@ -400,6 +402,7 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'antigravity-acp-quota', order: 48 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'qianwen-token-plan-quota', order: 49 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'relayone-quota', order: 50 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'opencode-go-quota', order: 51 }),
     ])
     expect(registrations.filter((registration) => registration.name === 'conversation.input.model.options')).toEqual([
       expect.objectContaining({ name: 'conversation.input.model.options', id: 'compact-after-turn', locale: 'dsh-compact-after-turn' }),
@@ -433,7 +436,7 @@ describe('client registration', () => {
   })
 
   it('hosts every subscription provider behind an overview hub in one settings page', async () => {
-    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'claude-api', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone', 'aws-quick'] as const
+    const TAB_IDS = ['chatgpt', 'command-code', 'kimi-code', 'minimax-code', 'glm-coding-plan', 'claude', 'claude-api', 'ollama', 'step-code', 'cline-pass', 'qoder', 'opendesign', 'workbuddy', 'antigravity-acp', 'qianwen-token-plan', 'relayone', 'aws-quick', 'opencode-go'] as const
     const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     const originalFetch = globalThis.fetch
@@ -599,13 +602,13 @@ describe('client registration', () => {
       // The opening screen is the overview: one card per provider, in registry
       // order, and no provider section mounted underneath.
       const cards = [...container.querySelectorAll<HTMLElement>('.dsh-hub-card')]
-      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Claude API', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne', 'AWS Quick'])
+      expect(cards.map((card) => card.querySelector('.dsh-hub-card-name')?.textContent)).toEqual(['ChatGPT', 'Command Code', 'Kimi Code', 'MiniMax Code', 'GLM（ZCode 账号）', 'Claude', 'Claude API', 'Ollama', 'Step Code（Step Plan 订阅）', 'Cline Pass', 'Qoder（订阅）', 'OpenDesign', 'WorkBuddy', 'Antigravity（ACP）', 'Qwen Token Plan（千问）', 'RelayOne', 'AWS Quick', 'OpenCode Go（订阅）'])
       expect(container.querySelector('.dsh-hub-detail')).toBeNull()
       expect(container.querySelector('#dsh-codex-title')).toBeNull()
       // Every toggleable line renders a switch on its card; Ollama, which has
       // no enable switch on the host, renders none. Step Code joins the toggleable
       // side (it posts enabled to its own /settings like every other line).
-      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(16)
+      expect(container.querySelectorAll('.dsh-hub-card [role="switch"]')).toHaveLength(17)
       const ollamaCard = cards.find((card) => card.textContent?.includes('Ollama'))!
       expect(ollamaCard.querySelector('[role="switch"]')).toBeNull()
       // Annotations carry the account count from the aggregated overview.
