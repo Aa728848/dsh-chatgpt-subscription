@@ -50,7 +50,7 @@ const CSS = `
 .dsh-hub-status.is-error{background:color-mix(in srgb,var(--dsw-alias-label-danger,#d94b4b) 12%,transparent);color:var(--dsw-alias-label-danger,#d94b4b)}
 .dsh-hub-status.is-error::before{background:var(--dsw-alias-label-danger,#d94b4b)}
 .dsh-hub-tail{align-items:center;display:flex;flex:none;gap:10px}
-.dsh-hub-proxy-select{background:var(--dsw-alias-bg-layer-1,#fff);border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:7px;color:var(--dsw-alias-label-secondary,#5d5c52);cursor:pointer;flex:none;font:inherit;font-size:12px;height:28px;max-width:112px;min-width:0;padding:0 22px 0 8px;width:112px}
+.dsh-hub-proxy-select{background:var(--dsw-alias-bg-layer-1,#fff);border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:7px;color:var(--dsw-alias-label-secondary,#5d5c52);cursor:pointer;flex:none;font:inherit;font-size:12px;height:28px;max-width:112px;min-width:0;padding:0 8px;width:112px}
 .dsh-hub-proxy-select:hover:not(:disabled){border-color:var(--dsw-alias-label-caption,#a6a094);color:var(--dsw-alias-label-primary,#141413)}
 .dsh-hub-proxy-select:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
 .dsh-hub-proxy-select:disabled{cursor:default;opacity:.55}
@@ -101,7 +101,7 @@ const CSS = `
 .dsh-hub-skeleton span{background:var(--dsw-alias-bg-layer-2,#f2f1ea);border-radius:5px;display:block;height:11px}
 .dsh-hub-skeleton .dsh-hub-skel-name{margin-bottom:6px;width:120px}
 .dsh-hub-skeleton .dsh-hub-skel-note{height:9px;width:170px}
-@media(max-width:640px){.dsh-hub-row{gap:8px;padding:10px}.dsh-hub-tail{gap:7px}.dsh-hub-status{display:none}.dsh-hub-proxy-select{font-size:11.5px;max-width:96px;padding-left:7px;width:96px}.dsh-hub-search{flex:1;max-width:none;width:auto}.dsh-hub-chevron{display:none}}
+@media(max-width:640px){.dsh-hub-row{gap:8px;padding:10px}.dsh-hub-tail{gap:7px}.dsh-hub-status{display:none}.dsh-hub-proxy-select{font-size:11.5px;max-width:96px;padding:0 7px;width:96px}.dsh-hub-search{flex:1;max-width:none;width:auto}.dsh-hub-chevron{display:none}}
 .dsh-hub-head{align-items:center;display:flex;flex-wrap:wrap;gap:8px;min-width:0}
 .dsh-hub-head .dsh-hub-head-title{flex:0 1 auto;margin:0 auto 0 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-hub-update{align-items:flex-end;display:flex;flex:0 1 auto;flex-direction:column;gap:4px;min-width:0}
