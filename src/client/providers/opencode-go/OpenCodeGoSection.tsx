@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { AccountPoolSection } from '../../common/AccountPoolSection.tsx'
 import { ContextWindowEditor, contextDraftsFor } from '../../common/ContextWindowEditor.tsx'
 import { ModelChecklist } from '../../common/ModelChecklist.tsx'
@@ -13,6 +13,7 @@ import { NS_OPENCODE_GO, zh } from './locales.ts'
 import { OpenCodeGoQuotaCard } from './OpenCodeGoQuotaCard.tsx'
 
 const api = createLineApi('/opencode-go/api', 'OpenCode Go')
+const QUOTA_POLL_MS = 30_000
 interface Props { onModelChange?: () => void; loadModelDirectory?: () => void }
 
 export function OpenCodeGoSection({ onModelChange, loadModelDirectory }: Props): React.JSX.Element {
@@ -26,6 +27,8 @@ export function OpenCodeGoSection({ onModelChange, loadModelDirectory }: Props):
   const [apiKeyTarget, setApiKeyTarget] = useState<string | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [savingModel, setSavingModel] = useState<string | null>(null)
+  const quotaRequest = useRef<Promise<OpenCodeGoWebStatus> | null>(null)
+  const authenticated = status?.authenticated === true
 
   const notifyChange = useCallback(() => { onModelChange?.(); loadModelDirectory?.() }, [onModelChange, loadModelDirectory])
   const applyStatus = useCallback((next: OpenCodeGoWebStatus) => { setStatus(next); setContextDrafts(contextDraftsFor(next)) }, [])
@@ -35,6 +38,40 @@ export function OpenCodeGoSection({ onModelChange, loadModelDirectory }: Props):
     finally { setLoading(false) }
   }, [applyStatus])
   useEffect(() => { void load() }, [load])
+
+  const requestQuota = useCallback(() => {
+    quotaRequest.current ??= api.post<OpenCodeGoWebStatus>('/quota/refresh').finally(() => {
+      quotaRequest.current = null
+    })
+    return quotaRequest.current
+  }, [])
+
+  useEffect(() => {
+    if (!authenticated || busy !== null) return
+    let active = true
+    const timer = window.setInterval(async () => {
+      if (document.hidden || quotaRequest.current !== null) return
+      try {
+        const next = await requestQuota()
+        if (!active) return
+        const accounts = new Map(next.accounts.map(account => [account.id, account]))
+        setStatus(current => current === null ? current : {
+          ...current,
+          quotaError: next.quotaError,
+          accounts: current.accounts.map(account => {
+            const update = accounts.get(account.id)
+            return update === undefined ? account : { ...account, quota: update.quota, planName: update.planName, lastUsedAt: update.lastUsedAt }
+          }),
+        })
+      } catch {
+        // Keep the last displayed quota when the background request fails.
+      }
+    }, QUOTA_POLL_MS)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [authenticated, busy, requestQuota])
 
   const commit = useCallback(async (kind: string, action: () => Promise<OpenCodeGoWebStatus>, notify = true) => {
     try { setBusy(kind); setError(null); applyStatus(await action()); if (notify) notifyChange() }
@@ -104,7 +141,7 @@ export function OpenCodeGoSection({ onModelChange, loadModelDirectory }: Props):
         <div className="dshoc-apikey-row"><input type="password" className="dsha-select" autoComplete="off" spellCheck={false} aria-label={t.apiKeyLogin} placeholder={t.apiKeyPlaceholder} value={apiKeyValue} disabled={busy !== null} onChange={event => setApiKeyValue(event.currentTarget.value)} onKeyDown={event => { if (event.key === 'Enter') void submitKey() }} /><button className="dsha-btn dsha-btn-primary" disabled={busy !== null || apiKeyValue.trim() === ''} onClick={() => void submitKey()}>{busy === 'login' ? t.apiKeySubmitting : t.apiKeySubmit}</button></div>
       </div>}
       {status?.quotaError != null && <p className="dsha-notice">{status.quotaError}</p>}
-      <div className="dsha-actions"><button className="dsha-btn" disabled={busy !== null || !status?.authenticated} onClick={() => void commit('quota', () => api.post<OpenCodeGoWebStatus>('/quota/refresh'), false)}>{busy === 'quota' ? t.refreshingQuota : t.refreshQuota}</button></div>
+      <div className="dsha-actions"><button className="dsha-btn" disabled={busy !== null || !status?.authenticated} onClick={() => void commit('quota', requestQuota, false)}>{busy === 'quota' ? t.refreshingQuota : t.refreshQuota}</button></div>
     </AccountPoolSection>
 
     <section className="dsha-group"><div className="dsha-grouphead"><h3>{t.connection}</h3></div>

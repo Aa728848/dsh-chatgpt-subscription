@@ -77,10 +77,10 @@ function subscribeProvider(adapter: SessionQuotaAdapter, listener: () => void): 
   if (wasIdle) {
     void fetchProvider(adapter, entry, false)
     entry.timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void fetchProvider(adapter, entry, false)
-      }
-    }, POLL_INTERVAL_MS)
+      if (document.visibilityState !== 'visible' || entry.inFlight !== null) return
+      const refresh = entry.view.hasData && (adapter.poll?.shouldRefresh(entry.view.raw) ?? false)
+      void fetchProvider(adapter, entry, refresh)
+    }, adapter.poll?.intervalMs ?? POLL_INTERVAL_MS)
   }
   return () => {
     entry.subscribers.delete(listener)

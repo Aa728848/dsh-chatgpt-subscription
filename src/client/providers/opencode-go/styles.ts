@@ -9,6 +9,8 @@ export function installOpenCodeGoStyles(): void {
   installPluginStyle('opencode-go', `
 .dshoc-page .dsha-btn{border-radius:14px}
 .dshoc-quota .dsha-kq-seg--cyan{background:#06b6d4}
+.dshoc-quota .dsha-kq-window-meta{align-items:baseline;color:var(--kq-fg-3);display:flex;flex-wrap:wrap;font-size:11px;gap:4px 12px;justify-content:space-between;line-height:1.4;margin-top:6px}
+.dshoc-quota .dsha-kq-window-meta>span:last-child{font-variant-numeric:tabular-nums}
 .dshoc-art{color:var(--dsw-alias-label-primary);height:64px;overflow:visible;pointer-events:none;position:absolute;right:6px;top:50%;transform:translateY(-50%);width:140px}
 .dshoc-art text{fill:currentColor;opacity:0;transform:scale(.8) translateY(16px);transform-box:fill-box;transform-origin:bottom;transition:opacity .2s ease-in-out,transform .2s ease-in-out}
 .dshoc-account:hover .dshoc-art text,.dshoc-quota:focus-within .dshoc-art text{opacity:1;transform:scale(1) translateY(0);transition:opacity .6s ease-in-out,transform .6s ease-in-out;transition-delay:calc(var(--i,0) * 80ms)}

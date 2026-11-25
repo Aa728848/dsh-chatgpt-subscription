@@ -26,7 +26,7 @@ function ago(t: OpenCodeGoDict, ms: number, now: number): string {
 
 export function OpenCodeGoQuotaCard({ quota, planName, lastUsedAt, labels: t }: Props): React.JSX.Element {
   const [grown, setGrown] = useState(false)
-  const [now] = useState(() => Date.now())
+  const now = Date.now()
   useEffect(() => { const frame = requestAnimationFrame(() => setGrown(true)); return () => cancelAnimationFrame(frame) }, [])
   if (quota === undefined) return <p className="dsha-muted dshoc-quota-empty">{t.quotaEmpty}</p>
   const windows = quota.windows ?? []

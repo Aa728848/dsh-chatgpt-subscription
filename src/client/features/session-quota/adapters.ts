@@ -7,6 +7,7 @@ import type { PluginStatusDto } from '../../../shared/contracts.ts'
 import { GLM_CODING_PLAN_PROVIDER_ID, type GlmStatusDto } from '../../../shared/glm-coding-plan-contracts.ts'
 import type { KimiCodeWebStatus } from '../../../shared/kimi-code-contracts.ts'
 import type { MinimaxCodeWebStatus } from '../../../shared/minimax-code-contracts.ts'
+import { OPENCODE_GO_PROVIDER_ID, OPENCODE_GO_ROUTE_PREFIX, type OpenCodeGoWebStatus } from '../../../shared/opencode-go-contracts.ts'
 import type { OpenDesignWebStatus } from '../../../shared/opendesign-contracts.ts'
 import { QIANWEN_TOKEN_PLAN_PROVIDER_ID, type QianwenStatusDto } from '../../../shared/qianwen-token-plan-contracts.ts'
 import { QODER_PROVIDER_ID, type QoderStatusDto } from '../../../shared/qoder-contracts.ts'
@@ -44,6 +45,10 @@ import {
 export interface SessionQuotaAdapter<Status = unknown> {
   providerId: string
   readStatus(refresh: boolean): Promise<Status>
+  poll?: {
+    intervalMs: number
+    shouldRefresh(status: Status): boolean
+  }
   toSnapshot(
     status: Status,
     modelId: string | undefined,
@@ -61,6 +66,7 @@ const workBuddyApi = createLineApi('/workbuddy/api', 'WorkBuddy')
 const clinePassApi = new ClinePassApi()
 const openDesignApi = new OpenDesignApi()
 const antigravityApi = new AntigravityAcpApi()
+const openCodeGoApi = createLineApi(OPENCODE_GO_ROUTE_PREFIX, 'OpenCode Go')
 
 function compactTokens(value: number): string {
   if (!Number.isFinite(value) || value < 0) return '—'
@@ -636,6 +642,51 @@ export function relayOneToSnapshot(
   }
 }
 
+function activeOpenCodeGoAccount(status: OpenCodeGoWebStatus) {
+  return status.accounts.find(account => account.id === status.activeAccountId)
+    ?? status.accounts.find(account => account.isPrimary)
+    ?? status.accounts[0]
+}
+
+async function readOpenCodeGoQuota(refresh: boolean): Promise<OpenCodeGoWebStatus> {
+  if (!refresh) {
+    const status = await openCodeGoApi.get<OpenCodeGoWebStatus>('/status')
+    if (!status.authenticated || activeOpenCodeGoAccount(status)?.quota?.windows.length) return status
+  }
+  return openCodeGoApi.post<OpenCodeGoWebStatus>('/quota/refresh')
+}
+
+function openCodeGoToSnapshot(
+  status: OpenCodeGoWebStatus,
+  _modelId: string | undefined,
+  dict: SessionQuotaDict,
+  nowMs?: number,
+): SessionQuotaSnapshot | null {
+  if (!status.authenticated) return null
+  const account = activeOpenCodeGoAccount(status)
+  const windows = account?.quota?.windows
+  if (!windows?.length) return null
+
+  const bars = windows.map((window, index) => {
+    const remaining = clampPercent(100 - window.usedPercent)
+    return {
+      key: `opencode-go-${index}`,
+      label: formatWindowDurationLabel(window.windowDurationMins, window.label || `#${index + 1}`, dict),
+      remainingPercent: remaining,
+      resetText: formatResetCountdown(window.resetsAt, dict, nowMs),
+      level: quotaLevel(remaining),
+    }
+  })
+  return {
+    providerId: OPENCODE_GO_PROVIDER_ID,
+    providerName: 'OpenCode Go',
+    planBadge: account?.planName,
+    ...summarizeBars(bars),
+    bars,
+    facts: [],
+  }
+}
+
 export const SESSION_QUOTA_ADAPTERS: ReadonlyMap<string, SessionQuotaAdapter<any>> = new Map<string, SessionQuotaAdapter<any>>([
   [CODEX_CHATGPT_PROVIDER_ID, {
     providerId: CODEX_CHATGPT_PROVIDER_ID,
@@ -706,6 +757,12 @@ export const SESSION_QUOTA_ADAPTERS: ReadonlyMap<string, SessionQuotaAdapter<any
     providerId: RELAYONE_PROVIDER_ID,
     readStatus: (refresh) => (refresh ? relayOneApi.post<RelayOneStatusDto>('/catalog/refresh', {}) : relayOneApi.get<RelayOneStatusDto>('/status')),
     toSnapshot: relayOneToSnapshot,
+  }],
+  [OPENCODE_GO_PROVIDER_ID, {
+    providerId: OPENCODE_GO_PROVIDER_ID,
+    readStatus: readOpenCodeGoQuota,
+    toSnapshot: openCodeGoToSnapshot,
+    poll: { intervalMs: 30_000, shouldRefresh: (status: OpenCodeGoWebStatus) => status.authenticated },
   }],
 ])
 

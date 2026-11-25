@@ -218,6 +218,72 @@ describe('session quota panel', () => {
     expect(readStatus).toHaveBeenCalledWith(true)
   })
 
+  it('shows the active OpenCode Go account and shares refreshes between the section and its summary', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-15T00:00:00Z'))
+    const now = Date.now()
+    const windows = [
+      { label: '', windowDurationMins: 300, usedPercent: 12, resetsAt: now + 3 * 3_600_000 },
+      { label: '', windowDurationMins: 10_080, usedPercent: 35, resetsAt: now + 2 * 86_400_000 },
+      { label: '', windowDurationMins: 43_200, usedPercent: 70, resetsAt: now + 20 * 86_400_000 },
+    ]
+    const status = {
+      authenticated: true,
+      activeAccountId: 'chosen',
+      accounts: [
+        { id: 'primary', isPrimary: true, planName: 'Other' },
+        { id: 'chosen', isPrimary: false, planName: 'Go Plus', quota: { windows, fetchedAt: now } },
+      ],
+    }
+    const updated = {
+      ...status,
+      accounts: [status.accounts[0], {
+        ...status.accounts[1],
+        quota: { fetchedAt: now, windows: windows.map(window => ({ ...window, usedPercent: window.usedPercent + 5 })) },
+      }],
+    }
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => new Response(JSON.stringify({
+      ok: true, value: init?.method === 'POST' ? updated : status,
+    })))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const directory = createDirectoryStore('opencode-go')
+      await act(async () => {
+        root.render(<>
+          <SessionQuotaSection directory={directory} />
+          <SessionQuotaReading directory={directory} />
+        </>)
+      })
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/opencode-go/api/status'])
+      expect(container.querySelector('.dsh-sq-panel')?.getAttribute('data-provider')).toBe('opencode-go')
+      expect(container.querySelector('.dsh-sq-tier')?.textContent).toBe('Go Plus')
+      expect([...container.querySelectorAll('.dsh-sq-bar-label')].map(node => node.textContent)).toEqual([
+        zh.windowFiveHour, zh.windowWeekly, zh.windowMonthly,
+      ])
+      expect(container.textContent).toContain('3 小时 0 分钟后重置')
+      expect(container.querySelector('.dsh-sq-reading')?.textContent).toContain('30%')
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(29_999) })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+      expect(fetchMock.mock.calls[1]).toEqual([
+        '/opencode-go/api/quota/refresh', expect.objectContaining({ method: 'POST' }),
+      ])
+      expect(container.querySelector('.dsh-sq-reading')?.textContent).toContain('25%')
+
+      await act(async () => { container.querySelector<HTMLButtonElement>('.dsh-sq-refresh')!.click() })
+      expect(fetchMock.mock.calls[2]).toEqual([
+        '/opencode-go/api/quota/refresh', expect.objectContaining({ method: 'POST' }),
+      ])
+      await act(async () => { root.render(null) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  })
+
   it('renders Antigravity (ACP) tier and last-turn token usage without fabricated percentage bars', async () => {
     const snapshot = antigravityToSnapshot({
       auth: { authenticated: true, tier: { id: 'ultra', name: 'Google AI Ultra' } },
