@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   AccountPoolCore,
   poolCredentialAccount,
+  UNUSABLE_BACKEND_RETRY_MS,
   type AccountPoolHooks,
 } from '../../src/host/common/account-pool.ts'
 import {
@@ -439,6 +440,38 @@ describe('the resolved backend is cached per process', () => {
     // And it is usable at once, not merely reported as such.
     await pool.addAccount({ access: 'a', refresh: 'r', expiresAt: Date.now() + 3_600_000, email: 'late@example.com' })
     expect(seam.records.size).toBe(1)
+  })
+
+  it('probes again once a keyring that was unreachable at startup has had time to unlock', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const keyring = new FakeKeyring<ToyPool>(null, false)
+      configurePoolStorage({ mode: () => 'keyring', logger: silentLogger })
+      const pool = new AccountPoolCore(buildHooks({ platform: 'linux', keyring }))
+
+      expect(await pool.poolStorage()).toMatchObject({ backend: 'keyring', unavailable: 'keyring-unreachable' })
+      // Within the cooldown the verdict stands: no probe per request.
+      await pool.listAccounts()
+      expect(keyring.pings).toBe(1)
+
+      // The login keyring is unlocked; nothing about the setting changed.
+      keyring.available = true
+      vi.advanceTimersByTime(UNUSABLE_BACKEND_RETRY_MS)
+      const recovered = await pool.poolStorage()
+      expect(recovered).toMatchObject({ backend: 'keyring' })
+      expect(recovered?.unavailable).toBeUndefined()
+      expect(keyring.pings).toBe(2)
+
+      await pool.addAccount({ access: 'a', refresh: 'r', expiresAt: Date.now() + 3_600_000, email: 'a@example.com' })
+      expect(await pool.listAccounts()).toHaveLength(1)
+
+      // Once usable, the store is cached again for the life of the process.
+      vi.advanceTimersByTime(UNUSABLE_BACKEND_RETRY_MS * 10)
+      await pool.listAccounts()
+      expect(keyring.pings).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('names the platform keyring for a caller-supplied store', async () => {

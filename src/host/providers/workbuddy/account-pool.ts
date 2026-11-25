@@ -741,10 +741,17 @@ export class WorkBuddyAccountPool extends AccountPoolCore<
    * expired pause is reported as not paused — it never needs a write to lift.
    */
   async poolState(): Promise<WorkBuddyPoolStateDto> {
-    await this.read()
+    // A failed read is reported rather than thrown: dropping the whole slice left
+    // the card with an empty account list and no reason, which reads as "no
+    // accounts". Pause and restrictions fall back to the last state this process read.
+    const readFailed = await this.read().then(() => false, () => true)
     const now = Date.now()
     const pause = this.activePause(now)
-    const storage = await this.poolStorage()
+    const resolved = await this.poolStorage()
+    // A reason the storage resolver already stated wins: it knows WHY.
+    const storage = readFailed && resolved !== undefined && resolved.unavailable === undefined
+      ? { ...resolved, unavailable: 'store-unreadable' as const }
+      : resolved
     return {
       paused: pause !== undefined,
       ...(pause === undefined

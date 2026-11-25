@@ -624,6 +624,17 @@ describe('WorkBuddy 11140 restrictions and the pool-wide pause', () => {
     expect(typeof stored.pool.restrictions['cn:u1'].observedAt).toBe('number')
   })
 
+  it('reports an unreadable store in the pool state instead of dropping the slice', async () => {
+    const { pool, backend } = await makeAccountedPool(2)
+    await pool.markAccountRestriction('cn:u1', { code: 11140 })
+    vi.spyOn(backend, 'load').mockRejectedValue(new Error('keyring locked'))
+
+    // Without the slice the card shows an empty list and no reason: "no accounts".
+    const state = await pool.poolState()
+    expect(state.storage?.unavailable).toBe('store-unreadable')
+    expect(state.restrictedAccountIds).toEqual(['cn:u1'])
+  })
+
   it('pauses the whole pool when a second different account is barred inside the window', async () => {
     const { pool, backend } = await makeAccountedPool(3)
     await pool.markAccountRestriction('cn:u1', { code: 11140 })

@@ -293,6 +293,15 @@ const poolRefreshes = new Map<string, { credentials: unknown; result: Promise<un
 class PoolAccountUnavailableError extends LlmError {}
 
 /**
+ * How long a pool store resolved as unusable is trusted before it is probed again.
+ *
+ * Short enough that unlocking the keyring is picked up by the next card refresh,
+ * long enough that a burst of requests against a host with no keyring launches
+ * one probe rather than one per request.
+ */
+export const UNUSABLE_BACKEND_RETRY_MS = 5_000
+
+/**
  * The shared multi-account pool: encrypted storage, eligibility filtering,
  * rotation strategy, 429 cooldowns and per-account auth failures.
  *
@@ -312,6 +321,8 @@ export class AccountPoolCore<
   private backendPromise?: Promise<PoolStorageResolution<PoolData<TAccount>>>
   /** Choice revision {@link backendPromise} was resolved under. */
   private backendRevision = -1
+  /** When an unusable or failed resolution may be probed again (see {@link backendStore}). */
+  private backendRetryAt = Number.POSITIVE_INFINITY
   /**
    * Bumped by every write that can move which account serves a request.
    *
@@ -380,21 +391,33 @@ export class AccountPoolCore<
   }
 
   /**
-   * The pool store: resolved once, and re-resolved only when the setting changes.
+   * The pool store: re-resolved when the setting changes, or when it was unusable.
    *
    * Lazy because the choice is a question about the host — does the keyring answer
-   * — and a pool is built from a constructor, which cannot await. CACHED for the
-   * life of the process on purpose: a read that re-detected the store on every
-   * model request would pay a `secret-tool` launch per request, and could hand two
-   * requests of one turn two different stores. The only thing that invalidates the
-   * cache is {@link poolStorageRevision} moving, which happens when the settings
-   * card writes a new choice.
+   * — and a pool is built from a constructor, which cannot await. A USABLE store is
+   * cached for the life of the process: re-detecting it per model request would pay
+   * a `secret-tool` launch per request, and could hand one turn two stores. An
+   * UNUSABLE one is not: a keyring that was locked or not yet up when the host
+   * started would otherwise hide every account until the setting changed, so it
+   * is probed again once {@link UNUSABLE_BACKEND_RETRY_MS} has passed.
    */
   private backendStore(): Promise<PoolStorageResolution<PoolData<TAccount>>> {
     const revision = poolStorageRevision()
-    if (this.backendPromise === undefined || this.backendRevision !== revision) {
+    if (
+      this.backendPromise === undefined
+      || this.backendRevision !== revision
+      || Date.now() >= this.backendRetryAt
+    ) {
       this.backendRevision = revision
-      this.backendPromise = this.resolveBackend()
+      this.backendRetryAt = Number.POSITIVE_INFINITY
+      const promise = this.resolveBackend()
+      this.backendPromise = promise
+      const retryLater = (): void => {
+        if (this.backendPromise === promise) this.backendRetryAt = Date.now() + UNUSABLE_BACKEND_RETRY_MS
+      }
+      promise.then((resolution) => {
+        if (resolution.storage.unavailable !== undefined) retryLater()
+      }, retryLater)
     }
     return this.backendPromise
   }
