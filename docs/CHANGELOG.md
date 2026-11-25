@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[minimax-code] 补齐图像与音频媒体工具**：新增 H3 Image 生图/参考图编辑、图像搜索下载与反搜、语音列表、批量语音/音乐生成、音频理解与转写；全部复用订阅 Matrix 网关和账号池，限制工作区路径、文件大小及公网传输地址，并与其他媒体工具共同受进展更新设置页的 `mediaTools` 总开关及 MiniMax 线路开关控制。DSH 已有的普通 Web 搜索和模型原生图片理解不重复注册。
+
 ## 0.86.0 - 2026-11-25
 
 - **[client] 按厂商分栏的模型清单扩展到多厂商线路**：厂商识别从 Command Code 提升为共享的 `src/client/common/model-vendors.ts`，并能从不带厂商前缀的模型 id（如 `qwen3.8-max`、`hy4-preview`、`llama3.1:8b`、`gpt-oss:20b`、`k3.1-pro`）识别厂商。`ModelChecklist` 新增 `groupByVendor`：识别出至少两个厂商、且目录不少于 10 个模型时切换为「左厂商 + 右模型」分栏，未识别的模型归入排在最后的「其他」；分栏文案由组件自带的 `dsh-model-checklist` 命名空间提供（zh / en / ru）。千问 Token Plan、RelayOne、Qoder、WorkBuddy、Cline Pass、OpenDesign、Ollama、Antigravity 已接入，并支持按厂商整组勾选（各线路沿用自己原有的选择语义）；单厂商线路保持平铺列表。

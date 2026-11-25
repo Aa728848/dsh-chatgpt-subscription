@@ -191,12 +191,13 @@
   - 接入 MiniMax Code 编程订阅 Anthropic Messages 接口（国区 `agent.minimax.cn` / 国际区 `agent.minimax.io`，仅使用 `Bearer` 认证）；
   - 优先只读复用本机桌面端 `~/.minimax/auth/<buildEnv>/<region>/mcode-public/auth.json`（或显式导入号池），无桌面端时使用 RFC 8628 设备码登录并存入 `$DSH_HOME/storages/minimax-code-credentials.json`；
   - 单次刷新令牌提前 5 分钟按身份单飞轮换，落盘前先核对磁盘是否已被桌面端刷新，避免跨进程误判失效。
-- **模型、思考与视频能力**：
+- **模型、思考与媒体能力**：
   - 因上游订阅网关未开放 `GET /v1/models`，随包内置硬编码目录（`MiniMax-M2.7`、`MiniMax-M2.7-highspeed`、`MiniMax-M3`、`MiniMax-M3.1-Flash`）；
   - 宿主自动压缩对齐官方 `contextManagement.compactionTriggerAt` 的口径：扣除输出预留后按 95% 触发（DSH 策略为 `thresholdRatio: 0.95`、`headroomTokens: 0`）；用户在 preset 中显式写的模型策略仍优先，MiniMax 请求体不增加任何压缩字段；
   - 思考控制统一走 `output_config.effort`（M2.7 恒开无档位，M3 开关二态，M3.1 Flash 支持 `low`/`medium`/`high`/`xhigh`/`max`，未选档位时不默认顶到 `max`）；携带 `interleaved-thinking-2025-05-14` 支持跨轮签名思考回放；
   - 请求体默认上限 **64 MB**，单次请求图片预算 **16 MB**（可通过 `DSH_MINIMAX_CODE_MAX_BODY_BYTES` / `DSH_MINIMAX_CODE_MAX_IMAGE_BYTES` 覆盖）；
   - **全套视频工作流**：M3 / M3.1 Flash 支持原生视频块输入；注册 `minimax_generate_video`（支持 MiniMax-H3 / H3-Max / Hailuo-2.3 文生视频、首尾帧与多模态参考，自动下载至工作区）与 `minimax_understand_video` 工具，客户端配套提供 `/video` 交互式参数弹窗、对话内播放器与右侧栏文档预览器；
+  - **图像与音频媒体工具**：`minimax_generate_image`（H3 Image 生图/参考图编辑）、`minimax_search_images`、`minimax_reverse_image_search`、`minimax_list_voices`、`minimax_generate_speech`、`minimax_generate_music`、`minimax_understand_audio`、`minimax_transcribe_audio`；输入/输出限制在会话工作区，全部受全局 `mediaTools` 与本线路启用开关控制。普通 Web 搜索和模型原生图片理解沿用 DSH 既有能力；
   - 内置工具参数无损强转与失控连击提醒守卫（`runtime-enhancements`），并支持每日签到与重置卡操作。
 - **额度说明**：`coding_plan/remains` 端点要求第一方客户端标识头；插件默认**不伪造**客户端签名头，如需读取 5 小时 / 每周额度条，需显式设置环境变量 `DSH_MINIMAX_CODE_QUOTA_ATTRIBUTION=1`。
 

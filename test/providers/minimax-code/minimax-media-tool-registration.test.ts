@@ -1,7 +1,7 @@
 /**
  * Which media tools the plugin actually registers.
  *
- * The two MiniMax tools are the expensive half of this plugin's tool list, and
+ * The MiniMax tools are the expensive half of this plugin's tool list, and
  * they are only useful to a deployment that serves the MiniMax Code route. The
  * gate is read once, during load, from the line's own settings — so what these
  * tests pin is the decision, not a hypothetical about reloading: a disabled
@@ -24,9 +24,18 @@ const MEDIA_TOOLS = [
   'kimi_attach_video',
   'minimax_understand_video',
   'minimax_generate_video',
+  'minimax_generate_image',
+  'minimax_search_images',
+  'minimax_reverse_image_search',
+  'minimax_list_voices',
+  'minimax_generate_speech',
+  'minimax_generate_music',
+  'minimax_understand_audio',
+  'minimax_transcribe_audio',
   'relayone_generate_image',
   'relayone_generate_video',
 ] as const
+const MINIMAX_MEDIA_TOOLS = MEDIA_TOOLS.filter(name => name.startsWith('minimax_'))
 
 const disposers: Array<() => void> = []
 
@@ -104,10 +113,9 @@ function mountPlugin(minimaxSettings: SettingsValue, config: Pick<PluginConfigSh
 }
 
 describe('MiniMax media tools follow the line switch', () => {
-  it('registers both video tools while the line is enabled', () => {
+  it('registers every MiniMax media tool while the line is enabled', () => {
     const tools = mountPlugin({ enabled: true })
-    expect(tools).toContain('minimax_generate_video')
-    expect(tools).toContain('minimax_understand_video')
+    for (const name of MINIMAX_MEDIA_TOOLS) expect(tools).toContain(name)
     // The other always-on tools are independent of this switch. `progress_update`
     // is NOT among them any more: it moved to its own component row
     // (`entry-progress-updates.ts`), so this row must not claim it.
@@ -115,10 +123,9 @@ describe('MiniMax media tools follow the line switch', () => {
     expect(tools).toContain('codex_image_generate')
   })
 
-  it('registers neither when the line is switched off, and keeps the rest', () => {
+  it('registers no MiniMax media tool when the line is switched off, and keeps the rest', () => {
     const tools = mountPlugin({ enabled: false })
-    expect(tools).not.toContain('minimax_generate_video')
-    expect(tools).not.toContain('minimax_understand_video')
+    for (const name of MINIMAX_MEDIA_TOOLS) expect(tools).not.toContain(name)
     // A disabled line must cost nothing, but it must not take the rest with it:
     // The server-side image routes serve every deployment.
     expect(tools).not.toContain('progress_update')
@@ -128,8 +135,7 @@ describe('MiniMax media tools follow the line switch', () => {
 
   it('treats a document with no explicit switch as enabled', () => {
     const tools = mountPlugin({})
-    expect(tools).toContain('minimax_generate_video')
-    expect(tools).toContain('minimax_understand_video')
+    for (const name of MINIMAX_MEDIA_TOOLS) expect(tools).toContain(name)
   })
 
   it('keeps the media registration order unchanged when mediaTools is explicit', () => {
@@ -147,10 +153,10 @@ describe('MiniMax media tools follow the line switch', () => {
   it('lets the global switch dominate the MiniMax line switch in both directions', () => {
     const globallyOff = mountPlugin({ enabled: true }, { mediaTools: { get: () => false } })
     const lineOff = mountPlugin({ enabled: false }, { mediaTools: { get: () => true } })
-    expect(globallyOff).not.toContain('minimax_generate_video')
-    expect(globallyOff).not.toContain('minimax_understand_video')
-    expect(lineOff).not.toContain('minimax_generate_video')
-    expect(lineOff).not.toContain('minimax_understand_video')
+    for (const name of MINIMAX_MEDIA_TOOLS) {
+      expect(globallyOff).not.toContain(name)
+      expect(lineOff).not.toContain(name)
+    }
     expect(lineOff).toContain('kimi_attach_video')
   })
 

@@ -86,6 +86,7 @@ import { KimiCodeAccountPool } from './host/providers/kimi-code/account-pool.ts'
 import { registerKimiCodeRoutes } from './host/providers/kimi-code/routes.ts'
 import { createKimiVideoTool } from './host/providers/kimi-code/video-tool.ts'
 import { createMinimaxGenerateVideoTool, createMinimaxUnderstandVideoTool } from './host/providers/minimax-code/video-tool.ts'
+import { createMinimaxMediaTools } from './host/providers/minimax-code/media-tool.ts'
 import { readVideoBytes } from './host/providers/kimi-code/video-store.ts'
 import type { VideoAttachmentRef } from './host/providers/kimi-code/modalities.ts'
 import {
@@ -2362,18 +2363,17 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     const disposeVideoTool = mediaToolsEnabled
       ? ctx.tools.register(createKimiVideoTool(ctx, { fetchFn: proxyFetchFor('kimi-code') }))
       : () => undefined
-    // The two media tools for the MiniMax Code route. They ride the Matrix
+    // The media tools for the MiniMax Code route. They ride the Matrix
     // gateway beside the Messages route (host/minimax-code/matrix-client.ts)
     // and present this line's own subscription credential, which is why the
     // pool — not the bare credential store — is what they read: the native
     // ~/.minimax directory this route once shared is gone on a fresh install,
     // and only a pooled account still holds a live session.
     //
-    // Both require the global media switch AND this line to be enabled. A user
-    // who turned either off never calls them, yet their schemas cost ≈2000 tokens of
-    // context on every request (generate 1442 + understand 571) — 74% of what
-    // this plugin's always-on tool list spends, paid by deployments that cannot
-    // use it. Registration happens during load and reads the synchronous
+    // All require the global media switch AND this line to be enabled. A user
+    // who turned either off never registers them, so their schemas do not consume
+    // context on requests from deployments that cannot use them. Registration
+    // happens during load and reads the synchronous
     // `status()` snapshot: a registered tool cannot be pulled back out of a
     // conversation's tool list, so the switch takes effect on the next start —
     // the same trade cline-pass/line.ts makes for `exposeTools`. On a harness
@@ -2391,6 +2391,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
         createMinimaxGenerateVideoTool(ctx, { fetchFn: proxyFetchFor('minimax-code'), pool: minimaxCodeAccountPool }),
       )
       : () => undefined
+    const disposeMinimaxMediaTools = minimaxMediaToolsEnabled
+      ? createMinimaxMediaTools(ctx, { fetchFn: proxyFetchFor('minimax-code'), pool: minimaxCodeAccountPool })
+        .map(tool => ctx.tools.register(tool))
+      : []
     // RelayOne media follows the SAME global mediaTools gate as Codex/Kimi/MiniMax.
     // The line's enabled flag and key are checked again at execution time.
     const relayOneMediaStores = { store: relayOneStore, settingsStore: relayOneSettings, catalog: relayOneCatalog, pool: relayOnePool }
@@ -2456,6 +2460,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       disposeVideoTool()
       disposeMinimaxUnderstandVideoTool()
       disposeMinimaxGenerateVideoTool()
+      for (const dispose of disposeMinimaxMediaTools.reverse()) dispose()
       disposeAdapter()
       disposeRoutes()
       disposeHubOverview()
