@@ -9,8 +9,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, MouseEvent } from 'react'
 import { ROUTE_PREFIX } from '../../compat.ts'
 import type { HubProviderSummaryDto } from '../../shared/hub-contracts.ts'
+import type { ProxyMode } from '../../shared/contracts.ts'
 import { formatPoolLabel } from '../common/account-pool-labels.ts'
-import { fetchLineProxySnapshot, type LineProxySnapshot } from '../common/LineProxySection.tsx'
+import { fetchLineProxySnapshot, savePreferences, type LineProxySnapshot } from '../common/LineProxySection.tsx'
 import { HubAddSheet } from './HubAddSheet.tsx'
 import {
   fetchOverview,
@@ -31,7 +32,7 @@ import {
   saveProviderOrder,
 } from './hub-overview-helpers.ts'
 import { cardAnnotation, HubProviderRow, type HubTranslate } from './HubProviderRow.tsx'
-import type { HubProviderDescriptor } from './providers.tsx'
+import { hubCardName, type HubProviderDescriptor } from './providers.tsx'
 
 export { cardAnnotation, HUB_PROVIDER_ORDER_STORAGE_KEY, HUB_ADDED_PROVIDERS_STORAGE_KEY, HUB_HIDDEN_PROVIDERS_STORAGE_KEY }
 export type { HubTranslate }
@@ -75,7 +76,9 @@ export function HubOverview({
   const [summaries, setSummaries] = useState<ReadonlyMap<string, HubProviderSummaryDto> | null>(readCachedSummaries)
   const [proxySnapshot, setProxySnapshot] = useState<LineProxySnapshot | null>(readCachedProxySnapshot)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [proxyLoadError, setProxyLoadError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [proxyBusyId, setProxyBusyId] = useState<string | null>(null)
   const [cardErrors, setCardErrors] = useState<ReadonlyMap<string, string>>(new Map())
   const [draggedId, setDraggedId] = useState<string | null>(null)
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
@@ -126,8 +129,10 @@ export function HubOverview({
       const snapshot = await fetchLineProxySnapshot(ROUTE_PREFIX)
       setProxySnapshot(snapshot)
       saveCachedProxySnapshot(snapshot)
-    } catch {
-      // Proxy badges degrade silently to default when /proxy is unavailable.
+      setProxyLoadError(null)
+    } catch (error) {
+      setProxyLoadError(error instanceof Error ? error.message : String(error))
+      // Proxy controls stay disabled when /proxy is unavailable.
     }
   }, [])
 
@@ -207,6 +212,31 @@ export function HubOverview({
       setBusyId(null)
     }
   }, [clearCardError, load])
+
+  const changeProxyMode = useCallback(async (descriptor: HubProviderDescriptor, mode: ProxyMode): Promise<void> => {
+    const line = descriptor.proxyLine
+    if (line === null || proxyBusyId !== null) return
+    const config = proxySnapshot?.lineProxies?.[line]
+    const customProxyUrl = config?.customProxyUrl?.trim() ?? ''
+    if (mode === 'custom' && customProxyUrl === '') {
+      const name = hubCardName(descriptor, t as (key: string) => string)
+      globalThis.alert(formatPoolLabel(t('hubCustomProxyMissing'), { name }))
+      onOpen(descriptor.id)
+      return
+    }
+    setProxyBusyId(descriptor.id)
+    clearCardError(descriptor.id)
+    try {
+      await savePreferences(ROUTE_PREFIX, {
+        lineProxies: { [line]: { mode, customProxyUrl: mode === 'custom' ? customProxyUrl : null } },
+      })
+      await loadProxy()
+    } catch (error) {
+      setCardErrors((current) => new Map(current).set(descriptor.id, error instanceof Error ? error.message : String(error)))
+    } finally {
+      setProxyBusyId(null)
+    }
+  }, [clearCardError, loadProxy, onOpen, proxyBusyId, proxySnapshot, t])
 
   const reorder = useCallback((sourceId: string, targetId: string): void => {
     setProviders((current) => {
@@ -396,6 +426,8 @@ export function HubOverview({
       summary={summary}
       busy={busyId === descriptor.id}
       proxySnapshot={proxySnapshot}
+      proxyBusy={proxyBusyId !== null}
+      proxyLoadError={proxyLoadError}
       cardError={cardErrors.get(descriptor.id) ?? null}
       matchedModels={matchedModels}
       selecting={selecting}
@@ -405,6 +437,7 @@ export function HubOverview({
       t={t}
       onOpen={onOpen}
       onToggle={toggle}
+      onProxyMode={changeProxyMode}
       onPick={handlePick}
       onContextMenu={handleRowContextMenu}
       onDragStart={(event) => {

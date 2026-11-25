@@ -168,9 +168,10 @@ describe('HubOverview (Magpie-style)', () => {
     expect(enabledCards[0]!.textContent).not.toContain('ChatGPT Plus')
     expect(enabledCards[0]!.textContent).toContain('2/11 个模型可用')
     expect(enabledCards[0]!.textContent).toContain(zh.hubProxyDirect)
-    // Ollama has no switch; no permanent proxy dropdowns or legacy drag-handle clutter
+    // Ollama has no switch; every network-managed row gets one compact proxy shortcut.
     expect(enabledCards[3]!.querySelector('[role="switch"]')).toBeNull()
-    expect(container.querySelectorAll('.dsh-hub-proxy-select')).toHaveLength(0)
+    expect(container.querySelectorAll('.dsh-hub-proxy-select')).toHaveLength(4)
+    expect(enabledCards[0]!.querySelector('.dsh-hub-badge.is-proxy')).toBeNull()
 
     // Turned off section shows count 1 (command-code) and starts folded
     const foldBtn = container.querySelector<HTMLButtonElement>('.dsh-hub-fold')!
@@ -183,6 +184,35 @@ describe('HubOverview (Magpie-style)', () => {
     const offCards = cards('[data-group="disabled"] .dsh-hub-card')
     expect(offCards.map((c) => c.dataset.id)).toEqual(['command-code'])
     expect(offCards[0]!.textContent).toContain(zh.hubBadgeOff)
+  })
+
+  it('saves only the selected line proxy mode without opening its detail page', async () => {
+    const calls = mockFetch()
+    const onOpen = await render()
+    const row = cards().find((card) => card.dataset.id === 'kimi-code')!
+    const select = row.querySelector<HTMLSelectElement>('.dsh-hub-proxy-select')!
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
+    await act(async () => {
+      setter.call(select, 'direct')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const update = calls.find((call) => call.url.includes('/preferences/update'))
+    expect(update?.body).toEqual({ lineProxies: { 'kimi-code': { mode: 'direct', customProxyUrl: null } } })
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it('opens the detail page instead of saving custom mode without an address', async () => {
+    const calls = mockFetch()
+    vi.stubGlobal('alert', vi.fn())
+    const onOpen = await render()
+    const select = cards().find((card) => card.dataset.id === 'kimi-code')!.querySelector<HTMLSelectElement>('.dsh-hub-proxy-select')!
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
+    await act(async () => {
+      setter.call(select, 'custom')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(onOpen).toHaveBeenCalledWith('kimi-code')
+    expect(calls.some((call) => call.url.includes('/preferences/update'))).toBe(false)
   })
 
   it('searches by model id and automatically expands matching turned-off providers', async () => {

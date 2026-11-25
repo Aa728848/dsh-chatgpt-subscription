@@ -68,6 +68,8 @@ export interface HubProviderRowProps {
   summary: HubProviderSummaryDto | undefined
   busy: boolean
   proxySnapshot: LineProxySnapshot | null
+  proxyBusy: boolean
+  proxyLoadError: string | null
   cardError: string | null
   matchedModels: readonly string[]
   selecting: boolean
@@ -77,6 +79,7 @@ export interface HubProviderRowProps {
   t: HubTranslate
   onOpen(id: HubProviderDescriptor['id']): void
   onToggle(descriptor: HubProviderDescriptor, summary: HubProviderSummaryDto, enabled: boolean): Promise<void>
+  onProxyMode(descriptor: HubProviderDescriptor, mode: ProxyMode): Promise<void>
   onPick(id: HubProviderDescriptor['id'], checked: boolean, shiftKey: boolean): void
   onContextMenu(descriptor: HubProviderDescriptor, event: MouseEvent<HTMLDivElement>): void
   onDragStart(event: DragEvent<HTMLButtonElement>): void
@@ -187,11 +190,6 @@ export function HubProviderRow(props: HubProviderRowProps): React.JSX.Element {
           <span className="dsh-hub-badge is-off">{t('hubBadgeOff')}</span>
         ) : null}
         <span className="dsh-hub-badge">{t(categoryBadgeKey(descriptor.category))}</span>
-        {proxyMode === 'direct' ? (
-          <span className="dsh-hub-badge is-proxy">{t('hubProxyDirect')}</span>
-        ) : proxyMode === 'custom' ? (
-          <span className="dsh-hub-badge is-proxy">{t('hubProxyCustom')}</span>
-        ) : null}
       </span>
       <span className={`dsh-hub-card-note${props.cardError !== null || summary?.error === true ? ' dsh-hub-note-danger' : ''}`}>
         {subline}
@@ -212,6 +210,25 @@ export function HubProviderRow(props: HubProviderRowProps): React.JSX.Element {
 
     {!props.selecting ? (
       <span className="dsh-hub-tail">
+        {descriptor.proxyLine !== null ? (
+          <select
+            className="dsh-hub-proxy-select"
+            aria-label={formatPoolLabel(t('hubProxyMode'), { name: cardName })}
+            title={props.proxyLoadError ?? t('proxyModeHint')}
+            value={proxyMode ?? 'auto'}
+            disabled={props.proxyBusy || props.proxySnapshot === null || summary === undefined}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              event.stopPropagation()
+              void props.onProxyMode(descriptor, event.currentTarget.value as ProxyMode)
+            }}
+          >
+            <option value="auto">{t('hubProxyAuto')}</option>
+            <option value="custom">{t('hubProxyCustom')}</option>
+            <option value="direct">{t('hubProxyDirect')}</option>
+          </select>
+        ) : null}
         {canToggle ? (
           <button
             type="button"
