@@ -39,7 +39,7 @@ export const DEFAULT_HIDDEN_PREFIXES: readonly string[] = Object.freeze(['mcp__'
  * 默认始终原生呈现的名字。
  *
  * 恒定系统提示词或子代理运行时契约里点名要求直接调用这些工具（大输出预览补读、调度账本查询、
- * 进展更新汇报、结构化子代理输出提交，以及 Windows 下替代被撤回 `pwsh` 的 `win_bash`）：
+ * 进展更新汇报、结构化子代理输出提交，以及兼容旧部署可选 Shell 的 `win_bash`）：
  * 遮蔽它们要么让提示词指向模型看不见的名字并触发整批 `UNKNOWN_TOOL` 重跑，要么让会话顶层
  * 失去唯一可用的 Shell。若某个工具当前未在宿主/子会话注册，保留在此集合中不会凭空暴露它。
  */
@@ -321,7 +321,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
     ? 'This session runs in Code Mode with a native whitelist: ' + nativeNames.map((name) => '`' + name + '`').join(', ')
       + '. Every other registered tool—including MCP tools, external plugin tools, and non-whitelist tools owned by this preset—is program-only. Reach them through `tools.<name>(...)` inside ' + run + '.'
     : 'This session runs in Code Mode. The tools in your tool list are called directly, exactly as usual. A second, larger set of tools is deliberately **not** in your context: every MCP tool, and every tool contributed by a plugin outside this preset. Reach them from inside ' + run + '.'
-  const commonProgramTools = ['read', 'glob', 'grep', 'edit', 'write', 'read_image', 'ask_user_question', 'subagent', 'win_bash']
+  const commonProgramTools = ['read', 'glob', 'grep', 'edit', 'write', 'read_image', 'ask_user_question', 'subagent', 'bash', 'pwsh']
     .filter((name) => !nativeNames.includes(name))
   const whitelistGuidance = nativeOnly
     ? [
@@ -353,7 +353,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
       ? '- Only what you pass to inspect(...values) (or a sole final expression when nothing was inspected) reaches the conversation; every intermediate result stays in the program, so filter and aggregate there. Never write a top-level `return` (an early `return` inside `if` is a SyntaxError in the REPL).'
       : '- Only what you inspect(...values), return, or console.log reaches the conversation; every intermediate result stays in the program, so filter and aggregate there instead of returning raw payloads.',
     '- File, search, and shell tool results are named-field objects, never bare strings — read the field, not the envelope (`job_list` and `list_agents` are the only bare arrays):',
-    '  `read` → `{ path, offset, lines: [{ number, text }], totalLines }` · `glob` → `{ root, paths }` · `grep` → `{ matches: [{ path, lineNumber, line }] }` · `edit` → `{ path, before, after }` · `write` → `{ path, operation, before, after }` · `win_bash` → `{ stdout, stderr, exitCode }` · `web_fetch` → `{ url, statusCode, body, truncated }` · `job_output` → `{ text, job }` · `read_image` → `{ path, image }` · `skill` → `{ name, content }` · `subagent` → `{ kind, name }`.',
+    '  `read` → `{ path, offset, lines: [{ number, text }], totalLines }` · `glob` → `{ root, paths }` · `grep` → `{ matches: [{ path, lineNumber, line }] }` · `edit` → `{ path, before, after }` · `write` → `{ path, operation, before, after }` · `bash` / `pwsh` → foreground `{ kind, cwd, exitCode, stdout: { text, truncated }, stderr: { text, truncated } }` (background/promoted variants also exist) · `web_fetch` → `{ url, statusCode, body, truncated }` · `job_output` → `{ text, job }` · `read_image` → `{ path, image }` · `skill` → `{ name, content }` · `subagent` → `{ kind, name }`.',
     python
       ? '- Read the field: `page["lines"]`, `match["text"]`. Calling `.split()`, `.splitlines()` or `in` on the envelope itself is always wrong.'
       : '- Read the field: `r.lines.map((l) => l.text)`. Calling `.map`, `.filter`, `.split` or `in` on the envelope itself is always wrong.',
@@ -362,7 +362,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
     !python && retained
       ? '- Tool argument objects and evaluated values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or inspect it with `inspect(x)`.'
       : '- Tool argument objects and `return` values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or print it with `inspect` / `console.log`.',
-    '- Parameter keys: `read`, `edit`, `write`, and `read_image` take `file_path` (not `path`); `glob` and `grep` take `path`; `win_bash` takes `workdir` (not `cwd`).',
+    '- Parameter keys: `read`, `edit`, `write`, and `read_image` take `file_path` (not `path`); `glob` and `grep` take `path`; `bash` and `pwsh` take `workdir` (not `cwd`).',
     // 程序文本本身的两类陷阱：写错了连求值都进不去，报错还没有行号。措辞只描述事实，不给自动改写。
     ...(python ? [] : [
       '- Paths and regexes: write a Windows path with forward slashes (`C:/Users/...`) or wrap it in `String.raw`; a literal `C:\\Users` inside an ordinary string is read as the escape `\\U` and the program never starts (`Expected unicode escape`). Regex backslashes (`\\d`, `\\.`) have the same trap — double them or use `String.raw`.',
@@ -374,7 +374,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
         : [
             '- A program is not a module: `import(\'./src/x.ts\')` and `import(\'vscode\')` cannot resolve — the program runs in a fresh process with no module graph. Read files with `tools.read`; `await import(\'node:fs\')` works only for Node built-ins.',
           ]),
-      '- `process.env` is empty inside the program: `os.tmpdir()` and credentialed CLIs (`gh`, `git`, `npm`) spawned via `node:child_process` miss `TEMP`, `HOME`, `APPDATA`, and auth tokens. Run shell and CLI commands through `await tools.win_bash({ command })` instead.',
+      '- `process.env` is empty inside the program: `os.tmpdir()` and credentialed CLIs (`gh`, `git`, `npm`) spawned via `node:child_process` miss `TEMP`, `HOME`, `APPDATA`, and auth tokens. Run shell and CLI commands through `await tools.bash({ command })` (POSIX) or `await tools.pwsh({ command })` (Windows) instead.',
     ]),
     '- Prefer batching multi-step read/search chains inside one ' + run + ' program instead of issuing many sequential single-tool turns.',
     '- Independent read-only calls may overlap under Promise.all; mutating calls run alone, in submission order.',

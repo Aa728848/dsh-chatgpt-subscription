@@ -23,7 +23,7 @@ function section(language?: string): string {
 }
 
 describe('结果形状索引', () => {
-  it('覆盖到真实会被误用的信封：glob / grep / read / edit / write / win_bash', () => {
+  it('覆盖到真实会被误用的信封：glob / grep / read / edit / write / bash / pwsh', () => {
     const text = section()
     expect(text).toContain('named-field objects, never bare strings')
     expect(text).toContain('`glob` → `{ root, paths }`')
@@ -31,8 +31,9 @@ describe('结果形状索引', () => {
     expect(text).toContain('`read` → `{ path, offset, lines: [{ number, text }], totalLines }`')
     expect(text).toContain('`edit` → `{ path, before, after }`')
     expect(text).toContain('`write` → `{ path, operation, before, after }`')
-    expect(text).toContain('`win_bash` → `{ stdout, stderr, exitCode }`')
+    expect(text).toContain('`bash` / `pwsh` → foreground `{ kind, cwd, exitCode, stdout: { text, truncated }, stderr: { text, truncated } }`')
     expect(text).toContain('`subagent` → `{ kind, name }`')
+    expect(text).not.toContain('win_bash')
     // 两个「顶层就是数组」的工具必须点名，否则模型会照旧 `list.map(...)`。
     expect(text).toContain('`job_list` and `list_agents` are the only bare arrays')
   })

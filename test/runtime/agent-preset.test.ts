@@ -240,6 +240,10 @@ describe('the dispatch definition', () => {
     const yml = readFileSync(join(bundledPresetsRoot(), DISPATCH_PRESET_ID, 'agent.cordis.yml'), 'utf8')
     expect(yml).toContain("    nativeToolsOnly: true\n    nativeTools:\n      - cache_warmup_result\n      - dispatch_ledger\n      - progress_update\n      - structured_output")
     expect(yml).not.toContain('      - win_bash')
+    const personaPrefix = (rowById('persona').config as { prefix: string }).prefix
+    expect(personaPrefix).toContain('including shell tools')
+    expect(personaPrefix).not.toContain('win_bash')
+    expect(yml).not.toContain('win_bash')
     expect(rowById('tool-ask-user')).toEqual({
       id: 'tool-ask-user',
       name: '@deepseek-ai/dsh-tool-ask-user',

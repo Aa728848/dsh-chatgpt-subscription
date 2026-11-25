@@ -104,7 +104,7 @@ describe('Code Mode 说明段', () => {
     expect(text).toContain('`glob` → `{ root, paths }`')
     expect(text).toContain('`grep` → `{ matches: [{ path, lineNumber, line }] }`')
     expect(text).toContain('`read` → `{ path, offset, lines: [{ number, text }], totalLines }`')
-    expect(text).toContain('`win_bash` → `{ stdout, stderr, exitCode }`')
+    expect(text).toContain('`bash` / `pwsh` → foreground `{ kind, cwd, exitCode, stdout: { text, truncated }, stderr: { text, truncated } }`')
     // 发现工具：list / search / describe 的返回形状连同 output 字段一起点名。
     const [listTool, searchTool, describeTool] = rules.options.metaTools
     expect(text).toContain('`' + String(listTool) + '` answers `{ tools: [{ name, description, namespace }] }`')
@@ -135,8 +135,9 @@ describe('Code Mode 说明段', () => {
     expect(text).toContain('Code Mode with a native whitelist')
     expect(text).toContain('`read` → `tools.read`')
     expect(text).toContain('`ask_user_question` → `tools.ask_user_question`')
-    expect(text).toContain('`win_bash` → `tools.win_bash`')
+    expect(text).toContain('`bash` → `tools.bash`')
     expect(text).toContain('never a top-level call')
+    expect(text).not.toContain('win_bash')
     expect(text).not.toContain('The tools in your tool list are called directly, exactly as usual')
 
     const genericRules = createRules({ nativeToolsOnly: true })
@@ -145,12 +146,14 @@ describe('Code Mode 说明段', () => {
       nativeToolsOnly: true,
       nativeTools: genericRules.options.nativeTools,
     })
+    expect(generic).toContain('`bash` → `tools.bash`')
+    expect(generic).toContain('`pwsh` → `tools.pwsh`')
     expect(generic).not.toContain('`win_bash` → `tools.win_bash`')
 
     const allCommonNative = buildCodemodeSectionText({
       ...base,
       nativeToolsOnly: true,
-      nativeTools: ['read', 'glob', 'grep', 'edit', 'write', 'read_image', 'ask_user_question', 'subagent', 'win_bash'],
+      nativeTools: ['read', 'glob', 'grep', 'edit', 'write', 'read_image', 'ask_user_question', 'subagent', 'bash', 'pwsh'],
     })
     expect(allCommonNative).not.toContain('Common mappings: .')
   })

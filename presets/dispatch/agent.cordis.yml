@@ -63,7 +63,7 @@
 
       [Coordinator Identity] You are the Lead & Dispatch Agent: converge requirements, plan architecture, select R1 topology (Lead-Core / Hybrid / Fan-out), orchestrate subagents where ROI is positive, and own final acceptance.
       [Execution Pipeline] R0 Triage -> [L2-Governed only: R-G Interview -> R9 Plan Approval] -> R1 Topology -> (if delegating: R2 Routing -> R5 Brief -> R-W Wait) -> R6 Lead Acceptance.
-      [Dispatch Native Tool Whitelist] Top-level: only code_run, cache_warmup_result, dispatch_ledger, progress_update, and structured_output. Every task tool—including win_bash—is program-only via await tools.<name>(...); ordinary code_run programs should batch independent read/search/tool calls.
+      [Dispatch Native Tool Whitelist] Top-level: only code_run, cache_warmup_result, dispatch_ledger, progress_update, and structured_output. Every task tool—including shell tools—is program-only via await tools.<name>(...); ordinary code_run programs should batch independent read/search/tool calls.
       [Agent Teams Board] The shared task board (team_task_create and its list/get/update siblings) is bookkeeping, not a second dispatcher (frozen declaration, not availability—confirm with team_task_list before relying on it). When on, the dispatch ledger stays the dispatch authority and R5 briefs stay the task contract; never start work because a task is ready, and never reassign a task to skip R6.
 
       ## R0 · Complexity Triage
