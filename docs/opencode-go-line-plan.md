@@ -5,7 +5,7 @@
 - Provider id：`opencode-go`。只接入 OpenCode 官方 Go / Go Plus / Go Teams 工作区的个人或服务账号 API Key，不转发 OpenAI、Anthropic 或 Google 的订阅登录态。
 - 协议：官方 Console gateway 的 OpenAI Chat Completions。官方声明每种文本模型都可经该 API 调用，网关负责原生协议转换；首版不另写 Responses、Anthropic 或 Gemini 适配器。
 - 账号：静态 Key 走共享 `AccountPoolCore`，支持主账号、顺序耗尽、轮询与粘性会话、替换 Key、401 失效和 429 冷却；不会在已有输出后换号。
-- 模型：实时目录按账号隔离并持久化。仅暴露 `type=chat` 且未声明禁用工具的条目；上下文、输出、模态、推理档位、训练/ZDR/地区标记都来自目录，不从模型名猜测。
+- 模型：实时目录按账号保存。聊天模型按厂商分组，可整组选中或取消勾选。未开放工具的聊天模型仍可用于对话。上下文、输出、模态、推理档位、训练、ZDR 和地区信息都来自官方目录。
 - 额度：`GET /inference/go/v1/usage` 映射 rolling / weekly / monthly 三窗；没有官方套餐字段时不编造 Go / Go Plus 名称，只有响应里的 `opencode.billing_source` 可识别时才记录。
 
 ## 官方依据
@@ -27,7 +27,7 @@
 
 - 真实公开目录包含 `deepseek-v4.1-flash`，`canonical_id=deepseek/deepseek-v4.1-flash-1017`。
 - 真实 Go Key 下，`glm-5.3` 与该 DeepSeek 快照均完成流式文本、工具调用、工具结果续轮、同一会话头和三窗额度读取；成功请求 `cost = 0`。
-- 25 项新线路离线测试通过，覆盖 mapper、目录/快照、账号池、adapter、路由与正式 UI。
+- 26 项新线路离线测试通过，覆盖 mapper、目录/快照、账号池、adapter、路由与正式 UI。
 - 正式 `OpenCodeGoAdapter` 的真实 DeepSeek 调用已验证：流式 `OK`、`probe_echo` 工具调用、`TOOL_OK` 续轮、稳定会话头与三窗额度；耗时约 25 秒。
 
 ## 风险与未验证项

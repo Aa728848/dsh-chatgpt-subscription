@@ -5,7 +5,7 @@ import { ModelChecklist } from '../../common/ModelChecklist.tsx'
 import { createLineApi } from '../../common/line-api.ts'
 import { formatCapacity, parsePositiveCapacity } from '../../common/format.ts'
 import { useLineDict } from '../../common/line-locale.ts'
-import { modelVendorGroup } from '../../common/model-vendors.ts'
+import { modelVendorGroup, nextGroupSelection } from '../../common/model-vendors.ts'
 import { LineProxySection } from '../../common/LineProxySection.tsx'
 import type { AccountRotationStrategy } from '../../../shared/account-pool-contracts.ts'
 import { OPENCODE_GO_REASONING_EFFORTS, type OpenCodeGoReasoningEffort, type OpenCodeGoSettingsUpdateDto, type OpenCodeGoWebStatus } from '../../../shared/opencode-go-contracts.ts'
@@ -51,10 +51,10 @@ export function OpenCodeGoSection({ onModelChange, loadModelDirectory }: Props):
   const accountAction = (action: string, accountId?: string, extra: Record<string, unknown> = {}) => commit('account', () => api.post<OpenCodeGoWebStatus>('/accounts/action', { action, accountId, ...extra }))
   const saveSettings = (patch: OpenCodeGoSettingsUpdateDto, kind = 'settings') => commit(kind, () => api.post<OpenCodeGoWebStatus>('/settings', patch))
 
-  const toggleModel = (id: string, enabled: boolean) => {
+  const setModelGroup = (ids: string[], enabled: boolean) => {
     if (status === null) return
-    const enabledModelIds = enabled ? [...new Set([...status.models.filter(model => model.enabled).map(model => model.id), id])] : status.models.filter(model => model.enabled && model.id !== id).map(model => model.id)
-    void saveSettings({ enabledModelIds })
+    const current = status.models.filter(model => model.enabled).map(model => model.id)
+    void saveSettings({ enabledModelIds: nextGroupSelection(current, ids, enabled) })
   }
   const setAllModels = (enabled: boolean) => { if (status !== null) void saveSettings({ enabledModelIds: enabled ? status.models.map(model => model.id) : [] }) }
 
@@ -118,7 +118,7 @@ export function OpenCodeGoSection({ onModelChange, loadModelDirectory }: Props):
 
     <section className="dsha-group"><div className="dsha-grouphead"><h3>{t.modelsSection}</h3><button className="dsha-btn" disabled={busy !== null || !status?.authenticated} onClick={() => void commit('catalog', () => api.post<OpenCodeGoWebStatus>('/models/refresh'))}>{busy === 'catalog' ? t.refreshingCatalog : t.refreshCatalog}</button></div>
       <p className="dsha-muted dsha-models-hint">{t.modelsHint}</p>
-      <ModelChecklist items={models.map(model => ({ id: model.id, name: model.name, hint: model.hint, enabled: model.enabled, group: modelVendorGroup(model.canonicalId ?? model.id, t.otherGroup) }))} busy={busy !== null} onToggle={(id, enabled) => void toggleModel(id, enabled)} onToggleAll={setAllModels} groupByVendor labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }} />
+      <ModelChecklist items={models.map(model => ({ id: model.id, name: model.name, hint: model.hint, enabled: model.enabled, group: modelVendorGroup(model.canonicalId ?? model.id, t.otherGroup) }))} busy={busy !== null} onToggle={(id, enabled) => setModelGroup([id], enabled)} onToggleAll={setAllModels} onToggleGroup={setModelGroup} groupByVendor labels={{ selectAll: t.selectAll, clearAll: t.unselectAll, list: t.modelsSection }} />
     </section>
 
     <section className="dsha-group"><div className="dsha-grouphead"><h3>{t.enhanced}</h3></div>
