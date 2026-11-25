@@ -47,6 +47,8 @@ export const DIAGNOSTIC_PROVIDERS = [
   // Claude API (API key): same registration point, appended at the end.
   'claude-api',
   'aws-quick',
+  // OpenCode Go: same registration point, appended at the end.
+  'opencode-go',
 ] as const
 
 export type DiagnosticProviderId = (typeof DIAGNOSTIC_PROVIDERS)[number]

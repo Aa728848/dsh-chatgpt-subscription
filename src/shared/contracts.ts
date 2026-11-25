@@ -202,6 +202,7 @@ export const LINE_PROXY_PROVIDER_IDS = [
   'qianwen-token-plan',
   'relayone',
   'claude-api',
+  'opencode-go',
 ] as const
 
 export type LineProxyProviderId = typeof LINE_PROXY_PROVIDER_IDS[number]

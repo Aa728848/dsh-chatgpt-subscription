@@ -78,6 +78,9 @@ import { dictionaries as claudeApiDicts, NS_CLAUDE_API, type ClaudeApiLocaleKey 
 import { installClaudeApiStyles } from './providers/claude-api/styles.ts'
 import { dictionaries as awsQuickDicts, NS_AWS_QUICK, type AwsQuickLocaleKey } from './providers/aws-quick/locales.ts'
 import { installAwsQuickStyles } from './providers/aws-quick/styles.ts'
+import { OpenCodeGoComposerQuota } from './providers/opencode-go/OpenCodeGoComposerQuota.tsx'
+import { dictionaries as openCodeGoDicts, NS_OPENCODE_GO, type OpenCodeGoLocaleKey } from './providers/opencode-go/locales.ts'
+import { installOpenCodeGoStyles } from './providers/opencode-go/styles.ts'
 import { installSubagentSettingsCard } from './features/subagent/index.ts'
 import { installSubagentStyles } from './features/subagent/styles.ts'
 import { dictionaries as subagentDicts, NS_SUBAGENT, type SubagentLocaleKey } from './features/subagent/locales.ts'
@@ -122,6 +125,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-relayone': RelayOneLocaleKey
     'dsh-claude-api': ClaudeApiLocaleKey
     'dsh-aws-quick': AwsQuickLocaleKey
+    'dsh-opencode-go': OpenCodeGoLocaleKey
     'dsh-compact-after-turn': CompactAfterTurnLocaleKey
     'dsh-session-quota': SessionQuotaLocaleKey
     'dsh-model-checklist': ModelChecklistLocaleKey
@@ -238,6 +242,8 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
   // AWS Quick: no account-pool or quota slot; settings dictionary and styles only.
   ctx.effect(() => ctx.locale.register(NS_AWS_QUICK, awsQuickDicts), 'dsh-aws-quick: dictionaries')
   ctx.effect(() => { installAwsQuickStyles(); return () => {} }, 'dsh-aws-quick: styles')
+  ctx.effect(() => ctx.locale.register(NS_OPENCODE_GO, openCodeGoDicts), 'dsh-opencode-go: dictionaries')
+  ctx.effect(() => { installOpenCodeGoStyles(); return () => {} }, 'dsh-opencode-go: styles')
   // 「子智能体」设置卡：遮蔽宿主同名卡（同 id、priority -10），并在宿主的授权清单
   // 之外再记一份「全局默认 + 按主代理模型」的两级列表。样式表无条件安装，
   // 注册本身在 installSubagentSettingsCard 里按服务是否就绪决定。
@@ -357,6 +363,10 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     name: 'conversation.input.right', id: 'relayone-quota', order: 50, locale: NS_RELAYONE,
     inject: (sessionId) => composerBadgeInject(ctx, sessionId),
   }, RelayOneComposerQuota))
+  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
+    name: 'conversation.input.right', id: 'opencode-go-quota', order: 51, locale: NS_OPENCODE_GO,
+    inject: (sessionId) => composerBadgeInject(ctx, sessionId),
+  }, OpenCodeGoComposerQuota))
   // One-shot "compact after this turn" row in the composer's model menu. The
   // slot arrived in DSH 0.2.2-rc.2; on an older harness it is never provided,
   // so this registration simply never runs (and a refusal must not fail apply).

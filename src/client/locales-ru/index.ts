@@ -35,6 +35,7 @@ import { NS_COMPACT_AFTER_TURN } from '../features/compact-after-turn/locales.ts
 import { NS_SESSION_QUOTA } from '../features/session-quota/locales.ts'
 import { NS } from '../providers/codex-chatgpt/locales.ts'
 import { NS_MODEL_CHECKLIST } from '../common/model-checklist-labels.ts'
+import { NS_OPENCODE_GO } from '../providers/opencode-go/locales.ts'
 import { dictionary as claude } from './claude.ts'
 import { dictionary as clinePass } from './cline-pass.ts'
 import { dictionary as commandCode } from './command-code.ts'
@@ -57,6 +58,7 @@ import { dictionary as awsQuick } from './aws-quick.ts'
 import { dictionary as compactAfterTurn } from './compact-after-turn.ts'
 import { dictionary as sessionQuota } from './session-quota.ts'
 import { dictionary as modelChecklist } from './model-checklist.ts'
+import { dictionary as openCodeGo } from './opencode-go.ts'
 
 /** Language id of this pack: the value stored as `locale.preference`. */
 export const RU_LOCALE = 'ru'
@@ -117,6 +119,7 @@ export function installRussianLocale(ctx: ClientContext): void {
     [NS_COMPACT_AFTER_TURN, compactAfterTurn],
     [NS_SESSION_QUOTA, sessionQuota],
     [NS_MODEL_CHECKLIST, modelChecklist],
+    [NS_OPENCODE_GO, openCodeGo],
   ]
 
   for (const [ns, dictionary] of dictionaries) {

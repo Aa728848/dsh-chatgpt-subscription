@@ -64,7 +64,7 @@
 │   │   ├── codemode/                # code_run 工具调用视图与样式
 │   │   ├── dispatch-ledger/         # Mandate v2 账本工具调用视图
 │   │   ├── subagent/                # 增强版「子智能体」模型白名单设置卡
-│   │   ├── locales-ru/              # 俄语语言包（17 个命名空间）
+│   │   ├── locales-ru/              # 俄语语言包（18 个命名空间）
 │   │   ├── mermaid/                 # 对话流 Mermaid 图表监听与安全渲染
 │   │   └── <line>/                  # 各线路独立设置页、API 封装与输入框额度胶囊
 │   └── shared/                      # Host 与 Client 共享的无副作用纯类型与 DTO 契约

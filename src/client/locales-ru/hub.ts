@@ -278,6 +278,7 @@ export const dictionary: Record<LocaleKey, string> = {
   'cardName.relayone': 'RelayOne',
   'cardName.claude-api': 'Claude API',
   'cardName.aws-quick': 'AWS Quick',
+  'cardName.opencode-go': 'OpenCode Go (подписка)',
   modelChecklistCount: 'Включено {count}/{total}',
   codeRunTitle: 'Код',
   codeRunOutput: 'Вывод',

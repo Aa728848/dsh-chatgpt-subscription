@@ -1,6 +1,6 @@
 # 供应线路完整指南与接口参考
 
-本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **17 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
+本文档详细记录 `@eddyskywalker/dsh-chatgpt-subscription` 接入的全部 **18 条供应线路**（Provider）的鉴权方式、协议细节、模型目录策略、多模态与思考档位映射、验证边界以及宿主 HTTP 路由表。
 
 > 跨线路共用的号池调度、存储后端（`poolStorage`）、统一网络代理与环境变量详见 [部署配置与安全参考](configuration.md)。
 
@@ -27,6 +27,7 @@
 17. [RelayOne：`relayone`](#17-relayonerelayone)
 18. [Claude API：`claude-api`](#18-claude-apiclaude-api)
 19. [AWS Quick：`aws-quick`](#19-aws-quickaws-quick)
+20. [OpenCode Go：`opencode-go`](#20-opencode-goopencode-go)
 
 ---
 
@@ -52,6 +53,7 @@
 | `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个 Token Plan 专属 API Key，系统加密存储；无账号池 | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 | `/qianwen-token-plan/api` |
 | `relayone` | RelayOne | Responses / Chat / Anthropic Messages | 多 API Key 存储 + 手动切换，系统加密存储 | 当前 Key live listing + 分组/端点元数据 + 凭据隔离快照 | `/relayone/api` |
 | `claude-api` | Claude API | Anthropic Messages（官方 Claude Code 形态） | 单个 API Key，系统加密存储；无账号池 | 当前 Key live listing + 随包能力表 + 凭据隔离快照 | `/claude-api/api` |
+| `opencode-go` | OpenCode Go（订阅） | OpenAI Chat Completions（Console gateway 转换） | OpenCode Console 个人 / 服务账号 API Key，独立账号池 | 当前 Key live listing + 凭据隔离快照 | `/opencode-go/api` |
 
 > **合规与风险声明**：
 > - `claude-subscription` 使用订阅 OAuth 凭据模拟客户端身份转发请求，与 Anthropic 现行服务条款冲突，未获官方授权，存在账号受限或封禁风险。
@@ -409,3 +411,16 @@
 - **工具与边界**：DSH 工具 schema 通过稳定 stdio MCP 发布；Quick 的 `tool_call` 进入 DSH 审批与执行，下一趟调用按 `toolCallId` 回写结果；自动 MCP 调用通过随机 Bearer 的 loopback 停放器匹配同一活动调用，共享同一真实结果。带 DSH 工具的轮次通过官方 `custom_prompt` 明确禁止用 Quick 设备 Python 沙盒替代 DSH Shell；实测模型会调用 DSH `win_bash`。首次需在 Quick 连接器页面原生启用一次 DeepSeek Harness；插件不伪造确认 nonce。支持 DSH 图片附件与工具结果中的 MCP 图片；远程图片 URL 和不可读附件明确拒绝。没有可靠剩余配额接口，故无配额 DTO、Composer 徽章或 widget。
 - **风险**：桌面数据面是非公开契约，Quick 升级可能需要同步适配；离线通过不等于真实账号验收。个人 social 账号已于 2026-11-21/22 实测通过 Fast 流式对话、真实 Adapter 分块、取消与回收，以及 Quick 本机工具可见性、Quick 工具调用 → DSH 结果 → 同连接最终文本闭环和真实图片识别（红色 PNG → `Red, square.`）；企业账号、新浏览器登录 UI 和自然到期刷新仍待验。逐常量来源见 [线路实现记录](aws-quick-line-plan.md)。
 - **路由**：`GET status|settings|models|login/status` · `POST settings|login/start|login/cancel|logout|refresh|tools/prepare`；所有写操作执行 Origin + Host 同源校验。
+
+---
+
+## 20. OpenCode Go：`opencode-go`
+
+- **鉴权**：使用 OpenCode Console 创建的个人或服务账号 API Key，官方 Go / Go Plus / Go Teams 工作区。Key 只在 Host 加密保存，可添加、替换、设主账号、删除并选择轮换策略；不读取 OpenCode 客户端文件，也不转发其他厂商的订阅 OAuth。
+- **协议与模型**：统一走 `https://opencode.ai/inference/go/openai/v1/chat/completions`。官方 gateway 负责把 OpenAI 兼容请求转换为各模型的原生协议。实时 `GET /v1/models` 决定聊天模型、上下文、输出、模态、推理档位与隐私标记，目录快照按账号隔离；不显示 decision / embedding 模型。
+- **会话与缓存**：每次推理携带稳定的 `x-opencode-session`（由 DSH 会话和账号共同派生）及独立 `dsh-opencode-go` User-Agent，符合官方对其他 coding agents 的要求。同一账号同一会话稳定，换账号时隔离，未提供宿主会话 id 的辅助请求使用独立 id；不把接受头字段等同于缓存命中。
+- **额度与套餐**：`GET /inference/go/v1/usage` 展示 rolling（5 小时）、weekly、monthly 三窗和重置时间。官方用量接口未返回套餐名时不编造；仅在响应的 `opencode.billing_source` 明确时显示 Go / Go Plus / Go Teams。
+- **失败处理**：401 标记当前 Key 失效；403 表示工作区、地区或套餐权限问题，不误判为 Key 失效；429 冷却并可换到未尝试账号，已有输出后绝不换号。DeepSeek 等托管在 Global 地区的模型需要用户在工作区自行允许 Regions，插件不修改隐私设置。
+- **界面**：账号池复用共享卡片和 Kimi 额度壳，包含 API Key 表单、账号操作、三窗额度、模型勾选、默认思考档位、上下文覆盖与 Composer 胶囊。五线谱静止，OPENCODE 字母在账号卡悬停或额度条聚焦时按 80ms 间隔逐字上升；按钮为账号卡同款 14px 圆角，额度条保留 Kimi 原始圆角。中英俄三语与官方 OpenCode favicon 均已注册。
+- **路由**：`GET status|settings|models` · `POST accounts|accounts/action|settings|models/refresh|quota/refresh|connection/test`；所有写操作执行 Origin + Host 同源校验。
+- **验证边界**：真实 `glm-5.3` 与 `deepseek-v4.1-flash-1017` 已验证文本、工具、续轮、会话头和三窗额度；未验证缓存命中率、Go Teams 套餐名和 `dispatch` 行为基准。详见 [线路设计与证据](opencode-go-line-plan.md)。

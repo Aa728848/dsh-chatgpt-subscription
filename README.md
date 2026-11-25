@@ -33,6 +33,7 @@
 | Ollama Cloud | `ollama` | API Key |
 | Google Antigravity | `antigravity-acp` | 复用本机官方 `agy` 登录态 |
 | AWS Quick | `aws-quick` | 复用本机 Quick Desktop 登录态 |
+| OpenCode Go | `opencode-go` | OpenCode Console API Key |
 
 > 部分订阅线路与非公开接口（如 `claude-subscription`、`antigravity-acp`、`aws-quick`、`workbuddy-subscription`、`qoder`）可能涉及第三方服务条款限制或上游协议变更，详见[供应线路指南](docs/providers.md)。
 

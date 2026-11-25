@@ -111,6 +111,8 @@ export const PROMPT_CACHE_POLICIES: Readonly<Record<string, PromptCachePolicy>> 
     stickyImages: false, affinity: false, waitWarmup: true, hint: false,
     ttlMs: 60 * MINUTE_MS, waitJobs: true,
   }),
+  // OpenCode documents session-based prompt-cache routing, but no local TTL or prewarm contract.
+  'opencode-go': policy({ ...DISABLED, mode: 'automatic', staticPrefix: true }),
 })
 
 const OVERRIDE_KEYS = new Set([
