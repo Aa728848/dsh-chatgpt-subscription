@@ -13,7 +13,7 @@ const status = {
   models: [{
     id: 'model', name: 'Example model', hint: '', enabled: true, defaultContextWindow: 128_000,
     contextWindow: 128_000, defaultMaxTokens: 4096, reasoningEfforts: [], supportsTools: true,
-    supportsImages: false, description: null, canonicalId: null, training: null, zdr: null, limitedRegions: null,
+    supportsImages: false, description: null, canonicalId: null, training: null, zdr: null, limitedRegions: null, protocol: 'chat-completions',
   }],
   contextWindowOverrides: {}, defaultReasoningEffort: null, catalogSynced: true, catalogCount: 1,
   quotaError: null, connection: null,

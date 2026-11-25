@@ -12,6 +12,10 @@
 
 - **[opencode-go] 增加额度感知轮换与原生协议**：持久化官方三窗额度快照、快照后的 `opencode.allowance` 消耗和同模型平均消耗，按 5 小时 / 周 / 月窗口预测压力并重排自动选号；用户 pin 优先，未知额度排在预测耗尽账号之前。模型目录接入权威 `api` / `base_url` 和 `monthly_usage`，原生支持 OpenAI Responses、Anthropic Messages 与 Gemini generateContent，统一文本、推理、工具、缓存 usage 和 `opencode-go` 回放，明确协议不支持时同账号回退 Chat Completions；Gemini 使用 `streamGenerateContent` SSE 流式响应并保留活动脉冲，不注入未确认的 thinking 字段。
 
+- **[dispatch] 修正通用 Shell 提示词与结果契约**：不再把旧部署可选的 `win_bash` 写成所有宿主都存在的工具；dispatch 预设改为中立 Shell 表述，Code Mode 静态说明按宿主实际契约列出 `bash`（POSIX）/ `pwsh`（Windows）、`workdir` 参数和 foreground `{ kind, cwd, exitCode, stdout/stderr: { text, truncated } }` 结果形状。运行时对已注册 `win_bash` 的兼容、参数归一化与结果投影保持不变，说明段仍为恒定文本，不读活工具目录、不破坏前缀缓存（#132）。
+
+- **[opencode-go] 补齐会话额度面板与自动刷新**：会话面板展示当前账号 5 小时、每周、每月三窗剩余额度和重置倒计时，折叠摘要与展开内容共享 30 秒轮询；仅在已认证且页面可见时刷新，手动刷新不重复并发，后台更新保留未保存的模型上下文编辑。设置卡窗口提示与重置时间降为次级文字（#131）。
+
 ## 0.86.0 - 2026-11-25
 
 - **[client] 按厂商分栏的模型清单扩展到多厂商线路**：厂商识别从 Command Code 提升为共享的 `src/client/common/model-vendors.ts`，并能从不带厂商前缀的模型 id（如 `qwen3.8-max`、`hy4-preview`、`llama3.1:8b`、`gpt-oss:20b`、`k3.1-pro`）识别厂商。`ModelChecklist` 新增 `groupByVendor`：识别出至少两个厂商、且目录不少于 10 个模型时切换为「左厂商 + 右模型」分栏，未识别的模型归入排在最后的「其他」；分栏文案由组件自带的 `dsh-model-checklist` 命名空间提供（zh / en / ru）。千问 Token Plan、RelayOne、Qoder、WorkBuddy、Cline Pass、OpenDesign、Ollama、Antigravity 已接入，并支持按厂商整组勾选（各线路沿用自己原有的选择语义）；单厂商线路保持平铺列表。
