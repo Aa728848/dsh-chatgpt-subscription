@@ -6,16 +6,18 @@
  *
  * 1. **静态思考与工程纪律段**（`discipline.ts`）：仅向 V4.1 Flash 会话注入逐字节恒定
  *    的精简指引（以查代想、PTC/批处理减噪、防自反馈空转、遵循状态锚），0% 破缓存。
- * 2. **Append-Only 128-token SWA 状态锚 + Effort 缓存诊断**（`state-anchor.ts`）：
- *    在长步周期（每 10 步）、上下文水位跨越（180K/350K/550K/750K）或连续工具失败时，
- *    于尾部追加 ≤ 110 tokens 的高对比度状态锚，落入 FP8 SWA 窗口对抗长任务漂移；
- *    并在长上下文中途切换 `reasoningEffort` 时发出 50x 破缓存诊断告警。
+ * 2. **Append-Only 紧凑状态锚 + Effort 缓存诊断**（`state-anchor.ts`）：
+ *    在长步周期（每 10 步）、上下文水位跨越（180K/350K/550K/750K）、压缩完成或连续工具
+ *    失败时，于尾部追加目标、任务进度与活动文件；论文的 `n_win = 128` 是 SWA 分支窗口，
+ *    并非锚点长度上限。并在长上下文中途切换 `reasoningEffort` 时发出 50x 破缓存诊断告警。
  * 3. **入库前自描述观测头 + 官方线路失控提醒**（`observation-tagger.ts`）：
  *    在根级大块文本观测首次写入历史前前置单行 `[OBS | ...]` 索引头，增强 CED 静态
  *    编码与 CSA2 FP4 块索引的远距召回；仅为官方线路 V4.1 Flash 补齐温和失控提醒。
  * 4. **仅限 V4.1 Flash 的无损双信号推理坍塌守卫**（复用 `reasoning-collapse-guard`）：
  *    不设硬性思考字数上限，仅在 N-gram 唯一性与跨句语义回环双信号连续确认时精准
  *    止损 1017 自反馈复读死循环，并无损续接。
+ * 5. **进展治理**（`progress-governor.ts`）：没有新证据、修改或任务完成时分级纠偏——
+ *    最小验证、重建计划、就阻塞点向用户提问；仅在已停滞时截断单次超长推理。
  *
  * ## 绝对隔离保证
  *
@@ -56,6 +58,15 @@ import {
   summarizeToolTarget,
 } from './observation-tagger.ts'
 import {
+  DEEPSEEK_V41_FLASH_PROGRESS_PREFIX,
+  PROGRESS_REASONING_CHAR_THRESHOLDS,
+  PROGRESS_STEP_THRESHOLDS,
+  PROGRESS_STREAM_CUT_CHARS,
+  installDeepSeekV41FlashProgressGovernor,
+  renderProgressNotice,
+  type ProgressGovernorOptions,
+} from './progress-governor.ts'
+import {
   ANCHOR_CONSECUTIVE_ERROR_THRESHOLD,
   ANCHOR_CONTEXT_WATERMARKS,
   ANCHOR_STEP_INTERVAL,
@@ -66,6 +77,7 @@ import {
   defaultEstimateContextTokens,
   installDeepSeekV41FlashStateAnchor,
   renderStateAnchorText,
+  summarizeTodos,
   type StateAnchorOptions,
 } from './state-anchor.ts'
 
@@ -79,6 +91,7 @@ export {
   DEEPSEEK_V41_FLASH_DISCIPLINE_ORDER,
   DEEPSEEK_V41_FLASH_DISCIPLINE_SECTION,
   DEEPSEEK_V41_FLASH_DISCIPLINE_TEXT,
+  DEEPSEEK_V41_FLASH_PROGRESS_PREFIX,
   DEEPSEEK_V41_FLASH_RUNAWAY_SOURCE_KIND,
   EFFORT_DRIFT_WARN_MIN_TOKENS,
   OBSERVATION_HEADER_PREFIX,
@@ -89,16 +102,22 @@ export {
   defaultEstimateContextTokens,
   installDeepSeekV41FlashDiscipline,
   installDeepSeekV41FlashObservationTagger,
+  installDeepSeekV41FlashProgressGovernor,
   installDeepSeekV41FlashStateAnchor,
   isDeepSeekV41Flash,
   isDeepSeekV41FlashScope,
   isDeepSeekV41FlashSession,
   readScopeRoute,
   readSessionRoute,
+  PROGRESS_REASONING_CHAR_THRESHOLDS,
+  PROGRESS_STEP_THRESHOLDS,
+  PROGRESS_STREAM_CUT_CHARS,
+  renderProgressNotice,
   renderStateAnchorText,
+  summarizeTodos,
   summarizeToolTarget,
 }
-export type { DetectedRoute, StateAnchorOptions }
+export type { DetectedRoute, ProgressGovernorOptions, StateAnchorOptions }
 
 /** 插件配置中控制 DeepSeek V4.1 Flash 专属优化的 volatile 字段形状。 */
 export interface DeepSeekV41FlashConfigFields {
@@ -134,6 +153,8 @@ export interface DeepSeekV41FlashOptimizationOptions {
   readonly stateAnchorOptions?: Omit<StateAnchorOptions, 'enabled'>
   /** 观测打标最小字符阈值（可选，便于单测）。 */
   readonly observationMinChars?: number
+  /** 进展治理微调项（可选，便于单测）。 */
+  readonly progressGovernorOptions?: Omit<ProgressGovernorOptions, 'enabled'>
 }
 
 /** 已安装句柄。 */
@@ -206,6 +227,11 @@ export function installDeepSeekV41FlashOptimizations(
     })
     if (disposeCollapse !== undefined) disposers.push(disposeCollapse)
   }
+
+  disposers.push(installDeepSeekV41FlashProgressGovernor(ctx, {
+    ...options.progressGovernorOptions,
+    enabled,
+  }))
 
   let disposed = false
   return {

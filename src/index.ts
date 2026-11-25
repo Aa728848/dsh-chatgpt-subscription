@@ -414,8 +414,8 @@ export interface Config {
   timelineCacheGuard?: Volatile<boolean>
   /**
    * 仅针对 DeepSeek V4.1 Flash（含 1017 快照与官方 `deepseek-flash`）的专项优化总开关：
-   * 静态思考与可读性排版纪律、128-token 尾部状态锚、入库前观测头、无损双信号推理坍塌守卫与
-   * 50x 前缀缓存保护。严格按模型隔离，绝不影响其它线路与模型。
+   * 静态思考与可读性排版纪律、紧凑尾部状态锚、入库前观测头、无损双信号推理坍塌守卫、
+   * 无进展分级纠偏与 50x 前缀缓存保护。严格按模型隔离，绝不影响其它线路与模型。
    */
   deepseekV41FlashOptimization?: Volatile<boolean>
   /**

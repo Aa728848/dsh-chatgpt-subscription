@@ -14,6 +14,7 @@ import {
   installDeepSeekV41FlashOptimizations,
   installDeepSeekV41FlashStateAnchor,
   isDeepSeekV41Flash,
+  renderStateAnchorText,
   resolveDeepSeekV41FlashOptimizationEnabled,
 } from '../../src/host/runtime/deepseek-v41-flash/index.ts'
 import { shouldSkipPruningForSession } from '../../src/entries/tool-result-pruner.ts'
@@ -310,6 +311,100 @@ describe('DeepSeek V4.1 Flash Append-Only SWA-128 state anchor & effort drift gu
     expect(warnings.length).toBe(warnCountBefore)
 
     dispose()
+  })
+
+  it('merges same-turn steering and retains only the latest three user turns', async () => {
+    const { ctx, emitWaterfall } = createEventHost()
+    const dispose = installDeepSeekV41FlashStateAnchor(ctx, {
+      stepInterval: 1,
+      contextWatermarks: [],
+      estimateContextTokens: () => 0,
+    })
+    const flashAgent = makeAgent('opendesign', 'deepseek-v4.1-flash-1017', 'sess-goal-history', 'high')
+    const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] })
+    const run = async (turn: number, messages: unknown[]) => await emitWaterfall(
+      'agent/pre-step',
+      [{ agent: flashAgent, turn, messages }],
+      () => ({ kind: 'enter', messages }),
+    ) as { messages: Array<{ content: Array<{ text: string }> }> }
+    const anchorText = (result: { messages: Array<{ content: Array<{ text: string }> }> }) => result.messages[0]?.content[0]?.text ?? ''
+
+    await run(1, [user('Fix stream parser races')])
+    await run(1, [user('Keep legacy adapters working')])
+    await run(2, [user('Add regression coverage')])
+    await run(3, [user('Update migration notes')])
+    const thirdTurn = await run(3, [])
+    const thirdTurnText = anchorText(thirdTurn)
+    expect(thirdTurnText).toContain('Fix stream parser races | Keep legacy adapters working')
+    expect(thirdTurnText).toContain('Add regression coverage')
+    expect(thirdTurnText).toContain('Update migration notes')
+    expect(thirdTurnText.length).toBeLessThan(480)
+
+    await run(4, [
+      user('Refresh compatibility matrix'),
+      { role: 'user', content: 'ignored notice', source: { kind: 'runtime-context', form: 'notice' } },
+    ])
+    const fourthTurn = await run(4, [])
+    const fourthTurnText = anchorText(fourthTurn)
+    expect(fourthTurnText).toContain('Add regression coverage')
+    expect(fourthTurnText).toContain('Update migration notes')
+    expect(fourthTurnText).toContain('Refresh compatibility matrix')
+    expect(fourthTurnText).not.toContain('Fix stream parser races')
+    expect(fourthTurnText).not.toContain('Keep legacy adapters working')
+    expect(fourthTurnText).not.toContain('ignored notice')
+
+    dispose()
+  })
+
+  it('re-anchors right after compaction with task progress, including nested todo_write calls', async () => {
+    const { ctx, listeners, emitWaterfall } = createEventHost()
+    const dispose = installDeepSeekV41FlashStateAnchor(ctx, { stepInterval: 100, contextWatermarks: [], estimateContextTokens: () => 0 })
+    const flashAgent = makeAgent('opendesign', 'deepseek-v4.1-flash-1017', 'sess-tasks', 'high')
+    const step = async () => await emitWaterfall('agent/pre-step', [{ agent: flashAgent, messages: [] }], () => ({ kind: 'enter', messages: [] as unknown[] }))
+    const goal = { role: 'user', content: [{ type: 'text', text: 'Migrate settings storage' }] }
+    await emitWaterfall('agent/pre-step', [{ agent: flashAgent, messages: [goal] }], () => ({ kind: 'enter', messages: [goal] }))
+    await emitWaterfall(
+      'tools/post-execute',
+      [
+        { name: 'todo_write', parent: 'code_run', agent: flashAgent, arguments: { todos: [
+          { content: 'Read legacy store', status: 'completed' },
+          { content: 'Write migration', status: 'in_progress' },
+          { content: 'Add regression tests', status: 'pending' },
+        ] } },
+        { isError: false, content: [] },
+      ],
+      () => ({ kind: 'accept' }),
+    )
+    expect((await step()).messages).toHaveLength(0)
+
+    for (const listener of listeners.get('session/event') ?? []) listener({ id: 'sess-tasks' }, { type: 'compaction/end' })
+    const anchored = await step()
+    const text = (anchored.messages[0] as { content: Array<{ text: string }> }).content[0]!.text
+    expect(text).toContain('trigger=compaction')
+    expect(text).toContain('GOAL: Migrate settings storage')
+    expect(text).toContain('TASKS: 1/3 done | NOW: Write migration | NEXT: Add regression tests')
+    expect((await step()).messages).toHaveLength(0)
+    dispose()
+  })
+
+  it('keeps the whole anchor within budget, dropping files before tasks and never the alert or goal', () => {
+    const text = renderStateAnchorText({
+      step: 12,
+      approxTokens: 400_000,
+      reason: 'consecutive-errors',
+      goal: 'g'.repeat(120),
+      tasks: `3/9 done | NOW: ${'n'.repeat(48)} | NEXT: ${'p'.repeat(48)}`,
+      activeFiles: ['src/a/'.padEnd(36, 'a'), 'src/b/'.padEnd(36, 'b'), 'src/c/'.padEnd(36, 'c'), 'src/d/'.padEnd(36, 'd')],
+      consecutiveErrors: 3,
+      lastErrorTool: 'bash',
+    })
+    expect(text.length).toBeLessThanOrEqual(640)
+    expect(text).toContain(`GOAL: ${'g'.repeat(120)}`)
+    expect(text).toContain('ALERT: 3 consecutive tool failures (bash)')
+    expect(text).toContain('TASKS: 3/9 done')
+    expect(text).toContain('RULE:')
+    // 空间不足时优先保留最新的文件。
+    if (text.includes('FILES:')) expect(text).toContain('src/d/')
   })
 
   it('anchor messages are ignored by cache-warmup navigation intent classifier', () => {

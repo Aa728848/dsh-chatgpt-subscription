@@ -18,6 +18,7 @@
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import {
   compactGoalSummary,
+  mergeGoalUpdate,
   defaultEstimateContextTokens,
   DEEPSEEK_V41_FLASH_ANCHOR_PREFIX,
   DEEPSEEK_V41_FLASH_ANCHOR_SOURCE_KIND,
@@ -59,6 +60,7 @@ interface AgentLike {
 interface PreStepPayloadLike {
   readonly agent?: AgentLike
   readonly messages?: readonly unknown[]
+  readonly turn?: unknown
   readonly signal?: { readonly aborted?: boolean }
   readonly modelSelection?: unknown
 }
@@ -87,6 +89,7 @@ interface EventHostLike {
 
 interface AnchorSessionState {
   goal: string
+  turn: number
   stepsInTurn: number
   lastAnchoredStep: number
   crossedWatermarkIndex: number
@@ -126,6 +129,7 @@ function isEnabled(read: (() => boolean) | undefined): boolean {
 function createSessionState(): AnchorSessionState {
   return {
     goal: '',
+    turn: 0,
     stepsInTurn: 0,
     lastAnchoredStep: 0,
     crossedWatermarkIndex: -1,
@@ -190,15 +194,15 @@ function isNoticeMessage(message: unknown): boolean {
   return false
 }
 
-function findLatestRealUserGoal(messages: readonly unknown[] | undefined): string | undefined {
-  if (!Array.isArray(messages)) return undefined
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]
+function findRealUserGoals(messages: readonly unknown[] | undefined): string[] {
+  if (!Array.isArray(messages)) return []
+  const goals: string[] = []
+  for (const message of messages) {
     if (isNoticeMessage(message)) continue
     const text = compactGoalSummary(extractTextFromContent((message as Record<string, unknown>)['content']))
-    if (text.length > 0) return text
+    if (text.length > 0) goals.push(text)
   }
-  return undefined
+  return goals
 }
 
 function shortFileLabel(rawPath: string): string {
@@ -237,7 +241,7 @@ function formatApproxTokens(tokens: number): string {
   return String(tokens)
 }
 
-/** 渲染紧凑尾部状态锚文本（≤ ~105 tokens，适配 SWA-128 与稀疏索引）。 */
+/** 渲染紧凑尾部状态锚文本（保持简短以减少噪声与 token 开销）。 */
 export function renderOpenModelStateAnchorText(input: {
   readonly profile: Pick<OpenModelProfile, 'label' | 'anchorRuleLine'>
   readonly step: number
@@ -364,9 +368,14 @@ export function installOpenModelStateAnchor(
 
     const approxTokens = estimateTokens(payload?.agent, state.observedChars)
 
-    const newGoal = findLatestRealUserGoal(incoming)
-    if (newGoal !== undefined) {
-      state.goal = newGoal
+    const currentTurn = typeof payload?.turn === 'number' ? payload.turn : undefined
+    const isSameTurn = currentTurn !== undefined && currentTurn === state.turn
+    if (currentTurn !== undefined) state.turn = currentTurn
+
+    const newGoals = findRealUserGoals(incoming)
+    if (newGoals.length > 0) {
+      const incomingGoal = newGoals.reduce(mergeGoalUpdate, '')
+      state.goal = isSameTurn ? mergeGoalUpdate(state.goal, incomingGoal) : incomingGoal
       state.stepsInTurn = 0
       state.lastAnchoredStep = 0
       state.consecutiveToolErrors = 0

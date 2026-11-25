@@ -624,6 +624,23 @@ function agentRegistry(ctx: ReasoningCollapseContext): { get(id: unknown): unkno
 }
 
 /**
+ * The live Agent registered under `sessionId`, or undefined when this host
+ * cannot name it. Shared with sibling guards that also stop and resume a turn.
+ */
+export function resolveRegisteredAgent(
+  ctx: ReasoningCollapseContext,
+  sessionId: string | undefined,
+): GuardAgentLike | undefined {
+  if (sessionId === undefined) return undefined
+  try {
+    const agent = agentRegistry(ctx)?.get(sessionId)
+    return agent === undefined || agent === null ? undefined : agent as GuardAgentLike
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Whether one request is a conversation call the guard may stop and resume.
  *
  * The loop marks its own requests, but that marker is reached through a named

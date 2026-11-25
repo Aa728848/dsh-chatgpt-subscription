@@ -341,6 +341,42 @@ describe('零改前缀尾部 State Anchor（适配 SWA 短窗与 1M 稀疏/线�
 
     dispose()
   })
+
+  it('同回合插话保留原目标与最新补充，新回合则开启独立目标', async () => {
+    const host = createFakeHost()
+    const dispose = installOpenModelStateAnchor(host.ctx, {
+      stepIntervalOverride: 1,
+      estimateContextTokens: () => 0,
+    })
+    const agent = createFakeAgent({ provider: 'command-code', model: 'xiaomi/mimo-v2.6-pro', sessionId: 'mimo-steering' })
+    const run = async (turn: number, messages: unknown[]) => await host.runWaterfall(
+      'agent/pre-step',
+      [{ agent, turn, messages }],
+      () => ({ kind: 'enter', messages }),
+    ) as { messages?: Array<{ content?: Array<{ text?: string }> }> }
+    const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] })
+
+    const original = `Fix parser edge case in auth.ts ${'x'.repeat(200)}`
+    await run(1, [user(original)])
+    await run(1, [
+      user('Also update regression tests'),
+      { role: 'user', content: 'ignored notice', source: { kind: 'runtime-context', form: 'notice' } },
+    ])
+    const steered = await run(1, [])
+    const steeredText = steered.messages?.[0]?.content?.[0]?.text ?? ''
+    expect(steeredText).toContain('GOAL: Fix parser edge case in auth.ts')
+    expect(steeredText).toContain(' | Also update regression tests')
+    expect(steeredText).not.toContain('ignored notice')
+
+    await run(2, [user('Document the new behavior')])
+    const nextTurn = await run(2, [])
+    const nextTurnText = nextTurn.messages?.[0]?.content?.[0]?.text ?? ''
+    expect(nextTurnText).toContain('GOAL: Document the new behavior')
+    expect(nextTurnText).not.toContain('Fix parser edge case')
+    expect(nextTurnText).not.toContain('Also update regression tests')
+
+    dispose()
+  })
 })
 
 describe('Kimi K3/K3.1 专属防线（只读空转、ESC ANSI 清洗、入库前观测头）与官方 V4 Pro 失控提醒', () => {

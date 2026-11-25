@@ -1,14 +1,13 @@
 /**
- * DeepSeek V4.1 Flash 专属 Append-Only 128-token SWA 状态锚点与 Effort 缓存诊断。
+ * DeepSeek V4.1 Flash 专属 Append-Only 紧凑状态锚点与 Effort 缓存诊断。
  *
- * ## 论文机制对应（arXiv:2609.19969）
+ * ## 设计依据（arXiv:2609.19969）
  *
- * 1. **SWA `n_win = 128` 局部高精度窗口 + CSA2 16K 候选池抗漂移**：
- *    在超长任务中，模型对末尾 128 tokens 享有 FP8 局部精确注意；而历史前缀通过
- *    CSA2 粗排上限 2,048 块（16,384 位置）访问。长链路步数累积或上下文跨越
- *    180K/350K/550K/750K 水位线、或遭遇工具连败时，在 `agent/pre-step` 尾部
- *    Append-Only 追加一段严格 ≤ 110 tokens 的高对比度状态锚，既 0% 破坏前方
- *    50x 前缀缓存，又把不可变总目标重新送进 FP8 SWA 窗口。
+ * 1. **长链路目标与任务状态重申**：长链路步数累积、上下文跨越 180K/350K/550K/750K
+ *    水位线、上下文压缩完成或遭遇工具连败时，在 `agent/pre-step` 尾部 Append-Only
+ *    追加一段紧凑状态锚（目标、任务进度、活动文件），不改写前方前缀缓存。
+ *    论文中的 `n_win = 128` 是每层 SWA 分支窗口与 Bounded Replay 的重放窗口，
+ *    并非提示词长度上限；锚点保持紧凑是减少噪声与 token 开销的工程选择。
  * 2. **Section 5.1.4 `reasoning_effort` 前缀破缓存诊断**：
  *    `Reasoning Effort: {b}` 渲染在 `<|System|>` 最前端，会话中途已有较大上下文
  *    时切换档位会 100% 击穿整段前缀缓存。本模块在检测到长上下文会话中途改档时
@@ -32,7 +31,7 @@ export const DEEPSEEK_V41_FLASH_ANCHOR_PREFIX = '[V4.1-Flash State Anchor'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    /** 本包仅对 DeepSeek V4.1 Flash 在长步/高水位/连败节点追加的 128-token 状态锚。 */
+    /** 本包仅对 DeepSeek V4.1 Flash 在长步/高水位/压缩/连败节点追加的紧凑状态锚。 */
     'deepseek-v41-flash-anchor': { kind: 'deepseek-v41-flash-anchor' } & { form?: 'notice'; summary?: string }
   }
 }
@@ -54,8 +53,14 @@ export const ANCHOR_CONSECUTIVE_ERROR_THRESHOLD = 2
 /** 估算上下文达到该阈值后再中途切换 `reasoningEffort`，发出 50x 破缓存诊断告警。 */
 export const EFFORT_DRIFT_WARN_MIN_TOKENS = 32_000
 
-/** 总目标摘要最大字符数，确保整条状态锚严格落在 ~80–110 tokens（< SWA 128）。 */
+/** 总目标摘要最大字符数，保持锚点紧凑（工程预算，非模型硬上限）。 */
 const MAX_GOAL_CHARS = 120
+/** 整条状态锚最大字符数；超出时依次压缩 FILES、TASKS，ALERT 与 GOAL 始终保留。 */
+const MAX_ANCHOR_CHARS = 640
+/** 任务状态中单项描述的最大字符数。 */
+const MAX_TASK_ITEM_CHARS = 48
+/** 状态锚保留的真实用户回合数，兼顾连续任务与旧任务消退。 */
+const MAX_GOAL_TURNS = 3
 /** 活动文件列表最大条目数。 */
 const MAX_ACTIVE_FILES = 4
 /** 单个文件名片段最大字符数。 */
@@ -77,6 +82,7 @@ interface AgentLike {
 interface PreStepPayloadLike {
   readonly agent?: AgentLike
   readonly messages?: readonly unknown[]
+  readonly turn?: unknown
   readonly step?: unknown
   readonly signal?: { readonly aborted?: boolean }
   readonly modelSelection?: unknown
@@ -107,6 +113,7 @@ interface EventHostLike {
 
 interface AnchorSessionState {
   goal: string
+  goalTurns: Array<{ turn: number; goal: string }>
   stepsInTurn: number
   lastAnchoredStep: number
   crossedWatermarkIndex: number
@@ -114,6 +121,10 @@ interface AnchorSessionState {
   lastErrorTool: string | undefined
   errorAnchorPending: boolean
   activeFiles: string[]
+  /** 最近一次 `todo_write` 归纳出的紧凑任务进度。 */
+  taskLine: string
+  /** 上下文压缩完成后，下一步立即重新锚定。 */
+  compactionAnchorPending: boolean
   lastEffort: string | undefined
   lastEffortWarnedTransition: string | undefined
   /** 仅当没有原生 token 数据时使用的保守累计字符估算。 */
@@ -149,6 +160,7 @@ function isEnabled(read: (() => boolean) | undefined): boolean {
 function createSessionState(): AnchorSessionState {
   return {
     goal: '',
+    goalTurns: [],
     stepsInTurn: 0,
     lastAnchoredStep: 0,
     crossedWatermarkIndex: -1,
@@ -156,6 +168,8 @@ function createSessionState(): AnchorSessionState {
     lastErrorTool: undefined,
     errorAnchorPending: false,
     activeFiles: [],
+    taskLine: '',
+    compactionAnchorPending: false,
     lastEffort: undefined,
     lastEffortWarnedTransition: undefined,
     observedChars: 0,
@@ -212,7 +226,30 @@ function isNoticeMessage(message: unknown): boolean {
   return false
 }
 
-/** 把原始用户目标清洗成紧凑的一行摘要，去除附带 reminder，保证不撑爆 SWA-128 窗。 */
+/** 是否为真实用户输入（排除运行时通知、状态锚与插件提醒）。 */
+export function isRealUserMessage(message: unknown): boolean {
+  return !isNoticeMessage(message)
+}
+
+/** 把 `todo_write` 参数归纳成紧凑进度行：完成数/总数、进行中与下一项。 */
+export function summarizeTodos(args: unknown): string | undefined {
+  if (!isRecord(args) || !Array.isArray(args['todos'])) return undefined
+  const todos = args['todos'].filter(isRecord)
+  if (todos.length === 0) return ''
+  const label = (todo: Record<string, unknown>): string => {
+    const text = typeof todo['content'] === 'string' ? todo['content'].replace(/\s+/g, ' ').trim() : ''
+    return text.length <= MAX_TASK_ITEM_CHARS ? text : text.slice(0, MAX_TASK_ITEM_CHARS - 3).trimEnd() + '...'
+  }
+  const done = todos.filter(todo => todo['status'] === 'completed').length
+  const now = todos.find(todo => todo['status'] === 'in_progress')
+  const pending = todos.find(todo => todo['status'] === 'pending')
+  const parts = [`${done}/${todos.length} done`]
+  if (now !== undefined && label(now).length > 0) parts.push(`NOW: ${label(now)}`)
+  if (pending !== undefined && label(pending).length > 0) parts.push(`NEXT: ${label(pending)}`)
+  return parts.join(' | ')
+}
+
+/** 把原始用户目标清洗成紧凑的一行摘要，去除附带 reminder。 */
 export function compactGoalSummary(raw: string): string {
   const reminderAt = raw.search(/<system-reminder\b|Current runtime context\./)
   const stripped = (reminderAt < 0 ? raw : raw.slice(0, reminderAt))
@@ -222,15 +259,30 @@ export function compactGoalSummary(raw: string): string {
   return stripped.slice(0, MAX_GOAL_CHARS - 3).trimEnd() + '...'
 }
 
-function findLatestRealUserGoal(messages: readonly unknown[] | undefined): string | undefined {
-  if (!Array.isArray(messages)) return undefined
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]
+/** 合并用户补充时保留原目标开头和最新消息，避免总长度截断把新约束吃掉。 */
+export function mergeGoalUpdate(current: string, update: string): string {
+  if (current.length === 0) return compactGoalSummary(update)
+  const compactedUpdate = compactGoalSummary(update)
+  if (compactedUpdate.length === 0) return current
+  const combined = compactGoalSummary(`${current} | ${compactedUpdate}`)
+  if (combined.endsWith(compactedUpdate)) return combined
+
+  const suffix = ` | ${compactedUpdate}`
+  const prefixBudget = combined.length - suffix.length
+  if (prefixBudget < 4) return compactedUpdate
+  const prefix = current.slice(0, prefixBudget - 3).trimEnd()
+  return prefix.length > 0 ? `${prefix}...${suffix}` : compactedUpdate
+}
+
+function findRealUserGoals(messages: readonly unknown[] | undefined): string[] {
+  if (!Array.isArray(messages)) return []
+  const goals: string[] = []
+  for (const message of messages) {
     if (isNoticeMessage(message)) continue
     const text = compactGoalSummary(extractTextFromContent((message as Record<string, unknown>)['content']))
-    if (text.length > 0) return text
+    if (text.length > 0) goals.push(text)
   }
-  return undefined
+  return goals
 }
 
 function shortFileLabel(rawPath: string): string {
@@ -309,27 +361,58 @@ function formatApproxTokens(tokens: number): string {
   return String(tokens)
 }
 
+/** 状态锚触发原因。 */
+export type StateAnchorTrigger = 'periodic' | 'watermark' | 'compaction' | 'consecutive-errors'
+
 /**
- * 渲染严格受控在 SWA `n_win = 128` 窗口内（~80–110 tokens）的状态锚正文。
+ * 渲染紧凑状态锚正文，整体不超过 {@link MAX_ANCHOR_CHARS}。
+ *
+ * 预算优先级：头部、ALERT、GOAL、RULE 始终保留；剩余空间先给 TASKS，再按新到旧给 FILES。
  */
 export function renderStateAnchorText(input: {
   readonly step: number
   readonly approxTokens: number
-  readonly reason: 'periodic' | 'watermark' | 'consecutive-errors'
+  readonly reason: StateAnchorTrigger
   readonly goal: string
+  readonly tasks?: string | undefined
   readonly activeFiles: readonly string[]
   readonly consecutiveErrors: number
-  readonly lastErrorTool?: string
+  readonly lastErrorTool?: string | undefined
 }): string {
   const header = `${DEEPSEEK_V41_FLASH_ANCHOR_PREFIX} | step=${input.step} | ctx~${formatApproxTokens(input.approxTokens)} | trigger=${input.reason}]`
-  const lines = [header]
-  if (input.goal.length > 0) lines.push(`GOAL: ${input.goal}`)
-  if (input.activeFiles.length > 0) lines.push(`FILES: ${input.activeFiles.join(', ')}`)
-  if (input.reason === 'consecutive-errors') {
-    const toolLabel = input.lastErrorTool ? ` (${input.lastErrorTool})` : ''
-    lines.push(`ALERT: ${input.consecutiveErrors} consecutive tool failures${toolLabel}. Do NOT retry the same approach; switch to minimal verification or inspect the root definition.`)
+  const goalLine = input.goal.length > 0 ? `GOAL: ${input.goal}` : undefined
+  const toolLabel = input.lastErrorTool ? ` (${input.lastErrorTool})` : ''
+  const alertLine = input.reason === 'consecutive-errors'
+    ? `ALERT: ${input.consecutiveErrors} consecutive tool failures${toolLabel}. Do NOT retry the same approach; switch to minimal verification or inspect the root definition.`
+    : undefined
+  const ruleLine = 'RULE: Stay locked on GOAL; verify via tools/PTC instead of long speculation; finish once acceptance criteria pass.'
+
+  const fixed = [header, goalLine, alertLine, ruleLine].filter((line): line is string => line !== undefined)
+  let remaining = MAX_ANCHOR_CHARS - fixed.reduce((sum, line) => sum + line.length + 1, 0)
+
+  let tasksLine: string | undefined
+  if (input.tasks !== undefined && input.tasks.length > 0) {
+    const full = `TASKS: ${input.tasks}`
+    if (full.length + 1 <= remaining) tasksLine = full
+    else if (remaining - 1 >= 'TASKS: '.length + 8) tasksLine = full.slice(0, remaining - 4).trimEnd() + '...'
+    if (tasksLine !== undefined) remaining -= tasksLine.length + 1
   }
-  lines.push('RULE: Stay locked on GOAL; verify via tools/PTC instead of long speculation; finish once acceptance criteria pass.')
+
+  let filesLine: string | undefined
+  const kept: string[] = []
+  for (let i = input.activeFiles.length - 1; i >= 0; i -= 1) {
+    const candidate = `FILES: ${[input.activeFiles[i]!, ...kept].join(', ')}`
+    if (candidate.length + 1 > remaining) break
+    kept.unshift(input.activeFiles[i]!)
+    filesLine = candidate
+  }
+
+  const lines = [header]
+  if (goalLine !== undefined) lines.push(goalLine)
+  if (tasksLine !== undefined) lines.push(tasksLine)
+  if (filesLine !== undefined) lines.push(filesLine)
+  if (alertLine !== undefined) lines.push(alertLine)
+  lines.push(ruleLine)
   return lines.join('\n')
 }
 
@@ -375,7 +458,7 @@ function subscribe(
 }
 
 /**
- * 安装仅对 DeepSeek V4.1 Flash 生效的 SWA-128 状态锚点与 Effort 缓存诊断器。
+ * 安装仅对 DeepSeek V4.1 Flash 生效的紧凑状态锚点与 Effort 缓存诊断器。
  */
 export function installDeepSeekV41FlashStateAnchor(
   ctx: unknown,
@@ -464,10 +547,22 @@ export function installDeepSeekV41FlashStateAnchor(
       state.lastEffort = route.reasoningEffort
     }
 
-    // 2. 区分新用户回合与自主工具推进步。
-    const newGoal = findLatestRealUserGoal(incoming)
-    if (newGoal !== undefined) {
-      state.goal = newGoal
+    // 2. 同回合插话合并；新回合保留最近三个真实用户目标，最新消息优先避让截断。
+    const currentTurn = typeof payload?.turn === 'number' ? payload.turn : undefined
+    const newGoals = findRealUserGoals(incoming)
+    if (newGoals.length > 0) {
+      const incomingGoal = newGoals.reduce(mergeGoalUpdate, '')
+      if (currentTurn === undefined) {
+        state.goalTurns = [{ turn: 0, goal: incomingGoal }]
+      } else {
+        const existing = state.goalTurns.find(entry => entry.turn === currentTurn)
+        if (existing === undefined) state.goalTurns.push({ turn: currentTurn, goal: incomingGoal })
+        else existing.goal = mergeGoalUpdate(existing.goal, incomingGoal)
+        if (state.goalTurns.length > MAX_GOAL_TURNS) {
+          state.goalTurns.splice(0, state.goalTurns.length - MAX_GOAL_TURNS)
+        }
+      }
+      state.goal = state.goalTurns.reduce((goal, entry) => mergeGoalUpdate(goal, entry.goal), '')
       state.stepsInTurn = 0
       state.lastAnchoredStep = 0
       state.consecutiveToolErrors = 0
@@ -495,6 +590,7 @@ export function installDeepSeekV41FlashStateAnchor(
           const recovered = compactGoalSummary(extractTextFromContent(msg['content']))
           if (recovered.length > 0) {
             state.goal = recovered
+            state.goalTurns = [{ turn: currentTurn ?? 0, goal: recovered }]
             break
           }
         }
@@ -502,7 +598,7 @@ export function installDeepSeekV41FlashStateAnchor(
     }
 
     // 3. 检查三大克制触发条件（优先级：连败防卡死 > 水位首次跨越 > 步数周期）。
-    let trigger: 'periodic' | 'watermark' | 'consecutive-errors' | undefined
+    let trigger: StateAnchorTrigger | undefined
     let nextWatermarkIndex = state.crossedWatermarkIndex
     for (let i = state.crossedWatermarkIndex + 1; i < watermarks.length; i += 1) {
       if (approxTokens >= watermarks[i]!) nextWatermarkIndex = i
@@ -511,6 +607,10 @@ export function installDeepSeekV41FlashStateAnchor(
     if (state.errorAnchorPending && state.consecutiveToolErrors >= errorThreshold) {
       trigger = 'consecutive-errors'
       state.errorAnchorPending = false
+    } else if (state.compactionAnchorPending) {
+      trigger = 'compaction'
+      state.compactionAnchorPending = false
+      if (nextWatermarkIndex > state.crossedWatermarkIndex) state.crossedWatermarkIndex = nextWatermarkIndex
     } else if (nextWatermarkIndex > state.crossedWatermarkIndex) {
       trigger = 'watermark'
       state.crossedWatermarkIndex = nextWatermarkIndex
@@ -534,6 +634,7 @@ export function installDeepSeekV41FlashStateAnchor(
       approxTokens,
       reason: trigger,
       goal: state.goal,
+      tasks: state.taskLine,
       activeFiles: state.activeFiles,
       consecutiveErrors: state.consecutiveToolErrors,
       lastErrorTool: state.lastErrorTool,
@@ -552,18 +653,24 @@ export function installDeepSeekV41FlashStateAnchor(
   ): Promise<unknown> => {
     const decision = await next()
     if (disposed || !isEnabled(options.enabled)) return decision
-    if (exec?.parent !== undefined) return decision
     const route = readScopeRoute(exec?.agent)
     if (!isDeepSeekV41Flash(route.model, route.provider)) return decision
 
     const state = stateFor(exec?.agent, route.sessionId)
     if (state === undefined) return decision
 
+    // Code Mode 中 todo_write 以嵌套调用出现，任务进度同样需要采集。
+    const failed = result?.isError === true || (isRecord(decision) && decision['kind'] === 'block')
+    if (!failed && exec?.name === 'todo_write') {
+      const tasks = summarizeTodos(exec.arguments)
+      if (tasks !== undefined) state.taskLine = tasks
+    }
+    if (exec?.parent !== undefined) return decision
+
     const targetFile = extractTargetFile(exec?.arguments)
     if (targetFile !== undefined) recordActiveFile(state, targetFile)
 
-    const isError = result?.isError === true || (isRecord(decision) && decision['kind'] === 'block')
-    if (isError) {
+    if (failed) {
       state.consecutiveToolErrors += 1
       state.lastErrorTool = typeof exec?.name === 'string' ? exec.name : undefined
       if (state.consecutiveToolErrors >= errorThreshold) {
@@ -582,14 +689,24 @@ export function installDeepSeekV41FlashStateAnchor(
     if (route.sessionId !== undefined) statesBySessionId.delete(route.sessionId)
   }
 
+  // 压缩完成后历史被摘要替换，下一步立即重申目标与任务状态。
+  const onSessionEvent = (session: { readonly id?: unknown } | undefined, event: { readonly type?: unknown } | undefined): void => {
+    if (disposed || event?.type !== 'compaction/end') return
+    const id = session?.id
+    if (typeof id !== 'string') return
+    const state = statesBySessionId.get(id)
+    if (state !== undefined) state.compactionAnchorPending = true
+  }
+
   const offPreStep = subscribe(host, 'agent/pre-step', onPreStep as never)
   const offPostExec = subscribe(host, 'tools/post-execute', onPostExecute as never)
   const offDisposed = subscribe(host, 'agent/disposed', onDisposed as never)
+  const offSessionEvent = subscribe(host, 'session/event', onSessionEvent as never)
 
   return () => {
     if (disposed) return
     disposed = true
-    for (const off of [offPreStep, offPostExec, offDisposed]) {
+    for (const off of [offPreStep, offPostExec, offDisposed, offSessionEvent]) {
       try {
         off?.()
       } catch {
