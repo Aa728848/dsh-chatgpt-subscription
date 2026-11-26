@@ -1,6 +1,6 @@
 {
   "name": "@eddyskywalker/dsh-chatgpt-subscription",
-  "version": "0.88.0",
+  "version": "0.88.1",
   "description": "Multi-provider subscription hub and agent runtime enhancements for DeepSeek Harness (DSH).",
   "icon": "./assets/icon.svg",
   "author": {
