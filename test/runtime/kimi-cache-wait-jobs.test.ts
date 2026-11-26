@@ -438,3 +438,80 @@ describe('deployment overrides on an opted-in line', () => {
     expect(h.agent.steer).not.toHaveBeenCalled()
   })
 })
+
+describe('cache wait re-attaches children it stopped tracking', () => {
+  /** The durable shape the current host appends for a child's completion notice. */
+  function settled(childId = CHILD) {
+    return { type: 'user/message', data: { content: [{ type: 'text', text: 'finished' }], source: { kind: 'subagent-settled', senderSessionId: childId } } }
+  }
+
+  /** A controller whose activity only the claude-api store knows, like a real claude-api session. */
+  function claudeApiHarness() {
+    const clock = new ManualClock()
+    const activity: MutableActivity = { lastActiveAt: 0, totalTokens: 4_096, ttlMs: HOUR_MS }
+    const agent = { id: PARENT, steer: vi.fn() }
+    const controller = new KimiCacheWaitController({
+      now: () => clock.now,
+      timer: clock.timer,
+      warmup: true,
+      agents: { get: id => id === PARENT ? agent : undefined },
+      activity: (_id, provider) => provider === 'claude-api' ? activity : undefined,
+    })
+    return { clock, activity, agent, controller }
+  }
+
+  it('re-tracks a settled child the parent reuses through send_message (no new catalog)', () => {
+    const h = harness({ provider: 'claude-api', ttlMs: HOUR_MS })
+    h.controller.observe(h.parent, catalog())
+    h.controller.observe(h.parent, turn('turn/end'))
+    expect(h.clock.pending).toBe(1)
+
+    // The child reports back; the parent's next turn reuses it with send_message.
+    h.clock.advance(10 * 60_000)
+    h.controller.observe(h.parent, turn('turn/start', 2))
+    h.controller.observe(h.parent, settled())
+    expect(h.controller.snapshot(PARENT).childCount).toBe(0)
+    h.activity.lastActiveAt = h.clock.now
+    h.controller.observe({ id: CHILD }, turn('turn/start'))
+    expect(h.controller.snapshot(PARENT).childCount).toBe(1)
+    expect(h.clock.pending).toBe(0)
+    h.controller.observe(h.parent, turn('turn/end', 2))
+
+    expect(h.clock.nextAt).toBe(h.activity.lastActiveAt + CLAUDE_DECISION_MS)
+    h.clock.advance(CLAUDE_DECISION_MS)
+    expect(h.agent.steer).toHaveBeenCalledTimes(1)
+  })
+
+  it('adopts an idle parent after a host restart when its child resumes', () => {
+    const h = claudeApiHarness()
+    // The restarted host replays nothing: the parent only appends a seed marker.
+    h.clock.advance(40 * 60_000)
+    h.controller.observe({ id: PARENT }, { type: 'session/end-seed', data: {} })
+    h.controller.observe(
+      { id: CHILD, header: { parentSession: PARENT, origin: 'subagent' } },
+      turn('turn/start'),
+    )
+    expect(h.controller.snapshot(PARENT)).toMatchObject({ waiting: true, childCount: 1, scheduled: true })
+    // Scheduled from the persisted issue time, not from the restart.
+    expect(h.clock.nextAt).toBe(CLAUDE_DECISION_MS)
+    h.clock.advance(CLAUDE_DECISION_MS - 40 * 60_000)
+    expect(h.agent.steer).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not adopt a parent it has seen start a turn that has not ended', () => {
+    const h = claudeApiHarness()
+    h.controller.observe({ id: PARENT }, turn('turn/start'))
+    h.controller.observe(
+      { id: CHILD, header: { parentSession: PARENT, origin: 'subagent' } },
+      turn('turn/start'),
+    )
+    expect(h.controller.snapshot(PARENT)).toMatchObject({ waiting: false, childCount: 1, scheduled: false })
+  })
+
+  it('ignores a turn from a session that is nobody\'s child', () => {
+    const h = claudeApiHarness()
+    h.controller.observe({ id: 'lonely', header: { origin: 'user' } }, turn('turn/start'))
+    h.controller.observe({ id: 'forked', header: { parentSession: PARENT, origin: 'fork' } }, turn('turn/start'))
+    expect(h.controller.snapshot(PARENT)).toMatchObject({ childCount: 0, scheduled: false })
+  })
+})

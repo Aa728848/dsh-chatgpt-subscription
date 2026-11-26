@@ -30,10 +30,19 @@ export const CACHE_WAIT_WARMUP_SETTING_DESCRIPTION =
 const MAX_TRACKED_SESSIONS = 256
 /** Per-session bound on tracked background jobs; registrations beyond it are ignored. */
 const MAX_TRACKED_JOBS = 256
+/** Bound on remembered child-to-parent links, kept after a child settles so a reused child re-attaches. */
+const MAX_KNOWN_CHILDREN = 1024
+/**
+ * Providers whose activity store can name a parent's line when its request header is gone
+ * (e.g. after a host restart). Order breaks ties; kimi-code stays first for compatibility.
+ */
+const WAIT_PROVIDER_CANDIDATES = ['kimi-code', 'claude-subscription', 'claude-api'] as const
 
 export interface CacheWaitSession {
   readonly id: string
   requestHeader?(): { readonly config?: { readonly provider?: unknown } | undefined } | undefined
+  /** Durable Session header; a child carries its parent's id here (newer hosts only). */
+  readonly header?: { readonly parentSession?: unknown; readonly origin?: unknown } | undefined
 }
 
 export interface CacheWaitEvent {
@@ -178,6 +187,10 @@ interface WaitState {
   lastWarmupAt?: number
   timer?: unknown
   lastDecision?: 'cold' | 'warmup'
+  /** The latest Session object seen for this parent; reconcile reads its live header. */
+  session?: CacheWaitSession
+  /** Whether this controller has seen the Session start or end a turn since it started. */
+  turnSeen?: boolean
 }
 
 export interface CacheWaitSnapshot {
@@ -239,6 +252,8 @@ function agentRegistry(ctx: {
 export class KimiCacheWaitController {
   private readonly states = new Map<string, WaitState>()
   private readonly parentByChild = new Map<string, string>()
+  /** Child-to-parent links that survive the child settling; see {@link reattachChild}. */
+  private readonly knownParentByChild = new Map<string, string>()
   private readonly providerBySession = new Map<string, string>()
   private readonly now: () => number
   private readonly timer: CacheWaitTimer
@@ -282,9 +297,11 @@ export class KimiCacheWaitController {
         const childId = text(data?.childId)
         if (childId === undefined || childId === session.id) return
         const state = this.stateFor(session.id)
+        state.session = session
         const newChild = !state.children.has(childId)
         state.children.add(childId)
         this.parentByChild.set(childId, session.id)
+        this.rememberParent(childId, session.id)
         if (newChild) {
           state.warmupUsed = false
           state.warmupCount = 0
@@ -300,7 +317,8 @@ export class KimiCacheWaitController {
         return
       }
       if (type === 'user/message') {
-        const source = record(record(data?.message)?.source)
+        // Older hosts nest the message; the current durable shape carries source on data.
+        const source = record(record(data?.message)?.source) ?? record(data?.source)
         if (text(source?.kind) === 'subagent-settled') this.removeChild(text(source?.senderSessionId))
         return
       }
@@ -308,6 +326,7 @@ export class KimiCacheWaitController {
         const jobId = text(data?.jobId)
         if (jobId === undefined) return
         const state = this.stateFor(session.id)
+        state.session = session
         if (state.jobs.has(jobId) || state.jobs.size >= MAX_TRACKED_JOBS) return
         state.jobs.add(jobId)
         // New delegated work: re-arm this batch exactly like a newly catalogued child.
@@ -323,7 +342,10 @@ export class KimiCacheWaitController {
         this.removeJob(session.id, text(data?.jobId))
         return
       }
+      if (type === 'turn/start') this.reattachChild(session)
       const state = this.stateFor(session.id)
+      state.session = session
+      if (type === 'turn/start' || type === 'turn/end') state.turnSeen = true
       if (type === 'turn/start') {
         state.waiting = false
         this.clearTimer(state)
@@ -377,6 +399,7 @@ export class KimiCacheWaitController {
     for (const state of this.states.values()) this.clearTimer(state)
     this.states.clear()
     this.parentByChild.clear()
+    this.knownParentByChild.clear()
     this.providerBySession.clear()
   }
 
@@ -402,6 +425,56 @@ export class KimiCacheWaitController {
       if (oldest.done !== true) this.dropState(oldest.value)
     }
     return state
+  }
+
+  private rememberParent(childId: string, parentId: string): void {
+    this.knownParentByChild.delete(childId)
+    this.knownParentByChild.set(childId, parentId)
+    if (this.knownParentByChild.size > MAX_KNOWN_CHILDREN) {
+      const oldest = this.knownParentByChild.keys().next()
+      if (oldest.done !== true) this.knownParentByChild.delete(oldest.value)
+    }
+  }
+
+  /**
+   * A child Session started a turn: make sure its parent counts it as running again.
+   *
+   * Two real cases produce a running child the catalog no longer reports:
+   * - the parent reuses a settled child through `send_message`, which appends no new
+   *   `subagent/catalog` event, so the settle notice left the child untracked;
+   * - the host restarted while children ran: they resume on their own, but this
+   *   controller starts empty and the idle parent never ends another turn to re-arm.
+   *
+   * The parent comes from the remembered catalog link, else the child's durable header.
+   * A parent this controller has never seen start or end a turn (it started after the
+   * parent's last turn) is adopted as waiting: it is idle while its children run, and its
+   * next real turn/start clears that again.
+   */
+  private reattachChild(session: CacheWaitSession): void {
+    const childId = session.id
+    let parentId = this.knownParentByChild.get(childId)
+    if (parentId === undefined) {
+      try {
+        const header = record(session.header)
+        const origin = text(header?.origin)
+        if (origin === undefined || origin === 'subagent') parentId = text(header?.parentSession)
+      } catch {
+        // A header getter that throws is simply no evidence.
+      }
+    }
+    if (parentId === undefined || parentId === childId) return
+    const state = this.stateFor(parentId)
+    if (state.turnSeen !== true) state.waiting = true
+    this.rememberParent(childId, parentId)
+    if (state.children.has(childId)) return
+    state.children.add(childId)
+    this.parentByChild.set(childId, parentId)
+    state.warmupUsed = false
+    state.warmupCount = 0
+    state.warmupFailed = false
+    state.lastWarmupAt = undefined
+    state.handled = false
+    this.reconcile(state.session ?? { id: parentId }, state)
   }
 
   private dropState(sessionId: string): void {
@@ -448,8 +521,20 @@ export class KimiCacheWaitController {
     }
     const latest = this.providerBySession.get(session.id)
     if (latest !== undefined) return latest
-    // Backward-compatible fallback for a Kimi session whose header is already gone.
-    return this.activity(session.id, 'kimi-code')?.lastActiveAt !== undefined ? 'kimi-code' : undefined
+    // No live header (e.g. a parent adopted after a host restart): the persisted activity
+    // store that saw this session most recently names its line. Kimi wins a tie, as before.
+    let best: { provider: string; at: number } | undefined
+    for (const provider of WAIT_PROVIDER_CANDIDATES) {
+      let at: number | undefined
+      try {
+        at = this.activity(session.id, provider)?.lastActiveAt
+      } catch {
+        at = undefined
+      }
+      if (at === undefined || !Number.isFinite(at)) continue
+      if (best === undefined || at > best.at) best = { provider, at }
+    }
+    return best?.provider
   }
 
   private isWarmupEnabled(): boolean {
