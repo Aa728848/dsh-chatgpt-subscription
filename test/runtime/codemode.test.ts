@@ -115,6 +115,18 @@ describe('Code Mode 说明段', () => {
     expect(text).toContain('x.opt ?? null')
   })
 
+  it('说明段包含路径确认与精确编辑前置条件', () => {
+    const rules = createRules({})
+    const text = buildCodemodeSectionText({
+      runToolName: rules.options.runToolName,
+      metaTools: rules.options.metaTools,
+      programFormat: 'function-body',
+    })
+    expect(text).toContain('old_string` that occurs exactly once')
+    expect(text).toContain('old_string` and `new_string` must differ')
+    expect(text).toContain('Use `glob` to confirm an unknown path')
+  })
+
   it('白名单说明把全局工具名映射到程序内，默认说明保持原样', () => {
     const rules = createRules({})
     const base = { runToolName: rules.options.runToolName, metaTools: rules.options.metaTools, programFormat: 'function-body' }

@@ -363,6 +363,7 @@ export function buildCodemodeSectionText(input: SectionInput): string {
       ? '- Tool argument objects and evaluated values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or inspect it with `inspect(x)`.'
       : '- Tool argument objects and `return` values must be lossless JSON: **never leave `undefined` in an object property value** — `{ a: x.opt }` fails the call when `x.opt === undefined`. Omit the key, write `x.opt ?? null`, or print it with `inspect` / `console.log`.',
     '- Parameter keys: `read`, `edit`, `write`, and `read_image` take `file_path` (not `path`); `glob` and `grep` take `path`; `bash`, `pwsh`, and `win_bash` take `workdir` (not `cwd`).',
+    '- Before `edit`, read the file and copy an `old_string` that occurs exactly once; `old_string` and `new_string` must differ. Use `glob` to confirm an unknown path before `read` or `edit`: a missing path is a tool error, not an empty result.',
     // 程序文本本身的两类陷阱：写错了连求值都进不去，报错还没有行号。措辞只描述事实，不给自动改写。
     ...(python ? [] : [
       '- Paths and regexes: write a Windows path with forward slashes (`C:/Users/...`) or wrap it in `String.raw`; a literal `C:\\Users` inside an ordinary string is read as the escape `\\U` and the program never starts (`Expected unicode escape`). Regex backslashes (`\\d`, `\\.`) have the same trap — double them or use `String.raw`.',
