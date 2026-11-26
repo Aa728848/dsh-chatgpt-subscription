@@ -22,6 +22,17 @@
  */
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { isDeepSeekV41Flash, readScopeRoute } from './match.ts'
+import {
+  absorbGoalMessages,
+  createGoalLedger,
+  currentGoal,
+  earlierGoals,
+  messageText,
+  recoverGoalFromEvents,
+  type GoalLedger,
+} from './goal-intake.ts'
+
+export { compactGoalSummary, isRealUserMessage, mergeGoalUpdate } from './goal-intake.ts'
 
 /** 尾部状态锚的消息来源 kind（本包自有，不冒充真实用户输入）。 */
 export const DEEPSEEK_V41_FLASH_ANCHOR_SOURCE_KIND = 'deepseek-v41-flash-anchor'
@@ -53,14 +64,10 @@ export const ANCHOR_CONSECUTIVE_ERROR_THRESHOLD = 2
 /** 估算上下文达到该阈值后再中途切换 `reasoningEffort`，发出 50x 破缓存诊断告警。 */
 export const EFFORT_DRIFT_WARN_MIN_TOKENS = 32_000
 
-/** 总目标摘要最大字符数，保持锚点紧凑（工程预算，非模型硬上限）。 */
-const MAX_GOAL_CHARS = 120
 /** 整条状态锚最大字符数；超出时依次压缩 FILES、TASKS，ALERT 与 GOAL 始终保留。 */
 const MAX_ANCHOR_CHARS = 640
 /** 任务状态中单项描述的最大字符数。 */
 const MAX_TASK_ITEM_CHARS = 48
-/** 状态锚保留的真实用户回合数，兼顾连续任务与旧任务消退。 */
-const MAX_GOAL_TURNS = 3
 /** 活动文件列表最大条目数。 */
 const MAX_ACTIVE_FILES = 4
 /** 单个文件名片段最大字符数。 */
@@ -112,11 +119,8 @@ interface EventHostLike {
 }
 
 interface AnchorSessionState {
-  /** 最新一个用户回合的目标（同回合插话已合并，后补充的在后）。 */
-  goal: string
-  /** 更早回合的目标，仅作参考；有任务清单时不渲染。 */
-  earlierGoal: string
-  goalTurns: Array<{ turn: number; goal: string }>
+  /** 最近几个回合的目标；GOAL 取最新回合，更早回合仅作参考且有任务清单时不渲染。 */
+  goals: GoalLedger
   stepsInTurn: number
   lastAnchoredStep: number
   crossedWatermarkIndex: number
@@ -162,9 +166,7 @@ function isEnabled(read: (() => boolean) | undefined): boolean {
 
 function createSessionState(): AnchorSessionState {
   return {
-    goal: '',
-    earlierGoal: '',
-    goalTurns: [],
+    goals: createGoalLedger(),
     stepsInTurn: 0,
     lastAnchoredStep: 0,
     crossedWatermarkIndex: -1,
@@ -178,61 +180,6 @@ function createSessionState(): AnchorSessionState {
     lastEffortWarnedTransition: undefined,
     observedChars: 0,
   }
-}
-
-function extractTextFromContent(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  const parts: string[] = []
-  for (const block of content) {
-    if (!isRecord(block)) continue
-    if (block['type'] === 'text' && typeof block['text'] === 'string') {
-      parts.push(block['text'])
-    }
-  }
-  return parts.join('\n')
-}
-
-function isNoticeMessage(message: unknown): boolean {
-  if (!isRecord(message)) return true
-  if (message['role'] !== 'user') return true
-  const source = isRecord(message['source']) ? message['source'] : undefined
-  if (source !== undefined) {
-    const form = source['form']
-    const kind = source['kind']
-    if (form === 'notice') return true
-    if (typeof kind === 'string' && (
-      kind === DEEPSEEK_V41_FLASH_ANCHOR_SOURCE_KIND
-      || kind === 'tool'
-      || kind === 'runtime-context'
-      || kind === 'agent-instructions'
-      || kind === 'skill-catalog'
-      || kind === 'compact-checkpoint'
-      || kind === 'progress-updates-language'
-      || kind === 'team-board-notice'
-      || kind === 'timeline-cache-notice'
-      || kind === 'dsh-chatgpt-subscription'
-      || kind === 'minimax-direct-call-reminder'
-      || kind === 'minimax-runaway-guard'
-    )) {
-      return true
-    }
-  }
-  const text = extractTextFromContent(message['content']).trimStart()
-  if (text.length === 0) return true
-  if (
-    text.startsWith('<system-reminder')
-    || text.startsWith('Current runtime context.')
-    || text.startsWith(DEEPSEEK_V41_FLASH_ANCHOR_PREFIX)
-  ) {
-    return true
-  }
-  return false
-}
-
-/** 是否为真实用户输入（排除运行时通知、状态锚与插件提醒）。 */
-export function isRealUserMessage(message: unknown): boolean {
-  return !isNoticeMessage(message)
 }
 
 /** 把 `todo_write` 参数归纳成紧凑进度行：完成数/总数、进行中与下一项。 */
@@ -251,42 +198,6 @@ export function summarizeTodos(args: unknown): string | undefined {
   if (now !== undefined && label(now).length > 0) parts.push(`NOW: ${label(now)}`)
   if (pending !== undefined && label(pending).length > 0) parts.push(`NEXT: ${label(pending)}`)
   return parts.join(' | ')
-}
-
-/** 把原始用户目标清洗成紧凑的一行摘要，去除附带 reminder。 */
-export function compactGoalSummary(raw: string): string {
-  const reminderAt = raw.search(/<system-reminder\b|Current runtime context\./)
-  const stripped = (reminderAt < 0 ? raw : raw.slice(0, reminderAt))
-    .replace(/\s+/g, ' ')
-    .trim()
-  if (stripped.length <= MAX_GOAL_CHARS) return stripped
-  return stripped.slice(0, MAX_GOAL_CHARS - 3).trimEnd() + '...'
-}
-
-/** 合并用户补充时保留原目标开头和最新消息，避免总长度截断把新约束吃掉。 */
-export function mergeGoalUpdate(current: string, update: string): string {
-  if (current.length === 0) return compactGoalSummary(update)
-  const compactedUpdate = compactGoalSummary(update)
-  if (compactedUpdate.length === 0) return current
-  const combined = compactGoalSummary(`${current} | ${compactedUpdate}`)
-  if (combined.endsWith(compactedUpdate)) return combined
-
-  const suffix = ` | ${compactedUpdate}`
-  const prefixBudget = combined.length - suffix.length
-  if (prefixBudget < 4) return compactedUpdate
-  const prefix = current.slice(0, prefixBudget - 3).trimEnd()
-  return prefix.length > 0 ? `${prefix}...${suffix}` : compactedUpdate
-}
-
-function findRealUserGoals(messages: readonly unknown[] | undefined): string[] {
-  if (!Array.isArray(messages)) return []
-  const goals: string[] = []
-  for (const message of messages) {
-    if (isNoticeMessage(message)) continue
-    const text = compactGoalSummary(extractTextFromContent((message as Record<string, unknown>)['content']))
-    if (text.length > 0) goals.push(text)
-  }
-  return goals
 }
 
 function shortFileLabel(rawPath: string): string {
@@ -535,7 +446,7 @@ export function installDeepSeekV41FlashStateAnchor(
 
     for (const msg of incoming) {
       if (isRecord(msg)) {
-        state.observedChars += extractTextFromContent(msg['content']).length
+        state.observedChars += messageText(msg['content']).length
       }
     }
 
@@ -567,24 +478,9 @@ export function installDeepSeekV41FlashStateAnchor(
       state.lastEffort = route.reasoningEffort
     }
 
-    // 2. 同回合插话合并；新回合保留最近三个真实用户目标，最新消息优先避让截断。
+    // 2. 只有真人（或上级代理）消息能改写目标；“继续”这类短句保留原目标但开启新回合。
     const currentTurn = typeof payload?.turn === 'number' ? payload.turn : undefined
-    const newGoals = findRealUserGoals(incoming)
-    if (newGoals.length > 0) {
-      const incomingGoal = newGoals.reduce(mergeGoalUpdate, '')
-      if (currentTurn === undefined) {
-        state.goalTurns = [{ turn: 0, goal: incomingGoal }]
-      } else {
-        const existing = state.goalTurns.find(entry => entry.turn === currentTurn)
-        if (existing === undefined) state.goalTurns.push({ turn: currentTurn, goal: incomingGoal })
-        else existing.goal = mergeGoalUpdate(existing.goal, incomingGoal)
-        if (state.goalTurns.length > MAX_GOAL_TURNS) {
-          state.goalTurns.splice(0, state.goalTurns.length - MAX_GOAL_TURNS)
-        }
-      }
-      // 最新回合才是当前指令；更早回合只作参考，避免被否定或无关的旧命令盖过新命令。
-      state.goal = state.goalTurns[state.goalTurns.length - 1]?.goal ?? incomingGoal
-      state.earlierGoal = state.goalTurns.slice(0, -1).reduce((goal, entry) => mergeGoalUpdate(goal, entry.goal), '')
+    if (absorbGoalMessages(state.goals, incoming, currentTurn)) {
       state.stepsInTurn = 0
       state.lastAnchoredStep = 0
       state.consecutiveToolErrors = 0
@@ -595,29 +491,15 @@ export function installDeepSeekV41FlashStateAnchor(
 
     state.stepsInTurn += 1
 
-    // 若之前尚未捕获目标（例如中途接管会话），从历史事件补抓最近一条真实用户目标。
-    if (state.goal.length === 0 && isRecord(payload?.agent) && isRecord(payload.agent.session)) {
+    // 若之前尚未捕获目标（例如中途接管会话），从历史事件补抓最近一条可作目标的消息。
+    if (currentGoal(state.goals).length === 0 && isRecord(payload?.agent) && isRecord(payload.agent.session)) {
       const session = payload.agent.session
       let events: readonly SessionEventLike[] | undefined
       if (Array.isArray(session.events)) events = session.events
       else if (typeof session.snapshotEvents === 'function') {
         try { events = session.snapshotEvents() } catch { events = undefined }
       }
-      if (events !== undefined) {
-        for (let i = events.length - 1; i >= 0; i -= 1) {
-          const ev = events[i]
-          if (ev?.type !== 'user/message' || !isRecord(ev.data)) continue
-          const msg = isRecord(ev.data['message']) ? ev.data['message'] : { role: 'user', content: ev.data['content'] ?? ev.data['text'] }
-          if (isNoticeMessage(msg)) continue
-          const recovered = compactGoalSummary(extractTextFromContent(msg['content']))
-          if (recovered.length > 0) {
-            state.goal = recovered
-            state.earlierGoal = ''
-            state.goalTurns = [{ turn: currentTurn ?? 0, goal: recovered }]
-            break
-          }
-        }
-      }
+      if (events !== undefined) recoverGoalFromEvents(state.goals, events, currentTurn)
     }
 
     // 3. 检查三大克制触发条件（优先级：连败防卡死 > 水位首次跨越 > 步数周期）。
@@ -645,6 +527,9 @@ export function installDeepSeekV41FlashStateAnchor(
     }
 
     if (trigger === undefined) return decision
+    const goal = currentGoal(state.goals)
+    // 周期锚只是重申；既无目标也无任务时没有可重申的内容。
+    if (trigger === 'periodic' && goal.length === 0 && state.taskLine.length === 0) return decision
 
     // 避免同一条消息列表已被其它路径加过锚点。
     if (incoming.some(msg => isRecord(msg) && isRecord(msg['source']) && msg['source']['kind'] === DEEPSEEK_V41_FLASH_ANCHOR_SOURCE_KIND)) {
@@ -656,8 +541,8 @@ export function installDeepSeekV41FlashStateAnchor(
       step: state.stepsInTurn,
       approxTokens,
       reason: trigger,
-      goal: state.goal,
-      earlierGoal: state.earlierGoal,
+      goal,
+      earlierGoal: earlierGoals(state.goals),
       tasks: state.taskLine,
       activeFiles: state.activeFiles,
       consecutiveErrors: state.consecutiveToolErrors,

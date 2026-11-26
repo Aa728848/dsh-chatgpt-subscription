@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[state-anchor] “继续”与自动消息不再顶替目标**：开源模型与 DeepSeek V4.1 Flash 的状态锚此前把任何非黑名单的用户角色消息都当作新目标，用户回一句“继续”、DSH 目标续跑轮次、子代理汇报都会被写成 `GOAL` 并在周期锚里反复注入。现改为按来源白名单判定：真人输入（含旧版宿主不带来源的消息）才设定新目标；“继续 / 好的 / continue / продолжай”等纯接续短句保留原目标；目标续跑轮次只取其中的 Objective；回答提问并入当前目标；代理间消息仅在尚无目标时作为子代理的任务说明；定时提醒、子代理通知等其他来源一律忽略。开源模型状态锚改为保留最近三个回合，更早目标以 `EARLIER` 行仅供参考；没有目标时不做周期注入。V4.1 Flash 进展治理同样不再因续跑轮次或提醒而清零计数。
+
 - **[providers] 压缩等辅助请求沿用会话的思考档位**：DSH 发出的压缩摘要、时间线报告、自动审查请求不带思考档位，此前各线路会退回设置默认档位或不发档位，与主对话请求体不一致，导致长上下文的前缀缓存整段失效（Kimi Code 会直接回 429 过载）。新增共用的 `SessionEffortMemory`，记住每个会话主轮次的模型与显式档位；辅助请求未指定档位时按同模型沿用，生成标题请求不受影响。已接入 kimi-code、workbuddy、qoder、minimax-code、command-code、qianwen-token-plan、relayone、opencode-go、glm-coding-plan、step-code、cline-pass、opendesign、codex-chatgpt、ollama、aws-quick、antigravity-acp；claude / claude-api 保持原有同类逻辑。
 
 ## 0.88.0 - 2026-11-25

@@ -371,9 +371,10 @@ describe('零改前缀尾部 State Anchor（适配 SWA 短窗与 1M 稀疏/线�
     await run(2, [user('Document the new behavior')])
     const nextTurn = await run(2, [])
     const nextTurnText = nextTurn.messages?.[0]?.content?.[0]?.text ?? ''
-    expect(nextTurnText).toContain('GOAL: Document the new behavior')
-    expect(nextTurnText).not.toContain('Fix parser edge case')
-    expect(nextTurnText).not.toContain('Also update regression tests')
+    const goalLine = nextTurnText.split('\n').find(line => line.startsWith('GOAL')) ?? ''
+    expect(goalLine).toBe('GOAL: Document the new behavior')
+    // 上一回合的目标降为仅供参考，而不是直接丢掉。
+    expect(nextTurnText).toContain('EARLIER (context only; GOAL wins on conflict): Fix parser edge case')
 
     dispose()
   })

@@ -10,19 +10,22 @@
  *   局部滑窗极窄，超过 128–512 tokens 外的目标约束难以进入局部层。
  *
  * 仅在步数周期、上下文水位首次跨越或连续工具失败时，于 `agent/pre-step` 尾部追加一段
- * 严格受控（≤ 105 tokens）的状态锚——0% 破坏前方前缀缓存，严格排除 DeepSeek V4.1 Flash
+ * 紧凑的状态锚——0% 破坏前方前缀缓存，严格排除 DeepSeek V4.1 Flash
  * 与全部闭源模型。
  *
  * @module @eddyskywalker/dsh-chatgpt-subscription/host/open-models/state-anchor
  */
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/message'
+import { defaultEstimateContextTokens } from '../deepseek-v41-flash/state-anchor.ts'
 import {
-  compactGoalSummary,
-  mergeGoalUpdate,
-  defaultEstimateContextTokens,
-  DEEPSEEK_V41_FLASH_ANCHOR_PREFIX,
-  DEEPSEEK_V41_FLASH_ANCHOR_SOURCE_KIND,
-} from '../deepseek-v41-flash/state-anchor.ts'
+  absorbGoalMessages,
+  createGoalLedger,
+  currentGoal,
+  earlierGoals,
+  messageText,
+  recoverGoalFromEvents,
+  type GoalLedger,
+} from '../deepseek-v41-flash/goal-intake.ts'
 import { matchOpenModelScope, type OpenModelProfile } from './profiles.ts'
 
 /** 开源模型共享状态锚的消息来源 kind。 */
@@ -88,10 +91,8 @@ interface EventHostLike {
 }
 
 interface AnchorSessionState {
-  goal: string
-  /** 目标由同回合多条用户消息合并而成（后补充的在后）。 */
-  goalMerged: boolean
-  turn: number
+  /** 最近几个回合的目标；GOAL 取最新回合，更早回合仅作参考。 */
+  goals: GoalLedger
   stepsInTurn: number
   lastAnchoredStep: number
   crossedWatermarkIndex: number
@@ -130,9 +131,7 @@ function isEnabled(read: (() => boolean) | undefined): boolean {
 
 function createSessionState(): AnchorSessionState {
   return {
-    goal: '',
-    goalMerged: false,
-    turn: 0,
+    goals: createGoalLedger(),
     stepsInTurn: 0,
     lastAnchoredStep: 0,
     crossedWatermarkIndex: -1,
@@ -142,70 +141,6 @@ function createSessionState(): AnchorSessionState {
     activeFiles: [],
     observedChars: 0,
   }
-}
-
-function extractTextFromContent(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  const parts: string[] = []
-  for (const block of content) {
-    if (!isRecord(block)) continue
-    if (block['type'] === 'text' && typeof block['text'] === 'string') {
-      parts.push(block['text'])
-    }
-  }
-  return parts.join('\n')
-}
-
-function isNoticeMessage(message: unknown): boolean {
-  if (!isRecord(message)) return true
-  if (message['role'] !== 'user') return true
-  const source = isRecord(message['source']) ? message['source'] : undefined
-  if (source !== undefined) {
-    const form = source['form']
-    const kind = source['kind']
-    if (form === 'notice') return true
-    if (typeof kind === 'string' && (
-      kind === OPEN_MODEL_ANCHOR_SOURCE_KIND
-      || kind === DEEPSEEK_V41_FLASH_ANCHOR_SOURCE_KIND
-      || kind === 'tool'
-      || kind === 'runtime-context'
-      || kind === 'agent-instructions'
-      || kind === 'skill-catalog'
-      || kind === 'compact-checkpoint'
-      || kind === 'progress-updates-language'
-      || kind === 'team-board-notice'
-      || kind === 'timeline-cache-notice'
-      || kind === 'dsh-chatgpt-subscription'
-      || kind === 'minimax-direct-call-reminder'
-      || kind === 'minimax-runaway-guard'
-      || kind === 'kimi-repeat-breaker'
-    )) {
-      return true
-    }
-  }
-  const text = extractTextFromContent(message['content']).trimStart()
-  if (text.length === 0) return true
-  if (
-    text.startsWith('<system-reminder')
-    || text.startsWith('Current runtime context.')
-    || text.startsWith(OPEN_MODEL_ANCHOR_PREFIX)
-    || text.startsWith(DEEPSEEK_V41_FLASH_ANCHOR_PREFIX)
-  ) {
-    return true
-  }
-  return false
-}
-
-function findRealUserGoals(messages: readonly unknown[] | undefined): string[] {
-  if (!Array.isArray(messages)) return []
-  const goals: string[] = []
-  for (const message of messages) {
-    if (isNoticeMessage(message)) continue
-    const text = compactGoalSummary(extractTextFromContent((message as Record<string, unknown>)['content']))
-    if (text.length > 0) goals.push(text)
-  }
-  return goals
 }
 
 function shortFileLabel(rawPath: string): string {
@@ -252,6 +187,7 @@ export function renderOpenModelStateAnchorText(input: {
   readonly reason: 'periodic' | 'watermark' | 'consecutive-errors'
   readonly goal: string
   readonly goalMerged?: boolean | undefined
+  readonly earlierGoal?: string | undefined
   readonly activeFiles: readonly string[]
   readonly consecutiveErrors: number
   readonly lastErrorTool?: string
@@ -259,6 +195,9 @@ export function renderOpenModelStateAnchorText(input: {
   const header = `${OPEN_MODEL_ANCHOR_PREFIX} | model=${input.profile.label} | step=${input.step} | ctx~${formatApproxTokens(input.approxTokens)} | trigger=${input.reason}]`
   const lines = [header]
   if (input.goal.length > 0) lines.push(`${input.goalMerged === true ? 'GOAL (later parts override earlier)' : 'GOAL'}: ${input.goal}`)
+  if (input.goal.length > 0 && input.earlierGoal !== undefined && input.earlierGoal.length > 0) {
+    lines.push(`EARLIER (context only; GOAL wins on conflict): ${input.earlierGoal}`)
+  }
   if (input.activeFiles.length > 0) lines.push(`FILES: ${input.activeFiles.join(', ')}`)
   if (input.reason === 'consecutive-errors') {
     const toolLabel = input.lastErrorTool ? ` (${input.lastErrorTool})` : ''
@@ -366,21 +305,15 @@ export function installOpenModelStateAnchor(
 
     for (const msg of incoming) {
       if (isRecord(msg)) {
-        state.observedChars += extractTextFromContent(msg['content']).length
+        state.observedChars += messageText(msg['content']).length
       }
     }
 
     const approxTokens = estimateTokens(payload?.agent, state.observedChars)
 
+    // 只有真人（或上级代理）消息能改写目标；“继续”这类短句保留原目标但开启新回合。
     const currentTurn = typeof payload?.turn === 'number' ? payload.turn : undefined
-    const isSameTurn = currentTurn !== undefined && currentTurn === state.turn
-    if (currentTurn !== undefined) state.turn = currentTurn
-
-    const newGoals = findRealUserGoals(incoming)
-    if (newGoals.length > 0) {
-      const incomingGoal = newGoals.reduce(mergeGoalUpdate, '')
-      state.goalMerged = newGoals.length > 1 || (isSameTurn && state.goal.length > 0)
-      state.goal = isSameTurn ? mergeGoalUpdate(state.goal, incomingGoal) : incomingGoal
+    if (absorbGoalMessages(state.goals, incoming, currentTurn)) {
       state.stepsInTurn = 0
       state.lastAnchoredStep = 0
       state.consecutiveToolErrors = 0
@@ -391,29 +324,14 @@ export function installOpenModelStateAnchor(
 
     state.stepsInTurn += 1
 
-    if (state.goal.length === 0 && isRecord(payload?.agent) && isRecord(payload.agent.session)) {
+    if (currentGoal(state.goals).length === 0 && isRecord(payload?.agent) && isRecord(payload.agent.session)) {
       const session = payload.agent.session
       let events: readonly SessionEventLike[] | undefined
       if (Array.isArray(session.events)) events = session.events
       else if (typeof session.snapshotEvents === 'function') {
         try { events = session.snapshotEvents() } catch { events = undefined }
       }
-      if (events !== undefined) {
-        for (let i = events.length - 1; i >= 0; i -= 1) {
-          const ev = events[i]
-          if (ev?.type !== 'user/message' || !isRecord(ev.data)) continue
-          const msg = isRecord(ev.data['message'])
-            ? ev.data['message']
-            : { role: 'user', content: ev.data['content'] ?? ev.data['text'] }
-          if (isNoticeMessage(msg)) continue
-          const recovered = compactGoalSummary(extractTextFromContent(msg['content']))
-          if (recovered.length > 0) {
-            state.goal = recovered
-            state.goalMerged = false
-            break
-          }
-        }
-      }
+      if (events !== undefined) recoverGoalFromEvents(state.goals, events, currentTurn)
     }
 
     const stepInterval = Math.max(1, options.stepIntervalOverride ?? profile.anchorStepInterval)
@@ -439,6 +357,9 @@ export function installOpenModelStateAnchor(
     }
 
     if (trigger === undefined) return decision
+    const goal = currentGoal(state.goals)
+    // 周期锚只是重申；没有目标时没有可重申的内容。
+    if (trigger === 'periodic' && goal.length === 0) return decision
 
     if (incoming.some(msg => isRecord(msg) && isRecord(msg['source']) && msg['source']['kind'] === OPEN_MODEL_ANCHOR_SOURCE_KIND)) {
       return decision
@@ -450,8 +371,9 @@ export function installOpenModelStateAnchor(
       step: state.stepsInTurn,
       approxTokens,
       reason: trigger,
-      goal: state.goal,
-      goalMerged: state.goalMerged,
+      goal,
+      goalMerged: state.goals.turns[state.goals.turns.length - 1]?.merged === true,
+      earlierGoal: earlierGoals(state.goals),
       activeFiles: state.activeFiles,
       consecutiveErrors: state.consecutiveToolErrors,
       lastErrorTool: state.lastErrorTool,
