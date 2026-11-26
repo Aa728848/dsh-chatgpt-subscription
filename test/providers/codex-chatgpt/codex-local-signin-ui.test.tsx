@@ -155,9 +155,7 @@ describe('the local sign-in import button, beside the login button', () => {
     expect(buttons[2]!.textContent).toBe(zh.localCodexLoginImport)
     expect(buttons[3]!.textContent).toBe(zh.credentialFileImport)
     expect(buttons[3]!.className).toBe('dsha-btn')
-    // The row has to fit on one line. The full sentence lives in aria-label, so
-    // the visible text is the short form and must stay short: these bounds are
-    // what keeps a future reword from silently reintroducing the wrap.
+    // Keep the visible labels short and the complete descriptions in aria-label.
     for (const label of [zh.deviceCodeLogin, zh.localCodexLoginImport]) {
       expect(label.length).toBeLessThanOrEqual(8)
     }

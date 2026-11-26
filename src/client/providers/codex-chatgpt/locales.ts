@@ -243,8 +243,7 @@ export const zh = {
   hubUpdateCommandLabel: '手动更新命令',
   // The row carries three entries side by side, so these two labels are kept
   // short enough to fit: the visible text names the mechanism, and the full
-  // sentence lives in the aria-label (see CodexSubscriptionSection). A row that
-  // wraps stops reading as a row of alternatives.
+  // sentence lives in the aria-label (see CodexSubscriptionSection).
   localCodexLoginImport: '导入本机登录',
   localCodexLoginImporting: '导入中…',
   credentialFileImport: '导入 CPA / sub2api',

@@ -607,7 +607,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           // The first button REPRODUCES the shared card's default login button
           // (same classes, same label, same disable rule), because taking the row
           // over means reproducing it — nothing about signing in changes here.
-          <div className="dsha-account-add-actions">
+          <div className="dsha-account-add-actions dsh-codex-login-actions">
             <button
               className="dsha-btn dsha-btn-primary"
               disabled={busy !== null}
