@@ -223,7 +223,13 @@ export function feedOpenCodeGoChatPayload(state: OpenCodeGoChatStreamState, payl
       const args = stringValue(fn.arguments) ?? ''
       if (!tool.started) { tool.started = true; out.push({ type: 'block-start', index: tool.index, blockType: 'tool-call' }) }
       tool.arguments += args
-      out.push({ type: 'tool-call-delta', index: tool.index, id: toToolCallId(tool.id), name: tool.name || undefined, argumentsDelta: args })
+      out.push({
+        type: 'tool-call-delta',
+        index: tool.index,
+        id: toToolCallId(tool.id),
+        ...(tool.name === '' ? {} : { name: tool.name }),
+        argumentsDelta: args,
+      })
     })
   }
   const finish = stringValue(choice.finish_reason)
