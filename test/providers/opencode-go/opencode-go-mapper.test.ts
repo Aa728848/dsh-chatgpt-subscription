@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '../../../src/host/common/llm-compat.ts'
 import { buildOpenCodeGoChatRequest, assertOpenCodeGoStreamComplete, createOpenCodeGoChatStreamState, openCodeGoPlanFromBillingSource, processOpenCodeGoStreamLine } from '../../../src/host/providers/opencode-go/mapper.ts'
 import { classifyOpenCodeGoFailure } from '../../../src/host/providers/opencode-go/adapter.ts'
@@ -45,6 +46,53 @@ describe('OpenCode Go request and stream mapping', () => {
     expect(finish?.replayState).toMatchObject({ response: { provider: 'opencode-go', billingSource: 'go-plus' } })
     expect(state.tools.get('index:0')?.arguments).toBe('{"value":"ok"}')
     expect(openCodeGoPlanFromBillingSource(state.billingSource)).toBe('Go Plus')
+  })
+
+  it('keeps initially nameless tool calls lossless through the DSH accumulator', () => {
+    const state = createOpenCodeGoChatStreamState()
+    const first = processOpenCodeGoStreamLine('data: ' + JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { arguments: '{"value":' } }] } }] }), state)
+    const firstDelta = first.find((chunk): chunk is Extract<StreamChunk, { type: 'tool-call-delta' }> => chunk.type === 'tool-call-delta')
+
+    const secondPayload = { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'probe', arguments: '"ok"}' } }] } }] }
+    const second = processOpenCodeGoStreamLine('data: ' + JSON.stringify(secondPayload), state)
+    const secondDelta = second.find((chunk): chunk is Extract<StreamChunk, { type: 'tool-call-delta' }> => chunk.type === 'tool-call-delta')
+    expect(secondDelta?.name).toBe('probe')
+
+    const closed = processOpenCodeGoStreamLine('data: [DONE]', state)
+    const chunks = [...first, ...second, ...closed]
+    const accumulator = new AssistantStreamAccumulator()
+    chunks.forEach((chunk, index) => accumulator.push({ time: index + 1, chunk }))
+    expect(firstDelta).toBeDefined()
+    expect(Object.prototype.hasOwnProperty.call(firstDelta, 'name')).toBe(false)
+    expect(chunks.map(chunk => chunk.type)).toEqual(['block-start', 'tool-call-delta', 'tool-call-delta', 'block-end', 'finish'])
+    expect(closed.find(chunk => chunk.type === 'block-end')).toMatchObject({ block: { type: 'tool-call', name: 'probe', arguments: '{"value":"ok"}' } })
+  })
+
+  it('preserves known tool names across empty argument-delta names', () => {
+    const state = createOpenCodeGoChatStreamState()
+    const fragments = [
+      { name: 'bash', arguments: '' },
+      { name: '', arguments: '{"command"' },
+      { name: '', arguments: ':"ls"}' },
+    ]
+    const chunks: StreamChunk[] = []
+    fragments.forEach((fn, index) => {
+      const payload = {
+        choices: [{
+          delta: { tool_calls: [{ index: 0, ...(index === 0 ? { id: 'call_00_test' } : {}), function: fn }] },
+          ...(index === fragments.length - 1 ? { finish_reason: 'tool_calls' } : {}),
+        }],
+      }
+      chunks.push(...processOpenCodeGoStreamLine('data: ' + JSON.stringify(payload), state))
+    })
+    chunks.push(...processOpenCodeGoStreamLine('data: [DONE]', state))
+
+    const accumulator = new AssistantStreamAccumulator()
+    chunks.forEach((chunk, index) => accumulator.push({ time: index + 1, chunk }))
+    const deltas = chunks.filter((chunk): chunk is Extract<StreamChunk, { type: 'tool-call-delta' }> => chunk.type === 'tool-call-delta')
+    expect(deltas.map(chunk => chunk.name)).toEqual(['bash', 'bash', 'bash'])
+    expect(chunks.find(chunk => chunk.type === 'block-end')).toMatchObject({ block: { type: 'tool-call', name: 'bash', arguments: '{"command":"ls"}' } })
+    expect(chunks.find(chunk => chunk.type === 'finish')).toMatchObject({ reason: { kind: 'tool-calls' } })
   })
 
   it('maps official OpenCode billed cache and reasoning tokens', () => {
