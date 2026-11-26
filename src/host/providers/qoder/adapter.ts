@@ -48,6 +48,7 @@ import {
   normalizeGenerateOptions,
   type GenerateOptions as NormalizedGenerateOptions,
 } from '../../common/llm-compat.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import { outputReservation } from '../../common/output-reservation.ts'
 import { requestImageTargetOrOriginal, type AttachmentImageReader } from '../../common/request-images.ts'
 import { retryAfterMs } from '../../infra/network/wire-auth.ts'
@@ -276,6 +277,8 @@ export class QoderAdapter extends LlmAdapter {
   private readonly preferences: QoderPreferenceStore | undefined
   private readonly accountPool: QoderAccountPool | null
   private readonly options: QoderAdapterOptions
+  /** 把主回合的 effort 带给压缩/时间线/评审等辅助请求（否则前缀缓存整段失效）。 */
+  private readonly effortMemory = new SessionEffortMemory()
 
   constructor(
     store: QoderCredentialStore = new QoderCredentialStore(),
@@ -431,8 +434,10 @@ export class QoderAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    // 辅助请求（compaction 等）不自带 effort，先在解析任何默认值之前对齐主回合的档位。
+    const followed = this.effortMemory.follow(options)
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal, activity) => this.requestStream(options, watchdogSignal, activity),
+      (watchdogSignal, activity) => this.requestStream(followed, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,

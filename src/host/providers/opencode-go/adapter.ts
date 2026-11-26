@@ -10,6 +10,7 @@ import { requestImageTargetOrOriginal, resolveRequestImages, type AttachmentImag
 import { withStaticPrefixOrdering } from '../../common/prefix-stability.ts'
 import type { PromptCacheOverride } from '../../common/prompt-cache-policy.ts'
 import { retryAfterMs } from '../../infra/network/wire-auth.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import type { OpenCodeGoAccountPool, OpenCodeGoPoolAccount } from './account-pool.ts'
 import { OpenCodeGoCatalogManager, openCodeGoModelOptions, resolveOpenCodeGoModel, type OpenCodeGoModelEntry } from './model-catalog.ts'
 import { OpenCodeGoSettingsStore } from './token-store.ts'
@@ -44,6 +45,8 @@ export class OpenCodeGoAdapter extends LlmAdapter {
   private readonly settingsStore: OpenCodeGoSettingsStore
   private readonly catalog: OpenCodeGoCatalogManager
   private readonly options: OpenCodeGoAdapterOptions
+  /** An auxiliary request names no effort; this lets it reuse the session's level so the prefix cache still hits. */
+  private readonly effortMemory = new SessionEffortMemory()
   constructor(settingsStore: OpenCodeGoSettingsStore = new OpenCodeGoSettingsStore(), catalog: OpenCodeGoCatalogManager = new OpenCodeGoCatalogManager(), options: OpenCodeGoAdapterOptions = {}) {
     super()
     this.settingsStore = settingsStore
@@ -96,7 +99,8 @@ export class OpenCodeGoAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    yield* wrapStreamWithWatchdog((signal, activity) => this.requestStream(options, signal, activity), options.signal, STREAM_IDLE_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_CODE, PROVIDER_NAME)
+    const followed = this.effortMemory.follow(options)
+    yield* wrapStreamWithWatchdog((signal, activity) => this.requestStream(followed, signal, activity), options.signal, STREAM_IDLE_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_CODE, PROVIDER_NAME)
   }
 
   private async *requestStream(options: GenerateOptions, signal: AbortSignal, activity?: StreamActivity): AsyncGenerator<StreamChunk> {

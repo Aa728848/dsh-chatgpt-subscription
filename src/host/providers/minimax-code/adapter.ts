@@ -86,6 +86,7 @@ import { agentBaseUrl } from './types.ts'
 import { fileRef, uploadMediaFile } from './files-api.ts'
 import type { MinimaxCodeAccountPool } from './account-pool.ts'
 import { LlmError, normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../../common/llm-compat.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import { sharedPrefixGroupKey, withStaticPrefixOrdering } from '../../common/prefix-stability.ts'
 import { promptCachePolicyOf, type PromptCacheOverride } from '../../common/prompt-cache-policy.ts'
 import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from '../../common/prefix-request-coordinator.ts'
@@ -771,6 +772,8 @@ export class MinimaxCodeAdapter extends LlmAdapter {
    */
   private readonly preferences: MinimaxCodePreferenceStore | undefined
   private readonly options: MinimaxCodeAdapterOptions
+  /** Follows the session's main-turn effort onto auxiliary (compaction/timeline/review) requests. */
+  private readonly effortMemory = new SessionEffortMemory()
 
   constructor(
     store: MinimaxCodeCredentialStore = new MinimaxCodeCredentialStore(),
@@ -963,10 +966,13 @@ export class MinimaxCodeAdapter extends LlmAdapter {
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const settings = await this.settings()
     const configured = settings.defaultReasoningEffort
-    const effort = options.reasoningEffort ?? (configured === null ? undefined : configured)
+    // Give an auxiliary request the session's main-turn effort before the default
+    // is applied, so a compaction body matches the conversation it summarizes.
+    const followed = this.effortMemory.follow(options)
+    const effort = followed.reasoningEffort ?? (configured === null ? undefined : configured)
     const effectiveOptions: GenerateOptions = effort === undefined || effort === null
-      ? options
-      : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
+      ? followed
+      : { ...followed, reasoningEffort: ReasoningEffortId(String(effort)) }
 
     yield* wrapStreamWithWatchdog(
       (watchdogSignal, activity) => this.requestStream(effectiveOptions, watchdogSignal, activity),

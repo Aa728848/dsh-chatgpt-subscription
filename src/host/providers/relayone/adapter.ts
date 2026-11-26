@@ -25,6 +25,7 @@ import {
 import { withStaticPrefixOrdering } from '../../common/prefix-stability.ts'
 import { promptCachePolicyOf, type PromptCacheOverride } from '../../common/prompt-cache-policy.ts'
 import { isAuxiliaryRequest } from '../../common/prefix-request-coordinator.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import { stableSessionId } from '../../infra/network/wire-auth.ts'
 import { fetchWithContextBudgetRecovery } from '../../common/context-budget-fetch.ts'
 import { parseResponsesStream } from '../codex-chatgpt/responses-client.ts'
@@ -124,6 +125,12 @@ export class RelayOneAdapter extends LlmAdapter {
   private readonly fallbacks = new Map<string, RelayOneProtocol>()
   /** The pool, when this line runs several keys; null means the single-key path. */
   private readonly pool: RelayOneAccountPool | null
+  /**
+   * An auxiliary request (compaction summary, Timeline report, auto-review) names
+   * no effort, so without this it falls back to the settings default and sends a
+   * body the main turns never cached against — the whole prefix then re-reads cold.
+   */
+  private readonly effortMemory = new SessionEffortMemory()
   constructor(
     private readonly store: RelayOneCredentialStore = new RelayOneCredentialStore(),
     private readonly settingsStore: RelayOneSettingsStore = new RelayOneSettingsStore(),
@@ -199,14 +206,21 @@ export class RelayOneAdapter extends LlmAdapter {
   async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
     const resolved = await this.resolveModel(provider, model, signal)
     const entry = resolveRelayOneModel(this.catalog.snapshot().entries, resolved.id)!
-    return { model: resolved, stream: options => this.streamWithEntry(options, entry) }
+    return { model: resolved, stream: options => this.streamWithEntry(this.followEffort(options), entry) }
+  }
+
+  /** A title request is a different conversation: it must neither read nor write the memory. */
+  private followEffort(options: GenerateOptions): GenerateOptions {
+    const isTitle = options.messages?.some(message => (message as { source?: { kind?: unknown } }).source?.kind === 'dsh-session-title-llm') ?? false
+    return this.effortMemory.follow(options, isTitle)
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const followed = this.followEffort(options)
     await this.catalog.warm()
-    const entry = resolveRelayOneModel(this.catalog.snapshot().entries, options.model)
+    const entry = resolveRelayOneModel(this.catalog.snapshot().entries, followed.model)
     if (entry === undefined || entry.kind !== 'chat') throw new LlmError('RelayOne model is absent from the current key catalog.', 'NOT_FOUND')
-    yield* this.streamWithEntry(options, entry)
+    yield* this.streamWithEntry(followed, entry)
   }
 
   private async *streamWithEntry(rawOptions: GenerateOptions, entry: RelayOneModelEntry): AsyncIterable<StreamChunk> {

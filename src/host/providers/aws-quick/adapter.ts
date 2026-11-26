@@ -13,6 +13,7 @@ import {QUICK_DSH_CLIENT_POLICY,QUICK_DSH_TOOL_POLICY} from './protocol.ts'
 import {decisionResponseText,decisionsToAskArguments,QuickMarkupFilter,renderDecisionsAsText,type QuickDecision} from './markup.ts'
 import type {AwsQuickOutpost} from './outpost.ts'
 import type {AwsQuickToolBridge,QuickToolCatalog} from './tool-bridge.ts'
+import {SessionEffortMemory} from '../../common/session-effort-memory.ts'
 
 const QUICK_STREAM_IDLE_TIMEOUT_MS=600_000
 const RETRY_POLICY=resolveRetryPolicy({mode:'normal',maxRetries:2,retryableCodes:['TRANSPORT','SERVER','TIMEOUT','STREAM_CLOSED',STREAM_IDLE_TIMEOUT_CODE],backoff:{initialDelayMs:1500,maxDelayMs:15000,jitterRatio:0.2}},'aws-quick.retry')
@@ -96,6 +97,8 @@ export function budgetQuickRequest(parts:QuickRequestParts,cap:number=QUICK_MAX_
 }
 export class AwsQuickAdapter extends LlmAdapter{
  private readonly threads=new Map<string,ThreadState>();private readonly live=new Map<string,LiveTurn>();private readonly active=new Set<string>();private readonly decisionCalls=new Map<string,QuickDecision[]>()
+ /** Remembers the last main turn's effort so an unnamed auxiliary request repeats it instead of the settings default. */
+ private readonly effortMemory=new SessionEffortMemory()
  constructor(private readonly options:{settings:AwsQuickSettingsStore;outpost:AwsQuickOutpost;toolBridge?:AwsQuickToolBridge;attachments?:AttachmentImageReader;openConnection?:typeof QuickConnection.open}){super()}
  imageRequestTarget(_provider:string,_model:string,image:ImageAttachmentRef){return requestImageTargetOrOriginal(image)}
  providerInfo(provider:string):LlmProviderInfo{return{id:provider,name:localizedProviderName(provider,PROVIDER_NAME)}}
@@ -110,7 +113,8 @@ export class AwsQuickAdapter extends LlmAdapter{
  private decisionAnswer(message:Message):string|undefined{const parts:string[]=[];for(const block of message.content){if(block.type!=='tool-result')continue;const result=block as ToolResultBlock;const decisions=this.decisionCalls.get(result.toolCallId);if(!decisions)continue;this.decisionCalls.delete(result.toolCallId);parts.push(decisionResponseText(decisions,resultText(result)))}return parts.length?parts.join('\n'):undefined}
  private compatible(state:ThreadState,options:GenerateOptions,model:string,effort:string|undefined,toolFingerprint:string|undefined):boolean{return state.model===model&&state.effort===effort&&state.toolFingerprint===toolFingerprint&&fingerprint(options.messages,state.covered)===state.fingerprint}
  private async *run(raw:HarnessGenerateOptions,signal:AbortSignal,activity:{pulse():void}):AsyncGenerator<StreamChunk>{
-  const options=normalizeGenerateOptions(raw);assertSupported(options)
+  // Follow the session's remembered effort before the settings default fills one in, so an unnamed compaction/report reuses the main turn's effort.
+  const options=this.effortMemory.follow(normalizeGenerateOptions(raw));assertSupported(options)
   const settings=await this.options.settings.read();if(!settings.enabled)throw new LlmError('AWS Quick is disabled.','PROVIDER_DISABLED')
   const sessionId=String(options.sessionId??'unscoped-session');const activeKey=sessionId+'\0'+(options.purpose??'main');if(this.active.has(activeKey))throw new LlmError('AWS Quick already has a turn running for this DSH session and purpose.','RATE_LIMIT');this.active.add(activeKey)
   let turn:LiveTurn|undefined;let keepLive=false

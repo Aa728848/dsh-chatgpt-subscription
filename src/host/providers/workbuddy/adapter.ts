@@ -81,6 +81,7 @@ import {
 } from '../../../shared/workbuddy-contracts.ts'
 import { requestImageTargetOrOriginal } from '../../common/request-images.ts'
 import { LlmError, normalizeGenerateOptions } from '../../common/llm-compat.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../../common/idle-watchdog.ts'
 import { retryAfterMs } from '../../infra/network/wire-auth.ts'
 import type { WorkBuddyCredentials } from './token-store.ts'
@@ -278,6 +279,9 @@ export class WorkBuddyAdapter extends LlmAdapter {
   /** Null keeps the pre-pool single-credential path. */
   private readonly accountPool: WorkBuddyAccountPool | null
 
+  /** Follows the session's main-turn effort onto auxiliary (compaction/timeline/review) requests. */
+  private readonly effortMemory = new SessionEffortMemory()
+
   constructor(
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
@@ -423,13 +427,16 @@ export class WorkBuddyAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    // Give an auxiliary request the session's main-turn effort before this line
+    // resolves any default, so a compaction body matches the cached conversation.
+    const followed = this.effortMemory.follow(options)
     // The effort is resolved INSIDE the request, per protocol: the chat endpoint
     // wants a ladder-filtered reasoning_effort, the Messages endpoint wants the
     // caller's level verbatim in output_config.effort, and which one applies
     // depends on the serving account's region.
 
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal, activity) => this.requestStream(options, watchdogSignal, activity),
+      (watchdogSignal, activity) => this.requestStream(followed, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[providers] 压缩等辅助请求沿用会话的思考档位**：DSH 发出的压缩摘要、时间线报告、自动审查请求不带思考档位，此前各线路会退回设置默认档位或不发档位，与主对话请求体不一致，导致长上下文的前缀缓存整段失效（Kimi Code 会直接回 429 过载）。新增共用的 `SessionEffortMemory`，记住每个会话主轮次的模型与显式档位；辅助请求未指定档位时按同模型沿用，生成标题请求不受影响。已接入 kimi-code、workbuddy、qoder、minimax-code、command-code、qianwen-token-plan、relayone、opencode-go、glm-coding-plan、step-code、cline-pass、opendesign、codex-chatgpt、ollama、aws-quick、antigravity-acp；claude / claude-api 保持原有同类逻辑。
+
 ## 0.88.0 - 2026-11-25
 
 - **[deepseek-v41-flash] 无进展分级纠偏，抑制长程空转与无意义的超长思考**：新增进展治理，以“新证据、成功修改、任务完成、用户回答”作为进展信号；连续无进展时依次要求最小工具验证、重建计划（事实、根因、未知点、唯一下一步），最后就具体阻塞点向用户提问（可用时调用 `ask_user_question`），且不得宣称任务完成。不设全局思考上限、不降低 reasoning effort：只有已提醒过且之后仍无进展时，单次超长推理才会被截断，并保留待处理输入以高一级提示续接，每次请求最多两次。

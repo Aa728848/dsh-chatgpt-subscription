@@ -56,6 +56,7 @@ import { promptCachePolicyOf, type PromptCacheOverride } from '../../common/prom
 import { fetchWithPrefixCoordination, PrefixRequestCoordinator } from '../../common/prefix-request-coordinator.ts'
 import { requestImageTargetOrOriginal, type AttachmentImageReader } from '../../common/request-images.ts'
 import { retryAfterMs } from '../../infra/network/wire-auth.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import { NOISE_FLOOR_TOKENS, promptTokensOf, type StepCodeCacheUsage } from './cache-stats.ts'
 import { promptCacheActivityStore } from '../../common/cache-activity.ts'
 import { evaluateCacheHint } from '../../common/cache-hint.ts'
@@ -274,6 +275,8 @@ export class StepCodeAdapter extends LlmAdapter {
   private readonly preferences: StepCodePreferenceStore | undefined
   private readonly accountPool: StepCodeAccountPool | null
   private readonly options: StepCodeAdapterOptions
+  /** 辅助请求（压缩摘要等）不带档位，靠这里沿用主回合的档位，否则请求体与缓存前缀不一致。 */
+  private readonly effortMemory = new SessionEffortMemory()
 
   constructor(
     store: StepCodeCredentialStore = new StepCodeCredentialStore(),
@@ -453,8 +456,9 @@ export class StepCodeAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const followed = this.effortMemory.follow(options)
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal, activity) => this.requestStream(options, watchdogSignal, activity),
+      (watchdogSignal, activity) => this.requestStream(followed, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,

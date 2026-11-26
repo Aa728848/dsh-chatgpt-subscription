@@ -15,6 +15,7 @@ import { localizedProviderName, t } from '../../common/i18n/index.ts'
 import { fetchWithContextBudgetRecovery } from '../../common/context-budget-fetch.ts'
 import { STREAM_IDLE_TIMEOUT_CODE, STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from '../../common/idle-watchdog.ts'
 import { LlmError, normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../../common/llm-compat.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import { outputReservation } from '../../common/output-reservation.ts'
 import { sharedPrefixGroupKey, withStaticPrefixOrdering } from '../../common/prefix-stability.ts'
 import { promptCachePolicyOf, type PromptCacheOverride } from '../../common/prompt-cache-policy.ts'
@@ -57,6 +58,8 @@ export class QianwenTokenPlanAdapter extends LlmAdapter {
   private readonly store: QianwenCredentialStore
   private readonly settingsStore: QianwenSettingsStore
   private readonly options: QianwenAdapterOptions
+  /** 把主回合的 effort 带给压缩/时间线/评审等辅助请求（否则前缀缓存整段失效）。 */
+  private readonly effortMemory = new SessionEffortMemory()
   constructor(
     store: QianwenCredentialStore = new QianwenCredentialStore(),
     settingsStore: QianwenSettingsStore = new QianwenSettingsStore(),
@@ -111,8 +114,10 @@ export class QianwenTokenPlanAdapter extends LlmAdapter {
     return { model: await this.resolveModel(provider, model, signal), stream: options => this.stream(options) }
   }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    // 辅助请求（compaction 等）不自带 effort，先在解析默认值之前对齐主回合的档位。
+    const followed = this.effortMemory.follow(options)
     yield* wrapStreamWithWatchdog(
-      (signal, activity) => this.requestStream(options, signal, activity),
+      (signal, activity) => this.requestStream(followed, signal, activity),
       options.signal, STREAM_IDLE_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_CODE, PROVIDER_NAME,
     )
   }

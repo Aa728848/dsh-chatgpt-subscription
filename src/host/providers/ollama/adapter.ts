@@ -48,6 +48,7 @@ import {
   type StreamActivity,
 } from '../../common/idle-watchdog.ts'
 import { retryAfterMs } from '../../infra/network/wire-auth.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 
 /**
  * Retry policy for the `ollama` route.
@@ -100,6 +101,12 @@ export class OllamaAdapter extends LlmAdapter {
 
   /** Probes currently in flight, so one model asked twice at once is read once. */
   private readonly thinkingProbes = new Map<string, Promise<OllamaThinkingCapability | undefined>>()
+
+  /**
+   * Remembers the last main turn's effort so an unnamed auxiliary request
+   * repeats it instead of the settings default, keeping it on the cached prefix.
+   */
+  private readonly effortMemory = new SessionEffortMemory()
 
   constructor(
     private readonly store = new FileCredentialStore(),
@@ -266,7 +273,9 @@ export class OllamaAdapter extends LlmAdapter {
 
   private async *requestStream(rawOptions: HarnessGenerateOptions, signal: AbortSignal, activity?: StreamActivity): AsyncGenerator<StreamChunk> {
     const fetchFn = this.options.fetchFn ?? fetch
-    const options = normalizeGenerateOptions(rawOptions)
+    // Follow the session's remembered effort before the settings default fills
+    // one in, so an unnamed compaction/report reuses the main turn's effort.
+    const options = this.effortMemory.follow(normalizeGenerateOptions(rawOptions))
     const wire = wireForModel(options.model)
     // A stored default is a per-route preference, not a per-model promise: the
     // settings card offers one ladder for the whole line, so the level chosen

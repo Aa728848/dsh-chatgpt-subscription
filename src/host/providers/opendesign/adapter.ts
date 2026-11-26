@@ -55,6 +55,7 @@ import {
   NO_RESOLVED_IMAGES,
   type AttachmentImageReader,
 } from '../../common/request-images.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 
 /**
  * Retry policy for the `opendesign` route.
@@ -141,6 +142,12 @@ interface PickedAccount {
 
 export class OpenDesignAdapter extends LlmAdapter {
   private readonly gate = new ConcurrencyGate()
+  /**
+   * Remembers the last main turn's effort so an unnamed auxiliary request
+   * (compaction, Timeline report, auto-review) repeats it instead of falling
+   * back to the settings default and re-reading the whole conversation cold.
+   */
+  private readonly effortMemory = new SessionEffortMemory()
 
   constructor(
     private readonly modelSettings: OpenDesignModelSettingsStore,
@@ -279,7 +286,9 @@ export class OpenDesignAdapter extends LlmAdapter {
     // own: it bounds the body the gateway accepts, which is a property of the
     // deployment rather than of this endpoint. Durable history is untouched —
     // only the request about to be sent changes.
-    const normalized: GenerateOptions = normalizeGenerateOptions(rawOptions)
+    // Follow the session's remembered effort BEFORE the body is built, so an
+    // unnamed auxiliary request carries the same reasoning effort as the main turn.
+    const normalized: GenerateOptions = this.effortMemory.follow(normalizeGenerateOptions(rawOptions))
     const images = await resolveRequestImages(
       normalized,
       this.options.attachments as AttachmentImageReader | undefined,

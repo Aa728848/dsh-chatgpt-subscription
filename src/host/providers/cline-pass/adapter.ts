@@ -25,6 +25,7 @@ import { localizedProviderName } from '../../common/i18n/index.ts'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { LlmError, normalizeGenerateOptions, type GenerateOptions } from '../../common/llm-compat.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import {
   DEFAULT_MODELS,
   POOL_COOLDOWN_MS,
@@ -114,6 +115,8 @@ export interface ClinePassAdapterOptions {
 
 export class ClinePassAdapter extends LlmAdapter {
   private readonly gate = new ConcurrencyGate()
+  /** An auxiliary request names no effort; this lets it reuse the session's level so the prefix cache still hits. */
+  private readonly effortMemory = new SessionEffortMemory()
 
   constructor(
     private readonly engine: ClinePassEngine,
@@ -251,7 +254,9 @@ export class ClinePassAdapter extends LlmAdapter {
     if (settings.enabled === false) {
       throw new LlmError(`${PROVIDER_NAME} is disabled in Settings > Subscription. Enable the line there, then retry.`, 'INVALID_REQUEST')
     }
-    const normalized = normalizeGenerateOptions(rawOptions)
+    // One follow() at the entry, before the body is built: an auxiliary request without
+    // a named effort inherits the session's, so the cache prefix still matches.
+    const normalized = normalizeGenerateOptions(this.effortMemory.follow(rawOptions))
     // RESOLVE FIRST, THEN MEASURE, THEN TRIM. The order is a correctness
     // condition, not a preference: the budget counts base64 PAYLOAD, and for a
     // durable image that payload is the downscaled request version the store

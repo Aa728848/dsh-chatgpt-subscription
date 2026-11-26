@@ -14,6 +14,7 @@ import { listCodexModels, PROVIDER_ID, PROVIDER_NAME, resolveCodexModel, resolve
 import { getCachedCatalog, type CodexCatalogEntry, type CodexCatalogLoadOptions } from './codex-catalog.ts'
 import { ResponsesClient } from './responses-client.ts'
 import type { SubscriptionPreferenceStore } from './preferences.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 
 const RETRY_POLICY = resolveRetryPolicy({
   mode: 'normal',
@@ -23,6 +24,13 @@ const RETRY_POLICY = resolveRetryPolicy({
 }, 'dsh-chatgpt-subscription.retry')
 
 export class CodexChatGptAdapter extends LlmAdapter {
+  /**
+   * Remembers the last main turn's effort so an unnamed auxiliary request
+   * (compaction, Timeline report, auto-review) repeats it instead of sending no
+   * effort and diverging from the cached main-turn body.
+   */
+  private readonly effortMemory = new SessionEffortMemory()
+
   constructor(
     private readonly client: ResponsesClient,
     private readonly preferences?: SubscriptionPreferenceStore,
@@ -77,7 +85,8 @@ export class CodexChatGptAdapter extends LlmAdapter {
       model: resolveCodexModel(model, this.preferences, catalog),
       // The resolver takes the model, because a 404 fallback moves the request
       // to another one that may speak another protocol.
-      stream: (options) => this.client.stream(options, (id) => resolveCodexWireCapabilities(id, catalog)),
+      // Follow the session's effort here, before the mapper builds the body.
+      stream: (options) => this.client.stream(this.effortMemory.follow(options), (id) => resolveCodexWireCapabilities(id, catalog)),
     }
   }
 
@@ -85,7 +94,7 @@ export class CodexChatGptAdapter extends LlmAdapter {
     // The direct path cannot bind a listing to the call, so it uses the one
     // already held: no network call on the hot path, and the live listing
     // still outranks the shipped table.
-    return this.client.stream(options, (id) => resolveCodexWireCapabilities(id, getCachedCatalog()))
+    return this.client.stream(this.effortMemory.follow(options), (id) => resolveCodexWireCapabilities(id, getCachedCatalog()))
   }
 }
 

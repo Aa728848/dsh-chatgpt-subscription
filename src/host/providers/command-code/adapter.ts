@@ -57,6 +57,7 @@ import {
   type InBandStreamError,
 } from './mapper.ts'
 import { LlmError, normalizeGenerateOptions } from '../../common/llm-compat.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import { reclassifyInBandError, reclassifyInBandResponsesError } from '../../common/stream-error.ts'
 import { wrapStreamWithWatchdog, type StreamActivity } from '../../common/idle-watchdog.ts'
 import { retryAfterMs } from '../../infra/network/wire-auth.ts'
@@ -254,6 +255,9 @@ export class CommandCodeAdapter extends LlmAdapter {
    */
   private readonly accountPool: CommandCodeAccountPool | null
 
+  /** Follows the session's main-turn effort onto auxiliary (compaction/timeline/review) requests. */
+  private readonly effortMemory = new SessionEffortMemory()
+
   constructor(
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
@@ -364,10 +368,13 @@ export class CommandCodeAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const settings = await this.settings()
-    const effort = options.reasoningEffort ?? settings.defaultReasoningEffort ?? undefined
+    // Give an auxiliary request the session's main-turn effort before the default
+    // is applied, so a compaction body matches the conversation it summarizes.
+    const followed = this.effortMemory.follow(options)
+    const effort = followed.reasoningEffort ?? settings.defaultReasoningEffort ?? undefined
     const effectiveOptions: GenerateOptions = effort === undefined || effort === null
-      ? options
-      : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
+      ? followed
+      : { ...followed, reasoningEffort: ReasoningEffortId(String(effort)) }
 
     // A stored default is a per-route preference, not a per-model promise: the
     // settings card offers one ladder for the whole line, and a value chosen

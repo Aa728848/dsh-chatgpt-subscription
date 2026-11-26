@@ -37,6 +37,7 @@ import { t } from '../../common/i18n/index.ts'
 import { localizedProviderName } from '../../common/i18n/index.ts'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { fetchWithContextBudgetRecovery } from '../../common/context-budget-fetch.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import { outputReservation } from '../../common/output-reservation.ts'
 import {
   LlmError,
@@ -291,6 +292,8 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   private readonly preferences: GlmCodingPlanPreferenceStore | undefined
   private readonly accountPool: GlmCodingPlanAccountPool | null
   private readonly options: GlmCodingPlanAdapterOptions
+  /** 辅助请求（压缩摘要等）不带档位，靠这里沿用主回合的档位，否则请求体与缓存前缀不一致。 */
+  private readonly effortMemory = new SessionEffortMemory()
   private catalogRegionSnapshot: {
     revision: number
     selectedAccountId: string | null
@@ -476,8 +479,9 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const followed = this.effortMemory.follow(options)
     yield* wrapStreamWithWatchdog(
-      (watchdogSignal, activity) => this.requestStream(options, watchdogSignal, activity),
+      (watchdogSignal, activity) => this.requestStream(followed, watchdogSignal, activity),
       options.signal,
       STREAM_IDLE_TIMEOUT_MS,
       STREAM_IDLE_TIMEOUT_CODE,

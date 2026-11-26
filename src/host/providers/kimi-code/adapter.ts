@@ -205,6 +205,7 @@ import {
 } from './cache-affinity.ts'
 import { ensureAccessToken, KimiCodeOAuthError, KimiCodeRetryableError, KimiCodeUnauthorizedError } from './oauth.ts'
 import { retryAfterMs } from '../../infra/network/wire-auth.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import type {
   KimiCodeRegion,
   KimiCodeRequestAttemptDiagnostic,
@@ -1155,6 +1156,13 @@ export class KimiCodeAdapter extends LlmAdapter {
    */
   private readonly accountPool: KimiCodeAccountPool | null
 
+  /**
+   * An unnamed compaction would otherwise take the settings default and differ
+   * from the session's level, turning a fully cached ~900K-token prompt cold; the
+   * service refuses that as an overloaded engine (429) instead of summarizing it.
+   */
+  private readonly effortMemory = new SessionEffortMemory()
+
   constructor(
     private readonly store = new FileCredentialStore(),
     private readonly modelSettings = new FileModelSettingsStore(),
@@ -1495,10 +1503,12 @@ export class KimiCodeAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const settings = await this.settings()
-    const effort = options.reasoningEffort ?? settings.defaultReasoningEffort ?? undefined
-    const effectiveOptions: GenerateOptions = effort === undefined || effort === null
-      ? options
-      : { ...options, reasoningEffort: ReasoningEffortId(String(effort)) }
+    // A title request on a harness that states no purpose is recognised by shape.
+    const followed = this.effortMemory.follow(options, isSideChannelTitleRequest(normalizeGenerateOptions(options)))
+    const effort = followed.reasoningEffort ?? settings.defaultReasoningEffort ?? undefined
+    const effectiveOptions: GenerateOptions = effort === undefined
+      ? followed
+      : { ...followed, reasoningEffort: ReasoningEffortId(String(effort)) }
 
     yield* wrapStreamWithWatchdog(
       (watchdogSignal, activity) => this.requestStream(effectiveOptions, watchdogSignal, activity),

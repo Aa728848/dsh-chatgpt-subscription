@@ -33,6 +33,7 @@ import {
   type AttachmentImageReader,
   type ResolvedRequestImages,
 } from '../../common/request-images.ts'
+import { SessionEffortMemory } from '../../common/session-effort-memory.ts'
 import type {
   AntigravityAcpModelDto,
   AntigravityAcpNativeToolPolicy,
@@ -336,6 +337,11 @@ export class AntigravityAcpAdapter extends LlmAdapter {
    * the agent has told us how full the window really was.
    */
   private readonly observedContextWindows = new Map<string, number>()
+  /**
+   * Remembers the last main turn's effort so an unnamed auxiliary request sets
+   * the same thought_level instead of the settings default on the ACP session.
+   */
+  private readonly effortMemory = new SessionEffortMemory()
 
   constructor(private readonly options: AntigravityAcpAdapterOptions) {
     super()
@@ -436,7 +442,9 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     signal: AbortSignal,
     activity: { pulse(): void },
   ): Promise<AsyncGenerator<StreamChunk>> {
-    const options = normalizeGenerateOptions(rawOptions)
+    // Follow the session's remembered effort before the settings default fills
+    // one in, so an unnamed compaction/report reuses the main turn's thought level.
+    const options = this.effortMemory.follow(normalizeGenerateOptions(rawOptions))
     // ACP's session/prompt carries content only: there is no temperature and no
     // stop sequence, and those are refused rather than dropped - a caller that
     // asked for one would otherwise believe it took effect.
