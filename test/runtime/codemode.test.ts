@@ -137,7 +137,8 @@ describe('Code Mode 说明段', () => {
     expect(text).toContain('`ask_user_question` → `tools.ask_user_question`')
     expect(text).toContain('`bash` → `tools.bash`')
     expect(text).toContain('never a top-level call')
-    expect(text).not.toContain('win_bash')
+    // A deployment may withdraw pwsh in favour of win_bash, so the whitelist names it too.
+    expect(text).toContain('`win_bash` → `tools.win_bash`')
     expect(text).not.toContain('The tools in your tool list are called directly, exactly as usual')
 
     const genericRules = createRules({ nativeToolsOnly: true })
@@ -153,7 +154,7 @@ describe('Code Mode 说明段', () => {
     const allCommonNative = buildCodemodeSectionText({
       ...base,
       nativeToolsOnly: true,
-      nativeTools: ['read', 'glob', 'grep', 'edit', 'write', 'read_image', 'ask_user_question', 'subagent', 'bash', 'pwsh'],
+      nativeTools: ['read', 'glob', 'grep', 'edit', 'write', 'read_image', 'ask_user_question', 'subagent', 'bash', 'pwsh', 'win_bash'],
     })
     expect(allCommonNative).not.toContain('Common mappings: .')
   })
