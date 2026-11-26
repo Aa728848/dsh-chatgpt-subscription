@@ -44,6 +44,7 @@ export const CODEX_AUTH_CLAIMS_KEY = 'https://api.openai.com/auth'
  * plugin accepted from the issuer is the input either way.
  */
 export interface OAuthClaims {
+  exp?: unknown
   email?: unknown
   sub?: unknown
   chatgpt_account_id?: unknown

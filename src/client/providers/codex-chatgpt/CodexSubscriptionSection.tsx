@@ -15,7 +15,7 @@ import { quotaWindows } from './quota.ts'
 
 type Props = PropsRuntime<'settings.section'> & PropsLocale<typeof NS>
 type BusyAction = 'login' | 'device-login' | 'token' | 'quota' | 'reset-credit' | 'test' | 'logout' | 'preferences'
-  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | 'adopt' | 'adopt-disable' | 'storage' | null
+  | 'set-primary' | 'delete' | 'clear-cooldown' | 'strategy' | 'adopt' | 'adopt-disable' | 'file-import' | 'storage' | null
 type Translate = Props['t']
 
 /**
@@ -70,6 +70,7 @@ function poolStorageUnavailableLabel(storage: PoolStorageDto, t: Translate): str
 export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   const apiRef = useRef(new SubscriptionApi())
   const eventSourceRef = useRef<EventSource | null>(null)
+  const credentialFileInputRef = useRef<HTMLInputElement>(null)
   /**
    * The flow the card knows it started.
    *
@@ -96,6 +97,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
   /** Ticked once a second, so the panel's countdown is a clock and not a snapshot. */
   const [now, setNow] = useState(() => Date.now())
   const [resetCreditNotice, setResetCreditNotice] = useState<string | null>(null)
+  const [credentialImportNotice, setCredentialImportNotice] = useState<string | null>(null)
   const [connection, setConnection] = useState<{ latencyMs: number; checkedAt: number } | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
 
@@ -475,6 +477,19 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
     })
   }
 
+  const importCredentialFile = async (file: File): Promise<void> => {
+    setCredentialImportNotice(null)
+    await run('file-import', async () => {
+      const result = await apiRef.current.importCredentialFile(file)
+      setStatus(result.status)
+      setCredentialImportNotice(formatPoolLabel(t('credentialFileImportResult'), {
+        format: result.format === 'cpa' ? 'CPA' : 'sub2api',
+        count: result.imported,
+        skipped: result.skipped,
+      }))
+    })
+  }
+
   const setRotationStrategy = async (strategy: AccountRotationStrategy): Promise<void> => {
     await run('strategy', async () => {
       const next = await apiRef.current.accountAction('strategy', { strategy })
@@ -643,6 +658,27 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
             >
               {busy === 'adopt' ? t('localCodexLoginImporting') : t('localCodexLoginImport')}
             </button>
+            <input
+              ref={credentialFileInputRef}
+              type="file"
+              hidden
+              accept=".zip,.json,application/zip,application/json"
+              aria-label={t('credentialFileImportDetail')}
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0]
+                event.currentTarget.value = ''
+                if (file !== undefined) void importCredentialFile(file)
+              }}
+            />
+            <button
+              className="dsha-btn"
+              disabled={busy !== null}
+              aria-label={t('credentialFileImportDetail')}
+              title={t('credentialFileImportDetail')}
+              onClick={() => credentialFileInputRef.current?.click()}
+            >
+              {busy === 'file-import' ? t('credentialFileImporting') : t('credentialFileImport')}
+            </button>
           </div>
         )}
         renderDetails={(entry) => (
@@ -651,6 +687,7 @@ export function CodexSubscriptionSection({ t }: Props): React.JSX.Element {
           </>
         )}
       >
+        {credentialImportNotice !== null ? <p className="dsh-codex-success" role="status">{credentialImportNotice}</p> : null}
         {login?.active && deviceLogin === null ? <p className="dsha-muted" role="status">{t('pending')}</p> : null}
         {deviceLogin !== null ? (
           <div className="dsh-codex-device" role="group" aria-label={t('deviceCodeLogin')}>

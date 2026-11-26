@@ -245,6 +245,10 @@ export const dictionary: Record<LocaleKey, string> = {
   // The import button in the account pool's login row.
   localCodexLoginImport: 'Импорт локального входа',
   localCodexLoginImporting: 'Импорт…',
+  credentialFileImport: 'Импорт CPA / sub2api',
+  credentialFileImporting: 'Импорт…',
+  credentialFileImportDetail: 'Импорт аккаунтов ChatGPT из CPA ZIP или sub2api JSON',
+  credentialFileImportResult: 'Импортировано аккаунтов {format}: {count}; пропущено: {skipped}.',
   // Вход по коду устройства: тот же вход, но без обратного вызова на localhost,
   // поэтому он работает на сервере и на headless-хосте.
   deviceCodeLogin: 'Вход по коду устройства',

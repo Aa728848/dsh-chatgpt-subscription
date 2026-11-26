@@ -437,6 +437,13 @@ export class CodexAccountPool extends AccountPoolCore<StoredOAuthCredentials, Co
     return blockedUntil === undefined || blockedUntil <= now
   }
 
+  /** Add or update a file's accounts in one storage transaction. */
+  async importAccounts(credentials: readonly StoredOAuthCredentials[]): Promise<void> {
+    await this.updatePool((data) => {
+      for (const credential of credentials) this.addAccountToPool(data, credential)
+    })
+  }
+
   /**
    * Force one account's token refresh and persist the rotated pair.
    *

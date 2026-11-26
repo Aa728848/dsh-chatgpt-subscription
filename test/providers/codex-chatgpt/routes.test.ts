@@ -701,6 +701,85 @@ describe('adopting a local sign-in', () => {
   })
 })
 
+describe('importing CPA and sub2api credential files', () => {
+  it('stores managed accounts from a raw upload and rejects cross-origin files', async () => {
+    const { origin, pool, dispose } = await adoptHarness({ authPath: 'unused-for-file-import' })
+    try {
+      const document = {
+        type: 'sub2api-data',
+        version: 1,
+        accounts: [
+          {
+            platform: 'openai', type: 'oauth',
+            credentials: {
+              type: 'codex',
+              access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3_600 }),
+              refresh_token: 'imported-refresh',
+              account_id: 'file-import-workspace',
+              email: 'file-import@example.com',
+            },
+          },
+          { platform: 'openai', type: 'oauth', credentials: { type: 'codex', disabled: true } },
+        ],
+      }
+      const response = await fetch(origin + ROUTE_PREFIX + '/accounts/import', {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream', origin },
+        body: Buffer.from(JSON.stringify(document)),
+      })
+      expect(response.status).toBe(200)
+      const result = (await response.json()).value
+      expect(result).toMatchObject({ format: 'sub2api', imported: 1, skipped: 1 })
+      const accounts = (await pool.read()).accounts
+      expect(accounts).toHaveLength(1)
+      expect(accounts[0]).toMatchObject({
+        adopted: false,
+        credentials: {
+          accountId: 'file-import-workspace',
+          email: 'file-import@example.com',
+          refreshToken: 'imported-refresh',
+        },
+      })
+      expect(accounts[0]?.credentials.adopted).toBeUndefined()
+
+      const rejected = await fetch(origin + ROUTE_PREFIX + '/accounts/import', {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream', origin: 'https://evil.example' },
+        body: Buffer.from(JSON.stringify(document)),
+      })
+      expect(rejected.status).toBe(403)
+      expect((await pool.read()).accounts).toHaveLength(1)
+    } finally {
+      dispose()
+    }
+  })
+
+  it('does not persist a partial batch when the pool capacity is exceeded', async () => {
+    const { origin, pool, dispose } = await adoptHarness({ authPath: 'unused-for-file-import' })
+    try {
+      const accounts = Array.from({ length: 21 }, (_, index) => ({
+        platform: 'openai', type: 'oauth',
+        credentials: {
+          type: 'codex',
+          access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3_600 }),
+          refresh_token: `refresh-${index}`,
+          account_id: `workspace-${index}`,
+          email: `person-${index}@example.com`,
+        },
+      }))
+      const response = await fetch(origin + ROUTE_PREFIX + '/accounts/import', {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream', origin },
+        body: Buffer.from(JSON.stringify({ type: 'sub2api-data', accounts })),
+      })
+      expect(response.status).toBe(502)
+      expect((await pool.read()).accounts).toHaveLength(0)
+    } finally {
+      dispose()
+    }
+  })
+})
+
 async function serve(handler: http.RequestListener): Promise<{ server: http.Server; origin: string }> {
   const server = http.createServer(handler)
   await new Promise<void>((resolve, reject) => {

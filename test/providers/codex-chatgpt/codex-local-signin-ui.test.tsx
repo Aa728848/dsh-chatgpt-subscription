@@ -10,6 +10,7 @@ const t = ((key: keyof typeof zh) => zh[key]) as never
 
 const STATUS = `${ROUTE_PREFIX}/status`
 const ADOPT = `${ROUTE_PREFIX}/adopt`
+const FILE_IMPORT = `${ROUTE_PREFIX}/accounts/import`
 
 const harness: { container?: HTMLElement; teardown?: () => Promise<void> } = {}
 const originalFetch = globalThis.fetch
@@ -70,7 +71,13 @@ async function mount(options: {
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const method = init?.method ?? 'GET'
-    calls.push({ url, method, ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }) })
+    const rawBody = init?.body
+    const body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody
+    calls.push({ url, method, ...(rawBody === undefined ? {} : { body }) })
+    if (url === FILE_IMPORT) {
+      accounts = [...accounts, managed('file-imported-1')]
+      return Response.json({ ok: true, value: { status: read(), format: 'sub2api', imported: 1, skipped: 0 } })
+    }
     if (url === ADOPT) {
       if (options.adopt !== undefined && options.adopt !== 'ok') {
         return Response.json({ ok: false, error: { code: 'bad-request', message: options.adopt } }, { status: 400 })
@@ -108,8 +115,7 @@ function loginRow(): HTMLElement {
 /**
  * Every entry in the login row, in order.
  *
- * Three of them since the device-code sign-in landed: the browser login, the
- * same sign-in without a loopback listener, and the local CLI import.
+ * Browser login, device-code login, local CLI import, and credential-file import.
  */
 function loginRowButtons(): HTMLButtonElement[] {
   return [...loginRow().querySelectorAll<HTMLButtonElement>('button')]
@@ -122,9 +128,15 @@ function deviceButton(): HTMLButtonElement {
   return button!
 }
 
-/** The import button, the last entry: login first, then the other ways in. */
+/** The local sign-in import button. */
 function importButton(): HTMLButtonElement {
   const button = loginRowButtons()[2]
+  expect(button).toBeDefined()
+  return button!
+}
+
+function fileImportButton(): HTMLButtonElement {
+  const button = loginRowButtons()[3]
   expect(button).toBeDefined()
   return button!
 }
@@ -137,10 +149,12 @@ describe('the local sign-in import button, beside the login button', () => {
     // device-code login (the same sign-in, for a host with no reachable
     // localhost), then the import. A row, not a block of its own with a heading
     // above it — which is the Claude layout.
-    expect(buttons).toHaveLength(3)
+    expect(buttons).toHaveLength(4)
     expect(buttons[0]!.textContent).toBe(zh.addAccount)
     expect(buttons[1]!.textContent).toBe(zh.deviceCodeLogin)
     expect(buttons[2]!.textContent).toBe(zh.localCodexLoginImport)
+    expect(buttons[3]!.textContent).toBe(zh.credentialFileImport)
+    expect(buttons[3]!.className).toBe('dsha-btn')
     // The row has to fit on one line. The full sentence lives in aria-label, so
     // the visible text is the short form and must stay short: these bounds are
     // what keeps a future reword from silently reintroducing the wrap.
@@ -249,5 +263,31 @@ describe('the local sign-in import button, beside the login button', () => {
     expect(harness.container!.querySelector('[role="alert"]')?.textContent)
       .toContain('unrecognised local sign-in format')
     expect(harness.container!.querySelectorAll('.dsha-account-card')).toHaveLength(0)
+  })
+})
+
+describe('CPA and sub2api file import', () => {
+  it('uses the same secondary action style and uploads the selected file', async () => {
+    const calls = await mount()
+    const input = loginRow().querySelector<HTMLInputElement>('input[type="file"]')
+    expect(input).not.toBeNull()
+    expect(input!.hidden).toBe(true)
+    expect(input!.accept).toContain('.zip')
+    expect(input!.accept).toContain('.json')
+    expect(fileImportButton().getAttribute('aria-label')).toBe(zh.credentialFileImportDetail)
+
+    const file = new File([JSON.stringify({ type: 'sub2api-data', accounts: [] })], 'accounts.json', { type: 'application/json' })
+    Object.defineProperty(input!, 'files', { configurable: true, value: [file] })
+    await act(async () => {
+      input!.dispatchEvent(new Event('change', { bubbles: true }))
+      await Promise.resolve()
+    })
+    await act(async () => Promise.resolve())
+
+    const upload = calls.find((call) => call.url === FILE_IMPORT)
+    expect(upload).toMatchObject({ method: 'POST', body: file })
+    expect(harness.container!.querySelector('.dsh-codex-success')?.textContent)
+      .toBe('已导入 1 个 sub2api 账号，跳过 0 个。')
+    expect(harness.container!.querySelectorAll('.dsha-account-card')).toHaveLength(1)
   })
 })

@@ -155,6 +155,13 @@ export interface PluginStatusDto {
   error?: PublicErrorDto
 }
 
+export interface CodexCredentialImportResultDto {
+  status: PluginStatusDto
+  format: 'cpa' | 'sub2api'
+  imported: number
+  skipped: number
+}
+
 export type OAuthStatusDto = Omit<PluginStatusDto, 'quota' | 'preferences'>
 
 export type SearchProviderPreference = 'dsh' | 'codex'
