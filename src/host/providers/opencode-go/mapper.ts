@@ -219,7 +219,9 @@ export function feedOpenCodeGoChatPayload(state: OpenCodeGoChatStreamState, payl
         state.blocks.push({ type: 'tool-call', id: toToolCallId(tool.id), name: tool.name, arguments: '' })
       }
       tool.id = stringValue(raw.id) ?? tool.id
-      tool.name = stringValue(fn.name) ?? tool.name
+      // Argument-only deltas can carry an empty name; it must not erase the initial tool name.
+      const name = stringValue(fn.name)
+      if (name !== undefined && name !== '') tool.name = name
       const args = stringValue(fn.arguments) ?? ''
       if (!tool.started) { tool.started = true; out.push({ type: 'block-start', index: tool.index, blockType: 'tool-call' }) }
       tool.arguments += args

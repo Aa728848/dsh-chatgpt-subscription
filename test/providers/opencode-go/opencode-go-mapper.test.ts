@@ -68,6 +68,33 @@ describe('OpenCode Go request and stream mapping', () => {
     expect(closed.find(chunk => chunk.type === 'block-end')).toMatchObject({ block: { type: 'tool-call', name: 'probe', arguments: '{"value":"ok"}' } })
   })
 
+  it('preserves known tool names across empty argument-delta names', () => {
+    const state = createOpenCodeGoChatStreamState()
+    const fragments = [
+      { name: 'bash', arguments: '' },
+      { name: '', arguments: '{"command"' },
+      { name: '', arguments: ':"ls"}' },
+    ]
+    const chunks: StreamChunk[] = []
+    fragments.forEach((fn, index) => {
+      const payload = {
+        choices: [{
+          delta: { tool_calls: [{ index: 0, ...(index === 0 ? { id: 'call_00_test' } : {}), function: fn }] },
+          ...(index === fragments.length - 1 ? { finish_reason: 'tool_calls' } : {}),
+        }],
+      }
+      chunks.push(...processOpenCodeGoStreamLine('data: ' + JSON.stringify(payload), state))
+    })
+    chunks.push(...processOpenCodeGoStreamLine('data: [DONE]', state))
+
+    const accumulator = new AssistantStreamAccumulator()
+    chunks.forEach((chunk, index) => accumulator.push({ time: index + 1, chunk }))
+    const deltas = chunks.filter((chunk): chunk is Extract<StreamChunk, { type: 'tool-call-delta' }> => chunk.type === 'tool-call-delta')
+    expect(deltas.map(chunk => chunk.name)).toEqual(['bash', 'bash', 'bash'])
+    expect(chunks.find(chunk => chunk.type === 'block-end')).toMatchObject({ block: { type: 'tool-call', name: 'bash', arguments: '{"command":"ls"}' } })
+    expect(chunks.find(chunk => chunk.type === 'finish')).toMatchObject({ reason: { kind: 'tool-calls' } })
+  })
+
   it('maps official OpenCode billed cache and reasoning tokens', () => {
     const state = createOpenCodeGoChatStreamState()
     processOpenCodeGoStreamLine('data: ' + JSON.stringify({
