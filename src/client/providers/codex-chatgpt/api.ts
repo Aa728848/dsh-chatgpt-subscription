@@ -10,6 +10,7 @@ import type {
   SubscriptionPreferencesDto,
   SubscriptionPreferencesUpdateDto,
   CompactionCandidatesDto,
+  CodexCredentialImportResultDto,
 } from '../../../shared/contracts.ts'
 
 export class SubscriptionApi {
@@ -62,6 +63,15 @@ export class SubscriptionApi {
    */
   adoptLocalLogin(source: 'codex'): Promise<PluginStatusDto> {
     return post<PluginStatusDto>(`${ROUTE_PREFIX}/adopt`, { source })
+  }
+
+  /** Import a CPA ZIP or sub2api JSON file without exposing its credentials in a DTO. */
+  importCredentialFile(file: Blob): Promise<CodexCredentialImportResultDto> {
+    return request<CodexCredentialImportResultDto>(`${ROUTE_PREFIX}/accounts/import`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: file,
+    })
   }
 
   /** Forget every imported snapshot. The CLIs' own files are never touched. */

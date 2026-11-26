@@ -243,10 +243,13 @@ export const zh = {
   hubUpdateCommandLabel: '手动更新命令',
   // The row carries three entries side by side, so these two labels are kept
   // short enough to fit: the visible text names the mechanism, and the full
-  // sentence lives in the aria-label (see CodexSubscriptionSection). A row that
-  // wraps stops reading as a row of alternatives.
+  // sentence lives in the aria-label (see CodexSubscriptionSection).
   localCodexLoginImport: '导入本机登录',
   localCodexLoginImporting: '导入中…',
+  credentialFileImport: '导入 CPA / sub2api',
+  credentialFileImporting: '导入中…',
+  credentialFileImportDetail: '从 CPA ZIP 或 sub2api JSON 文件导入 ChatGPT 账号',
+  credentialFileImportResult: '已导入 {count} 个 {format} 账号，跳过 {skipped} 个。',
   // The device-code sign-in, for a host that cannot open a localhost callback.
   deviceCodeLogin: '设备代码登录',
   deviceCodeLoginStarting: '获取代码…',
@@ -539,6 +542,10 @@ export const en: Record<keyof typeof zh, string> = {
   // same way because the two are the same decision.
   localCodexLoginImport: 'Import local sign-in',
   localCodexLoginImporting: 'Importing…',
+  credentialFileImport: 'Import CPA / sub2api',
+  credentialFileImporting: 'Importing…',
+  credentialFileImportDetail: 'Import ChatGPT accounts from a CPA ZIP or sub2api JSON file',
+  credentialFileImportResult: 'Imported {count} {format} accounts; skipped {skipped}.',
   // The same sign-in as the button above, obtained without a localhost
   // callback: the only path a server or a headless host can finish.
   deviceCodeLogin: 'Device-code sign-in',

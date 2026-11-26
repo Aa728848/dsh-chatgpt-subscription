@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ROUTE_PREFIX } from '../../../compat.ts'
 import type {
   ApiEnvelope,
+  CodexCredentialImportResultDto,
   FetchConfigurationDto,
   LoginEventDto,
   PluginStatusDto,
@@ -26,6 +27,7 @@ import {
 } from '../../../shared/preferences.ts'
 import type { CompactionCandidatesDto } from '../../../shared/contracts.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
+import { AccountPoolCapacityError } from '../../common/account-pool.ts'
 import { isSameOriginMutation } from '../../common/same-origin.ts'
 import { currentLocale, hostLocaleRuntime } from '../../common/i18n/index.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
@@ -35,6 +37,7 @@ import type { ProxyManager } from '../../infra/network/proxy-manager.ts'
 import type { SearchProviderSwitcher } from '../../infra/network/search-provider-switcher.ts'
 import { UsageService, UsageServiceError } from './usage-service.ts'
 import { CODEX_CLI_CREDENTIAL_SOURCE, codexCliCredentialPaths, codexCliCredentialPresence, readCodexCliCredentials } from './codex-adopt.ts'
+import { CodexCredentialImportError, MAX_CREDENTIAL_IMPORT_BYTES, parseCodexCredentialFile } from './codex-file-import.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -174,16 +177,6 @@ export function registerRoutes(
       jsonError(response, 403, { code: 'csrf-rejected', message: 'Cross-origin request rejected.' })
       return
     }
-    const contentType = request.headers['content-type']
-    if (typeof contentType !== 'string' || !contentType.toLowerCase().startsWith('application/json')) {
-      jsonError(response, 415, { code: 'bad-request', message: 'A JSON request body is required.' })
-      return
-    }
-    const body = await readJson(request)
-    if (body === null) {
-      jsonError(response, 400, { code: 'bad-request', message: 'Malformed JSON request.' })
-      return
-    }
     // The same refreshed status the /accounts action answers with, so a card
     // that adopts an account and then re-renders does not need a second request
     // to learn the result. Declared once and shared by every mutating case that
@@ -195,6 +188,58 @@ export function registerRoutes(
         quota: await usage.status(afterAction.authenticated),
         preferences: preferences.status(),
       }
+    }
+    if (url.pathname === `${ROUTE_PREFIX}/accounts/import`) {
+      const contentType = request.headers['content-type']
+      if (contentType?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/octet-stream') {
+        jsonError(response, 415, { code: 'bad-request', message: 'The credential file must be sent as an octet stream.' })
+        return
+      }
+      if (accountPool === undefined) {
+        jsonError(response, 400, { code: 'bad-request', message: 'The ChatGPT account pool is not installed.' })
+        return
+      }
+      try {
+        const data = await readBinary(request, MAX_CREDENTIAL_IMPORT_BYTES)
+        if (data === null) {
+          response.setHeader('connection', 'close')
+          jsonError(response, 413, { code: 'bad-request', message: 'The import file exceeds the 16 MB limit.' })
+          return
+        }
+        const parsed = parseCodexCredentialFile(data)
+        if (parsed.credentials.length === 0) {
+          jsonError(response, 400, { code: 'bad-request', message: 'The file contains no usable ChatGPT OAuth accounts.' })
+          return
+        }
+        await accountPool.importAccounts(parsed.credentials)
+        const value: CodexCredentialImportResultDto = {
+          status: await refreshedStatus(),
+          format: parsed.format,
+          imported: parsed.credentials.length,
+          skipped: parsed.skipped,
+        }
+        json(response, { ok: true, value })
+      } catch (error) {
+        if (error instanceof CodexCredentialImportError) {
+          jsonError(response, 400, { code: 'bad-request', message: error.message })
+        } else if (error instanceof AccountPoolCapacityError) {
+          jsonError(response, 409, { code: 'bad-request', message: error.message })
+        } else {
+          const mapped = publicError(error, 'internal')
+          jsonError(response, statusFor(mapped), mapped)
+        }
+      }
+      return
+    }
+    const contentType = request.headers['content-type']
+    if (typeof contentType !== 'string' || !contentType.toLowerCase().startsWith('application/json')) {
+      jsonError(response, 415, { code: 'bad-request', message: 'A JSON request body is required.' })
+      return
+    }
+    const body = await readJson(request)
+    if (body === null) {
+      jsonError(response, 400, { code: 'bad-request', message: 'Malformed JSON request.' })
+      return
     }
     try {
       switch (url.pathname) {
@@ -466,17 +511,24 @@ export function registerRoutes(
   }
 }
 
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
+async function readBinary(request: IncomingMessage, limit: number): Promise<Buffer | null> {
   const chunks: Buffer[] = []
   let total = 0
-  for await (const chunk of request) {
+  // Let an oversized upload receive the HTTP error before its connection closes.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array)
     total += buffer.length
-    if (total > MAX_BODY_BYTES) return null
+    if (total > limit) return null
     chunks.push(buffer)
   }
+  return Buffer.concat(chunks, total)
+}
+
+async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
+  const data = await readBinary(request, MAX_BODY_BYTES)
+  if (data === null) return null
   try {
-    const value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+    const value = JSON.parse(data.toString('utf8')) as unknown
     return typeof value === 'object' && value !== null && !Array.isArray(value)
       ? value as Record<string, unknown>
       : null

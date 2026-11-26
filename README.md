@@ -16,7 +16,7 @@
 
 | 线路 | Provider ID | 登录方式 |
 | --- | --- | --- |
-| ChatGPT / Codex | `codex-chatgpt` | 浏览器登录 / 设备码 / 导入 Codex CLI |
+| ChatGPT / Codex | `codex-chatgpt` | 浏览器登录 / 设备码 / 导入 Codex CLI、CPA / sub2api 文件 |
 | Claude 订阅 | `claude-subscription` | 浏览器授权 / 导入 Claude Code |
 | Claude API | `claude-api` | API Key |
 | Kimi Code | `kimi-code` | 设备码授权 / API Key |

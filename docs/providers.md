@@ -91,7 +91,8 @@
 - **登录方式**：
   - 浏览器 OAuth（PKCE S256，一次性监听 `http://localhost:1455/auth/callback`，5 分钟超时）；
   - 设备码登录（无本地浏览器或远程主机场景）；
-  - 只读导入本机 Codex CLI 登录态。
+  - 只读导入本机 Codex CLI 登录态；
+  - 批量导入 CPA ZIP / sub2api JSON，有效账号进入现有账号池，可正常刷新、轮换与删除。
 - **上游固定端点**（无自定义 baseURL 覆盖，保障凭据边界）：
   - OAuth 令牌：`https://auth.openai.com/oauth/token`
   - 模型响应：`https://chatgpt.com/backend-api/codex/responses`（携带 `openai-beta: responses=experimental`）
@@ -126,6 +127,7 @@
 | `POST` | `/login/cancel` | 取消进行中的登录 |
 | `POST` | `/adopt` / `/adopt/disable` | 导入或清除本机 Codex CLI 登录快照 |
 | `POST` | `/accounts` | 号池操作（设为主账号、别名、冷却清理、轮换策略等） |
+| `POST` | `/accounts/import` | 导入 CPA ZIP / sub2api JSON（原始文件上传，自动识别格式） |
 | `POST` | `/storage` | 切换全局号池存储后端（`keyring` / `credentials`） |
 | `POST` | `/logout` | 注销并清理凭据与额度缓存 |
 | `POST` | `/token/refresh` | 手动刷新访问令牌 |
