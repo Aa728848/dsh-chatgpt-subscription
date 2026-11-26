@@ -27,6 +27,7 @@ import {
 } from '../../../shared/preferences.ts'
 import type { CompactionCandidatesDto } from '../../../shared/contracts.ts'
 import type { CodexAccountPool } from './codex-account-pool.ts'
+import { AccountPoolCapacityError } from '../../common/account-pool.ts'
 import { isSameOriginMutation } from '../../common/same-origin.ts'
 import { currentLocale, hostLocaleRuntime } from '../../common/i18n/index.ts'
 import { OAuthService, publicError } from './oauth-service.ts'
@@ -190,7 +191,7 @@ export function registerRoutes(
     }
     if (url.pathname === `${ROUTE_PREFIX}/accounts/import`) {
       const contentType = request.headers['content-type']
-      if (typeof contentType !== 'string' || !contentType.toLowerCase().startsWith('application/octet-stream')) {
+      if (contentType?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/octet-stream') {
         jsonError(response, 415, { code: 'bad-request', message: 'The credential file must be sent as an octet stream.' })
         return
       }
@@ -198,12 +199,13 @@ export function registerRoutes(
         jsonError(response, 400, { code: 'bad-request', message: 'The ChatGPT account pool is not installed.' })
         return
       }
-      const data = await readBinary(request, MAX_CREDENTIAL_IMPORT_BYTES)
-      if (data === null) {
-        jsonError(response, 400, { code: 'bad-request', message: 'The import file is empty or exceeds the 16 MB limit.' })
-        return
-      }
       try {
+        const data = await readBinary(request, MAX_CREDENTIAL_IMPORT_BYTES)
+        if (data === null) {
+          response.setHeader('connection', 'close')
+          jsonError(response, 413, { code: 'bad-request', message: 'The import file exceeds the 16 MB limit.' })
+          return
+        }
         const parsed = parseCodexCredentialFile(data)
         if (parsed.credentials.length === 0) {
           jsonError(response, 400, { code: 'bad-request', message: 'The file contains no usable ChatGPT OAuth accounts.' })
@@ -220,6 +222,8 @@ export function registerRoutes(
       } catch (error) {
         if (error instanceof CodexCredentialImportError) {
           jsonError(response, 400, { code: 'bad-request', message: error.message })
+        } else if (error instanceof AccountPoolCapacityError) {
+          jsonError(response, 409, { code: 'bad-request', message: error.message })
         } else {
           const mapped = publicError(error, 'internal')
           jsonError(response, statusFor(mapped), mapped)
@@ -510,13 +514,14 @@ export function registerRoutes(
 async function readBinary(request: IncomingMessage, limit: number): Promise<Buffer | null> {
   const chunks: Buffer[] = []
   let total = 0
-  for await (const chunk of request) {
+  // Let an oversized upload receive the HTTP error before its connection closes.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array)
     total += buffer.length
     if (total > limit) return null
     chunks.push(buffer)
   }
-  return total === 0 ? null : Buffer.concat(chunks)
+  return Buffer.concat(chunks, total)
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {

@@ -1,4 +1,4 @@
-import { inflateRawSync } from 'node:zlib'
+import { crc32, inflateRawSync } from 'node:zlib'
 import type { StoredOAuthCredentials } from '../../infra/storage/token-store.ts'
 import { extractIdentity, parseJwtClaims } from './codex-identity.ts'
 
@@ -33,7 +33,8 @@ function text(value: unknown): string | undefined {
 
 function expiry(accessToken: string, record: Record<string, unknown>): number | undefined {
   const exp = parseJwtClaims(accessToken)?.exp
-  if (typeof exp === 'number' && Number.isFinite(exp) && exp >= 0) return Math.round(exp * 1000)
+  const milliseconds = typeof exp === 'number' ? Math.round(exp * 1000) : NaN
+  if (Number.isSafeInteger(milliseconds) && milliseconds >= 0) return milliseconds
   for (const candidate of [record.expires_at, record.expiresAt, record.expired]) {
     if (typeof candidate !== 'string') continue
     const parsed = Date.parse(candidate)
@@ -43,7 +44,7 @@ function expiry(accessToken: string, record: Record<string, unknown>): number | 
 }
 
 function parseCredential(record: Record<string, unknown>): StoredOAuthCredentials | undefined {
-  if (record.type !== 'codex' || record.disabled === true) return undefined
+  if (record.disabled === true) return undefined
   const accessToken = text(record.access_token)
   const refreshToken = text(record.refresh_token)
   if (accessToken === undefined || refreshToken === undefined) return undefined
@@ -68,7 +69,12 @@ function parseCredential(record: Record<string, unknown>): StoredOAuthCredential
 }
 
 function parseSub2Api(value: unknown): ParsedCodexCredentialFile {
-  if (!isRecord(value) || value.type !== 'sub2api-data' || !Array.isArray(value.accounts)) {
+  if (!isRecord(value) || !Array.isArray(value.accounts)) {
+    throw new CodexCredentialImportError('The file is not a sub2api account export.')
+  }
+  // Native backups omit the type marker. Older bundles and converters include it.
+  const nativeExport = value.type === undefined && text(value.exported_at) !== undefined && Array.isArray(value.proxies)
+  if (!nativeExport && value.type !== 'sub2api-data' && value.type !== 'sub2api-bundle') {
     throw new CodexCredentialImportError('The file is not a sub2api account export.')
   }
   if (value.accounts.length > MAX_JSON_ACCOUNTS) {
@@ -79,6 +85,7 @@ function parseSub2Api(value: unknown): ParsedCodexCredentialFile {
   for (const account of value.accounts) {
     const parsed = isRecord(account) && account.platform === 'openai' && account.type === 'oauth'
       && account.disabled !== true && isRecord(account.credentials)
+      && (account.credentials.type === undefined || account.credentials.type === 'codex')
       ? parseCredential(account.credentials)
       : undefined
     if (parsed === undefined) skipped += 1
@@ -94,20 +101,11 @@ function assertRange(buffer: Buffer, offset: number, length: number): void {
   }
 }
 
-function crc32(buffer: Buffer): number {
-  let crc = 0xffffffff
-  for (const byte of buffer) {
-    crc ^= byte
-    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) === 1 ? 0xedb88320 : 0)
-  }
-  return (crc ^ 0xffffffff) >>> 0
-}
-
-function zipEntries(buffer: Buffer): Array<{ name: string; data: Buffer }> {
+function zipEntries(buffer: Buffer): Buffer[] {
   if (buffer.length < 22) throw new CodexCredentialImportError('The CPA ZIP file is malformed.')
   let end = -1
   for (let offset = buffer.length - 22; offset >= Math.max(0, buffer.length - 65_557); offset -= 1) {
-    if (buffer.readUInt32LE(offset) === 0x06054b50) {
+    if (buffer.readUInt32LE(offset) === 0x06054b50 && offset + 22 + buffer.readUInt16LE(offset + 20) === buffer.length) {
       end = offset
       break
     }
@@ -116,47 +114,50 @@ function zipEntries(buffer: Buffer): Array<{ name: string; data: Buffer }> {
   const count = buffer.readUInt16LE(end + 10)
   const directorySize = buffer.readUInt32LE(end + 12)
   const directoryOffset = buffer.readUInt32LE(end + 16)
-  if (count > MAX_ZIP_ENTRIES || directoryOffset === 0xffffffff || directorySize === 0xffffffff) {
+  if (buffer.readUInt16LE(end + 4) !== 0 || buffer.readUInt16LE(end + 6) !== 0
+    || buffer.readUInt16LE(end + 8) !== count || count > MAX_ZIP_ENTRIES
+    || directoryOffset + directorySize !== end) {
     throw new CodexCredentialImportError('The CPA ZIP file is too large or uses an unsupported directory.')
   }
-  assertRange(buffer, directoryOffset, directorySize)
+  const directory = buffer.subarray(directoryOffset, end)
+  const fileData = buffer.subarray(0, directoryOffset)
 
-  const entries: Array<{ name: string; data: Buffer }> = []
-  let cursor = directoryOffset
+  const entries: Buffer[] = []
+  let cursor = 0
   let totalBytes = 0
   for (let index = 0; index < count; index += 1) {
-    assertRange(buffer, cursor, 46)
-    if (buffer.readUInt32LE(cursor) !== 0x02014b50) {
+    assertRange(directory, cursor, 46)
+    if (directory.readUInt32LE(cursor) !== 0x02014b50) {
       throw new CodexCredentialImportError('The CPA ZIP directory is malformed.')
     }
-    const flags = buffer.readUInt16LE(cursor + 8)
-    const method = buffer.readUInt16LE(cursor + 10)
-    const expectedCrc = buffer.readUInt32LE(cursor + 16)
-    const compressedSize = buffer.readUInt32LE(cursor + 20)
-    const uncompressedSize = buffer.readUInt32LE(cursor + 24)
-    const nameLength = buffer.readUInt16LE(cursor + 28)
-    const extraLength = buffer.readUInt16LE(cursor + 30)
-    const commentLength = buffer.readUInt16LE(cursor + 32)
-    const localOffset = buffer.readUInt32LE(cursor + 42)
-    assertRange(buffer, cursor + 46, nameLength + extraLength + commentLength)
-    const name = buffer.toString('utf8', cursor + 46, cursor + 46 + nameLength)
+    const flags = directory.readUInt16LE(cursor + 8)
+    const method = directory.readUInt16LE(cursor + 10)
+    const expectedCrc = directory.readUInt32LE(cursor + 16)
+    const compressedSize = directory.readUInt32LE(cursor + 20)
+    const uncompressedSize = directory.readUInt32LE(cursor + 24)
+    const nameLength = directory.readUInt16LE(cursor + 28)
+    const extraLength = directory.readUInt16LE(cursor + 30)
+    const commentLength = directory.readUInt16LE(cursor + 32)
+    const localOffset = directory.readUInt32LE(cursor + 42)
+    assertRange(directory, cursor + 46, nameLength + extraLength + commentLength)
+    const name = directory.toString('utf8', cursor + 46, cursor + 46 + nameLength)
     cursor += 46 + nameLength + extraLength + commentLength
     if (!name.toLowerCase().endsWith('.json')) continue
     if ((flags & 1) !== 0 || (method !== 0 && method !== 8)
-      || compressedSize === 0xffffffff || uncompressedSize === 0xffffffff
-      || uncompressedSize > MAX_ZIP_ENTRY_BYTES || totalBytes + uncompressedSize > MAX_ZIP_TOTAL_BYTES) {
+      || compressedSize === 0xffffffff || uncompressedSize > MAX_ZIP_ENTRY_BYTES
+      || totalBytes + uncompressedSize > MAX_ZIP_TOTAL_BYTES) {
       throw new CodexCredentialImportError('The CPA ZIP contains an encrypted, oversized, or unsupported JSON entry.')
     }
-    assertRange(buffer, localOffset, 30)
-    if (buffer.readUInt32LE(localOffset) !== 0x04034b50) {
+    assertRange(fileData, localOffset, 30)
+    if (fileData.readUInt32LE(localOffset) !== 0x04034b50) {
       throw new CodexCredentialImportError('The CPA ZIP entry is malformed.')
     }
-    const dataOffset = localOffset + 30 + buffer.readUInt16LE(localOffset + 26) + buffer.readUInt16LE(localOffset + 28)
-    assertRange(buffer, dataOffset, compressedSize)
-    const compressed = buffer.subarray(dataOffset, dataOffset + compressedSize)
+    const dataOffset = localOffset + 30 + fileData.readUInt16LE(localOffset + 26) + fileData.readUInt16LE(localOffset + 28)
+    assertRange(fileData, dataOffset, compressedSize)
+    const compressed = fileData.subarray(dataOffset, dataOffset + compressedSize)
     let data: Buffer
     try {
-      data = method === 0 ? compressed : inflateRawSync(compressed, { maxOutputLength: MAX_ZIP_ENTRY_BYTES + 1 })
+      data = method === 0 ? compressed : inflateRawSync(compressed, { maxOutputLength: Math.max(1, uncompressedSize) })
     } catch {
       throw new CodexCredentialImportError('A CPA ZIP JSON entry cannot be decompressed.')
     }
@@ -164,8 +165,9 @@ function zipEntries(buffer: Buffer): Array<{ name: string; data: Buffer }> {
       throw new CodexCredentialImportError('A CPA ZIP JSON entry failed its integrity check.')
     }
     totalBytes += data.length
-    entries.push({ name, data })
+    entries.push(data)
   }
+  if (cursor !== directory.length) throw new CodexCredentialImportError('The CPA ZIP directory is malformed.')
   return entries
 }
 
@@ -175,15 +177,12 @@ function parseCpa(buffer: Buffer): ParsedCodexCredentialFile {
   let skipped = 0
   for (const entry of entries) {
     try {
-      const value = JSON.parse(entry.data.toString('utf8')) as unknown
-      const parsed = isRecord(value) ? parseCredential(value) : undefined
+      const value = JSON.parse(entry.toString('utf8')) as unknown
+      const parsed = isRecord(value) && value.type === 'codex' ? parseCredential(value) : undefined
       if (parsed === undefined) skipped += 1
       else credentials.push(parsed)
     } catch {
       skipped += 1
-    }
-    if (credentials.length + skipped > MAX_JSON_ACCOUNTS) {
-      throw new CodexCredentialImportError(`The archive exceeds the ${MAX_JSON_ACCOUNTS}-account import limit.`)
     }
   }
   return { format: 'cpa', credentials, skipped }

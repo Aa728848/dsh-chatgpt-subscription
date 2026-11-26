@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ROUTE_PREFIX } from '../../../src/compat.ts'
 import { CodexAccountPool, parseCodexPoolData } from '../../../src/host/providers/codex-chatgpt/codex-account-pool.ts'
+import { MAX_CREDENTIAL_IMPORT_BYTES } from '../../../src/host/providers/codex-chatgpt/codex-file-import.ts'
 import { OAuthService } from '../../../src/host/providers/codex-chatgpt/oauth-service.ts'
 import { registerRoutes } from '../../../src/host/providers/codex-chatgpt/routes.ts'
 import { PoolStorageSettings } from '../../../src/host/common/pool-storage-settings.ts'
@@ -705,17 +706,17 @@ describe('importing CPA and sub2api credential files', () => {
   it('stores managed accounts from a raw upload and rejects cross-origin files', async () => {
     const { origin, pool, dispose } = await adoptHarness({ authPath: 'unused-for-file-import' })
     try {
+      const accessToken = jwt({ exp: Math.floor(Date.now() / 1000) + 3_600 })
       const document = {
-        type: 'sub2api-data',
-        version: 1,
+        exported_at: '2026-05-18T00:00:00Z',
+        proxies: [],
         accounts: [
           {
             platform: 'openai', type: 'oauth',
             credentials: {
-              type: 'codex',
-              access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3_600 }),
+              access_token: accessToken,
               refresh_token: 'imported-refresh',
-              account_id: 'file-import-workspace',
+              chatgpt_account_id: 'file-import-workspace',
               email: 'file-import@example.com',
             },
           },
@@ -728,7 +729,10 @@ describe('importing CPA and sub2api credential files', () => {
         body: Buffer.from(JSON.stringify(document)),
       })
       expect(response.status).toBe(200)
-      const result = (await response.json()).value
+      const responseText = await response.text()
+      expect(responseText).not.toContain('imported-refresh')
+      expect(responseText).not.toContain(accessToken)
+      const result = JSON.parse(responseText).value
       expect(result).toMatchObject({ format: 'sub2api', imported: 1, skipped: 1 })
       const accounts = (await pool.read()).accounts
       expect(accounts).toHaveLength(1)
@@ -754,6 +758,22 @@ describe('importing CPA and sub2api credential files', () => {
     }
   })
 
+  it('returns a JSON error for an oversized credential upload', async () => {
+    const { origin, pool, dispose } = await adoptHarness({ authPath: 'unused-for-file-import' })
+    try {
+      const response = await fetch(origin + ROUTE_PREFIX + '/accounts/import', {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream', origin },
+        body: Buffer.alloc(MAX_CREDENTIAL_IMPORT_BYTES + 1),
+      })
+      expect(response.status).toBe(413)
+      expect(await response.json()).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+      expect((await pool.read()).accounts).toHaveLength(0)
+    } finally {
+      dispose()
+    }
+  })
+
   it('does not persist a partial batch when the pool capacity is exceeded', async () => {
     const { origin, pool, dispose } = await adoptHarness({ authPath: 'unused-for-file-import' })
     try {
@@ -772,7 +792,8 @@ describe('importing CPA and sub2api credential files', () => {
         headers: { 'content-type': 'application/octet-stream', origin },
         body: Buffer.from(JSON.stringify({ type: 'sub2api-data', accounts })),
       })
-      expect(response.status).toBe(502)
+      expect(response.status).toBe(409)
+      expect(await response.json()).toMatchObject({ ok: false, error: { code: 'bad-request' } })
       expect((await pool.read()).accounts).toHaveLength(0)
     } finally {
       dispose()

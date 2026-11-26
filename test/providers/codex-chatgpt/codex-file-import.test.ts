@@ -109,6 +109,34 @@ describe('parseCodexCredentialFile', () => {
     expect(parsed.credentials[0]?.adopted).toBeUndefined()
   })
 
+  it('reads a native sub2api export without format or credential type markers', () => {
+    const expiresAt = '2033-05-18T03:33:20Z'
+    const oauth = {
+      access_token: 'opaque-access',
+      refresh_token: 'refresh-token',
+      expires_at: expiresAt,
+      chatgpt_account_id: 'workspace-1',
+      chatgpt_user_id: 'user-1',
+    }
+    const parsed = parseCodexCredentialFile(Buffer.from(JSON.stringify({
+      exported_at: '2026-05-18T00:00:00Z',
+      proxies: [],
+      accounts: [wrapper(oauth), wrapper({ ...oauth, type: 'other' }), wrapper(oauth, { type: 'apikey' })],
+    })))
+    expect(parsed).toMatchObject({
+      format: 'sub2api',
+      skipped: 2,
+      credentials: [{ expiresAt: Date.parse(expiresAt), accountId: 'workspace-1', userId: 'user-1' }],
+    })
+  })
+
+  it('accepts the legacy sub2api bundle marker', () => {
+    const parsed = parseCodexCredentialFile(Buffer.from(JSON.stringify({
+      type: 'sub2api-bundle', version: 1, accounts: [wrapper(credential())],
+    })))
+    expect(parsed.credentials).toHaveLength(1)
+  })
+
   it('uses the export expiry when an access token is opaque', () => {
     const expired = '2033-05-18T03:33:20.000Z'
     const parsed = parseCodexCredentialFile(sub2api([
@@ -130,8 +158,16 @@ describe('parseCodexCredentialFile', () => {
     expect(parsed.credentials[0]).toMatchObject({ accountId: 'workspace-1', userId: 'user-1' })
   })
 
+  it('rejects an inconsistent CPA directory instead of silently importing part of it', () => {
+    const data = Buffer.from(JSON.stringify(credential()))
+    const archive = zip([{ name: 'one.json', data }, { name: 'two.json', data }])
+    archive.writeUInt16LE(1, archive.length - 14)
+    archive.writeUInt16LE(1, archive.length - 12)
+    expect(() => parseCodexCredentialFile(archive)).toThrow(CodexCredentialImportError)
+  })
+
   it('rejects unknown files and ZIP entries with a bad integrity check', () => {
-    expect(() => parseCodexCredentialFile(Buffer.from('{"json":true}'))).toThrow(CodexCredentialImportError)
+    expect(() => parseCodexCredentialFile(Buffer.from('{"accounts":[]}'))).toThrow(CodexCredentialImportError)
     const archive = zip([{ name: 'one-cpa.json', data: Buffer.from(JSON.stringify(credential())) }])
     archive[42] = (archive[42] ?? 0) ^ 0xff
     expect(() => parseCodexCredentialFile(archive)).toThrow(/integrity|decompressed/)

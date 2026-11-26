@@ -30,6 +30,9 @@ const MIN_COOLDOWN_MS = 10_000
 /** Accounts a single pool may hold before `addAccount` refuses another one. */
 export const DEFAULT_MAX_POOL_ACCOUNTS = 20
 
+/** A new account would exceed the configured pool capacity. */
+export class AccountPoolCapacityError extends Error {}
+
 /**
  * The parts of a pooled account every provider line agrees on.
  *
@@ -682,7 +685,7 @@ export class AccountPoolCore<
       : data.accounts.findIndex((account) => this.hooks.dedupeKey?.(account.credentials) === key)
     const maxAccounts = this.hooks.maxAccounts ?? DEFAULT_MAX_POOL_ACCOUNTS
     if (existingIndex < 0 && data.accounts.length >= maxAccounts) {
-      throw new Error(t('pool.maxAccounts', { provider: this.hooks.displayName, max: maxAccounts }))
+      throw new AccountPoolCapacityError(t('pool.maxAccounts', { provider: this.hooks.displayName, max: maxAccounts }))
     }
 
     const existing = existingIndex >= 0 ? data.accounts[existingIndex] : undefined
