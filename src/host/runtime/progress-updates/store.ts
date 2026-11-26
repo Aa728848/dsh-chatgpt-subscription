@@ -12,7 +12,7 @@
 export const MAX_UPDATES = 50
 
 /** 催促阈值：连续这么多轮带工具调用却没有进展更新时，注入一条提醒。 */
-export const NUDGE_THRESHOLD = 8
+export const NUDGE_THRESHOLD = 24
 
 /** 一条已展示的进展。 */
 export interface ProgressUpdate {
@@ -26,6 +26,14 @@ export interface ProgressUpdate {
   at: number
   /** 来源标签（计数会话 id），供浏览器侧分组显示。 */
   source?: string
+}
+
+/** 从宿主 Todo 投影复制的只读任务；不进入模型请求。 */
+export interface ProgressTask {
+  id: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+  activeForm?: string
 }
 
 /** 一个会话维度的进展更新状态。 */

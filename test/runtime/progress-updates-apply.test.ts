@@ -8,7 +8,7 @@ import { NUDGE_THRESHOLD } from '../../src/host/runtime/progress-updates/store.t
 import { NOTIFY_USER_TOOL } from '../../src/host/runtime/progress-updates/tool.ts'
 
 /**
- * 宿主半边接线：工具注册、提示词分节、8 轮催促、设置的即时生效，以及重复挂载
+ * 宿主半边接线：工具注册、提示词分节、24 轮催促、设置的即时生效，以及重复挂载
  * 的单实例守卫。用假 ctx 驱动真实的挂载函数，不引入任何运行时服务。
  *
  * 这里的假 ctx 刻意做成**真实 Cordis 的形状**：可选服务（sessions /
@@ -412,8 +412,9 @@ describe('apply: 语言覆盖走尾部消息', () => {
   })
 })
 
-describe('apply: 8 轮催促', () => {
-  it('第 1 到 7 轮不注入，第 8 轮注入一条', async () => {
+describe('apply: 24 轮催促', () => {
+  it('默认第 1 到 23 轮不注入，第 24 轮注入一条', async () => {
+    expect(NUDGE_THRESHOLD).toBe(24)
     const fake = mount(volatileField(true))
     for (let round = 1; round < NUDGE_THRESHOLD; round += 1) {
       // eslint-disable-next-line no-await-in-loop -- 催促计数逐轮累积：本轮结果取决于上一轮的计数，并行会改掉被测语义。
@@ -424,7 +425,7 @@ describe('apply: 8 轮催促', () => {
     expect(nudged.additionalContexts).toHaveLength(1)
   })
 
-  it('注入之后计数归零，要再攒满 8 轮才会再注入', async () => {
+  it('注入之后计数归零，要再攒满 24 轮才会再注入', async () => {
     const fake = mount(volatileField(true))
     // eslint-disable-next-line no-await-in-loop -- 预热轮次必须顺序累积到阈值，并行会让计数停在 1 轮。
     for (let index = 0; index < NUDGE_THRESHOLD; index += 1) await fake.postExecute({})
@@ -441,7 +442,20 @@ describe('apply: 8 轮催促', () => {
     // eslint-disable-next-line no-await-in-loop -- 预热轮次必须顺序累积到阈值，并行会让计数停在 1 轮。
     for (let index = 0; index < NUDGE_THRESHOLD - 1; index += 1) await fake.postExecute({})
     await fake.postExecute({ name: NOTIFY_USER_TOOL })
-    // 计数已经归零：再来 7 轮也不该注入。
+    // 计数已经归零：再来不足一个完整阈值的轮次也不该注入。
+    for (let round = 1; round < NUDGE_THRESHOLD; round += 1) {
+      // eslint-disable-next-line no-await-in-loop -- 催促计数逐轮累积：本轮结果取决于上一轮的计数，并行会改掉被测语义。
+      expect((await fake.postExecute({})).additionalContexts ?? [], `round ${round}`).toHaveLength(0)
+    }
+  })
+
+  it('工具执行本身就清零，Code Mode 嵌套汇报不依赖外层 post-execute', async () => {
+    const fake = mount(volatileField(true))
+    // eslint-disable-next-line no-await-in-loop -- 预热轮次必须顺序累积到阈值，并行会让计数停在 1 轮。
+    for (let index = 0; index < NUDGE_THRESHOLD - 1; index += 1) await fake.postExecute({})
+    const tool = fake.tools.get(NOTIFY_USER_TOOL)!
+    // 只执行实际工具，不投喂对应的 post-execute：模拟嵌套调用只露出外层 code_run。
+    expect(await tool.execute({ message: 'nested update' }, {} as never)).toEqual({ displayed: true })
     for (let round = 1; round < NUDGE_THRESHOLD; round += 1) {
       // eslint-disable-next-line no-await-in-loop -- 催促计数逐轮累积：本轮结果取决于上一轮的计数，并行会改掉被测语义。
       expect((await fake.postExecute({})).additionalContexts ?? [], `round ${round}`).toHaveLength(0)
@@ -455,7 +469,7 @@ describe('apply: 8 轮催促', () => {
       // eslint-disable-next-line no-await-in-loop -- 催促计数逐轮累积：本轮结果取决于上一轮的计数，并行会改掉被测语义。
       expect((await fake.postExecute({})).additionalContexts ?? []).toHaveLength(0)
     }
-    // 打开开关之后要重新攒满阈值：那 24 轮没有被计过数。
+    // 打开开关之后要重新攒满阈值：关闭期间的轮次没有被计过数。
     enabled.set(true)
     for (let round = 1; round < NUDGE_THRESHOLD; round += 1) {
       // eslint-disable-next-line no-await-in-loop -- 催促计数逐轮累积：本轮结果取决于上一轮的计数，并行会改掉被测语义。
@@ -488,7 +502,7 @@ describe('apply: 8 轮催促', () => {
     const rootExec = { agent: { id: 'root', session: { header: { id: 'root' } } } }
     const childExec = { agent: { id: 'child', session: { header: { id: 'child', origin: 'subagent', parentSession: 'root' } } } }
 
-    // 主 agent 跑 4 轮、subagent 跑 4 轮：各自都不够阈值，合起来正好 8。
+    // 主 agent 与 subagent 各跑约一半：各自都不够阈值，合起来正好达到阈值。
     for (let round = 0; round < NUDGE_THRESHOLD / 2; round += 1) {
       // eslint-disable-next-line no-await-in-loop -- 催促计数逐轮累积：本轮结果取决于上一轮的计数，并行会改掉被测语义。
       expect((await fake.postExecute(rootExec)).additionalContexts ?? []).toHaveLength(0)
@@ -552,7 +566,7 @@ describe('apply: 按模型步去重', () => {
       const decision = await fake.postExecute({ agent: { id: 'root', session: { header: { id: 'root' }, stepSeq: 1 } } })
       expect(decision.additionalContexts ?? [], `call ${call}`).toHaveLength(0)
     }
-    // 再走 7 步（每步各 1 条工具结果），加上第一步正好 8 轮。
+    // 再走剩余步数（每步各 1 条工具结果），加上第一步正好达到阈值。
     for (let step = 2; step < NUDGE_THRESHOLD; step += 1) {
       // eslint-disable-next-line no-await-in-loop -- 按模型步推进：每一步都要等上一步的计数落定。
       const decision = await fake.postExecute({ agent: { id: 'root', session: { header: { id: 'root' }, stepSeq: step } } })
@@ -578,7 +592,7 @@ describe('apply: 按模型步去重', () => {
       // eslint-disable-next-line no-await-in-loop -- 按模型步推进：每一步都要等上一步的计数落定。
       expect((await fake.postExecute(stepExec(step))).additionalContexts ?? [], `step ${step}`).toHaveLength(0)
     }
-    // 第 8 步模型报了进展：计数归零，这一步也不算轮次。
+    // 阈值所在步模型报了进展：计数归零，这一步也不算轮次。
     await fake.postExecute(stepExec(NUDGE_THRESHOLD, NOTIFY_USER_TOOL))
     // 同一步里跟在进展更新之后的工具结果也不计入。
     expect((await fake.postExecute(stepExec(NUDGE_THRESHOLD))).additionalContexts ?? []).toHaveLength(0)

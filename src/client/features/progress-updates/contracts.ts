@@ -37,6 +37,14 @@ export interface ProgressUpdate {
   source?: string
 }
 
+/** 宿主 Todo 投影的只读副本。 */
+export interface ProgressTask {
+  id: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+  activeForm?: string
+}
+
 /**
  * 右侧栏页签类型的注册面（阶段一）。
  *
@@ -100,6 +108,8 @@ export interface SidebarRightTabRegistryService {
 
 /** 右侧栏导航面：按 kind 打开一个页面型页签。 */
 export interface SidebarRightService {
+  /** 在指定会话里打开；新宿主优先走这个入口。 */
+  openTabIn?(sessionId: string, kind: string): void
   /**
    * 按 kind 打开一个页面型页签。
    * @param kind - 阶段一声明过的类型判别值。

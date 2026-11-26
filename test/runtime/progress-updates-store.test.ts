@@ -45,8 +45,8 @@ describe('capUpdates', () => {
 })
 
 describe('shouldNudge', () => {
-  it('阈值是 8', () => {
-    expect(NUDGE_THRESHOLD).toBe(8)
+  it('默认阈值是 24', () => {
+    expect(NUDGE_THRESHOLD).toBe(24)
   })
 
   it('低于阈值不催促', () => {

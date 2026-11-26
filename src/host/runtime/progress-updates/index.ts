@@ -7,7 +7,7 @@
  * 1. `progress_update` 工具（tools 服务）；
  * 2. 系统提示词引导（systemPrompt 服务，文本用函数形式，开关关闭时返回空串，
  *    因此设置改动立刻生效、无需重启会话）；
- * 3. `tools/post-execute` 上的 8 轮催促：连续带工具调用却没有进展更新时，给模型
+ * 3. `tools/post-execute` 上的 24 轮催促：连续带工具调用却没有进展更新时，给模型
  *    追加一条提醒（additionalContexts）；
  * 4. `GET /api/dsh-progress-updates/updates` 只读路由 —— 浏览器半边唯一的取数通道。
  *
@@ -58,6 +58,7 @@ import {
   NUDGE_THRESHOLD,
   createProgressUpdateStore,
   shouldNudge,
+  type ProgressTask,
   type ProgressUpdate,
   type ProgressUpdateStore,
 } from './store.ts'
@@ -122,7 +123,7 @@ export function resolveProgressUpdatesSettings(config?: ProgressUpdatesConfigFie
   const language = readProgressConfigField(config?.progressUpdatesLanguage)
   return {
     enabled: enabled !== false,
-    // 缺省就是 store 里那个冻结的 NUDGE_THRESHOLD（8），两处永远不会漂移。
+    // 缺省就是 store 里那个冻结的 NUDGE_THRESHOLD（24），两处永远不会漂移。
     nudgeThreshold: typeof threshold === 'number' && Number.isSafeInteger(threshold) && threshold > 0
       ? threshold
       : NUDGE_THRESHOLD,
@@ -464,7 +465,38 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
    * 请求不带 session（或带一个本进程没见过的 id）时，回退到那个"合成会话桶"：
    * 这是单会话部署里的常态，也是插件第一次被调用、祖先血缘还没建立时的落点。
    */
+  /** 读取宿主已有 Todo 投影；只复制普通 DTO，绝不追加会话消息。 */
+  const projectedTasksOf = (sessionId: string): readonly ProgressTask[] => {
+    if (sessionId === '') return []
+    try {
+      const sessions = sessionsOf() as SessionsLookup | undefined
+      const projections = sessionProjectionsOf()
+      const own = sessions?.get?.(sessionId)
+      if (own === undefined || projections === undefined) return []
+      const state = (projections as unknown as {
+        stateOf(session: unknown, key: 'todos'): unknown
+      }).stateOf(own, 'todos')
+      if (!Array.isArray(state)) return []
+      const tasks: ProgressTask[] = []
+      for (const item of state) {
+        if (!isRecord(item) || typeof item.content !== 'string') continue
+        const status = item.status
+        if (status !== 'pending' && status !== 'in_progress' && status !== 'completed') continue
+        tasks.push({
+          id: sessionId + ':todo:' + tasks.length,
+          content: item.content,
+          status,
+          ...(typeof item.activeForm === 'string' ? { activeForm: item.activeForm } : {}),
+        })
+      }
+      return tasks
+    } catch {
+      return []
+    }
+  }
+
   const reader: ProgressUpdatesReader = {
+    tasksOf: projectedTasksOf,
     updatesOf: (sessionId: string) => {
       const projected = projectionUpdatesOf(sessionId)
       if (projected !== undefined) return projected
@@ -494,10 +526,11 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
       sink: () => ({
         push: (update: ProgressUpdate) => {
           if (!options.settings().enabled) return false
-          // 进展落进会话 store 就够浏览器读到了：路由直接从同一个 store 取数。
-          // store.push 只负责写入列表，轮次归零由 execute 之后的 post-execute
-          // （exec.name === NOTIFY_USER_TOOL 那条分支）统一处理，这里不重复做。
-          storeOf(update.source ?? 'session').push(update)
+          // 工具实际执行是最可靠的汇报信号：Code Mode 嵌套调用可能只让外层
+          // code_run 经过 post-execute，若只在那里清零会把已汇报的会话继续周期催促。
+          const store = storeOf(update.source ?? 'session')
+          store.push(update)
+          store.markUpdated()
           return true
         },
       }),
@@ -583,7 +616,7 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
     return webServer.register(makeProgressUpdatesRoute(reader))
   }, 'dsh-chatgpt-subscription: progress update route')
 
-  // 8 轮催促：在工具结果之后计数，达到阈值就追加一条提醒，并把计数归零。
+  // 24 轮催促：在工具结果之后计数，达到阈值就追加一条提醒，并把计数归零。
   // 计数按会话维度（子会话归并到顶层祖先），按模型步去重（一次并行调用多个工具
   // 只算一轮），且每条工具结果最多注入一次。
   const disposeListener = ctx.on?.('tools/post-execute', (async (
@@ -611,7 +644,7 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
       countedSteps.set(key, step)
     }
     const rounds = store.bumpRound()
-    // 设置里没改过阈值时走 store 的冻结谓词（NUDGE_THRESHOLD = 8），改过则按设置值。
+    // 设置里没改过阈值时走 store 的冻结谓词（NUDGE_THRESHOLD = 24），改过则按设置值。
     const reached = current.nudgeThreshold === NUDGE_THRESHOLD
       ? shouldNudge(rounds)
       : rounds >= current.nudgeThreshold

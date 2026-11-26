@@ -1,5 +1,5 @@
 /**
- * 8 轮催促：在 `tools/post-execute` 上计数，连续且带工具调用、期间没有
+ * 24 轮催促：在 `tools/post-execute` 上计数，连续且带工具调用、期间没有
  * progress_update 的轮次达到阈值时，给模型追加一条提醒。
  *
  * 两个刻意的设计：

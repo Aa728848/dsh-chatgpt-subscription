@@ -13,7 +13,7 @@
 
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import type { ProgressUpdate } from './store.ts'
+import type { ProgressTask, ProgressUpdate } from './store.ts'
 
 /** 本路由族的前缀。 */
 export const PROGRESS_API_PREFIX = '/api/dsh-progress-updates'
@@ -100,6 +100,8 @@ export interface ProgressUpdatesReader {
    * @returns 该会话的进展（按时间顺序，最多 MAX_UPDATES 条）。
    */
   updatesOf(sessionId: string): readonly ProgressUpdate[]
+  /** 可选 Todo 投影；旧读取器没有它时返回空任务列表。 */
+  tasksOf?(sessionId: string): readonly ProgressTask[]
 }
 
 /**
@@ -120,7 +122,11 @@ export function makeProgressUpdatesRoute(reader: ProgressUpdatesReader): WebRout
         return
       }
       const session = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('session') ?? ''
-      writeJson(res, 200, { updates: reader.updatesOf(session) }, { 'cache-control': 'no-store' })
+      const tasks = reader.tasksOf?.(session)
+      writeJson(res, 200, {
+        updates: reader.updatesOf(session),
+        ...(tasks === undefined ? {} : { tasks }),
+      }, { 'cache-control': 'no-store' })
     },
   }
 }

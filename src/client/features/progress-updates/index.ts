@@ -14,7 +14,7 @@ import { ProgressUpdatesTab, ProgressUpdatesTabTitle, type ProgressSnapshotSourc
 import { PROGRESS_UPDATE_TOOL_NAME } from './tool-name.ts'
 import { createHostProgressSource, isProgressUpdatesHostPresent, type HostProgressSource } from './host-source.ts'
 import { createProgressSettingsForm, type ProgressSettingsForm } from './settings-binding.ts'
-import { NS_PROGRESS_UPDATES, zh } from './locales.ts'
+import { NS_PROGRESS_UPDATES, zh, type ProgressUpdatesLocaleKey } from './locales.ts'
 
 /**
  * 本实现在右侧栏页签系统里的身份：它既是阶段一 `sidebarRightTabs` 里的 `id`，

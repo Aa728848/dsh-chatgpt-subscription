@@ -146,7 +146,7 @@ function mount(enabled: boolean | { get(): boolean }) {
  * profile 早就在核心行写了 `progressUpdates`，字段搬走就会被那条 patch 抹成默认值。
  */
 describe('插件 Config：两个字段都是活引用', () => {
-  it('解析出来的就是 { get() } 引用，默认开启、阈值 8', () => {
+  it('解析出来的就是 { get() } 引用，默认开启、阈值 24', () => {
     // 默认开启：装上插件即开箱可用，用户可随时在设置里关掉。
     const parsed = Config({})
     expect(parsed.progressUpdates?.get()).toBe(true)
@@ -245,7 +245,33 @@ describe('进展路由：浏览器半边的唯一取数通道', () => {
     const fake = mount(true)
     const response = fake.callRoute('/api/dsh-progress-updates/updates?session=nobody')
     expect(response.status).toBe(200)
-    expect(response.body).toEqual({ updates: [] })
+    expect(response.body).toEqual({ updates: [], tasks: [] })
+  })
+
+  it('只读复制宿主 Todo 投影，并过滤损坏条目', () => {
+    const fake = mount(true)
+    const originalGet = fake.ctx.get
+    const session = { header: { id: 'root' } }
+    fake.ctx.get = (key: string): unknown => {
+      if (key === 'sessions') return { get: (id: string) => id === 'root' ? session : undefined }
+      if (key === 'sessionProjections') return {
+        stateOf: (_session: unknown, projection: string) => projection === 'todos' ? [
+          { content: '已完成任务', status: 'completed' },
+          { content: '正在处理', activeForm: '正在处理任务', status: 'in_progress' },
+          { content: '坏状态', status: 'unknown' },
+          { status: 'pending' },
+        ] : undefined,
+      }
+      return originalGet(key)
+    }
+    const response = fake.callRoute('/api/dsh-progress-updates/updates?session=root')
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      tasks: [
+        { id: 'root:todo:0', content: '已完成任务', status: 'completed' },
+        { id: 'root:todo:1', content: '正在处理', activeForm: '正在处理任务', status: 'in_progress' },
+      ],
+    })
   })
 
   it('信任栅栏：非 loopback 来源被拒 403', () => {
@@ -279,7 +305,7 @@ describe('进展路由：浏览器半边的唯一取数通道', () => {
     expect([...fake.routes.keys()]).toContain('/api/dsh-progress-updates/updates')
     const response = fake.callRoute('/api/dsh-progress-updates/updates')
     expect(response.status).toBe(200)
-    expect(response.body).toEqual({ updates: [] })
+    expect(response.body).toEqual({ updates: [], tasks: [] })
   })
 
   it('响应带 no-store：进展实时变化，缓存住就等于展示过期数据', () => {

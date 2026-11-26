@@ -345,7 +345,7 @@ export interface Config {
    * loader 行上，任何线路的 agent 都能用。
    */
   progressUpdates?: Volatile<boolean>
-  /** 进展更新的催促阈值：连续这么多轮带工具调用却没有进展更新时提醒一次。默认 8。 */
+  /** 进展更新的催促阈值：连续这么多轮带工具调用却没有进展更新时提醒一次。默认 24。 */
   progressUpdatesNudgeThreshold?: Volatile<number>
   /** 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文、`ru` 俄文。 */
   progressUpdatesLanguage?: Volatile<ProgressUpdateLanguage>
@@ -570,7 +570,7 @@ export interface ConfigInput {
   noAnswerResume?: NoAnswerResumeOptions | false
   /** 「进展更新」总开关（默认开启）。 */
   progressUpdates?: boolean
-  /** 进展更新的催促阈值（默认 8）。 */
+  /** 进展更新的催促阈值（默认 24）。 */
   progressUpdatesNudgeThreshold?: number
   /** 进展更新的输出语言（默认 auto：跟随对话）。 */
   progressUpdatesLanguage?: ProgressUpdateLanguage

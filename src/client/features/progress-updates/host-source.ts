@@ -3,7 +3,7 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/client/progress-updates/host-source
  */
 
-import type { ProgressUpdate } from './contracts.ts'
+import type { ProgressTask, ProgressUpdate } from './contracts.ts'
 import type { ProgressSnapshotSource } from './updates-panel.tsx'
 
 /**
@@ -69,6 +69,8 @@ export const PROGRESS_FETCH_TIMEOUT_MS = 8_000
 export interface ProgressUpdatesResponse {
   /** 该会话的进展，按产生顺序排列。 */
   updates: ProgressUpdate[]
+  /** 可选只读 Todo 投影；旧宿主省略时按空列表。 */
+  tasks?: ProgressTask[]
 }
 
 /** 定时器宿主的最小形状；抽出来是为了测试能塞假时钟。 */
@@ -110,12 +112,16 @@ export interface ProgressFetchDeps {
   timers?: ProgressTimers
   /** 解析响应体，缺省按 {@link ProgressUpdatesResponse} 取 `updates`。 */
   decode?: (body: unknown) => readonly ProgressUpdate[]
+  /** 解析任务投影，缺省读取响应里的 tasks。 */
+  decodeTasks?: (body: unknown) => readonly ProgressTask[]
   /** 观测一次失败（错误已被吞掉，只为测试与诊断）。 */
   onError?: (error: unknown) => void
 }
 
 /** 面板数据源 + 一个显式停止入口（apply 卸载时调用）。 */
 export interface HostProgressSource extends ProgressSnapshotSource {
+  /** 当前只读 Todo 快照，与进展共享一次轮询和订阅。 */
+  getTasksSnapshot(): readonly ProgressTask[]
   /**
    * 停止轮询并清空监听（幂等，且**是终态**）。
    *
@@ -160,6 +166,18 @@ function decodeUpdates(body: unknown): readonly ProgressUpdate[] {
   })
 }
 
+function decodeTaskList(body: unknown): readonly ProgressTask[] {
+  if (typeof body !== 'object' || body === null) return []
+  const tasks = (body as { tasks?: unknown }).tasks
+  if (!Array.isArray(tasks)) return []
+  return tasks.filter((item): item is ProgressTask => {
+    if (typeof item !== 'object' || item === null) return false
+    const record = item as Partial<ProgressTask>
+    return typeof record.id === 'string' && typeof record.content === 'string'
+      && (record.status === 'pending' || record.status === 'in_progress' || record.status === 'completed')
+  })
+}
+
 /**
  * 拼出这次请求的地址。
  *
@@ -195,6 +213,15 @@ function sameList(left: readonly ProgressUpdate[], right: readonly ProgressUpdat
   return true
 }
 
+function sameTasks(left: readonly ProgressTask[], right: readonly ProgressTask[]): boolean {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  return left.every((item, index) => {
+    const other = right[index]
+    return item.id === other.id && item.content === other.content && item.status === other.status && item.activeForm === other.activeForm
+  })
+}
+
 /**
  * 起一个轮询数据源：真正发 `GET` 请求，把结果喂给面板。
  *
@@ -217,9 +244,11 @@ export function createHostProgressSource(
   const timers = deps.timers ?? DEFAULT_TIMERS
   const visible = deps.isVisible ?? isDocumentVisible
   const decode = deps.decode ?? decodeUpdates
+  const decodeTasks = deps.decodeTasks ?? decodeTaskList
 
   /** 最后一份**成功**快照；面板只认它。失败不会把它清空。 */
   let snapshot: readonly ProgressUpdate[] = []
+  let tasksSnapshot: readonly ProgressTask[] = []
   /** 订阅者集合；空集 = 没人看 = 不轮询。 */
   const listeners = new Set<() => void>()
   /** 当前轮询定时器句柄。 */
@@ -262,8 +291,12 @@ export function createHostProgressSource(
       if (!response.ok) throw new Error(`progress updates: HTTP ${response.status}`)
       const body: unknown = await response.json()
       const next = decode(body)
-      if (sameList(snapshot, next)) return
-      snapshot = Object.freeze([...next])
+      const nextTasks = decodeTasks(body)
+      const updatesChanged = !sameList(snapshot, next)
+      const tasksChanged = !sameTasks(tasksSnapshot, nextTasks)
+      if (!updatesChanged && !tasksChanged) return
+      if (updatesChanged) snapshot = Object.freeze([...next])
+      if (tasksChanged) tasksSnapshot = Object.freeze([...nextTasks])
       notify()
     } catch (error) {
       // 403 / 500 / 网络错误 / 超时 / JSON 坏掉：都只是"这次没更新"。
@@ -348,6 +381,7 @@ export function createHostProgressSource(
 
   return {
     getSnapshot: () => snapshot,
+    getTasksSnapshot: () => tasksSnapshot,
     subscribe,
     stop: () => {
       stopped = true
