@@ -16,6 +16,7 @@ import type {
 import { CLAUDE_REASONING_EFFORTS } from '../../../shared/claude-contracts.ts'
 import { AccountPoolSection } from '../../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../../common/ContextWindowEditor.tsx'
+import { MaxOutputEditor } from './MaxOutputEditor.tsx'
 import { ModelChecklist } from '../../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate } from '../../common/format.ts'
 import { useClaudeSection, type ClaudeSectionProps } from './useClaudeSection.ts'
@@ -57,16 +58,20 @@ function modelFacts(model: ClaudeModelOption, t: typeof zh): string[] {
 
 export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSectionProps): React.ReactElement {
   const { state, derived, actions } = useClaudeSection({ onModelChange, loadModelDirectory })
-  const { status, loading, busy, error, flow, connection, pasteValue, contextDrafts, savingModel } = state
+  const { status, loading, busy, error, flow, connection, pasteValue, contextDrafts, savingModel, maxOutputDrafts } = state
   const { accounts, hasAdopted, contextModels, overrideCount, quota, windows, poolLabels } = derived
   const {
     login, cancelLogin, submitPaste, adopt, stopImporting, accountAction, setStrategy, relogin,
     refreshQuota, refreshCatalog, testConnection, toggleModel, setAllModels, updateEffort,
     updateCacheTtl, updateFastMode, updateCacheKeepalive, saveContextWindow, resetContextWindow, resetAllContextWindows,
+    updateMaxOutputDraft, saveMaxOutput, resetMaxOutput,
     updateContextDraft, setPasteValue,
   } = actions
 
   const t = useLineDict(NS_CLAUDE, zh)
+  const EFFORT_LABELS_LOCAL: Record<ClaudeReasoningEffort, string> = {
+    low: t.effortLow, medium: t.effortMedium, high: t.effortHigh, xhigh: t.effortXHigh, max: t.effortMax,
+  }
 
   if (loading) {
     return (
@@ -381,6 +386,35 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
           onCommit={(id) => void saveContextWindow(id)}
           onReset={(id) => void resetContextWindow(id)}
           onResetAll={() => void resetAllContextWindows()}
+        />
+      </section>
+
+      <section className="dsha-group">
+        <div className="dsha-grouphead">
+          <h3>{t.maxOutputSection}</h3>
+        </div>
+        <p className="dsha-muted">{t.maxOutputHint}</p>
+        <MaxOutputEditor
+          rows={contextModels.map((model: ClaudeModelOption) => ({
+            id: model.id,
+            name: model.name,
+            defaultLabel: formatCapacity(model.defaultMaxTokens),
+            levels: model.reasoningEfforts.filter((level): level is ClaudeReasoningEffort => (CLAUDE_REASONING_EFFORTS as readonly string[]).includes(level)),
+            drafts: maxOutputDrafts[model.id] ?? {},
+            hasOverride: status?.maxOutputOverrides?.[model.id] !== undefined,
+            saving: savingModel === model.id,
+          }))}
+          labels={{
+            levels: { default: t.maxOutputAll, ...EFFORT_LABELS_LOCAL },
+            inherit: t.maxOutputInherit,
+            save: t.save,
+            saving: t.saving,
+            reset: t.contextWindowReset,
+            empty: t.contextWindowNoneEnabled,
+          }}
+          onDraftChange={(id, level, draft) => updateMaxOutputDraft(id, level, draft)}
+          onCommit={(id) => void saveMaxOutput(id)}
+          onReset={(id) => void resetMaxOutput(id)}
         />
       </section>
 

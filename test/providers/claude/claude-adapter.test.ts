@@ -1288,6 +1288,20 @@ describe('Claude subscription wait-time cache activity', () => {
 })
 
 describe('Claude first-party protocol corrections', () => {
+  it('lowers max_tokens to the saved limit for the request thinking level', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ maxOutputOverrides: { 'claude-opus-5-5': { default: 64_000, low: 16_000 } } })
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'low' as never })))
+    await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'high' as never })))
+    await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'low' as never, maxTokens: 1_000 })))
+    await drain(adapter.stream(options('claude-fable-5-1', { reasoningEffort: 'low' as never })))
+    // The limit is the final ceiling; a caller asking for less keeps its own
+    // request, which this route already widens by the thinking budget.
+    expect(calls.map(call => call.body.max_tokens)).toEqual([16_000, 64_000, 3_048, 128_000])
+  })
+
   it('signs the exact final body and links headers, metadata and system context', async () => {
     const { store, settings } = await mount()
     const { fn, calls } = recordingFetch(() => answerResponse('ok'))

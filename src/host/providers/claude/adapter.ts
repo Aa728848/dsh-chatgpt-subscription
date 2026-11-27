@@ -40,6 +40,7 @@ import {
   type ClaudeCacheTtl,
 } from './types.ts'
 import {
+  maxOutputLimitFor,
   FileCredentialStore,
   FileModelSettingsStore,
   type ClaudeAccountRecord,
@@ -604,10 +605,12 @@ export class ClaudeAdapter extends LlmAdapter {
       ...(systemRoleUnsupported ? { midConversationSystem: false } : {}),
     }
     const effectiveCatalog = [entry, ...catalog.filter(candidate => candidate.id !== entry.id)]
+    const maxOutputLimit = maxOutputLimitFor(settings, requestOptions.model, requestOptions.reasoningEffort)
     const payload = buildClaudeRequestBody({
       ...requestOptions,
       maxTokens: requestOptions.maxTokens ?? maxOutputTokensFor(requestOptions.model, catalog),
     }, images, {
+      ...(maxOutputLimit === undefined ? {} : { maxOutputLimit }),
       // THE SAME table createStreamState is given — see the module note. Built
       // once by the caller and handed to both sides.
       toolNames,

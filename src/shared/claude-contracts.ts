@@ -40,6 +40,10 @@ export type ClaudeThinkingMode = 'mid-convo' | 'adaptive' | 'budget' | 'none'
  * 'src/host/claude/routes.ts'; see the module comment.
  */
 export const CLAUDE_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+/** Keys of one model's output-limit override: every thinking level, or all of them. */
+export type ClaudeMaxOutputKey = 'default' | (typeof CLAUDE_REASONING_EFFORTS)[number]
+/** Per-model output limits, by thinking level; `default` applies to levels without their own value. */
+export type ClaudeMaxOutputOverrides = Record<string, Partial<Record<ClaudeMaxOutputKey, number>>>
 
 /** One selectable thinking level. */
 export type ClaudeReasoningEffort = (typeof CLAUDE_REASONING_EFFORTS)[number]
@@ -234,6 +238,8 @@ export interface ClaudeWebStatus extends Partial<AccountPoolStatusDto> {
   defaultReasoningEffort: ClaudeReasoningEffort | null
   /** Prompt-cache tier; `null` means "follow the official subscription default". */
   cacheTtl: ClaudeCacheTtl | null
+  /** Output limits per model and thinking level; absent levels keep the route's default. */
+  maxOutputOverrides?: ClaudeMaxOutputOverrides
   /** Whether eligible models receive speed: fast. */
   fastMode?: boolean
   /** Whether 1h main requests advertise cache-keepalive and permit cache_touch. */
@@ -256,6 +262,8 @@ export interface ClaudeSettingsUpdateDto {
   defaultReasoningEffort?: ClaudeReasoningEffort | null
   /** `null` restores the subscription default. */
   cacheTtl?: ClaudeCacheTtl | null
+  /** A number sets one level's limit; `null` removes that level, or the whole model when given for the model. */
+  maxOutputOverrides?: Record<string, Partial<Record<ClaudeMaxOutputKey, number | null>> | null>
   fastMode?: boolean
   cacheKeepalive?: boolean
   selectedAccountId?: string | null

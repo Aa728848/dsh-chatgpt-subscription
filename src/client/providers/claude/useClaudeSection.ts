@@ -19,6 +19,7 @@ import type {
   ClaudeQuotaWindow,
   ClaudeReasoningEffort,
   ClaudeWebStatus,
+  ClaudeMaxOutputKey,
 } from '../../../shared/claude-contracts.ts'
 import { contextDraftsFor } from '../../common/ContextWindowEditor.tsx'
 import { formatCapacity, parsePositiveCapacity } from '../../common/format.ts'
@@ -73,6 +74,8 @@ export interface ClaudeSectionView {
     contextDrafts: Record<string, string>
     /** Model id whose context-window save or restore is in flight. */
     savingModel: string | null
+    /** Output-limit drafts per model and level, as typed. */
+    maxOutputDrafts: Record<string, Partial<Record<ClaudeMaxOutputKey, string>>>
   }
   /** Facts read straight off the current status answer. */
   derived: {
@@ -125,6 +128,9 @@ export interface ClaudeSectionView {
     updateFastMode(checked: boolean): Promise<void>
     updateCacheKeepalive(checked: boolean): Promise<void>
     saveContextWindow(modelId: string): Promise<void>
+    updateMaxOutputDraft(modelId: string, level: ClaudeMaxOutputKey, draft: string): void
+    saveMaxOutput(modelId: string): Promise<void>
+    resetMaxOutput(modelId: string): Promise<void>
     resetContextWindow(modelId: string): Promise<void>
     resetAllContextWindows(): Promise<void>
     /** Edit one capacity draft mid-typing; the editor never parses it. */
@@ -143,6 +149,16 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
   const [pasteValue, setPasteValue] = useState('')
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [savingModel, setSavingModel] = useState<string | null>(null)
+  const [maxOutputDrafts, setMaxOutputDrafts] = useState<Record<string, Partial<Record<ClaudeMaxOutputKey, string>>>>({})
+  const savedMaxOutput = JSON.stringify(status?.maxOutputOverrides ?? {})
+  // Drafts follow what the host has saved; they reset only when a saved limit changes.
+  useEffect(() => {
+    const drafts: Record<string, Partial<Record<ClaudeMaxOutputKey, string>>> = {}
+    for (const [modelId, levels] of Object.entries(JSON.parse(savedMaxOutput) as Record<string, Partial<Record<ClaudeMaxOutputKey, number>>>)) {
+      drafts[modelId] = Object.fromEntries(Object.entries(levels).map(([level, limit]) => [level, formatCapacity(limit as number)]))
+    }
+    setMaxOutputDrafts(drafts)
+  }, [savedMaxOutput])
   const [connection, setConnection] = useState<ClaudeConnectionDto | null>(null)
 
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
@@ -498,6 +514,48 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
   const updateFastMode = (checked: boolean) => updateBooleanSetting('fastMode', checked)
   const updateCacheKeepalive = (checked: boolean) => updateBooleanSetting('cacheKeepalive', checked)
 
+  const updateMaxOutputDraft = (modelId: string, level: ClaudeMaxOutputKey, draft: string) => {
+    setMaxOutputDrafts((prev) => ({ ...prev, [modelId]: { ...(prev[modelId] ?? {}), [level]: draft } }))
+  }
+
+  const postMaxOutput = async (modelId: string, levels: Partial<Record<ClaudeMaxOutputKey, number | null>> | null) => {
+    try {
+      setSavingModel(modelId)
+      setError(null)
+      const updated = await api.request<ClaudeWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ maxOutputOverrides: { [modelId]: levels } }),
+      })
+      setStatus(updated)
+      notifyChange()
+    } catch (err) {
+      reportError(err)
+    } finally {
+      setSavingModel(null)
+    }
+  }
+
+  /** Every level is sent: an emptied box removes that level's saved limit. */
+  const saveMaxOutput = async (modelId: string) => {
+    const levels: Partial<Record<ClaudeMaxOutputKey, number | null>> = {}
+    for (const level of ['default', 'low', 'medium', 'high', 'xhigh', 'max'] as const) {
+      const raw = (maxOutputDrafts[modelId]?.[level] ?? '').trim()
+      if (raw === '') {
+        levels[level] = null
+        continue
+      }
+      const parsed = parsePositiveCapacity(raw)
+      if (parsed === null) {
+        setError(t.maxOutputInvalid.replace('{value}', raw))
+        return
+      }
+      levels[level] = parsed
+    }
+    await postMaxOutput(modelId, levels)
+  }
+
+  const resetMaxOutput = (modelId: string) => postMaxOutput(modelId, null)
+
   const saveContextWindow = async (modelId: string) => {
     const raw = contextDrafts[modelId] || ''
     const parsed = parsePositiveCapacity(raw)
@@ -593,6 +651,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
       connection,
       pasteValue,
       contextDrafts,
+      maxOutputDrafts,
       savingModel,
     },
     derived: {
@@ -623,6 +682,9 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
       updateFastMode,
       updateCacheKeepalive,
       saveContextWindow,
+      updateMaxOutputDraft,
+      saveMaxOutput,
+      resetMaxOutput,
       resetContextWindow,
       resetAllContextWindows,
       updateContextDraft,

@@ -1806,6 +1806,11 @@ function mergeClaudeMessages(entries: ClaudeWireEntry[]): ClaudeWireEntry[] {
 /** Options this builder reads beyond GenerateOptions. */
 export interface ClaudeRequestOptions {
   /**
+   * Saved output limit for this model and thinking level. It is the final
+   * max_tokens ceiling, thinking included, and only ever lowers the request.
+   */
+  maxOutputLimit?: number
+  /**
    * Emit prompt-cache breakpoints. Default TRUE: caching is what a caller that
    * states nothing gets (see the module doc). Pass false only to opt out.
    *
@@ -1879,9 +1884,11 @@ export function buildClaudeRequestBody(
   // The ceiling is inflated to fit the thinking budget ONLY for a request that
   // will actually think: a request that is not thinking must ask for exactly the
   // cap it was given.
-  const maxTokens = claudeRequestThinks(options.model, effort, catalog)
+  const adjustedMax = claudeRequestThinks(options.model, effort, catalog)
     ? adjustMaxTokensForThinking(baseMax, modelMax, level, request.thinkingBudgets).maxTokens
     : baseMax
+  // Applied before the thinking fields are derived, so a budget always fits under it.
+  const maxTokens = request.maxOutputLimit === undefined ? adjustedMax : Math.min(adjustedMax, request.maxOutputLimit)
   const { thinking, outputConfig } = claudeThinking(options.model, effort, level, maxTokens, request.thinkingBudgets, catalog)
 
   const entries: ClaudeWireEntry[] = []

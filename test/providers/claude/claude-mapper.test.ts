@@ -2316,3 +2316,29 @@ describe('The four modes as complete bodies', () => {
   })
 })
 
+describe('saved output limit', () => {
+  it('is the final max_tokens ceiling and keeps a thinking budget inside it', () => {
+    const body = buildClaudeRequestBody({
+      provider: 'claude-subscription',
+      model: 'claude-haiku-4-5',
+      reasoningEffort: 'high',
+      maxTokens: 64_000,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    } as never, new Map(), { maxOutputLimit: 4_000 })
+    expect(body.max_tokens).toBe(4_000)
+    const thinking = body.thinking as { type: string; budget_tokens?: number } | undefined
+    if (thinking?.budget_tokens !== undefined) expect(thinking.budget_tokens).toBeLessThan(4_000)
+  })
+
+  it('never raises a smaller request', () => {
+    const body = buildClaudeRequestBody({
+      provider: 'claude-subscription',
+      model: 'claude-opus-5-5',
+      maxTokens: 1_000,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    } as never, new Map(), { maxOutputLimit: 50_000 })
+    expect(body.max_tokens).toBeLessThanOrEqual(50_000)
+    expect(body.max_tokens).toBeGreaterThanOrEqual(1_000)
+  })
+})
+

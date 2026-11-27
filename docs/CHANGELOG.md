@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[claude] 按模型和思考档位设置输出上限**：设置卡新增「输出上限」，每个已启用模型可设置「全部档位」以及各思考档位的 max_tokens，例如 low 16K、medium 32K、high 64K。上限是最终 max_tokens（含思考预算），只会调低请求，预算模式模型的 `budget_tokens` 会随之收进上限内；不填保持现有行为。
+
 - **[claude / claude-api] 修复工具缓存标记排在 global system 块之前导致的偶发 400**（#138）：请求体渲染顺序为 tools → system → messages，当静态 system 块携带 `scope: "global"` 时，最后一个工具上的普通 `ephemeral` 标记会排在其前面，触发“`scope: "global"` 之后出现更窄缓存范围”的校验错误。现在只要 system 中存在 global 作用域的缓存块就跳过工具标记（global 断点已覆盖其前面的全部工具定义），并把这一个断点名额留给消息；两条线路行为一致。
 
 ## 0.89.0 - 2026-11-27

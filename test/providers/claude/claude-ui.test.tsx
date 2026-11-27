@@ -237,6 +237,30 @@ describe('claude model and context settings', () => {
     expect([...select!.options].map((option) => option.value)).toEqual(['', 'low', 'medium', 'high', 'xhigh', 'max'])
   })
 
+  it('saves output limits per thinking level and removes them on reset', async () => {
+    const { node, fetchMock } = await mountSection(status({ maxOutputOverrides: { 'claude-opus-4-6': { default: 32_000 } } }))
+    const all = node.querySelector<HTMLInputElement>(`input[aria-label="Claude Opus 4.6 ${zh.maxOutputAll}"]`)
+    const low = node.querySelector<HTMLInputElement>(`input[aria-label="Claude Opus 4.6 ${zh.effortLow}"]`)
+    expect(all?.value).toBe('32K')
+    expect(low?.value).toBe('')
+    expect(low?.placeholder).toBe(zh.maxOutputInherit)
+    expect(node.querySelector(`input[aria-label="Claude Haiku 4.5 ${zh.maxOutputAll}"]`)).toBeNull()
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setter.call(low, '8K')
+      low!.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const row = low!.closest('.dshcl-max-output-row')!
+    await act(async () => { row.querySelector<HTMLButtonElement>('.dsha-context-save:not(.dsha-context-reset)')!.click() })
+    await act(async () => { row.querySelector<HTMLButtonElement>('.dsha-context-reset')!.click() })
+    const writes = fetchMock.mock.calls.filter(entry => String(entry[0]).endsWith('/claude/api/settings'))
+      .map(entry => JSON.parse(String(entry[1]?.body)))
+    expect(writes).toEqual([
+      { maxOutputOverrides: { 'claude-opus-4-6': { default: 32_000, low: 8_000, medium: null, high: null, xhigh: null, max: null } } },
+      { maxOutputOverrides: { 'claude-opus-4-6': null } },
+    ])
+  })
+
   it('posts a number to save a context window and null to restore the default', async () => {
     const { node, fetchMock } = await mountSection(status({
       contextWindowOverrides: { 'claude-opus-4-6': 500_000 },

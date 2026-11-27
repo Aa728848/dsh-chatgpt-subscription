@@ -627,6 +627,7 @@ describe('claude model settings', () => {
       // A legacy document states no cache tier, and "no tier stored" is the
       // subscription default rather than a value the reader has to invent.
       cacheTtl: null,
+      maxOutputOverrides: {},
       fastMode: false,
       cacheKeepalive: false,
       deviceId: '',
@@ -799,3 +800,26 @@ describe.skipIf(process.platform !== 'win32')('claude credential storage / Windo
     expect(await new FileCredentialStore(path).read()).toEqual(await store.read())
   }, 30_000)
 })
+
+describe('Claude output limits', () => {
+  it('keeps known levels with usable limits and drops the rest', async () => {
+    const { normalizeMaxOutputOverrides } = await import('../../../src/host/providers/claude/token-store.ts')
+    expect(normalizeMaxOutputOverrides({
+      'claude-opus-5-5': { default: 64_000, low: 16_000, bogus: 1, high: -1, max: 1.5 },
+      'claude-fable-5-1': { medium: 'x' },
+      '': { default: 1 },
+    })).toEqual({ 'claude-opus-5-5': { default: 64_000, low: 16_000 } })
+    expect(normalizeMaxOutputOverrides(null)).toEqual({})
+  })
+
+  it('picks the level value, else the model default, else none', async () => {
+    const { maxOutputLimitFor } = await import('../../../src/host/providers/claude/token-store.ts')
+    const settings = { maxOutputOverrides: { 'claude-opus-5-5': { default: 64_000, low: 16_000 } } }
+    expect(maxOutputLimitFor(settings, 'claude-opus-5-5', 'low')).toBe(16_000)
+    expect(maxOutputLimitFor(settings, 'claude-opus-5-5', 'high')).toBe(64_000)
+    expect(maxOutputLimitFor(settings, 'claude-opus-5-5', undefined)).toBe(64_000)
+    expect(maxOutputLimitFor(settings, 'claude-fable-5-1', 'low')).toBeUndefined()
+    expect(maxOutputLimitFor(null, 'claude-opus-5-5', 'low')).toBeUndefined()
+  })
+})
+
