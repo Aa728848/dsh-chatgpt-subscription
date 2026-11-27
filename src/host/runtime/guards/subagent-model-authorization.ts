@@ -347,15 +347,29 @@ export function liveSubagentModelSelectionPreference(
       return undefined
     }
   }
-  const getter = asRecord(candidate)?.['get']
-  if (typeof getter === 'function' && typeof asRecord(candidate)?.['allowedRoutes'] !== 'function') {
+  // Cordis exposes the host context as a Proxy whose `get` trap throws
+  // "cannot get property \"X\" without inject" for any service -- including this
+  // one -- that the plugin did not declare in `inject`. `?.` guards against
+  // null/undefined but not against a trap that throws, so every property probe
+  // here must be swallowed: a missing optional service means "no live
+  // preference", never a failed tool call. See issue #144 and the 0.5.11 precedent.
+  const safeProp = (value: unknown, key: string): unknown => {
+    try {
+      const record = asRecord(value)
+      return record === undefined ? undefined : record[key]
+    } catch {
+      return undefined
+    }
+  }
+  const getter = safeProp(candidate, 'get')
+  if (typeof getter === 'function' && typeof safeProp(candidate, 'allowedRoutes') !== 'function') {
     try {
       candidate = (getter as (name: string) => unknown).call(candidate, 'subagentModelSelection')
     } catch {
       return undefined
     }
   }
-  const allowedRoutesFn = asRecord(candidate)?.['allowedRoutes']
+  const allowedRoutesFn = safeProp(candidate, 'allowedRoutes')
   if (typeof allowedRoutesFn !== 'function') return undefined
   let raw: unknown
   try {

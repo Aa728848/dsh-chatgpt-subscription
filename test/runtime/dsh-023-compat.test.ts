@@ -715,6 +715,51 @@ describe('DSH 0.2.3 子代理实时模型授权 (ctx.subagentModelSelection) 与
     expect(registeredTool).toBeDefined()
     dispose()
   })
+
+  it('ctx 是 cordis Proxy 且未 inject subagentModelSelection 时不抛错（issue #144）', () => {
+    // Cordis 的 ctx 是 Proxy：读取任何未在 inject 中声明的服务属性都会抛
+    // "cannot get property \"X\" without inject"。这里模拟一个对未知属性抛错的 ctx。
+    const cordisLike = (services: Record<string, unknown>): unknown =>
+      new Proxy({ get: (name: string) => services[name] } as Record<string, unknown>, {
+        get(target, prop) {
+          if (prop === 'get' || typeof prop === 'symbol' || prop === 'then') {
+            return Reflect.get(target, prop as string)
+          }
+          if (typeof prop === 'string' && prop in services) return services[prop]
+          throw new Error('cannot get property "' + String(prop) + '" without inject')
+        },
+      })
+
+    // 1. 服务未挂载：不得抛错，按“没有该服务”返回 undefined。
+    expect(() => liveSubagentModelSelectionPreference(cordisLike({}))).not.toThrow()
+    expect(liveSubagentModelSelectionPreference(cordisLike({}))).toBeUndefined()
+    // 同一路径的 readSubagentRoutingPreference 也不得把调用拖垮。
+    expect(readSubagentRoutingPreference({ modelSelection: cordisLike({}) })).toBeUndefined()
+
+    // 2. 服务已挂载：照常读 allowedRoutes()。
+    const mounted = cordisLike({
+      subagentModelSelection: { allowedRoutes: () => [{ provider: 'kimi-code', model: 'kimi-for-coding' }] },
+    })
+    expect(liveSubagentModelSelectionPreference(mounted)).toEqual({
+      enabled: true,
+      allowedModels: [{ provider: 'kimi-code', model: 'kimi-for-coding' }],
+      liveService: true,
+    })
+
+    // 3. 老式服务对象（直接暴露 allowedRoutes，无 get）仍然可用。
+    expect(liveSubagentModelSelectionPreference({ allowedRoutes: () => undefined })).toEqual({
+      enabled: false,
+      allowedModels: [],
+      liveService: true,
+    })
+
+    // 4. 敌意 Proxy：任何属性读取都抛错时安全降级，不崩溃。
+    const hostile = new Proxy({} as Record<string, unknown>, {
+      get() { throw new Error('hostile') },
+    })
+    expect(() => liveSubagentModelSelectionPreference(hostile)).not.toThrow()
+    expect(liveSubagentModelSelectionPreference(hostile)).toBeUndefined()
+  })
 })
 
 describe('DSH 0.2.3 ImageRequestTarget 双代契约', () => {

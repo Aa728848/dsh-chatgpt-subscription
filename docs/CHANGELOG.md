@@ -5,6 +5,8 @@
 - **[advisor] 新增跨线路只读顾问**：模型选择弹层可按当前对话开启顾问、选择任意已配置 Provider/Model 与推理强度；主 Agent 可在方案、排错、换方向和完成验收前调用 `consult_advisor`，由独立模型审阅投影后的对话并返回建议。默认关闭，支持独立上下文裁剪、图片能力投影、超时/取消、临时错误重试及用量展示；顾问无工具，失败不阻断主任务，开关不重建主模型前缀。每会话路由通过插件原子 JSON 存储持久化，不包含凭据或对话正文。
 - **[advisor] 补齐治理与命令面**：新增用户级默认值与 `/advisor` 斜杠命令（查看 / 设置 / 开关 / 存默认）；新增按对话累计的顾问用量与 `advisorSessionTokenBudget` 预算闸门，超限后不再发起咨询；新增顾问与主模型同款时的提示；新增 `declined` 状态以区分「顾问拒绝给建议」与传输失败。转录投影改为保证 `tool-call` 与工具结果成对发送（结果被裁掉时补显式占位），超长单条消息按头尾摘录压缩，避免上游拒收或顾问误读截断证据。
 
+- **[dispatch] 修复 cordis Proxy 下 `dispatch_ledger {action:"self"}` 与带 mandate 头委派抛 `cannot get property "allowedRoutes" without inject`**（#144）：`liveSubagentModelSelectionPreference` 探测宿主 ctx 时裸读 `allowedRoutes`，而 cordis 的 ctx Proxy 读取任何未在 `inject` 中声明的服务属性都会抛错，`?.` 挡不住异常，异常一路穿出到工具执行。现在所有属性探测都收进 `safeProp` 的 try/catch：服务未挂载时按「没有实时服务」返回 undefined，而不是拖垮 `dispatch_ledger` 和带头的 `subagent` / `send_message`。
+
 - **[claude / claude-api] 修复工具缓存标记排在 global system 块之前导致的偶发 400**（#138）：请求体渲染顺序为 tools → system → messages，当静态 system 块携带 `scope: "global"` 时，最后一个工具上的普通 `ephemeral` 标记会排在其前面，触发“`scope: "global"` 之后出现更窄缓存范围”的校验错误。现在只要 system 中存在 global 作用域的缓存块就跳过工具标记（global 断点已覆盖其前面的全部工具定义），并把这一个断点名额留给消息；两条线路行为一致。
 
 ## 0.89.0 - 2026-11-27
