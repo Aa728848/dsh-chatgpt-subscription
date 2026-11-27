@@ -399,6 +399,7 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
             id: model.id,
             name: model.name,
             defaultLabel: formatCapacity(model.defaultMaxTokens),
+            ...(model.maxTokensLimit === undefined ? {} : { limitLabel: t.maxOutputLimitMeta.replace('{value}', formatCapacity(model.maxTokensLimit)) }),
             levels: model.reasoningEfforts.filter((level): level is ClaudeReasoningEffort => (CLAUDE_REASONING_EFFORTS as readonly string[]).includes(level)),
             drafts: maxOutputDrafts[model.id] ?? {},
             hasOverride: status?.maxOutputOverrides?.[model.id] !== undefined,

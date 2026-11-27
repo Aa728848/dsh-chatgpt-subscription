@@ -3,8 +3,10 @@ import type { ClaudeMaxOutputKey } from '../../../shared/claude-contracts.ts'
 export interface MaxOutputRow {
   id: string
   name: string
-  /** The route's limit when nothing is saved, shown as the "all levels" placeholder. */
+  /** The route's default when nothing is saved, shown as the "all levels" placeholder. */
   defaultLabel: string
+  /** The model's own limit, shown beside its name. */
+  limitLabel?: string
   /** Levels this model accepts, in order; `default` is always shown first. */
   levels: readonly ClaudeMaxOutputKey[]
   drafts: Partial<Record<ClaudeMaxOutputKey, string>>
@@ -36,7 +38,10 @@ export function MaxOutputEditor({ rows, labels, onDraftChange, onCommit, onReset
     {rows.map((row) => (
       <div key={row.id} className="dshcl-max-output-row">
         <div className="dshcl-max-output-head">
-          <span title={row.id}>{row.name}</span>
+          <span title={row.id}>
+            {row.name}
+            {row.limitLabel !== undefined ? <span className="dshcl-model-meta">{row.limitLabel}</span> : null}
+          </span>
           <div className="dsha-capacity-control">
             <button type="button" className="dsha-context-save" disabled={row.saving} onClick={() => onCommit(row.id)}>
               {row.saving ? labels.saving : labels.save}

@@ -4,7 +4,7 @@ import { CommandCodeAdapter } from '../../src/host/providers/command-code/adapte
 import { FALLBACK_MODELS as COMMAND, declaredMaxOutputTokens as commandCap } from '../../src/host/providers/command-code/types.ts'
 import { COMMAND_CODE_MODELS } from '../../src/host/providers/command-code/model-catalog.ts'
 import { ClaudeAdapter } from '../../src/host/providers/claude/adapter.ts'
-import { CLAUDE_MODELS } from '../../src/host/providers/claude/model-catalog.ts'
+import { CLAUDE_MODELS, defaultMaxTokensFor } from '../../src/host/providers/claude/model-catalog.ts'
 import { GlmCodingPlanAdapter } from '../../src/host/providers/glm-coding-plan/adapter.ts'
 import { GLM_MODEL_CATALOG as GLM } from '../../src/host/providers/glm-coding-plan/model-catalog.ts'
 import { OllamaAdapter } from '../../src/host/providers/ollama/adapter.ts'
@@ -47,7 +47,8 @@ function reserved(row: ProviderRow): number | undefined {
 
 const rows: ProviderRow[] = [
   ...COMMAND.map(m => ({ provider: 'command', model: m.id, window: m.contextWindow, cap: commandCap(m.id) })),
-  ...CLAUDE_MODELS.map(m => ({ provider: 'claude', model: m.id, window: m.contextWindow, cap: m.maxTokens })),
+  // The Claude route reserves what it really sends by default: the official Claude Code default.
+  ...CLAUDE_MODELS.map(m => ({ provider: 'claude', model: m.id, window: m.contextWindow, cap: defaultMaxTokensFor(m.id) })),
   ...GLM.map(m => ({ provider: 'glm', model: m.id, window: m.defaultContextWindow, cap: m.defaultMaxTokens })),
   ...CODEX_MODEL_CATALOG.map(m => ({ provider: 'codex', model: m.id, window: m.contextWindow, cap: codexModelMaxTokens(m.id) })),
   ...[80_000, 128_000, 262_144].map(window => ({ provider: 'ollama', model: 'live-model', window, cap: 8192 })),

@@ -112,7 +112,9 @@ export interface ClaudeModelSettings {
   cacheTtl: ClaudeCacheTtl | null
   /**
    * Output limits per model, by thinking level (`default` covers levels without
-   * their own value). A limit only lowers what a request asks for.
+   * their own value). Like the official CLAUDE_CODE_MAX_OUTPUT_TOKENS, a value
+   * replaces the model's default max_tokens (thinking included) and is capped
+   * at the model's limit; a caller's own smaller cap is only ever lowered.
    */
   maxOutputOverrides: Record<string, Record<string, number>>
   /** Account pinned in the card, by {@link ClaudeAccountRecord.internalId}. */

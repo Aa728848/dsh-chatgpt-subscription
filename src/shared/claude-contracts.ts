@@ -42,7 +42,10 @@ export type ClaudeThinkingMode = 'mid-convo' | 'adaptive' | 'budget' | 'none'
 export const CLAUDE_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 /** Keys of one model's output-limit override: every thinking level, or all of them. */
 export type ClaudeMaxOutputKey = 'default' | (typeof CLAUDE_REASONING_EFFORTS)[number]
-/** Per-model output limits, by thinking level; `default` applies to levels without their own value. */
+/**
+ * Per-model max_tokens by thinking level (thinking included); `default` applies
+ * to levels without their own value. Capped at the model's limit.
+ */
 export type ClaudeMaxOutputOverrides = Record<string, Partial<Record<ClaudeMaxOutputKey, number>>>
 
 /** One selectable thinking level. */
@@ -88,8 +91,10 @@ export interface ClaudeModelOption {
   defaultContextWindow: number
   /** Effective context window: the override when one is saved, else the default. */
   contextWindow: number
-  /** Maximum output tokens this route requests when a caller omits one. */
+  /** max_tokens this route sends when nothing overrides it: the official Claude Code default. */
   defaultMaxTokens: number
+  /** The model's own output limit; a saved value is capped at it. */
+  maxTokensLimit?: number
   /** Thinking levels this model exposes; empty for a model that takes none. */
   reasoningEfforts: string[]
   /**

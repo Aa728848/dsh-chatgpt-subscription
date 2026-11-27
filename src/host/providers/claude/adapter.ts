@@ -40,6 +40,7 @@ import {
   type ClaudeCacheTtl,
 } from './types.ts'
 import {
+  isMaxOutputLimit,
   maxOutputLimitFor,
   FileCredentialStore,
   FileModelSettingsStore,
@@ -49,6 +50,7 @@ import {
   type ClaudePreferenceStore,
 } from './token-store.ts'
 import {
+  defaultMaxTokensFor,
   DEFAULT_VISIBLE_MODEL_IDS,
   FALLBACK_MODELS,
   claudeMinCliVersionFor,
@@ -202,6 +204,15 @@ export interface ClaudeAccountPoolLike {
   getFreshCredential?(accountId?: string, fetchFn?: typeof fetch): Promise<ClaudeCredentials>
   markCooldown(accountId: string, durationMs: number, reason: string): Promise<void>
   markAuthFailed(accountId: string, reason: string): Promise<void>
+}
+
+/**
+ * The max_tokens this route uses when a caller states none: the saved "all
+ * levels" value, else the official Claude Code default, never above the model limit.
+ */
+function routeMaxTokensFor(settings: ClaudeModelSettings | null, modelId: string, catalog: readonly ClaudeModelEntry[]): number {
+  const saved = settings?.maxOutputOverrides?.[modelId]?.['default']
+  return Math.min(isMaxOutputLimit(saved) ? saved : defaultMaxTokensFor(modelId, catalog), maxOutputTokensFor(modelId, catalog))
 }
 
 export interface ClaudeAdapterOptions {
@@ -438,7 +449,7 @@ export class ClaudeAdapter extends LlmAdapter {
       name: entry.name,
       inputModalities: entry.supportsImage ? ['text', 'image'] : ['text'],
       context: { contextWindow: contextWindow || DEFAULT_CONTEXT_WINDOW },
-      ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, maxOutputTokensFor(modelId, catalog)),
+      ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, routeMaxTokensFor(settings, modelId, catalog)),
       // `toolUpdate: 'in-history'` for models that accept a mid-conversation
       // system message: a tool change then rides a `tool_addition` /
       // `tool_removal` block in that message, the declaration list at the head
@@ -605,12 +616,21 @@ export class ClaudeAdapter extends LlmAdapter {
       ...(systemRoleUnsupported ? { midConversationSystem: false } : {}),
     }
     const effectiveCatalog = [entry, ...catalog.filter(candidate => candidate.id !== entry.id)]
+    // A request carrying the route's own default (or the model limit an older
+    // host cached as that default) follows the official client: one final
+    // max_tokens, thinking included — the saved level value, else the saved
+    // "all levels" value, else Claude Code's default for the model.
+    const modelLimit = maxOutputTokensFor(requestOptions.model, catalog)
+    const routeMax = routeMaxTokensFor(settings, requestOptions.model, catalog)
+    const asked = requestOptions.maxTokens
+    const routeDefault = asked === undefined || asked === routeMax || asked === modelLimit
     const maxOutputLimit = maxOutputLimitFor(settings, requestOptions.model, requestOptions.reasoningEffort)
     const payload = buildClaudeRequestBody({
       ...requestOptions,
-      maxTokens: requestOptions.maxTokens ?? maxOutputTokensFor(requestOptions.model, catalog),
+      maxTokens: routeDefault ? Math.min(maxOutputLimit ?? routeMax, modelLimit) : asked,
     }, images, {
-      ...(maxOutputLimit === undefined ? {} : { maxOutputLimit }),
+      // A caller's own smaller cap keeps this route's existing handling, under the saved limit.
+      ...(routeDefault ? { maxTokensFinal: true } : maxOutputLimit === undefined ? {} : { maxOutputLimit }),
       // THE SAME table createStreamState is given — see the module note. Built
       // once by the caller and handed to both sides.
       toolNames,

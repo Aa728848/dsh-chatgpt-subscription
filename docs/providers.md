@@ -151,7 +151,7 @@
   - 本地预检 `minCliVersion`（如 Opus 5.5 要求 `>= 2.1.280`，插件默认申报版本高于表内全部门槛，亦可用 `DSH_CLAUDE_CLI_VERSION` 覆盖）；
   - 四档思考形态按模型精确匹配：`mid-convo`（adaptive + `block_binding: drop_block` + `output_config.effort`）、`adaptive`（绑定前缀模型自动附带 `block_binding: drop_block`）、`budget`（`budget_tokens`，为正文至少预留 1024 token）、`none`；带签名的 `thinking` / `redacted_thinking` 块原样回放；
   - 支持合法位置的会话中途原生 `role: 'system'` 消息；单图 5 MiB base64 防线与整请求 8 MiB 图片预算独立执行；
-  - **输出上限**：每个已启用模型可按「全部档位」和 low / medium / high / xhigh / max 分别设置 max_tokens 上限；没填的档位用「全部档位」，都没填保持路由默认值。上限是最终 max_tokens（含思考预算），只会调低，不会超过模型本身的上限。
+  - **输出上限**：默认 max_tokens 与官方 Claude Code 一致（按模型取官方表的默认值，例如 Opus 5.5 / Fable 5.2 为 128K、Opus 4.6–5 与 Fable 5 / 5.1 为 64K、Sonnet 4.6 与 Haiku 4.5 为 32K，未知模型 32K），模型上限不变。设置卡可按模型设置「全部档位」以及 low / medium / high / xhigh / max 各档的值；与官方 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` 一样，保存的值就是最终 max_tokens（含思考），可调高也可调低，但不超过模型上限。
   - **提示缓存 TTL** 可选「跟随官方（1h）/ 1 小时 / 5 分钟」；快速模式与 cache-keepalive 是两个独立、默认关闭的开关。开启后者时仅 1h 主请求携带 cache-keepalive beta，等待续热优先按上一响应的 request-id 调用 cache_touch，失败回退原轻量请求；touch 固定产生该响应的账号。
   - 官方 context_management、尾部 assistant 防护、thinking-token-count 摘除重试与按账号+模型的 7 天能力记忆均已接入；压缩请求跟随会话最近主轮次 effort。cache_touch 的真实订阅直连和 55 分钟效果尚未验证。
   - **等待续热（仅 1 小时档，含「跟随官方」）**：主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时，自动发一次很小的续热请求保住前缀缓存，该轮结束后重新计时；5 分钟档从不续热。空闲时钟从请求**发出**时算起，沿用全局 `cacheWaitWarmup` 开关；新的 cache-keepalive 开关只把优先续热方式换成 cache_touch，失败仍走这里的真实请求。每次 steer 续热是一次真实请求，按缓存读取价格读回整段前缀并计入订阅额度。选号与该会话下一次真实请求完全一致（默认 sequential 取 primary、sticky 取上次账号，只在凭据失效或账号级限流后换号）；若把轮换策略显式设为 `round-robin`，续热可能落到另一个账号、白写一次缓存。

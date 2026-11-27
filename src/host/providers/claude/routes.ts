@@ -17,6 +17,7 @@ import {
   isMaxOutputLimit,
 } from './token-store.ts'
 import {
+  defaultMaxTokensFor,
   DEFAULT_VISIBLE_MODEL_IDS,
   FALLBACK_MODELS,
   claudeModelCanDisableThinking,
@@ -195,7 +196,8 @@ export function buildClaudeModelOptions(
       contextWindow: typeof override === 'number' && Number.isFinite(override) && override > 0
         ? override
         : defaultWindow,
-      defaultMaxTokens: maxOutputTokensFor(id, catalog),
+      defaultMaxTokens: defaultMaxTokensFor(id, catalog),
+      maxTokensLimit: maxOutputTokensFor(id, catalog),
       reasoningEfforts: [...claudeReasoningEfforts(id, catalog)],
       canDisableThinking: claudeModelCanDisableThinking(id, catalog),
       thinkingMode: claudeThinkingMode(id, catalog),
