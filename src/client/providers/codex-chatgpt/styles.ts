@@ -3,9 +3,13 @@ import { installPluginStyle } from '../../common/plugin-style.ts'
 const CSS = `
 .dsh-codex-page{box-sizing:border-box;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:20px;max-width:780px;min-width:0;padding:2px 0 30px}
 .dsh-codex-page *{box-sizing:border-box}
-/* Let Codex's actions wrap so both import labels remain distinguishable. */
 .dsh-codex-page :where(.dsha-account-add-actions:not(.dsh-codex-login-actions)){flex-wrap:nowrap;min-width:0}
 .dsh-codex-page :where(.dsha-account-add-actions:not(.dsh-codex-login-actions)) > .dsha-btn{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* Wrap the heading and actions as units when the full labels need more room. */
+.dsha-grouphead:has(> .dsh-codex-login-actions){flex-wrap:wrap;gap:6px 8px}
+.dsha-grouphead:has(> .dsh-codex-login-actions) > h3 > .dsha-muted{font-size:12px}
+.dsh-codex-page .dsh-codex-login-actions{gap:4px;max-width:100%}
+.dsh-codex-login-actions > .dsha-btn{font-size:12px;padding-inline:6px}
 .dsh-codex-title{font-size:15px;font-weight:650;line-height:1.4;margin:0 0 5px}
 .dsh-codex-intro,.dsh-codex-muted{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:1.55;margin:0}
 .dsh-codex-group{border-top:0.5px solid var(--dsw-alias-border-l2);min-width:0}
