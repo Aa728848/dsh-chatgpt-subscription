@@ -1288,6 +1288,29 @@ describe('Claude subscription wait-time cache activity', () => {
 })
 
 describe('Claude first-party protocol corrections', () => {
+  it('signs only the billing block when history quotes the cch placeholder', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const quoted = 'cc_entrypoint=" + entrypoint + "; cch=00000; cc_prompt_id="'
+    const history = [
+      { role: 'user', content: [{ type: 'text', text: 'show the signer' }] },
+      { role: 'assistant', content: [{ type: 'text', text: quoted }] },
+      { role: 'user', content: [{ type: 'text', text: 'continue' }] },
+    ]
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', { system: 'STATIC', sessionId: 'quoted-session' as never, messages: history as never })))
+    await drain(adapter.stream(options('claude-opus-5-5', { system: 'STATIC', sessionId: 'quoted-session' as never, messages: [...history, { role: 'assistant', content: [{ type: 'text', text: 'ok' }] }, { role: 'user', content: [{ type: 'text', text: 'again' }] }] as never })))
+    const [first, second] = calls.map(call => call.body as { messages: Array<{ content: unknown }>; system: Array<{ text: string }> })
+    const text = (body: typeof first) => JSON.stringify(body!.messages[1]!.content)
+    expect(text(first)).toContain('cch=00000;')
+    expect(text(second)).toBe(text(first))
+    for (const body of [first!, second!]) {
+      const cch = body.system[0]!.text.match(/cch=([0-9a-f]{5});/)?.[1]
+      expect(cch).toBeDefined()
+      expect(cch).not.toBe('00000')
+    }
+  })
+
   it('signs the exact final body and links headers, metadata and system context', async () => {
     const { store, settings } = await mount()
     const { fn, calls } = recordingFetch(() => answerResponse('ok'))

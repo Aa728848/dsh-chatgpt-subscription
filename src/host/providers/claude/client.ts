@@ -37,7 +37,7 @@ import {
 } from '../_claude-shared/claude-code-first-party.ts'
 import { FALLBACK_MODELS, resolveClaudeModel, type ClaudeModelEntry } from './model-catalog.ts'
 import { ClaudeCodeVersionResolver, type ClaudeCodeVersionSelection } from '../_claude-shared/claude-code-version.ts'
-import { signClaudeCodeCch } from '../_claude-shared/claude-code-cch.ts'
+import { signClaudeCodeRequest } from '../_claude-shared/claude-code-cch.ts'
 import type { ClaudeCredentials } from './token-store.ts'
 
 // ---------------------------------------------------------------------------
@@ -1152,7 +1152,7 @@ export async function probeConnection(
     response = await fetchFn(API_BASE + MESSAGES_PATH, {
       method: 'POST',
       headers: buildClaudeHeaders(credentials.accessToken, { method: 'POST', model, version: version.value, firstParty, cacheTtl: '1h' }),
-      body: signClaudeCodeCch(JSON.stringify(payload), version.seed),
+      body: signClaudeCodeRequest(payload, version.seed),
       signal: timeoutSignal(options.signal, options.timeoutMs ?? DISCOVERY_TIMEOUT_MS),
     })
   } catch (error) {
