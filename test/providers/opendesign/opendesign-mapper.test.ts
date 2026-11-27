@@ -56,6 +56,40 @@ describe('buildOpenDesignBody', () => {
     expect(body.tools).toHaveLength(1)
   })
 
+  it('adds an object root to all-object oneOf tool parameters without mutating the schema', () => {
+    const parameters = {
+      oneOf: [
+        { type: 'object', properties: { action: { const: 'status' } } },
+        { type: 'object', properties: { action: { const: 'activate' } } },
+      ],
+    }
+    const original = structuredClone(parameters)
+    const body = buildOpenDesignBody(
+      options({ tools: [{ name: 'run', description: 'run it', parameters }] as never }),
+      { maxTokens: 64_000 },
+      NO_RESOLVED_IMAGES,
+    )
+
+    expect(body.tools?.[0]?.function.parameters).toEqual({ ...original, type: 'object' })
+    expect(parameters).toEqual(original)
+  })
+
+  it('preserves mixed-type oneOf roots and schemas that already declare a type', () => {
+    const mixed = { oneOf: [{ type: 'object' }, { type: 'string' }] }
+    const existing = { type: 'object', oneOf: [{ type: 'object' }] }
+    const body = buildOpenDesignBody(
+      options({ tools: [
+        { name: 'mixed', description: 'mixed', parameters: mixed },
+        { name: 'existing', description: 'existing', parameters: existing },
+      ] as never }),
+      { maxTokens: 64_000 },
+      NO_RESOLVED_IMAGES,
+    )
+
+    expect(body.tools?.[0]?.function.parameters).toBe(mixed)
+    expect(body.tools?.[1]?.function.parameters).toBe(existing)
+  })
+
   it('omits the knobs the caller never set', () => {
     const body = buildOpenDesignBody(options({}), { maxTokens: 0 }, NO_RESOLVED_IMAGES)
     expect(body).not.toHaveProperty('tools')

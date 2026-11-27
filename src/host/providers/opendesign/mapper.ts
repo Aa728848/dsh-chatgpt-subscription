@@ -357,6 +357,16 @@ export function withCompletionTokens(body: OpenDesignWireBody): OpenDesignWireBo
 }
 
 /**
+ * OpenDesign requires an object root even when every `oneOf` branch already
+ * says so. Add it only on the wire copy; mixed-type unions keep their semantics.
+ */
+function openDesignToolParameters(parameters: Record<string, unknown>): Record<string, unknown> {
+  if (parameters.type !== undefined || !Array.isArray(parameters.oneOf) || parameters.oneOf.length === 0) return parameters
+  const objectBranchesOnly = parameters.oneOf.every((branch) => isRecord(branch) && branch.type === 'object')
+  return objectBranchesOnly ? { ...parameters, type: 'object' } : parameters
+}
+
+/**
  * Build the wire request for one harness call.
  * @param options - the harness request (model, system, history, tools, sampling).
  * @param connection - resolved connection facts (default output budget).
@@ -372,7 +382,7 @@ export function buildOpenDesignBody(
   messages.push(...serializeMessages(options.messages, images))
   const tools = (options.tools ?? []).map((tool) => ({
     type: 'function' as const,
-    function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+    function: { name: tool.name, description: tool.description, parameters: openDesignToolParameters(tool.parameters) },
   }))
   const maxTokens = options.maxTokens ?? connection.maxTokens
   const reasoningEffort = options.reasoningEffort === undefined ? undefined : String(options.reasoningEffort)
