@@ -52,6 +52,7 @@ const CSS = `
 .dsh-progress-switch:disabled{cursor:default;opacity:.5}
 .dsh-progress-switch:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:2px}
 .dsh-progress-number{background:var(--dsw-alias-bg-layer-1,#fff);border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:8px;box-sizing:border-box;color:var(--dsw-alias-label-primary,#141413);font:inherit;font-size:13px;height:30px;padding:0 8px;text-align:center;width:64px}
+.dsh-progress-number-wide{width:96px}
 .dsh-progress-number:focus-visible{outline:2px solid var(--dsw-alias-button-info-fill,#397ee8);outline-offset:1px}
 .dsh-progress-number:disabled{cursor:default;opacity:.5}
 .dsh-progress-select{background:var(--dsw-alias-bg-layer-1,#fff);border:0.5px solid var(--dsw-alias-border-l2,#e3e1d5);border-radius:8px;box-sizing:border-box;color:var(--dsw-alias-label-primary,#141413);cursor:pointer;font:inherit;font-size:13px;height:30px;padding:0 6px}

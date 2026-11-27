@@ -92,6 +92,18 @@ export interface ProgressUpdatesSettingsValues {
   toolRunawayGuard?: boolean
   /** 五个图片/视频工具的注册期总开关（缺键 = 开；重载插件或重启后生效）。 */
   mediaTools?: boolean
+  /** 顾问是否作为新对话的默认开启（缺键 = 关）。 */
+  advisorEnabled?: boolean
+  /** 单个对话累计可消耗的顾问 token 上限；0 表示不限制。 */
+  advisorSessionTokenBudget?: number
+  /** 顾问单次回复的最大 token 数。 */
+  advisorMaxTokens?: number
+  /** 转发给顾问的对话上下文预算。 */
+  advisorContextTokenBudget?: number
+  /** 顾问单次咨询的总超时毫秒数。 */
+  advisorTimeoutMs?: number
+  /** 顾问遇到临时错误时的最大追加重试次数。 */
+  advisorMaxRetries?: number
   /**
    * Agent Teams 策略段缓存守卫开关（缺键 = 开）。
    *
@@ -118,6 +130,12 @@ export type ProgressUpdatesField =
   | 'toolRunawayGuard'
   | 'mediaTools'
   | 'teamPolicyCacheGuard'
+  | 'advisorEnabled'
+  | 'advisorSessionTokenBudget'
+  | 'advisorMaxTokens'
+  | 'advisorContextTokenBudget'
+  | 'advisorTimeoutMs'
+  | 'advisorMaxRetries'
 
 /**
  * 候选条目 id，按可能性从高到低。

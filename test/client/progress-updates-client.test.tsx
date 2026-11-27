@@ -357,7 +357,7 @@ describe('B. 设置页：独立一格，全部设置卡片与按钮交互', () =
     expect(sections[0]!.locale).toBe(NS_PROGRESS_UPDATES)
   })
 
-  it('全部设置卡片都渲染：运行时开关、阈值、语言与面板', async () => {
+  it('全部设置卡片都渲染：运行时开关、顾问、阈值、语言与面板', async () => {
     // Given 一份就绪的表单与一个假侧栏
     const form = fakeForm({ progressUpdates: false, progressUpdatesNudgeThreshold: 8 })
     await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
@@ -374,6 +374,12 @@ describe('B. 设置页：独立一格，全部设置卡片与按钮交互', () =
     expect(container.querySelector('[data-dsh-part="settings-row-tool-runaway-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-team-policy-cache-guard"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-media-tools"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-advisor"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-advisor-budget"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-advisor-output"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-advisor-context"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-advisor-timeout"]')).not.toBeNull()
+    expect(container.querySelector('[data-dsh-part="settings-row-advisor-retry"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-threshold"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-language"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="settings-row-panel"]')).not.toBeNull()
@@ -388,12 +394,61 @@ describe('B. 设置页：独立一格，全部设置卡片与按钮交互', () =
     expect(container.textContent).toContain(zh.settingsToolRunawayGuardName)
     expect(container.textContent).toContain(zh.settingsTeamPolicyCacheGuardName)
     expect(container.textContent).toContain(zh.settingsMediaToolsName)
+    expect(container.textContent).toContain(zh.settingsAdvisorEnabledName)
+    expect(container.textContent).toContain(zh.settingsAdvisorSessionBudgetName)
+    expect(container.textContent).toContain(zh.settingsAdvisorMaxTokensName)
+    expect(container.textContent).toContain(zh.settingsAdvisorContextName)
+    expect(container.textContent).toContain(zh.settingsAdvisorTimeoutName)
+    expect(container.textContent).toContain(zh.settingsAdvisorRetriesName)
     expect(container.textContent).toContain(zh.settingsThresholdName)
     expect(container.textContent).toContain(zh.settingsLanguageName)
     expect(container.textContent).toContain(zh.settingsPanelName)
     expect(container.textContent).toContain(zh.settingsHint)
     // And 行上挂的是本插件自己的样式类（与 hub 那套同形但不覆盖）
-    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(13)
+    expect(container.querySelectorAll('.dsh-progress-card')).toHaveLength(19)
+  })
+
+  it('顾问设置行写入的是本插件 Config 的 advisor 字段', async () => {
+    // Given 一份没写过顾问字段的表单
+    const form = fakeForm({ progressUpdates: true })
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    // When 打开开关
+    const toggle = container.querySelector<HTMLButtonElement>('[data-dsh-part="settings-advisor-switch"]')!
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    await act(async () => { toggle.click() })
+    // Then 写的是根字段 advisorEnabled
+    expect(form.writes).toContainEqual(['advisorEnabled', true])
+    // And 未写入过的数字字段回落到宿主 schema 的默认值
+    const budget = container.querySelector<HTMLInputElement>('[data-dsh-part="settings-advisor-budget"]')!
+    expect(budget.value).toBe('200000')
+    const retries = container.querySelector<HTMLInputElement>('[data-dsh-part="settings-advisor-retry"]')!
+    expect(retries.value).toBe('1')
+    // When 把预算改成范围内整数（React 受控输入要走原生 value setter 才能触发 onChange）
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setter.call(budget, '500000')
+      budget.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    // Then 写的是 advisorSessionTokenBudget
+    expect(form.writes).toContainEqual(['advisorSessionTokenBudget', 500000])
+  })
+
+  it('顾问数字字段超出范围时不写入宿主', async () => {
+    const form = fakeForm({ progressUpdates: true })
+    await act(async () => root.render(createElement(ProgressUpdatesSettingsSection, {
+      openPanel: vi.fn(), close: vi.fn(), settings: form,
+    } as never)))
+    const output = container.querySelector<HTMLInputElement>('[data-dsh-part="settings-advisor-output"]')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setter.call(output, '12')
+      output.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    // 256 是宿主 schema 的下限，12 必须留在输入框里而不提交。
+    expect(form.writes.some(([field]) => field === 'advisorMaxTokens')).toBe(false)
+    expect(output.value).toBe('12')
   })
 
   it('点「打开进展面板」真的调用了 openTab（vi.fn + 真实 click）', async () => {

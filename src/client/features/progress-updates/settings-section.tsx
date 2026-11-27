@@ -61,6 +61,15 @@ export const NUDGE_THRESHOLD_MAX = 50
 /** 宿主 schema 里的默认阈值（`NUDGE_THRESHOLD`，两处同一个数）。 */
 export const NUDGE_THRESHOLD_DEFAULT = 8
 
+/** 顾问数字字段的范围与默认值，逐项照抄宿主 `Config` schema。 */
+export const ADVISOR_LIMITS = {
+  budget: { min: 0, max: 10_000_000, step: 1, fallback: 200_000 },
+  output: { min: 256, max: 32_768, step: 1, fallback: 4_096 },
+  context: { min: 8_000, max: 1_000_000, step: 1, fallback: 100_000 },
+  timeout: { min: 1_000, max: 300_000, step: 1, fallback: 300_000 },
+  retries: { min: 0, max: 3, step: 1, fallback: 1 },
+} as const
+
 /**
  * 没有表单通道时的空快照。写成模块级常量，是因为
  * `useSyncExternalStore` 要求 `getSnapshot` 返回稳定引用。
@@ -217,6 +226,69 @@ function PanelMark(): ReactNode {
   )
 }
 
+/** 顾问开关那一行的标记：两枚对望的气泡（第二意见）。 */
+function AdvisorMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3.5 8.2a3.7 3.7 0 0 1 3.7-3.7h3.1a3.7 3.7 0 0 1 0 7.4H8.9L6.3 14v-2.3a3.7 3.7 0 0 1-2.8-3.5Z" />
+      <path d="M12.2 6.2h.6a3.4 3.4 0 0 1 3.4 3.4c0 1.5-1 2.8-2.4 3.2v1.9l-2.1-1.6" />
+    </svg>
+  )
+}
+
+/** 顾问预算那一行的标记：一枚硬币（成本闸门）。 */
+function AdvisorBudgetMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="10" cy="10" r="6.5" />
+      <path d="M12.3 7.6c-.6-.6-1.4-.9-2.3-.9-1.4 0-2.4.7-2.4 1.7 0 1.1 1 1.5 2.4 1.8 1.4.3 2.4.7 2.4 1.7 0 1-1 1.7-2.4 1.7-.9 0-1.7-.3-2.3-.9" />
+      <path d="M10 5.6v1M10 13.4v1" />
+    </svg>
+  )
+}
+
+/** 顾问输出上限那一行的标记：一块向下收窄的量尺。 */
+function AdvisorOutputMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="4" width="13" height="12" rx="2" />
+      <path d="M6.8 8h6.4M6.8 11h4M6.8 14h2" />
+    </svg>
+  )
+}
+
+/** 顾问上下文预算那一行的标记：一叠层叠的历史。 */
+function AdvisorContextMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="4" width="13" height="4" rx="1.4" />
+      <rect x="3.5" y="9" width="13" height="4" rx="1.4" />
+      <path d="M6 15h8" />
+    </svg>
+  )
+}
+
+/** 顾问超时那一行的标记：一只钟。 */
+function AdvisorTimeoutMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="10" cy="10" r="6.5" />
+      <path d="M10 6.4V10l2.4 1.6" />
+    </svg>
+  )
+}
+
+/** 顾问重试那一行的标记：一段循环箭头。 */
+function AdvisorRetryMark(): ReactNode {
+  return (
+    <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M16 10a6 6 0 1 1-1.8-4.3" />
+      <path d="M16 3.9v2.9h-2.9" />
+    </svg>
+  )
+}
+
+
 /**
  * 一行卡片的外壳：左侧方块、中间名称与说明、右侧控件。
  * @param props - 行内各部件与是否关闭态。
@@ -284,7 +356,7 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   )
 
   /** 写入被拒/失败时落在哪一行、说什么。 */
-  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'mediaTools' | 'teamPolicyCacheGuard', text: string } | undefined>(undefined)
+  const [failure, setFailure] = useState<{ row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'mediaTools' | 'teamPolicyCacheGuard' | 'advisor' | 'advisorBudget' | 'advisorOutput' | 'advisorContext' | 'advisorTimeout' | 'advisorRetry', text: string } | undefined>(undefined)
 
   const value = snapshot.value ?? {}
   // 没有表单通道，或宿主还没答上来/明确说这份文档不收写入：都只能只读。
@@ -308,6 +380,18 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   const mediaTools = value.mediaTools !== false
   // 缺键 = 开：宿主 schema 上是 default(true)，缺键时界面必须同样读成开。
   const teamPolicyCacheGuard = value.teamPolicyCacheGuard !== false
+  // 顾问这一组：缺键一律落回宿主 schema 的默认值，界面读数与运行时一致。
+  const advisorEnabled = value.advisorEnabled === true
+  const advisorBudget = typeof value.advisorSessionTokenBudget === 'number'
+    ? value.advisorSessionTokenBudget : ADVISOR_LIMITS.budget.fallback
+  const advisorOutput = typeof value.advisorMaxTokens === 'number'
+    ? value.advisorMaxTokens : ADVISOR_LIMITS.output.fallback
+  const advisorContext = typeof value.advisorContextTokenBudget === 'number'
+    ? value.advisorContextTokenBudget : ADVISOR_LIMITS.context.fallback
+  const advisorTimeout = typeof value.advisorTimeoutMs === 'number'
+    ? value.advisorTimeoutMs : ADVISOR_LIMITS.timeout.fallback
+  const advisorRetry = typeof value.advisorMaxRetries === 'number'
+    ? value.advisorMaxRetries : ADVISOR_LIMITS.retries.fallback
   const threshold = typeof value.progressUpdatesNudgeThreshold === 'number'
     ? value.progressUpdatesNudgeThreshold
     : NUDGE_THRESHOLD_DEFAULT
@@ -324,12 +408,49 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
   useEffect(() => { setDraft(String(threshold)) }, [threshold])
 
   /**
+   * 顾问的五个数字字段各有一份草稿文本：与催促阈值同一条策略——只有落进
+   * 宿主 schema 范围的整数才提交，半截输入留在框里不打扰宿主。
+   */
+  const advisorNumbers = {
+    advisorBudget: advisorBudget,
+    advisorOutput: advisorOutput,
+    advisorContext: advisorContext,
+    advisorTimeout: advisorTimeout,
+    advisorRetry: advisorRetry,
+  } as const
+  const [advisorDrafts, setAdvisorDrafts] = useState<Record<string, string>>(
+    () => Object.fromEntries(Object.entries(advisorNumbers).map(([key, value]) => [key, String(value)])),
+  )
+  useEffect(() => {
+    setAdvisorDrafts(Object.fromEntries(Object.entries(advisorNumbers).map(([key, value]) => [key, String(value)])))
+  }, [advisorBudget, advisorOutput, advisorContext, advisorTimeout, advisorRetry])
+
+  /**
+   * 提交一个顾问数字字段。
+   * @param row - 出问题的是哪一行。
+   * @param field - 本插件 Config 的根字段名。
+   * @param raw - 输入框原始文本。
+   * @param bounds - 合法范围。
+   */
+  const editAdvisorNumber = (
+    row: 'advisorBudget' | 'advisorOutput' | 'advisorContext' | 'advisorTimeout' | 'advisorRetry',
+    field: ProgressUpdatesField,
+    raw: string,
+    bounds: { min: number, max: number },
+  ): void => {
+    setAdvisorDrafts((prev) => ({ ...prev, [row]: raw }))
+    const parsed = Number(raw)
+    if (!Number.isSafeInteger(parsed) || parsed < bounds.min || parsed > bounds.max) return
+    write(row, field, parsed)
+  }
+
+  /**
    * 写一个字段；宿主拒绝、传输失败、没有通道都落到该行的说明行上。
    * @param row - 出问题的是哪一行。
    * @param field - 字段名（本插件 Config 的根字段）。
    * @param next - 新值。
    */
-  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'mediaTools' | 'teamPolicyCacheGuard', field: ProgressUpdatesField, next: boolean | number | string): void => {
+  const write = (row: 'enabled' | 'threshold' | 'language' | 'cacheWarmup' | 'retrieval' | 'cacheWaitWarmup' | 'cacheAffinity' | 'planModePipeline' | 'dispatchExecutionGuard' | 'toolRunawayGuard' | 'mediaTools' | 'teamPolicyCacheGuard' | 'advisor' | 'advisorBudget' | 'advisorOutput' | 'advisorContext' | 'advisorTimeout' | 'advisorRetry', field: ProgressUpdatesField, next: boolean | number | string): void => {
     setFailure(undefined)
     if (settings === undefined) {
       setFailure({ row, text: translate('settingsUnavailable') })
@@ -600,6 +721,147 @@ export function ProgressUpdatesSettingsSection(props: ProgressUpdatesSettingsPro
           />
         </CardRow>
 
+        <CardRow
+          part="settings-row-advisor"
+          brand="#3f7d8c"
+          mark={<AdvisorMark />}
+          name={translate('settingsAdvisorEnabledName')}
+          note={unavailable
+            ?? (failure?.row === 'advisor' ? failure.text : translate('settingsAdvisorEnabledNote'))}
+          danger={failure?.row === 'advisor' || unavailable !== undefined}
+          enabled={advisorEnabled}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={advisorEnabled}
+            aria-label={translate('settingsAdvisorEnabledName')}
+            className="dsh-progress-switch"
+            data-dsh-part="settings-advisor-switch"
+            disabled={!writable}
+            onClick={() => { write('advisor', 'advisorEnabled', !advisorEnabled) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-advisor-budget"
+          brand="#2f7d5c"
+          mark={<AdvisorBudgetMark />}
+          name={translate('settingsAdvisorSessionBudgetName')}
+          note={failure?.row === 'advisorBudget' ? failure.text : translate('settingsAdvisorSessionBudgetNote')}
+          danger={failure?.row === 'advisorBudget'}
+        >
+          <input
+            type="number"
+            inputMode="numeric"
+            min={ADVISOR_LIMITS.budget.min}
+            max={ADVISOR_LIMITS.budget.max}
+            step={ADVISOR_LIMITS.budget.step}
+            className="dsh-progress-number dsh-progress-number-wide"
+            data-dsh-part="settings-advisor-budget"
+            aria-label={translate('settingsAdvisorSessionBudgetName')}
+            value={advisorDrafts['advisorBudget'] ?? '200000'}
+            disabled={!writable}
+            onChange={(event) => { editAdvisorNumber('advisorBudget', 'advisorSessionTokenBudget', event.target.value, ADVISOR_LIMITS.budget) }}
+            onBlur={() => { setAdvisorDrafts((prev) => ({ ...prev, advisorBudget: String(advisorBudget) })) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-advisor-output"
+          brand="#4d6bfe"
+          mark={<AdvisorOutputMark />}
+          name={translate('settingsAdvisorMaxTokensName')}
+          note={failure?.row === 'advisorOutput' ? failure.text : translate('settingsAdvisorMaxTokensNote')}
+          danger={failure?.row === 'advisorOutput'}
+        >
+          <input
+            type="number"
+            inputMode="numeric"
+            min={ADVISOR_LIMITS.output.min}
+            max={ADVISOR_LIMITS.output.max}
+            step={ADVISOR_LIMITS.output.step}
+            className="dsh-progress-number dsh-progress-number-wide"
+            data-dsh-part="settings-advisor-output"
+            aria-label={translate('settingsAdvisorMaxTokensName')}
+            value={advisorDrafts['advisorOutput'] ?? '4096'}
+            disabled={!writable}
+            onChange={(event) => { editAdvisorNumber('advisorOutput', 'advisorMaxTokens', event.target.value, ADVISOR_LIMITS.output) }}
+            onBlur={() => { setAdvisorDrafts((prev) => ({ ...prev, advisorOutput: String(advisorOutput) })) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-advisor-context"
+          brand="#168a9c"
+          mark={<AdvisorContextMark />}
+          name={translate('settingsAdvisorContextName')}
+          note={failure?.row === 'advisorContext' ? failure.text : translate('settingsAdvisorContextNote')}
+          danger={failure?.row === 'advisorContext'}
+        >
+          <input
+            type="number"
+            inputMode="numeric"
+            min={ADVISOR_LIMITS.context.min}
+            max={ADVISOR_LIMITS.context.max}
+            step={ADVISOR_LIMITS.context.step}
+            className="dsh-progress-number dsh-progress-number-wide"
+            data-dsh-part="settings-advisor-context"
+            aria-label={translate('settingsAdvisorContextName')}
+            value={advisorDrafts['advisorContext'] ?? '100000'}
+            disabled={!writable}
+            onChange={(event) => { editAdvisorNumber('advisorContext', 'advisorContextTokenBudget', event.target.value, ADVISOR_LIMITS.context) }}
+            onBlur={() => { setAdvisorDrafts((prev) => ({ ...prev, advisorContext: String(advisorContext) })) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-advisor-timeout"
+          brand="#d97724"
+          mark={<AdvisorTimeoutMark />}
+          name={translate('settingsAdvisorTimeoutName')}
+          note={failure?.row === 'advisorTimeout' ? failure.text : translate('settingsAdvisorTimeoutNote')}
+          danger={failure?.row === 'advisorTimeout'}
+        >
+          <input
+            type="number"
+            inputMode="numeric"
+            min={ADVISOR_LIMITS.timeout.min}
+            max={ADVISOR_LIMITS.timeout.max}
+            step={ADVISOR_LIMITS.timeout.step}
+            className="dsh-progress-number dsh-progress-number-wide"
+            data-dsh-part="settings-advisor-timeout"
+            aria-label={translate('settingsAdvisorTimeoutName')}
+            value={advisorDrafts['advisorTimeout'] ?? '300000'}
+            disabled={!writable}
+            onChange={(event) => { editAdvisorNumber('advisorTimeout', 'advisorTimeoutMs', event.target.value, ADVISOR_LIMITS.timeout) }}
+            onBlur={() => { setAdvisorDrafts((prev) => ({ ...prev, advisorTimeout: String(advisorTimeout) })) }}
+          />
+        </CardRow>
+
+        <CardRow
+          part="settings-row-advisor-retry"
+          brand="#7c6aef"
+          mark={<AdvisorRetryMark />}
+          name={translate('settingsAdvisorRetriesName')}
+          note={failure?.row === 'advisorRetry' ? failure.text : translate('settingsAdvisorRetriesNote')}
+          danger={failure?.row === 'advisorRetry'}
+        >
+          <input
+            type="number"
+            inputMode="numeric"
+            min={ADVISOR_LIMITS.retries.min}
+            max={ADVISOR_LIMITS.retries.max}
+            step={ADVISOR_LIMITS.retries.step}
+            className="dsh-progress-number dsh-progress-number-wide"
+            data-dsh-part="settings-advisor-retry"
+            aria-label={translate('settingsAdvisorRetriesName')}
+            value={advisorDrafts['advisorRetry'] ?? '1'}
+            disabled={!writable}
+            onChange={(event) => { editAdvisorNumber('advisorRetry', 'advisorMaxRetries', event.target.value, ADVISOR_LIMITS.retries) }}
+            onBlur={() => { setAdvisorDrafts((prev) => ({ ...prev, advisorRetry: String(advisorRetry) })) }}
+          />
+        </CardRow>
         <CardRow
           part="settings-row-threshold"
           brand="#2f9e6e"
