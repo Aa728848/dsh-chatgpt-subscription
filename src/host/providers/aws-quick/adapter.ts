@@ -155,10 +155,10 @@ export class AwsQuickAdapter extends LlmAdapter{
    }
    if(!turn)throw new LlmError('AWS Quick failed to initialize its connection.','SERVER')
    const currentTurn=turn
-   let open:{index:number;kind:'text'|'reasoning';text:string}|null=null;let index=0
+   let open:{index:number;kind:'text'|'reasoning';text:string}|null=null;let index=0;let visibleText=''
    const close=():StreamChunk|undefined=>{if(!open)return undefined;const current=open;open=null;return{type:'block-end',index:current.index,block:current.kind==='text'?{type:'text',text:current.text}:{type:'reasoning',text:current.text}} as StreamChunk}
    const filter=new QuickMarkupFilter()
-   const emit=function*(kind:'text'|'reasoning',delta:string):Generator<StreamChunk>{if(!delta)return;const currentOpen=open as {index:number;kind:'text'|'reasoning';text:string}|null;if(currentOpen?.kind!==kind){const closing=close();if(closing)yield closing;open={kind,index:index++,text:''};yield{type:'block-start',index:open.index,blockType:kind} as StreamChunk}open!.text+=delta;yield{type:kind==='text'?'text-delta':'reasoning-delta',index:open!.index,text:delta} as StreamChunk}
+   const emit=function*(kind:'text'|'reasoning',delta:string):Generator<StreamChunk>{if(!delta)return;const currentOpen=open as {index:number;kind:'text'|'reasoning';text:string}|null;if(currentOpen?.kind!==kind){const closing=close();if(closing)yield closing;open={kind,index:index++,text:''};yield{type:'block-start',index:open.index,blockType:kind} as StreamChunk}open!.text+=delta;if(kind==='text')visibleText+=delta;yield{type:kind==='text'?'text-delta':'reasoning-delta',index:open!.index,text:delta} as StreamChunk}
    const separator=():string=>{const current=open as {kind:'text'|'reasoning';text:string}|null;return current?.kind==='text'&&current.text.trim()?'\n\n':''}
    for await(const event of currentTurn.connection.events()){
     if(event.kind==='tool-call'){
@@ -178,8 +178,16 @@ export class AwsQuickAdapter extends LlmAdapter{
      return
     }
     if(event.kind==='done'){
-     yield* emit('text',filter.flush())
-     const decisions=filter.decisions.splice(0)
+     let decisions:QuickDecision[]
+     if(event.reason!=='cancelled'&&event.text!==undefined){
+      // Quick's final text can contain markup omitted from text_delta. Parse that
+      // authoritative copy, but emit only the suffix not already streamed to DSH.
+      const finalFilter=new QuickMarkupFilter();const finalText=finalFilter.push(event.text)+finalFilter.flush()
+      if(finalText.startsWith(visibleText))yield* emit('text',finalText.slice(visibleText.length))
+      decisions=finalFilter.decisions.splice(0)
+     }else{
+      yield* emit('text',filter.flush());decisions=filter.decisions.splice(0)
+     }
      if(decisions.length&&event.reason!=='cancelled'){
       if(tools.some((tool)=>tool.name===ASK_TOOL)){
        // Quick ended its turn on a choice card; DSH asks through its own question tool and

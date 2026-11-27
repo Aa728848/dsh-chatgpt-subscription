@@ -10,7 +10,7 @@ export type QuickRawObserver=(event:QuickWireEvent)=>void
 /** Decides whether a Quick-side approval request concerns a tool DSH owns (and will permission itself). */
 export type QuickApprovalResolver=(request:{toolName?:string;actionId?:string;connectorId?:string})=>boolean
 export interface QuickToolCall{id:string;name:string;argumentsText:string}
-export type QuickStreamEvent={kind:'text'|'reasoning';delta:string}|{kind:'tool-call';call:QuickToolCall}|{kind:'done';reason:'stop'|'cancelled'}
+export type QuickStreamEvent={kind:'text'|'reasoning';delta:string}|{kind:'tool-call';call:QuickToolCall}|{kind:'done';reason:'stop'|'cancelled';text?:string}
 interface Pending<T>{resolve(value:T):void;reject(error:Error):void}
 class EventQueue implements AsyncIterable<QuickStreamEvent>{
  private values:QuickStreamEvent[]=[];private waiting:Pending<IteratorResult<QuickStreamEvent>>|null=null;private failure:Error|null=null;private closed=false
@@ -23,7 +23,7 @@ function payload(event:QuickWireEvent):Record<string,unknown>{return typeof even
 function textField(event:QuickWireEvent,key:string):string|undefined{const value=payload(event)[key];return typeof value==='string'&&value?value:undefined}
 async function bytes(data:unknown):Promise<Uint8Array|string|null>{if(typeof data==='string')return data;if(data instanceof ArrayBuffer)return new Uint8Array(data);if(ArrayBuffer.isView(data))return new Uint8Array(data.buffer,data.byteOffset,data.byteLength);if(typeof Blob!=='undefined'&&data instanceof Blob)return new Uint8Array(await data.arrayBuffer());return null}
 export class QuickConnection{
- private readonly queue=new EventQueue();private assistantMessageId:string|undefined;private done=false;private closed=false;private signal:AbortSignal|undefined;private activity:{pulse():void}|undefined;private approvalResolver:QuickApprovalResolver|undefined
+ private readonly queue=new EventQueue();private assistantMessageId:string|undefined;private finalText:string|undefined;private done=false;private closed=false;private signal:AbortSignal|undefined;private activity:{pulse():void}|undefined;private approvalResolver:QuickApprovalResolver|undefined
  private connectedResolve:()=>void=()=>{};private readonly connected=new Promise<void>((resolve)=>{this.connectedResolve=resolve})
  private readonly keepalive:ReturnType<typeof setInterval>;private readonly refresh:ReturnType<typeof setInterval>
  private constructor(private readonly socket:WebSocket,private readonly outpost:AwsQuickOutpost,private readonly threadId:string,private readonly preApprovedTools?:string[],private readonly invokingOutpostId?:string,private readonly appVersion?:string,private readonly rawObserver?:QuickRawObserver){
@@ -56,7 +56,7 @@ export class QuickConnection{
  sendUser(text:string,mode:AwsQuickMode,effort?:AwsQuickEffort,attachments?:QuickImageAttachment[],customPrompt?:string):void{if(this.done||this.closed)throw new LlmError('Quick connection is closed.','STREAM_CLOSED');this.send(quickUserMessage({text,threadId:this.threadId,mode,effort,preApprovedTools:this.preApprovedTools,invokingOutpostId:this.invokingOutpostId,appVersion:this.appVersion,attachments,customPrompt,userLocale:Intl.DateTimeFormat().resolvedOptions().locale,userTimezone:Intl.DateTimeFormat().resolvedOptions().timeZone}))}
  answerTool(call:QuickToolCall,result:string|QuickResultContent[],isError=false):void{if(this.done||this.closed||this.socket.readyState!==WebSocket.OPEN)throw new LlmError('Quick tool result cannot be sent because the connection is closed.','STREAM_CLOSED');const content=typeof result==='string'?[{type:'text' as const,text:result}]:result;this.send({type:'tool_result',payload:{tool_call_id:call.id,result:{content},error:isError?(typeof result==='string'?result:'Tool execution failed.'):null}})}
  events():AsyncIterable<QuickStreamEvent>{return this.queue}
- private finish(reason:'stop'|'cancelled'):void{if(this.done)return;this.done=true;this.queue.push({kind:'done',reason});this.queue.close()}
+ private finish(reason:'stop'|'cancelled',text?:string):void{if(this.done)return;this.done=true;this.queue.push({kind:'done',reason,...(text?{text}:{})});this.queue.close()}
  private async receive(data:unknown):Promise<void>{
   const raw=await bytes(data);if(raw===null)return
   const event=typeof raw==='string'?JSON.parse(raw) as QuickWireEvent:decodeQuickOutput(raw);if(!event)return;this.rawObserver?.(event);this.activity?.pulse()
@@ -77,12 +77,13 @@ export class QuickConnection{
   if(type==='connected'){const user=payload(event).user;this.send({type:'federate_status',payload:{user}});this.connectedResolve()}
   if(type==='message_start')this.assistantMessageId=textField(event,'message_id')??event.message_id??this.assistantMessageId
   if(type==='text_delta'||type==='thinking_delta'){const delta=textField(event,'delta');if(delta)this.queue.push({kind:type==='text_delta'?'text':'reasoning',delta});return}
+  if(type==='text_complete'){this.finalText=textField(event,'text')??this.finalText;return}
   if(type==='tool_call'||type==='outpost_tool_call'){
    const p=payload(event);const id=textField(event,'tool_call_id')??textField(event,'id');const name=textField(event,'tool_name')??textField(event,'name')
    if(id&&name){const args=p.arguments??p.input??{};this.queue.push({kind:'tool-call',call:{id,name,argumentsText:unwrapQuickToolArguments(args)}})}return
   }
   if(type==='turn_aborted'){this.finish('cancelled');return}
-  if(type==='message_complete'||type==='stream_ended'){this.finish('stop');return}
+  if(type==='message_complete'||type==='stream_ended'){this.finish('stop',textField(event,'text')??this.finalText);return}
   if(type==='error'||type==='guardrail_blocked'){const message=textField(event,'message')??textField(event,'error')??'AWS Quick returned an error.';const oversize=/over the \d+ ?KB size limit|size limit/i.test(message);this.queue.fail(new LlmError(message,type==='guardrail_blocked'||oversize?'INVALID_REQUEST':'SERVER'))}
  }
  close():void{if(this.closed)return;this.closed=true;clearInterval(this.keepalive);clearInterval(this.refresh);this.signal?.removeEventListener('abort',this.onAbort);this.queue.close();if(this.socket.readyState===WebSocket.OPEN||this.socket.readyState===WebSocket.CONNECTING)this.socket.close(1000,'Complete')}

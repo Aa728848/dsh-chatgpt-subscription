@@ -69,6 +69,36 @@ describe('AWS Quick adapter',()=>{
    await collect(adapter.stream(next as never));expect(opened[1].threadId).toBe(opened[0].threadId);expect(opened[1].state.sent).toBe('<decision_response>下一步?: 推送</decision_response>');await adapter.dispose()
   }finally{await cleanup(file)}
  })
+ it('lifts decisions carried only by the final message text without duplicating streamed prose',async()=>{
+  const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-final-decision-')),'settings.json')
+  try{
+   const ask={name:'ask_user_question',description:'Ask',parameters:{type:'object',properties:{}}}
+   const bridge={ensure:async()=>({id:'dsh-quick',fingerprint:'tools',outpostId:'o',resolve:()=>null}),track:()=>{},settle:()=>{},dispose:async()=>{}} as unknown as AwsQuickToolBridge
+   const decision='<decision question="接下来怎么做?"><option description="继续验证">重新授权</option><option>先停在这里</option></decision>'
+   const fake=fakeConnection([[{kind:'text',delta:'接下来怎么做？\n'},{kind:'done',reason:'stop',text:'接下来怎么做？\n'+decision}]])
+   const adapter=new AwsQuickAdapter({settings:new AwsQuickSettingsStore(file),outpost,toolBridge:bridge,openConnection:async()=>fake.connection})
+   const chunks=await collect(adapter.stream(request('选择下一步',[ask]) as never))
+   const text=chunks.filter((c)=>c.type==='text-delta').map((c)=>(c as {text:string}).text).join('')
+   expect(text).toBe('接下来怎么做？\n')
+   const call=chunks.find((c)=>c.type==='tool-call-delta') as unknown as {name:string;argumentsDelta:string}
+   expect(call.name).toBe('ask_user_question')
+   expect(JSON.parse(call.argumentsDelta)).toEqual({questions:[{id:'q1',question:'接下来怎么做?',options:[{label:'重新授权',description:'继续验证'},{label:'先停在这里'}]}]})
+   expect(chunks.at(-1)).toMatchObject({reason:{kind:'tool-calls'}});await adapter.dispose()
+  }finally{await cleanup(file)}
+ })
+ it('passes an exit_plan_mode connector call through as the native DSH tool',async()=>{
+  const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-exit-plan-')),'settings.json')
+  try{
+   const plan={name:'exit_plan_mode',description:'Submit plan',parameters:{type:'object',properties:{}}}
+   const args='{"plan":"1. Verify the protocol"}'
+   const fake=fakeConnection([[{kind:'tool-call',call:{id:'plan-1',name:'mcp__dsh-quick__exit_plan_mode',argumentsText:args}}]])
+   const bridge={ensure:async()=>({id:'dsh-quick',fingerprint:'tools',outpostId:'o',resolve:(name:string)=>name==='mcp__dsh-quick__exit_plan_mode'?'exit_plan_mode':null}),track:()=>{},settle:()=>{},dispose:async()=>{}} as unknown as AwsQuickToolBridge
+   const adapter=new AwsQuickAdapter({settings:new AwsQuickSettingsStore(file),outpost,toolBridge:bridge,openConnection:async()=>fake.connection})
+   const chunks=await collect(adapter.stream(request('submit the plan',[plan]) as never))
+   expect(chunks.find((c)=>c.type==='tool-call-delta')).toMatchObject({id:'plan-1',name:'exit_plan_mode',argumentsDelta:args})
+   expect(chunks.at(-1)).toMatchObject({reason:{kind:'tool-calls'}});await adapter.dispose()
+  }finally{await cleanup(file)}
+ })
  it('falls back to numbered text when the session offers no question tool',async()=>{
   const file=path.join(await fs.mkdtemp(path.join(os.tmpdir(),'dsh-aws-quick-decision-text-')),'settings.json')
   try{
