@@ -24,7 +24,7 @@ import {
 import type { PromptCacheOverride } from '../../common/prompt-cache-policy.ts'
 import { promptCacheActivityStore } from '../../common/cache-activity.ts'
 import { ClaudeCodeFirstPartyTracker } from '../_claude-shared/claude-code-first-party.ts'
-import { signClaudeCodeCch } from '../_claude-shared/claude-code-cch.ts'
+import { signClaudeCodeRequest } from '../_claude-shared/claude-code-cch.ts'
 import { isClaudeThinkingTokenCountUnsupported } from '../_claude-shared/claude-code-corrections.ts'
 import type { ClaudeCodeVersionSelection } from '../_claude-shared/claude-code-version.ts'
 import { fetchWithContextBudgetRecovery } from '../../common/context-budget-fetch.ts'
@@ -282,7 +282,7 @@ export class ClaudeApiAdapter extends LlmAdapter {
       response = await this.fetchFn(claudeApiUrl(baseUrl, CLAUDE_API_MESSAGES_PATH), {
         method: 'POST',
         headers: buildClaudeApiHeaders({ apiKey, version: version.value, sessionUuid, betas: deriveClaudeApiBetas(body, entry, thinkingTokenCount), stream: true, firstParty }),
-        body: signClaudeCodeCch(JSON.stringify(body), version.seed),
+        body: signClaudeCodeRequest(body, version.seed),
         signal,
       })
     } catch (error) {

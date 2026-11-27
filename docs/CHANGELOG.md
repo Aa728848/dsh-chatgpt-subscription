@@ -7,6 +7,8 @@
 
 - **[dispatch] 修复 cordis Proxy 下 `dispatch_ledger {action:"self"}` 与带 mandate 头委派抛 `cannot get property "allowedRoutes" without inject`**（#144）：`liveSubagentModelSelectionPreference` 探测宿主 ctx 时裸读 `allowedRoutes`，而 cordis 的 ctx Proxy 读取任何未在 `inject` 中声明的服务属性都会抛错，`?.` 挡不住异常，异常一路穿出到工具执行。现在所有属性探测都收进 `safeProp` 的 try/catch：服务未挂载时按「没有实时服务」返回 undefined，而不是拖垮 `dispatch_ledger` 和带头的 `subagent` / `send_message`。
 
+- **[claude / claude-api] 修复 `cch` 签名写进历史消息导致的缓存失效**（#139）：签名此前在整个序列化请求里替换第一个 `cch=00000;`，而 `messages` 排在 `system` 之前；历史里一旦出现这段文字（例如工具结果里显示了签名代码），签名就会写进该消息、计费头保持未签名，此后每个请求的这条历史都不同，提示缓存从此处起再也接不上。现在签名只写入 `system[0]` 计费块，历史原样发送。
+
 - **[claude / claude-api] 修复工具缓存标记排在 global system 块之前导致的偶发 400**（#138）：请求体渲染顺序为 tools → system → messages，当静态 system 块携带 `scope: "global"` 时，最后一个工具上的普通 `ephemeral` 标记会排在其前面，触发“`scope: "global"` 之后出现更窄缓存范围”的校验错误。现在只要 system 中存在 global 作用域的缓存块就跳过工具标记（global 断点已覆盖其前面的全部工具定义），并把这一个断点名额留给消息；两条线路行为一致。
 
 ## 0.89.0 - 2026-11-27

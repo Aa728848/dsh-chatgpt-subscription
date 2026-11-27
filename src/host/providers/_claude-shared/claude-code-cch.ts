@@ -104,10 +104,55 @@ export function claudeCodeCchToken(body: string, seed = CLAUDE_CODE_CCH_SEED): s
     .padStart(5, '0')
 }
 
-/** Sign after serialization. A body without the placeholder is returned verbatim. */
+const CCH_PLACEHOLDER = 'cch=00000;'
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * The billing block's text when it still carries the placeholder. Only
+ * system[0] is the billing block: the same characters quoted in history (a tool
+ * result showing this file, a pasted header) must reach the wire unchanged, or
+ * every later request rewrites that message and the prompt cache stops matching.
+ */
+function billingText(payload: unknown): string | undefined {
+  const system = isRecord(payload) ? payload.system : undefined
+  const first = Array.isArray(system) ? system[0] : undefined
+  const text = isRecord(first) && first.type === 'text' && typeof first.text === 'string' ? first.text : undefined
+  return text !== undefined && text.includes(CCH_PLACEHOLDER) ? text : undefined
+}
+
+/**
+ * Serialize and sign a request payload. The token is computed over the whole
+ * serialized body, as before, and written into the billing block only.
+ */
+export function signClaudeCodeRequest(payload: unknown, seed = CLAUDE_CODE_CCH_SEED): string {
+  const body = JSON.stringify(payload)
+  const text = billingText(payload)
+  if (text === undefined || !isRecord(payload) || !Array.isArray(payload.system)) return body
+  const [first, ...rest] = payload.system as unknown[]
+  const signed = text.replace(CCH_PLACEHOLDER, `cch=${claudeCodeCchToken(body, seed)};`)
+  // Same keys in the same order: the result differs from `body` only in the token.
+  return JSON.stringify({ ...payload, system: [{ ...(first as Record<string, unknown>), text: signed }, ...rest] })
+}
+
+/**
+ * Sign an already serialized body by the same rule. A body without a billing
+ * placeholder, or whose billing text occurs more than once, is returned verbatim.
+ */
 export function signClaudeCodeCch(body: string, seed = CLAUDE_CODE_CCH_SEED): string {
-  const match = /\bcch=00000;/.exec(body)
-  if (match === null) return body
-  const token = claudeCodeCchToken(body, seed)
-  return body.slice(0, match.index + 4) + token + body.slice(match.index + 9)
+  let payload: unknown
+  try {
+    payload = JSON.parse(body)
+  } catch {
+    return body
+  }
+  const text = billingText(payload)
+  if (text === undefined) return body
+  const literal = JSON.stringify(text)
+  const start = body.indexOf(literal)
+  if (start < 0 || body.indexOf(literal, start + 1) >= 0) return body
+  const at = start + literal.indexOf(CCH_PLACEHOLDER)
+  return body.slice(0, at + 4) + claudeCodeCchToken(body, seed) + body.slice(at + 9)
 }

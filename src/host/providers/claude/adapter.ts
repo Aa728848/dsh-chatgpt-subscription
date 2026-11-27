@@ -97,7 +97,7 @@ import {
   claudeCodeSessionUuid,
   type ClaudeCodeFirstPartyContext,
 } from '../_claude-shared/claude-code-first-party.ts'
-import { signClaudeCodeCch } from '../_claude-shared/claude-code-cch.ts'
+import { signClaudeCodeRequest } from '../_claude-shared/claude-code-cch.ts'
 import { ClaudeCapabilityMemory, claudeCapabilityMemoryPath } from '../_claude-shared/claude-capability-memory.ts'
 import {
   isClaudeSpeedNeedsBeta,
@@ -661,7 +661,7 @@ export class ClaudeAdapter extends LlmAdapter {
             cacheTtl,
             method: 'POST',
           }),
-          body: signClaudeCodeCch(JSON.stringify(payload), version.seed),
+          body: signClaudeCodeRequest(payload, version.seed),
           signal,
         },
       )
