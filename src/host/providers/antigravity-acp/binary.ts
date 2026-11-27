@@ -108,12 +108,14 @@ export interface ResolvedAcpBinary {
  * The registry's standalone server already speaks ACP on stdio and rejects the
  * full CLI's acp and disable-telemetry flags. Detect configured paths too.
  */
-export function acpLaunchArgs(binary: ResolvedAcpBinary): string[] {
+export function acpLaunchArgs(binary: ResolvedAcpBinary, platform = process.platform): string[] {
   const executable = path.basename(binary.path).toLowerCase()
   const standalone = binary.kind === 'downloaded'
     || executable === 'agy_acp_server.exe'
     || executable === 'agy_acp_server.par'
-  return standalone ? [] : ['acp', '--disable-telemetry']
+  if (!standalone) return ['acp', '--disable-telemetry']
+  // The official Registry requires an empty uid for both Linux standalone builds.
+  return platform === 'linux' ? ['--uid='] : []
 }
 
 /** Where a resolution attempt looked and what it found, for the status card. */

@@ -639,7 +639,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
           if (type === 'process_exit') {
             const detail = asRecord(update.detail)
             throw acpError(
-              'ACP_DISCONNECTED',
+              'ACP_PROMPT_INTERRUPTED',
               `(code ${String(detail?.code ?? 'null')}, signal ${String(detail?.signal ?? 'none')}).`,
             )
           }
@@ -749,7 +749,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
           }
           yield* closeBlocks()
           const reason = settleReason(settled.stopReason)
-          if (reason.kind === 'error') throw new LlmError(reason.failure.message, 'SERVER')
+          if (reason.kind === 'error') throw new LlmError(reason.failure.message, reason.failure.code as never)
           yield {
             type: 'finish',
             reason: reason.kind === 'aborted'
@@ -949,7 +949,14 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         this.lastUsage = { ...usage, at: this.now(), durationMs: this.now() - startedAt }
       }
     } catch (error) {
-      turn.settled = { error: asError(error) }
+      const failure = asLlmError(error)
+      // Once `session/prompt` is on the wire, an automatic retry can repeat real
+      // workspace actions. Only setup failures keep the reconnectable code.
+      turn.settled = {
+        error: failure.code === 'ACP_DISCONNECTED'
+          ? acpError('ACP_PROMPT_INTERRUPTED', failure.message)
+          : failure,
+      }
     } finally {
       turn.queue.push({ sessionUpdate: 'prompt_settled' })
     }
@@ -1543,12 +1550,13 @@ function asLlmError(error: unknown): LlmError {
     return new LlmError('The Antigravity ACP turn was cancelled.', 'ABORTED')
   }
   if (error instanceof AcpError) {
-    // The same wall also arrives with a different code, or with no code at all;
     // `needsAuth` already treats the sentence as proof, so the classification
     // does too instead of reporting a retryable transport fault.
     if (error.code === ACP_AUTH_REQUIRED_CODE || /authentication required/i.test(error.message)) {
       return acpError('ACP_AUTH_REQUIRED')
     }
+    // Local transport failures have no JSON-RPC code. A server refusal does.
+    if (error.code === undefined) return acpError('ACP_DISCONNECTED', error.message)
     // JSON-RPC's own reserved codes: the server understood the shape and said no.
     if (error.code === -32602) return acpError('ACP_INVALID_PARAMS')
     if (error.code === -32601) return acpError('ACP_METHOD_UNSUPPORTED')
@@ -1565,9 +1573,6 @@ function asLlmError(error: unknown): LlmError {
   return acpError('ACP_DISCONNECTED', message)
 }
 
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error))
-}
 
 function abortError(): Error {
   const error = new Error('Antigravity ACP turn was cancelled')

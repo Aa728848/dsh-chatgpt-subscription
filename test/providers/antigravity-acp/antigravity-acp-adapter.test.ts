@@ -75,6 +75,15 @@ process.stdin.on('data', (chunk) => {
         replyError(request.id, -32053, 'Authentication required: sign in first')
         continue
       }
+      if (text.includes('DISCONNECT')) {
+        notify({ sessionId: request.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'partial work' } } })
+        setTimeout(() => process.exit(23), 10)
+        continue
+      }
+      if (text.includes('REFUSAL')) {
+        reply(request.id, { stopReason: 'refusal' })
+        continue
+      }
       // A reused process can still flush the conversation it ran before.
       if (text.includes('STALE')) {
         notify({ sessionId: 'session-0', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'stale answer from session-0' } } })
@@ -409,6 +418,36 @@ describe('AntigravityAcpAdapter', () => {
       const policy = harness.adapter.providerRetryPolicy() as { retryableCodes: readonly string[] }
       expect(policy.retryableCodes).not.toContain('ACP_UPSTREAM_BLOCKED')
       expect(policy.retryableCodes).toContain('ACP_DISCONNECTED')
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
+  it('does not automatically replay a prompt when the agent disconnects mid-turn', async () => {
+    const harness = adapterHarness()
+    try {
+      await expect(collect(harness.adapter.stream(optionsOf({
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'DISCONNECT after partial work' }] }],
+      }) as never))).rejects.toMatchObject({ failure: { code: 'ACP_PROMPT_INTERRUPTED' } })
+      const policy = harness.adapter.providerRetryPolicy() as { retryableCodes: readonly string[] }
+      expect(policy.retryableCodes).not.toContain('ACP_PROMPT_INTERRUPTED')
+      // A process that dies during setup has not accepted work and remains retryable.
+      expect(policy.retryableCodes).toContain('ACP_DISCONNECTED')
+    } finally {
+      await harness.adapter.dispose()
+      harness.dispose()
+    }
+  })
+
+  it('preserves a terminal refusal instead of reclassifying it as a retryable server error', async () => {
+    const harness = adapterHarness()
+    try {
+      await expect(collect(harness.adapter.stream(optionsOf({
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'REFUSAL' }] }],
+      }) as never))).rejects.toMatchObject({ failure: { code: 'ACP_REFUSAL' } })
+      const policy = harness.adapter.providerRetryPolicy() as { retryableCodes: readonly string[] }
+      expect(policy.retryableCodes).not.toContain('ACP_REFUSAL')
     } finally {
       await harness.adapter.dispose()
       harness.dispose()

@@ -23,8 +23,10 @@ export const ACP_ERROR_CODES = {
   ACP_AUTH_REQUIRED: 'The Antigravity CLI is not signed in. Run `agy acp --login` or use the sign-in button in this card.',
   /** The executable is missing or cannot be started. */
   ACP_BINARY_UNAVAILABLE: 'No usable Antigravity CLI (agy) was found. Install it, or let this line download the official ACP server.',
-  /** The agent process exited mid-turn. */
-  ACP_DISCONNECTED: 'The Antigravity agent process ended mid-turn. Retry to reconnect.',
+  /** The agent process exited before a prompt was sent. */
+  ACP_DISCONNECTED: 'The Antigravity agent process ended before the prompt was sent. Retry to reconnect.',
+  /** A dispatched prompt may already have run tools; never replay it automatically. */
+  ACP_PROMPT_INTERRUPTED: 'The Antigravity connection ended after the prompt was sent. The turn was not retried automatically because that could repeat completed actions. Review the workspace and retry manually.',
   /** A JSON-RPC error the line has no specific handling for. */
   ACP_RPC_ERROR: 'The Antigravity ACP server returned a JSON-RPC error.',
   /**

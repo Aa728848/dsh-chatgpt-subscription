@@ -113,9 +113,14 @@ describe('candidate discovery', () => {
 })
 
 describe('acpLaunchArgs', () => {
-  it('uses no CLI flags for the standalone ACP server', () => {
-    expect(acpLaunchArgs({ path: 'C:/cache/agy_acp_server.exe', kind: 'downloaded' })).toEqual([])
-    expect(acpLaunchArgs({ path: '/opt/agy_acp_server.par', kind: 'configured' })).toEqual([])
+  it('uses no CLI flags for the standalone ACP server on Windows', () => {
+    expect(acpLaunchArgs({ path: 'C:/cache/agy_acp_server.exe', kind: 'downloaded' }, 'win32')).toEqual([])
+    expect(acpLaunchArgs({ path: '/opt/agy_acp_server.par', kind: 'configured' }, 'win32')).toEqual([])
+  })
+
+  it('passes the Registry-required empty uid to standalone Linux servers', () => {
+    expect(acpLaunchArgs({ path: '/opt/agy_acp_server.par', kind: 'downloaded' }, 'linux')).toEqual(['--uid='])
+    expect(acpLaunchArgs({ path: '/opt/agy_acp_server.par', kind: 'configured' }, 'linux')).toEqual(['--uid='])
   })
 
   it('preserves the full agy CLI arguments', () => {
