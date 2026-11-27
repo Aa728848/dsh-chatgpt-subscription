@@ -34,8 +34,24 @@ export function MaxOutputEditor({ rows, labels, onDraftChange, onCommit, onReset
   return <div className="dsha-context-settings">
     {rows.length === 0 ? <p className="dsha-muted">{labels.empty}</p> : null}
     {rows.map((row) => (
-      <div key={row.id} className="dsha-context-row dshcl-max-output-row">
-        <span title={row.id}>{row.name}</span>
+      <div key={row.id} className="dshcl-max-output-row">
+        <div className="dshcl-max-output-head">
+          <span title={row.id}>{row.name}</span>
+          <div className="dsha-capacity-control">
+            <button type="button" className="dsha-context-save" disabled={row.saving} onClick={() => onCommit(row.id)}>
+              {row.saving ? labels.saving : labels.save}
+            </button>
+            <button
+              type="button"
+              className="dsha-context-save dsha-context-reset"
+              aria-label={`${row.name} ${labels.reset}`}
+              disabled={row.saving || !row.hasOverride}
+              onClick={() => onReset(row.id)}
+            >
+              {labels.reset}
+            </button>
+          </div>
+        </div>
         <div className="dshcl-max-output-levels">
           {(['default', ...row.levels.filter(level => level !== 'default')] as ClaudeMaxOutputKey[]).map((level) => (
             <label key={level} className="dshcl-max-output-level">
@@ -52,20 +68,6 @@ export function MaxOutputEditor({ rows, labels, onDraftChange, onCommit, onReset
               />
             </label>
           ))}
-        </div>
-        <div className="dsha-capacity-control">
-          <button type="button" className="dsha-context-save" disabled={row.saving} onClick={() => onCommit(row.id)}>
-            {row.saving ? labels.saving : labels.save}
-          </button>
-          <button
-            type="button"
-            className="dsha-context-save dsha-context-reset"
-            aria-label={`${row.name} ${labels.reset}`}
-            disabled={row.saving || !row.hasOverride}
-            onClick={() => onReset(row.id)}
-          >
-            {labels.reset}
-          </button>
         </div>
       </div>
     ))}
