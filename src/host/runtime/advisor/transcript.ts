@@ -41,23 +41,34 @@ function withoutImages(messages: readonly Message[]): Message[] {
  * Collapse a message that alone exceeds the budget into a head/tail excerpt. Without
  * this an oversized tool output either evicts every recent message or arrives as an
  * unexplained truncation, and the advisor reviews evidence it cannot see the end of.
+ *
+ * Only prose is cut. Every structural block — above all a `tool-call` — survives, because
+ * a call that disappears here orphans the result that follows it, and a provider that
+ * validates the pairing rejects the whole request rather than the excerpt ("tool_call_id
+ * … is not found"). A call's argument is therefore never shortened either: half a JSON
+ * body is not an excerpt the advisor can act on.
  */
 function trimToBudget(message: Message, characters: number): Message {
-  const text = textOf(message)
-  if (text.length <= characters) return message
-  const head = text.slice(0, Math.min(TRIM_HEAD_CHARS, Math.floor(characters * 0.6)))
-  const tail = text.slice(text.length - Math.min(TRIM_TAIL_CHARS, Math.floor(characters * 0.3)))
-  const dropped = text.length - head.length - tail.length
+  const structural = message.content.filter((block) => block.type !== 'text' && block.type !== 'reasoning')
+  const prose = message.content
+    .filter((block) => block.type === 'text' || block.type === 'reasoning')
+    .map(blockText).join('\n')
+  if (prose.length <= characters) return message
+  const head = prose.slice(0, Math.min(TRIM_HEAD_CHARS, Math.floor(characters * 0.6)))
+  const tail = prose.slice(prose.length - Math.min(TRIM_TAIL_CHARS, Math.floor(characters * 0.3)))
+  const dropped = prose.length - head.length - tail.length
   const excerpt = `${head}\n…[${dropped} characters of this ${message.role} message were omitted to fit the advisor context window]…\n${tail}`
-  return { ...message, content: [{ type: 'text', text: excerpt }] } as Message
+  const content: ContentBlock[] = [{ type: 'text', text: excerpt }, ...structural]
+  return { ...message, content } as Message
 }
 
 /**
  * Preserve the original task and recent evidence while fitting a separate Advisor budget.
  *
- * Two invariants outrank the budget: a `tool-call` is never sent without a matching
- * `tool` result (some providers reject such a request, and the ones that accept it show
- * the advisor a self-contradicting history), and the newest evidence survives even when
+ * Two invariants outrank the budget: calls and results travel as pairs — a `tool-call` is
+ * never sent without a matching `tool` result, and a result is never sent whose call this
+ * projection dropped (some providers reject either shape, and the ones that accept it show
+ * the advisor a self-contradicting history) — and the newest evidence survives even when
  * that message alone is larger than the whole budget.
  */
 export function projectAdvisorTranscript(
@@ -83,15 +94,29 @@ export function projectAdvisorTranscript(
   }
   const kept = projected.filter((message) => selected.has(message))
   const repaired = repairToolPairs(kept)
-  // Only messages that already fit get trimmed: an oversized survivor is treated as
-  // the unit of newest evidence and is never cut down to nothing.
-  const perMessage = Math.max(600, Math.floor((budget * 4) / Math.max(1, repaired.messages.length)))
-  const messages = repaired.messages.map((message) => trimToBudget(message, perMessage))
+  // The selection above already keeps the whole set inside the budget, so nothing is cut
+  // here except a message larger than the entire budget. Excerpting everything above an
+  // equal share spent half the budget to throw away evidence the advisor could have read.
+  const budgetCharacters = Math.max(600, Math.floor(budget * 4))
+  let messages = repaired.messages.map((message) => trimToBudget(message, budgetCharacters))
+  // The original task and the newest message are kept whatever they cost, so that pair is
+  // the only thing that can push the set past the budget: every other message was admitted
+  // by the selection loop against it. Only then does the whole set fall back to an equal
+  // share, which is the one case where it genuinely does not fit.
+  if (estimate(first) + (latest === first ? 0 : estimate(latest)) > budget) {
+    const share = Math.max(600, Math.floor(budgetCharacters / Math.max(1, messages.length)))
+    messages = messages.map((message) => trimToBudget(message, share))
+  }
+  // Trimming is the only pass that rewrites a body, so the pairing invariant is re-checked
+  // after it rather than trusted.
+  const trimmed = repairToolPairs(messages)
   return {
-    messages,
+    messages: trimmed.messages,
     sourceSystem,
-    omittedMessages: projected.length - messages.length,
-    orphanedToolCalls: repaired.orphaned,
+    // Counted against the selection, not the final list: the placeholder results added for
+    // unanswered calls are not messages this projection failed to fit.
+    omittedMessages: projected.length - kept.length,
+    orphanedToolCalls: repaired.orphaned + trimmed.orphaned,
   }
 }
 

@@ -283,7 +283,7 @@ describe('buildOpenAIRequest', () => {
     expect(answered.map((entry) => entry.content)).toEqual(['first result', 'second result'])
   })
 
-  it('keeps a result that answers no declared call behind the answered ones', () => {
+  it('drops a result that answers no declared call', () => {
     const body = buildOpenAIRequest(options({
       messages: [
         { role: 'user', content: [{ type: 'text', text: 'go' }] } as Message,
@@ -302,9 +302,9 @@ describe('buildOpenAIRequest', () => {
     const wire = body.messages as Array<Record<string, unknown>>
     const answered = wire.filter((entry) => entry.role === 'tool')
     // The declared calls are answered in the order they were declared; the
-    // stray one answers no declared call and keeps its relative order behind
-    // them.
-    expect(answered.map((entry) => entry.tool_call_id)).toEqual(['call_a', 'call_b', 'call_unknown'])
+    // stray one is dropped, because the gateway answers a request carrying an
+    // undeclared tool_call_id with a 400 instead of ignoring it.
+    expect(answered.map((entry) => entry.tool_call_id)).toEqual(['call_a', 'call_b'])
   })
 
   it('normalizes tool schema with $defs, $ref and property type inference', () => {

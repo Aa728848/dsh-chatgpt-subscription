@@ -45,6 +45,9 @@ interface AdvisorAgent {
   }
 }
 
+/** Context assumed for an advisor model whose real window could not be resolved. */
+const UNKNOWN_CONTEXT_WINDOW = 32_000
+
 export interface AdvisorHostConfig {
   advisorEnabled?: unknown
   advisorProvider?: unknown
@@ -103,7 +106,10 @@ export class AdvisorService {
     }
     const info = await this.llm.resolveModelInfo?.(state.selection.provider, state.selection.model, signal).catch(() => undefined)
     const maxTokens = info?.maxTokens === undefined ? state.limits.maxTokens : Math.min(state.limits.maxTokens, info.maxTokens)
-    const contextTokenBudget = info?.contextWindow === undefined ? state.limits.contextTokenBudget : Math.min(state.limits.contextTokenBudget, info.contextWindow)
+    // An unknown window is treated as the smaller one: a request sized for the configured
+    // budget reaches an advisor model whose real window is narrower than that, and the
+    // consultation is lost to an upstream context error before it says anything.
+    const contextTokenBudget = Math.min(state.limits.contextTokenBudget, info?.contextWindow ?? UNKNOWN_CONTEXT_WINDOW)
     const transcript = projectAdvisorTranscript(agent.session.deriveMessages(), {
       contextTokenBudget, maxTokens, includeImages: info?.inputModalities?.includes('image') ?? true,
     })

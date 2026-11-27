@@ -1530,9 +1530,9 @@ interface ToolResultBatchEntry {
  * DSH history can hold the results out of order (a resumed session, a tool
  * that answered late), so the run is sorted back into the declared order.
  *
- * A result whose id belongs to no declared call keeps its relative order
- * behind the answered ones: it answers something this turn did not declare,
- * so there is no declared position for it to be sorted into.
+ * A result whose id belongs to no declared call has no position to sort into and is
+ * dropped by the caller: the gateway answers such a request with a 400 rather than
+ * ignoring the stray answer (see buildOpenAIRequest).
  */
 function pairToolExchanges(
   batch: readonly ToolResultBatchEntry[],
@@ -1672,12 +1672,14 @@ export function buildOpenAIRequest(
       // The batch is emitted in the order the assistant declared its calls in,
       // not in the order the results happened to arrive in.
       for (const entry of pairToolExchanges(batch, awaitingToolCallIds)) {
+        // A result whose call this request never declared is rejected by the gateway
+        // ("tool_call_id is not found"), and one stray result costs the whole turn. The
+        // Anthropic wire repairs the same asymmetry in cleanOrphanedToolCalls.
+        if (!awaitingToolCallIds.includes(entry.id)) continue
         messages.push({ role: 'tool', tool_call_id: entry.id, content: entry.content })
         pendingToolImages.push(...entry.images)
-        if (awaitingToolCallIds.length > 0) {
-          awaitingToolCallIds = awaitingToolCallIds.filter((id) => id !== entry.id)
-          if (awaitingToolCallIds.length === 0) flushDeferred()
-        }
+        awaitingToolCallIds = awaitingToolCallIds.filter((id) => id !== entry.id)
+        if (awaitingToolCallIds.length === 0) flushDeferred()
       }
       if (awaitingToolCallIds.length === 0) flushToolImages()
       continue

@@ -3,11 +3,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createAssistantMessage, createToolResultMessage, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage, createUserMessage, type GenerateOptions, type Message, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AdvisorService } from '../../src/host/runtime/advisor/index.ts'
 import { AdvisorSelectionStore, type AdvisorDefaults } from '../../src/host/runtime/advisor/selection-store.ts'
 import { projectAdvisorTranscript } from '../../src/host/runtime/advisor/transcript.ts'
 import { requestAdvisor, type AdvisorLlm } from '../../src/host/runtime/advisor/request.ts'
+import { ADVISOR_TOOL_DESCRIPTION } from '../../src/host/runtime/advisor/prompt.ts'
 
 const files: string[] = []
 afterEach(async () => { await Promise.all(files.splice(0).map((file) => fs.unlink(file).catch(() => undefined))) })
@@ -40,6 +41,18 @@ function success(text = 'Check the completion criteria.'): AsyncIterable<StreamC
     yield { type: 'finish', reason: { kind: 'stop' } } as const
   })()
 }
+
+// The description is the only trigger the main model reads, so the boundary with
+// ask_user_question is a contract rather than prose: a second opinion on the model's own
+// reading, never an answer to what the user wants.
+describe('ADVISOR_TOOL_DESCRIPTION', () => {
+  it('sends user-owned decisions to the user instead of the advisor', () => {
+    expect(ADVISOR_TOOL_DESCRIPTION).toContain('Ask the user instead')
+    expect(ADVISOR_TOOL_DESCRIPTION).toContain('never grants a decision the user owns')
+    expect(ADVISOR_TOOL_DESCRIPTION).toContain('Never put the same question to both')
+    expect(ADVISOR_TOOL_DESCRIPTION).not.toMatch(/abandon/i)
+  })
+})
 
 describe('AdvisorService', () => {
   it('is disabled by default and performs no model request', async () => {
@@ -184,7 +197,7 @@ describe('projectAdvisorTranscript', () => {
   })
 
   it('keeps the newest evidence as the last message and bounds it when it alone exceeds the budget', () => {
-    const latest = user(`latest ${'x'.repeat(10000)}`)
+    const latest = user(`latest ${'x'.repeat(24000)}`)
     const result = projectAdvisorTranscript([user('task'), user('older'), latest], { contextTokenBudget: 8000, maxTokens: 4096, includeImages: true })
     const last = result.messages.at(-1)!
     expect(last).not.toBe(latest)
@@ -230,5 +243,80 @@ describe('projectAdvisorTranscript', () => {
     const roles = result.messages.map((message) => message.role)
     expect(roles).toEqual(['user', 'assistant', 'tool'])
     expect(result.orphanedToolCalls).toBe(0)
+  })
+
+  it('keeps a tool call when the message that carries it is trimmed to the budget', () => {
+    const call = createAssistantMessage({
+      content: [
+        { type: 'text', text: `analysis ${'x'.repeat(40_000)}` },
+        { type: 'tool-call', id: 'call-long' as never, name: 'read', arguments: '{"path":"a"}' },
+      ],
+      source: { provider: 'kimi-code', model: 'k3' },
+    })
+    // The newest message is kept whatever it costs, so this is the one place a message
+    // larger than the whole budget still reaches the trimming pass.
+    const history = [
+      user('task'),
+      ...Array.from({ length: 20 }, (_, i) => user(`step ${i} ${'y'.repeat(200)}`)),
+      call,
+    ]
+    const result = projectAdvisorTranscript(history, { contextTokenBudget: 9000, maxTokens: 256, includeImages: true })
+    const carrying = result.messages.filter((message) => message.content.some((block) => block.type === 'tool-call'))
+    expect(carrying).toHaveLength(1)
+    const prose = carrying[0]!.content.filter((block) => block.type === 'text').map((block) => (block.type === 'text' ? block.text : '')).join('')
+    expect(prose).toContain('omitted to fit the advisor context window')
+    // The pairing is what a strict provider validates: an answer without its call is a 400.
+    const answered = result.messages.filter((message) => message.role === 'tool')
+    expect(answered.map((message) => String((message as { toolCallId?: string }).toolCallId))).toEqual(['call-long'])
+  })
+
+  it('leaves every projected history pairing calls and results in both directions', () => {
+    const history: Message[] = [user('task')]
+    for (let index = 0; index < 12; index++) {
+      const id = `call-${index}`
+      history.push(createAssistantMessage({
+        content: [
+          { type: 'text', text: `step ${index} ${'z'.repeat(index % 3 === 0 ? 3_000 : 40)}` },
+          { type: 'tool-call', id: id as never, name: 'read', arguments: '{}' },
+        ],
+        source: { provider: 'kimi-code', model: 'k3' },
+      }))
+      history.push(createToolResultMessage({ callId: id as never, content: [{ type: 'text', text: `result ${index}` }], isError: false }))
+    }
+    history.push(user('latest evidence'))
+    const result = projectAdvisorTranscript(history, { contextTokenBudget: 9000, maxTokens: 256, includeImages: true })
+    const calls = new Set<string>()
+    const results = new Set<string>()
+    for (const message of result.messages) {
+      for (const block of message.content) if (block.type === 'tool-call') calls.add(String(block.id))
+      if (message.role === 'tool') results.add(String((message as { toolCallId?: string }).toolCallId))
+    }
+    expect([...results].filter((id) => !calls.has(id))).toEqual([])
+    expect([...calls].filter((id) => !results.has(id))).toEqual([])
+  })
+
+  it('keeps a message that fits the budget instead of excerpting it to an equal share', () => {
+    const big = `analysis ${'w'.repeat(12_000)}`
+    const history = [
+      user('task'),
+      createAssistantMessage({ content: [{ type: 'text', text: big }], source: { provider: 'kimi-code', model: 'k3' } }),
+      user('next'),
+      user('latest evidence'),
+    ]
+    const result = projectAdvisorTranscript(history, { contextTokenBudget: 9000, maxTokens: 256, includeImages: true })
+    const bodies = result.messages.map((message) => message.content.map((block) => (block.type === 'text' ? block.text : '')).join(''))
+    expect(bodies.some((text) => text.includes('omitted to fit the advisor context window'))).toBe(false)
+    expect(bodies).toContain(big)
+  })
+
+  it('counts omitted messages against the selection, not the placeholder results it added', () => {
+    const call = createAssistantMessage({
+      content: [{ type: 'tool-call', id: 'call-pending' as never, name: 'read', arguments: '{}' }],
+      source: { provider: 'kimi-code', model: 'k3' },
+    })
+    const result = projectAdvisorTranscript([user('task'), call], { contextTokenBudget: 8000, maxTokens: 256, includeImages: true })
+    expect(result.messages.map((message) => message.role)).toEqual(['user', 'assistant', 'tool'])
+    // The placeholder is not a message the projection failed to fit.
+    expect(result.omittedMessages).toBe(0)
   })
 })
