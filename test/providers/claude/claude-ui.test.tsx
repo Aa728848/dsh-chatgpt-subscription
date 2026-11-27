@@ -174,7 +174,7 @@ describe('claude card with nothing held back', () => {
       .find(section => section.querySelector('h3')?.textContent === zh.enhanced)
     expect(enhanced).not.toBeUndefined()
     const rows = [...enhanced!.querySelectorAll(':scope > .dsha-pref-row')]
-    expect(rows).toHaveLength(4)
+    expect(rows).toHaveLength(5)
     const fast = enhanced!.querySelector<HTMLInputElement>(`input[aria-label="${zh.fastMode}"]`)
     const keepalive = enhanced!.querySelector<HTMLInputElement>(`input[aria-label="${zh.cacheKeepalive}"]`)
     expect(fast?.type).toBe('checkbox')
@@ -191,6 +191,22 @@ describe('claude card with nothing held back', () => {
     await act(async () => { keepalive?.click() })
     const writes = fetchMock.mock.calls.filter(entry => String(entry[0]).endsWith('/claude/api/settings'))
     expect(writes.map(entry => JSON.parse(String(entry[1]?.body)))).toEqual([{ fastMode: true }, { cacheKeepalive: true }])
+  })
+
+  it('sets the main-conversation and subagent cache tiers separately', async () => {
+    const { node, fetchMock } = await mountSection(status())
+    const main = node.querySelector<HTMLSelectElement>(`select[aria-label="${zh.cacheTtl}"]`)
+    const other = node.querySelector<HTMLSelectElement>(`select[aria-label="${zh.subagentCacheTtl}"]`)
+    expect(main).not.toBeNull()
+    expect(other).not.toBeNull()
+    expect(other!.value).toBe('')
+    expect([...other!.options].map(option => option.value)).toEqual(['', '1h', '5m'])
+    await act(async () => {
+      other!.value = '1h'
+      other!.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const writes = fetchMock.mock.calls.filter(entry => String(entry[0]).endsWith('/claude/api/settings'))
+    expect(writes.map(entry => JSON.parse(String(entry[1]?.body)))).toEqual([{ subagentCacheTtl: '1h' }])
   })
 
   it('starts a sign-in from the click, with no acknowledgement step in front of it', async () => {

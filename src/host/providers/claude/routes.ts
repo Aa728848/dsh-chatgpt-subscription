@@ -381,6 +381,7 @@ export async function getClaudeWebStatus(
     contextWindowOverrides: settings.contextWindowOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort as ClaudeWebStatus['defaultReasoningEffort'],
     cacheTtl: settings.cacheTtl,
+    subagentCacheTtl: settings.subagentCacheTtl,
     fastMode: settings.fastMode,
     cacheKeepalive: settings.cacheKeepalive,
     selectedAccountId: settings.selectedAccountId,
@@ -754,6 +755,12 @@ export function registerClaudeRoutes(
             const ttl = body.cacheTtl
             if (ttl === null || isClaudeCacheTtl(ttl)) {
               patch.cacheTtl = ttl
+            }
+          }
+          if (body.subagentCacheTtl !== undefined) {
+            const ttl = body.subagentCacheTtl
+            if (ttl === null || isClaudeCacheTtl(ttl)) {
+              patch.subagentCacheTtl = ttl
             }
           }
           if (body.fastMode !== undefined) {

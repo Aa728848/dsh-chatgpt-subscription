@@ -350,6 +350,7 @@ describe('Claude settings routes', () => {
         enabledModelIds: ['claude-opus-4-6'],
         contextWindowOverrides: { 'claude-opus-4-6': 123_456 },
         defaultReasoningEffort: 'high',
+        subagentCacheTtl: '1h',
       })
 
       expect(result.status).toBe(200)
@@ -360,10 +361,11 @@ describe('Claude settings routes', () => {
       const stored = await modelSettings.read()
       expect(stored.contextWindowOverrides).toEqual({ 'claude-opus-4-6': 123_456 })
       expect(stored.defaultReasoningEffort).toBe('high')
+      expect(stored.subagentCacheTtl).toBe('1h')
       // And the settings document states no acceptance field of any kind.
       const raw = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as Record<string, unknown>
       expect(Object.keys(raw).sort()).toEqual([
-        'cacheKeepalive', 'cacheTtl', 'contextWindowOverrides', 'defaultReasoningEffort', 'deviceId', 'enabled', 'enabledModelIds', 'fastMode', 'selectedAccountId',
+        'cacheKeepalive', 'cacheTtl', 'contextWindowOverrides', 'defaultReasoningEffort', 'deviceId', 'enabled', 'enabledModelIds', 'fastMode', 'selectedAccountId', 'subagentCacheTtl',
       ])
     })
 

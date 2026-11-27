@@ -627,6 +627,7 @@ describe('claude model settings', () => {
       // A legacy document states no cache tier, and "no tier stored" is the
       // subscription default rather than a value the reader has to invent.
       cacheTtl: null,
+      subagentCacheTtl: null,
       fastMode: false,
       cacheKeepalive: false,
       deviceId: '',

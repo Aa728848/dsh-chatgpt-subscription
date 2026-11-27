@@ -122,6 +122,7 @@ export interface ClaudeSectionView {
     setAllModels(selectAll: boolean): void
     updateEffort(effort: ClaudeReasoningEffort | null): Promise<void>
     updateCacheTtl(ttl: ClaudeCacheTtl | null): Promise<void>
+    updateSubagentCacheTtl(ttl: ClaudeCacheTtl | null): Promise<void>
     updateFastMode(checked: boolean): Promise<void>
     updateCacheKeepalive(checked: boolean): Promise<void>
     saveContextWindow(modelId: string): Promise<void>
@@ -484,6 +485,19 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
     }
   }
 
+  const updateSubagentCacheTtl = async (ttl: ClaudeCacheTtl | null) => {
+    try {
+      const updated = await api.request<ClaudeWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ subagentCacheTtl: ttl }),
+      })
+      setStatus(updated)
+      notifyChange()
+    } catch (err) {
+      reportError(err)
+    }
+  }
+
   const updateBooleanSetting = async (field: 'fastMode' | 'cacheKeepalive', checked: boolean) => {
     try {
       const updated = await api.request<ClaudeWebStatus>('/settings', {
@@ -620,6 +634,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
       setAllModels,
       updateEffort,
       updateCacheTtl,
+      updateSubagentCacheTtl,
       updateFastMode,
       updateCacheKeepalive,
       saveContextWindow,

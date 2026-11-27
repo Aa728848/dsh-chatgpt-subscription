@@ -62,7 +62,7 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
   const {
     login, cancelLogin, submitPaste, adopt, stopImporting, accountAction, setStrategy, relogin,
     refreshQuota, refreshCatalog, testConnection, toggleModel, setAllModels, updateEffort,
-    updateCacheTtl, updateFastMode, updateCacheKeepalive, saveContextWindow, resetContextWindow, resetAllContextWindows,
+    updateCacheTtl, updateSubagentCacheTtl, updateFastMode, updateCacheKeepalive, saveContextWindow, resetContextWindow, resetAllContextWindows,
     updateContextDraft, setPasteValue,
   } = actions
 
@@ -326,6 +326,26 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
             }}
           >
             <option value="">{t.cacheTtlSubscription}</option>
+            <option value="1h">{t.cacheTtl1h}</option>
+            <option value="5m">{t.cacheTtl5m}</option>
+          </select>
+        </div>
+        <div className="dsha-pref-row">
+          <div>
+            <strong>{t.subagentCacheTtl}</strong>
+            <p className="dsha-muted">{t.subagentCacheTtlHint}</p>
+          </div>
+          <select
+            className="dsha-select"
+            aria-label={t.subagentCacheTtl}
+            value={status?.subagentCacheTtl ?? ''}
+            disabled={busy !== null}
+            onChange={(event) => {
+              const value = event.currentTarget.value
+              void updateSubagentCacheTtl(value === '' ? null : (value as ClaudeCacheTtl))
+            }}
+          >
+            <option value="">{t.subagentCacheTtlOfficial}</option>
             <option value="1h">{t.cacheTtl1h}</option>
             <option value="5m">{t.cacheTtl5m}</option>
           </select>

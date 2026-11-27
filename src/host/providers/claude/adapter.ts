@@ -25,6 +25,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import { randomUUID } from 'node:crypto'
 import {
   API_BASE,
+  CLAUDE_SUBAGENT_CACHE_TTL,
   CLAUDE_SUBSCRIPTION_CACHE_TTL,
   DEFAULT_CONTEXT_WINDOW,
   ERROR_CODE_CLIENT_VERSION_TOO_OLD,
@@ -221,6 +222,12 @@ export interface ClaudeAdapterOptions {
   /** Shared with claude-api in production; isolated defaults keep unit tests independent. */
   version?: ClaudeCodeVersionResolver
   capabilityMemory?: ClaudeCapabilityMemory
+  /**
+   * Whether a session belongs to a delegated agent. Its requests, like every
+   * request that names a purpose, are outside the main conversation and use
+   * that cache tier. Absent treats every session as a main conversation.
+   */
+  isDelegatedSession?: (sessionId: string) => boolean
 }
 
 const claudePrefixRequests = new PrefixRequestCoordinator()
@@ -561,10 +568,23 @@ export class ClaudeAdapter extends LlmAdapter {
    *
    * @param settings - the document the caller already read for this turn.
    */
-  private static cacheTtlFor(settings: ClaudeModelSettings | null): ClaudeCacheTtl {
+  private static cacheTtlFor(settings: ClaudeModelSettings | null, mainConversation = true): ClaudeCacheTtl {
     // A settings read that failed falls back with everything else: a request
     // must not fail because a preference document could not be read.
+    // Outside the main conversation the official client uses five minutes.
+    if (!mainConversation) return settings?.subagentCacheTtl ?? CLAUDE_SUBAGENT_CACHE_TTL
     return settings?.cacheTtl ?? CLAUDE_SUBSCRIPTION_CACHE_TTL
+  }
+
+  /** Outside the main conversation: any named purpose, or a delegated agent's session. */
+  private isMainConversation(options: NormalizedGenerateOptions, sessionId: string | undefined): boolean {
+    if (options.purpose !== undefined) return false
+    if (sessionId === undefined) return true
+    try {
+      return this.options.isDelegatedSession?.(sessionId) !== true
+    } catch {
+      return true
+    }
   }
 
   private async attemptRequest(
@@ -580,6 +600,7 @@ export class ClaudeAdapter extends LlmAdapter {
     deviceId: string,
     accountId: string | undefined,
     corrections: ClaudeProtocolCorrections,
+    cacheTtl: ClaudeCacheTtl,
   ): Promise<Response> {
     // Resolved ONCE and used for both halves of the request: the marker in the
     // body and the beta in the header. They license the same capability, and a
@@ -587,10 +608,9 @@ export class ClaudeAdapter extends LlmAdapter {
     // refused — so deriving the header from the body is the only way the two
     // cannot drift.
     //
-    // `null` (nothing stored) means "follow the official subscription client",
-    // which requests the one-hour tier while the plan is drawing on included
-    // usage. See CLAUDE_SUBSCRIPTION_CACHE_TTL.
-    const cacheTtl = ClaudeAdapter.cacheTtlFor(settings)
+    // The caller resolves it once per call (see cacheTtlFor): the main
+    // conversation and everything else follow separate settings, each `null`
+    // meaning "as the official client".
     const catalog = await this.catalog(credentials)
     const capabilityScope = accountId ?? credentials.account?.uuid ?? 'single'
     const remembered = this.capabilityMemory.get(capabilityScope, requestOptions.model)
@@ -824,7 +844,8 @@ export class ClaudeAdapter extends LlmAdapter {
         callOptions = { ...requestOptions, reasoningEffort: ReasoningEffortId(remembered) }
       }
     }
-    this.version.noteActivity(ClaudeAdapter.cacheTtlFor(settings), 'claude')
+    const cacheTtl = ClaudeAdapter.cacheTtlFor(settings, this.isMainConversation(requestOptions, sessionId))
+    this.version.noteActivity(cacheTtl, 'claude')
     const deviceId = await this.modelSettings.ensureDeviceId()
     const sessionUuid = sessionId === undefined ? randomUUID() : claudeCodeSessionUuid(sessionId, 'dsh-claude-subscription-session:')
     const firstParty = this.firstParty.begin(sessionUuid, sessionId ?? sessionUuid)
@@ -837,7 +858,7 @@ export class ClaudeAdapter extends LlmAdapter {
     const waitSessionId = sessionId
     const mainTurn = requestOptions.purpose === undefined && waitSessionId !== undefined
     if (mainTurn) this.rememberSessionEffort(waitSessionId, namedEffort ?? settings?.defaultReasoningEffort ?? null)
-    const waitTtlMs = ClaudeAdapter.cacheTtlFor(settings) === '1h' ? 60 * 60_000 : 5 * 60_000
+    const waitTtlMs = cacheTtl === '1h' ? 60 * 60_000 : 5 * 60_000
     let issuedAt = 0
 
     const pool = this.accountPool
@@ -881,7 +902,7 @@ export class ClaudeAdapter extends LlmAdapter {
         issuedAt = Date.now()
         claudeCacheActivity.record(waitSessionId, claudeCacheActivity.read(waitSessionId)?.totalTokens ?? 0, issuedAt, waitTtlMs)
       }
-      response = await this.attemptRequest(credentials, callOptions, images, toolNames, settings, signal, fetchFn, version, firstParty, deviceId, accountId, corrections)
+      response = await this.attemptRequest(credentials, callOptions, images, toolNames, settings, signal, fetchFn, version, firstParty, deviceId, accountId, corrections, cacheTtl)
       // Headers are transport activity: the streaming idle budget starts at the
       // hand-off, so a slow prefill is not spent from it.
       activity?.pulse()

@@ -234,6 +234,8 @@ export interface ClaudeWebStatus extends Partial<AccountPoolStatusDto> {
   defaultReasoningEffort: ClaudeReasoningEffort | null
   /** Prompt-cache tier; `null` means "follow the official subscription default". */
   cacheTtl: ClaudeCacheTtl | null
+  /** Tier outside the main conversation (subagents, auxiliary requests); `null` follows the official five minutes. */
+  subagentCacheTtl?: ClaudeCacheTtl | null
   /** Whether eligible models receive speed: fast. */
   fastMode?: boolean
   /** Whether 1h main requests advertise cache-keepalive and permit cache_touch. */
@@ -256,6 +258,8 @@ export interface ClaudeSettingsUpdateDto {
   defaultReasoningEffort?: ClaudeReasoningEffort | null
   /** `null` restores the subscription default. */
   cacheTtl?: ClaudeCacheTtl | null
+  /** `null` restores the official default outside the main conversation. */
+  subagentCacheTtl?: ClaudeCacheTtl | null
   fastMode?: boolean
   cacheKeepalive?: boolean
   selectedAccountId?: string | null
