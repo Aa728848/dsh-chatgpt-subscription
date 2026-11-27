@@ -4,27 +4,45 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock, GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { isSameOriginMutation } from '../../common/same-origin.ts'
-import { CONSULT_ADVISOR_TOOL_NAME, ADVISOR_STATE_PATH, type AdvisorResult, type AdvisorRoute, type AdvisorStateDto } from '../../../shared/advisor-contracts.ts'
+import {
+  CONSULT_ADVISOR_TOOL_NAME, ADVISOR_STATE_PATH,
+  type AdvisorResult, type AdvisorRoute, type AdvisorStateDto, type AdvisorUsage,
+} from '../../../shared/advisor-contracts.ts'
 import { ADVISOR_TOOL_DESCRIPTION } from './prompt.ts'
+import { AdvisorSelectionStore, type AdvisorDefaults } from './selection-store.ts'
+import { projectAdvisorTranscript } from './transcript.ts'
+import { requestAdvisor, type AdvisorLlm } from './request.ts'
+
+/** Human-facing one-liner for one result, shared by the tool renderer and the log. */
+function describeResult(result: AdvisorResult): string {
+  const route = result.advisor === undefined ? '' : `\nAdvisor: ${result.advisor.provider}/${result.advisor.model}`
+  if (result.status === 'disabled' || result.status === 'unconfigured' || result.status === 'unavailable'
+    || result.status === 'cancelled' || result.status === 'budget-exhausted') {
+    return `${result.detail ?? `Advisor ${result.status}`}${route}`
+  }
+  if (result.status === 'declined') return `Advisor declined to advise on this request.${result.detail === undefined ? '' : `\n${result.detail}`}${route}`
+  const usage = result.usage === undefined
+    ? ''
+    : `\nUsage: ${result.usage.inputTokens ?? 0} input, ${result.usage.outputTokens ?? 0} output tokens.`
+  const truncated = result.status === 'truncated' ? '\n[Advisor output was truncated at its token limit.]' : ''
+  return `${result.advice}${truncated}${route}${usage}`
+}
 
 const ADVISOR_OUTPUT = {
   schema: { type: 'json' },
   render: (_args: unknown, value: JsonValue): ContentBlock[] => {
     const result = value as unknown as AdvisorResult
-    if (result.status !== 'ok' && result.status !== 'truncated') return [{ type: 'text', text: result.detail ?? `Advisor ${result.status}` }]
-    const usage = result.usage === undefined ? '' : `\nUsage: ${result.usage.inputTokens ?? 0} input, ${result.usage.outputTokens ?? 0} output tokens.`
-    const truncated = result.status === 'truncated' ? '\n[Advisor output was truncated at its token limit.]' : ''
-    const route = result.advisor === undefined ? '' : `\nAdvisor: ${result.advisor.provider}/${result.advisor.model}`
-    return [{ type: 'text', text: `${result.advice}${truncated}${route}${usage}` }]
+    return [{ type: 'text', text: describeResult(result) }]
   },
 } as const
-import { AdvisorSelectionStore, type AdvisorDefaults } from './selection-store.ts'
-import { projectAdvisorTranscript } from './transcript.ts'
-import { requestAdvisor, type AdvisorLlm } from './request.ts'
 
 interface AdvisorAgent {
   id?: unknown
-  session?: { id?: unknown; deriveMessages?: () => Parameters<typeof projectAdvisorTranscript>[0] }
+  session?: {
+    id?: unknown
+    deriveMessages?: () => Parameters<typeof projectAdvisorTranscript>[0]
+    requestHeader?: () => { config?: { provider?: unknown; model?: unknown } } | undefined
+  }
 }
 
 export interface AdvisorHostConfig {
@@ -36,6 +54,7 @@ export interface AdvisorHostConfig {
   advisorTimeoutMs?: unknown
   advisorMaxRetries?: unknown
   advisorContextTokenBudget?: unknown
+  advisorSessionTokenBudget?: unknown
 }
 
 function value<T>(input: unknown, fallback: T): T {
@@ -52,8 +71,21 @@ function routeOf(config: AdvisorHostConfig): AdvisorRoute | null {
   return { provider, model, ...(reasoningEffort === '' || reasoningEffort === 'auto' ? {} : { reasoningEffort }) }
 }
 
+/** Which model the conversation itself runs on, used only for the weaker-advisor warning. */
+function mainRouteOf(agent: AdvisorAgent | undefined): AdvisorRoute | null {
+  const config = agent?.session?.requestHeader?.()?.config
+  const provider = typeof config?.provider === 'string' ? config.provider : ''
+  const model = typeof config?.model === 'string' ? config.model : ''
+  return provider === '' || model === '' ? null : { provider, model }
+}
+
+function spentTokens(usage: AdvisorUsage): number {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+}
+
 export class AdvisorService {
   constructor(readonly selections: AdvisorSelectionStore, private readonly llm: AdvisorLlm) {}
+
   async consult(args: { question: string; focus?: string }, agentInput: unknown, signal: AbortSignal): Promise<AdvisorResult> {
     const agent = agentInput as AdvisorAgent | undefined
     const sessionId = String(agent?.session?.id ?? agent?.id ?? '')
@@ -63,6 +95,12 @@ export class AdvisorService {
     const state = await this.selections.state(sessionId)
     if (!state.enabled) return { status: 'disabled', advice: '', detail: 'Advisor is disabled for this conversation.' }
     if (state.selection === null) return { status: 'unconfigured', advice: '', detail: 'Choose an advisor model in the conversation model menu first.' }
+    if (state.limits.sessionTokenBudget > 0 && spentTokens(state.usage) >= state.limits.sessionTokenBudget) {
+      return {
+        status: 'budget-exhausted', advice: '', advisor: state.selection,
+        detail: `This conversation has spent ${spentTokens(state.usage)} of its ${state.limits.sessionTokenBudget} advisor tokens. Raise the budget or start a new conversation to consult again.`,
+      }
+    }
     const info = await this.llm.resolveModelInfo?.(state.selection.provider, state.selection.model, signal).catch(() => undefined)
     const maxTokens = info?.maxTokens === undefined ? state.limits.maxTokens : Math.min(state.limits.maxTokens, info.maxTokens)
     const contextTokenBudget = info?.contextWindow === undefined ? state.limits.contextTokenBudget : Math.min(state.limits.contextTokenBudget, info.contextWindow)
@@ -70,11 +108,30 @@ export class AdvisorService {
       contextTokenBudget, maxTokens, includeImages: info?.inputModalities?.includes('image') ?? true,
     })
     const question = `Review focus: ${args.focus ?? 'other'}\nQuestion: ${args.question}`
-    return requestAdvisor({
+    const result = await requestAdvisor({
       llm: this.llm, route: state.selection, transcript, question,
       maxTokens, timeoutMs: state.limits.timeoutMs, maxRetries: state.limits.maxRetries,
       sessionId: sessionId as GenerateOptions['sessionId'], signal,
     })
+    // Only an answered consultation spends budget; a failed or cancelled attempt is free.
+    if (result.status === 'ok' || result.status === 'truncated' || result.status === 'declined') {
+      const usage = await this.selections.addUsage(sessionId, {
+        inputTokens: result.usage?.inputTokens ?? 0,
+        outputTokens: result.usage?.outputTokens ?? 0,
+        cacheReadTokens: result.usage?.cacheReadTokens ?? 0,
+        cacheWriteTokens: result.usage?.cacheWriteTokens ?? 0,
+        calls: 1,
+      }).catch(() => undefined)
+      if (usage !== undefined && state.limits.sessionTokenBudget > 0 && spentTokens(usage) > state.limits.sessionTokenBudget) {
+        return { ...result, detail: `${result.detail === undefined ? '' : `${result.detail}\n`}This consultation exhausted the conversation's advisor token budget.` }
+      }
+    }
+    const main = mainRouteOf(agent)
+    if (main !== null && result.advisor !== undefined && main.provider === result.advisor.provider && main.model === result.advisor.model) {
+      const warning = 'The advisor is the same model as the main model, so it adds cost without an independent perspective.'
+      return { ...result, detail: result.detail === undefined ? warning : `${result.detail}\n${warning}` }
+    }
+    return result
   }
 }
 
@@ -83,6 +140,7 @@ export function installAdvisor(ctx: Context, config: AdvisorHostConfig): () => v
     enabled: value(config.advisorEnabled, false), selection: routeOf(config),
     maxTokens: value(config.advisorMaxTokens, 4096), timeoutMs: value(config.advisorTimeoutMs, 300000),
     maxRetries: value(config.advisorMaxRetries, 1), contextTokenBudget: value(config.advisorContextTokenBudget, 100000),
+    sessionTokenBudget: value(config.advisorSessionTokenBudget, 200000),
   }))
   const service = new AdvisorService(store, ctx.llm)
   const disposeTool = ctx.tools.register(defineTool({
@@ -98,9 +156,90 @@ export function installAdvisor(ctx: Context, config: AdvisorHostConfig): () => v
     execute: async (args, exec): Promise<JsonValue> => await service.consult(args, exec.agent, exec.signal) as unknown as JsonValue,
   }))
   const disposeRoute = ctx.webServer?.register({ kind: 'exact', path: ADVISOR_STATE_PATH, handler: createAdvisorStateHandler(store) })
-  return () => { disposeRoute?.(); disposeTool() }
+  const disposeCommand = installAdvisorCommand(ctx, store)
+  return () => { disposeCommand(); disposeRoute?.(); disposeTool() }
 }
 
+interface CommandsRegistryLike { register(definition: unknown): unknown }
+interface InjectHostLike { inject?(deps: string[], callback: (scope: unknown) => void): unknown }
+
+/** Read an optional service; a missing service or a throwing getter is simply absent. */
+function serviceOf<T>(ctx: unknown, service: string): T | undefined {
+  const read = (ctx as { get?: (name: string) => unknown } | undefined)?.get
+  if (typeof read !== 'function') return undefined
+  try {
+    return read.call(ctx, service) as T | undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * `/advisor` — the same surface Claude Code offers: no argument prints the current
+ * advisor, `<provider>/<model>` sets it for the conversation and as the user default,
+ * `default` moves only the user default, and `off` disables it.
+ */
+function installAdvisorCommand(ctx: Context, store: AdvisorSelectionStore): () => void {
+  const host = ctx as unknown as InjectHostLike
+  if (typeof host.inject !== 'function') return () => {}
+  try {
+    host.inject.call(ctx, ['commands'], (scope: unknown) => {
+      const commands = serviceOf<CommandsRegistryLike>(scope, 'commands')
+      if (commands === undefined || typeof commands.register !== 'function') return
+      try {
+        commands.register({
+          definitionId: 'dsh-chatgpt-subscription:advisor',
+          name: 'advisor',
+          description: 'Show or set the read-only advisor model for this conversation',
+          input: { hint: '[<provider>/<model>|default|off]' },
+          handler: async (payload: { agent?: AdvisorAgent; rawInput?: string }) => {
+            const sessionId = String(payload?.agent?.session?.id ?? '')
+            if (sessionId === '') return { kind: 'error' as const, text: 'Advisor needs an active conversation.' }
+            const raw = typeof payload?.rawInput === 'string' ? payload.rawInput.trim() : ''
+            const state = await store.state(sessionId)
+            if (raw === '') {
+              const current = state.selection === null ? 'no advisor' : `${state.selection.provider}/${state.selection.model}`
+              const inherited = state.inherited ? ' (following the user default)' : ''
+              return {
+                kind: 'success' as const,
+                text: `Advisor: ${state.enabled ? current : `off (${current})`}${inherited}.\nSpent ${spentTokens(state.usage)} of ${state.limits.sessionTokenBudget} advisor tokens in this conversation.`,
+              }
+            }
+            if (raw === 'off') {
+              await store.update(sessionId, { enabled: false })
+              return { kind: 'success' as const, text: 'Advisor off.' }
+            }
+            if (raw === 'on') {
+              if (state.selection === null) return { kind: 'error' as const, text: 'Choose an advisor model first: /advisor <provider>/<model>.' }
+              await store.update(sessionId, { enabled: true })
+              return { kind: 'success' as const, text: `Advisor set to ${state.selection.provider}/${state.selection.model}.` }
+            }
+            if (raw === 'default') {
+              if (state.selection === null) return { kind: 'error' as const, text: 'No advisor is configured to save as the default.' }
+              await store.setDefault(state.selection, true)
+              return { kind: 'success' as const, text: `Advisor default saved: ${state.selection.provider}/${state.selection.model}.` }
+            }
+            const route = parseModelKey(raw)
+            if (route === null) return { kind: 'error' as const, text: 'Use <provider>/<model>, one of: on, off, default.' }
+            await store.update(sessionId, { enabled: true, selection: route })
+            return { kind: 'success' as const, text: `Advisor set to ${route.provider}/${route.model}.` }
+          },
+        })
+      } catch { /* another plugin already claimed /advisor */ }
+    })
+  } catch { /* this harness generation has no command surface */ }
+  return () => {}
+}
+
+/** Accept the source-qualified key the rest of the client already uses. */
+function parseModelKey(raw: string): AdvisorRoute | null {
+  const index = raw.indexOf('/')
+  if (index <= 0 || index === raw.length - 1) return null
+  const provider = raw.slice(0, index).trim()
+  const model = raw.slice(index + 1).trim()
+  if (provider === '' || model === '') return null
+  return { provider, model }
+}
 export function createAdvisorStateHandler(store: AdvisorSelectionStore) {
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const send = (status: number, body: unknown) => {
@@ -115,14 +254,26 @@ export function createAdvisorStateHandler(store: AdvisorSelectionStore) {
       }
       if (request.method === 'POST') {
         if (!isSameOriginMutation(request)) return send(403, { ok: false, error: { code: 'forbidden', message: 'Cross-origin request refused.' } })
-        const body = await readJson(request) as { sessionId?: unknown; enabled?: unknown; selection?: unknown } | null
+        const body = await readJson(request) as {
+          sessionId?: unknown; enabled?: unknown; selection?: unknown; default?: unknown;
+        } | null
         if (typeof body?.sessionId !== 'string' || body.sessionId === '') return send(400, { ok: false, error: { code: 'bad-request', message: 'A sessionId is required.' } })
-        if (body.enabled !== undefined && typeof body.enabled !== 'boolean') return send(400, { ok: false, error: { code: 'bad-request', message: 'enabled must be boolean.' } })
+        if (body.enabled !== undefined && body.enabled !== null && typeof body.enabled !== 'boolean') {
+          return send(400, { ok: false, error: { code: 'bad-request', message: 'enabled must be a boolean or null.' } })
+        }
         const selection = parseRoute(body.selection)
         if (selection === false) return send(400, { ok: false, error: { code: 'bad-request', message: 'selection must be null or a complete route.' } })
-        const patch: { enabled?: boolean; selection?: AdvisorRoute | null } = {}
-        if (typeof body.enabled === 'boolean') patch.enabled = body.enabled
+        const patch: { enabled?: boolean | null; selection?: AdvisorRoute | null } = {}
+        if (body.enabled === null) patch.enabled = null
+        else if (typeof body.enabled === 'boolean') patch.enabled = body.enabled
         if (selection !== undefined) patch.selection = selection
+        // The same endpoint also moves the user-level default, so the composer pane
+        // can offer "use for new conversations" without a second route.
+        if (body.default === true) {
+          const state = await store.update(body.sessionId, patch)
+          await store.setDefault(state.selection, state.enabled)
+          return send(200, { ok: true, value: await store.state(body.sessionId) })
+        }
         const value: AdvisorStateDto = await store.update(body.sessionId, patch)
         return send(200, { ok: true, value })
       }

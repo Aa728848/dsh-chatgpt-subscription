@@ -14,7 +14,8 @@ type CatalogModel = ProviderGroup['models'][number]
 type ReasoningEffort = NonNullable<CatalogModel['reasoning']>['efforts'][number]
 type Translate = (key: AdvisorLocaleKey, params?: Record<string, string>) => string
 
-type AdvisorUpdate = (patch: { enabled?: boolean; selection?: AdvisorRoute | null }) => void
+type AdvisorPatch = { enabled?: boolean; selection?: AdvisorRoute | null; default?: boolean }
+type AdvisorUpdate = (patch: AdvisorPatch) => void
 
 function AdvisorReasoningSlider({ selection, directory, pending, locked, update, t }: {
   selection: AdvisorRoute
@@ -115,7 +116,7 @@ function AdvisorReasoningSlider({ selection, directory, pending, locked, update,
 }
 export interface AdvisorApi {
   read(sessionId: string): Promise<AdvisorStateDto>
-  write(sessionId: string, patch: { enabled?: boolean; selection?: AdvisorRoute | null }): Promise<AdvisorStateDto>
+  write(sessionId: string, patch: AdvisorPatch): Promise<AdvisorStateDto>
 }
 async function call(url: string, init?: RequestInit): Promise<AdvisorStateDto> {
   const response = await fetch(url, { ...init, credentials: 'same-origin' })
@@ -161,7 +162,7 @@ function useAdvisorState(sessionId: string, api: AdvisorApi, reportFailure: (mes
     window.addEventListener('dsh-advisor-changed', changed)
     return () => window.removeEventListener('dsh-advisor-changed', changed)
   }, [sessionId])
-  const update = useCallback((patch: { enabled?: boolean; selection?: AdvisorRoute | null }) => {
+  const update = useCallback((patch: AdvisorPatch) => {
     setPending(true)
     void api.write(sessionId, patch).then((value) => {
       if (mounted.current) setState(value)

@@ -59,9 +59,12 @@ export async function requestAdvisor(options: {
       const blocks: string[] = []
       let finishKind: string | undefined
       try {
-        const system = [ADVISOR_SYSTEM_PROMPT, `The main agent requests this review focus:\n${options.question}`, options.transcript.sourceSystem,
+        const gaps = [
           options.transcript.omittedMessages > 0 ? `${options.transcript.omittedMessages} middle messages were omitted to fit the advisor context window.` : '',
-        ].filter(Boolean).join('\n\n')
+          options.transcript.orphanedToolCalls > 0 ? `${options.transcript.orphanedToolCalls} tool results fell outside that window; their calls carry an explicit placeholder.` : '',
+        ].filter(Boolean)
+        const system = [ADVISOR_SYSTEM_PROMPT, `The main agent requests this review focus:\n${options.question}`, options.transcript.sourceSystem, ...gaps]
+          .filter(Boolean).join('\n\n')
         const stream = options.llm.stream({
           provider: options.route.provider, model: options.route.model,
           reasoningEffort: options.route.reasoningEffort as GenerateOptions['reasoningEffort'],
@@ -79,9 +82,12 @@ export async function requestAdvisor(options: {
           }
         }
         const advice = (deltas.length > 0 ? deltas.join('') : blocks.join('\n')).trim()
-        if (advice === '') throw Object.assign(new Error('Advisor returned no guidance.'), { code: 'EMPTY_RESPONSE' })
+        // An empty answer is a real outcome, not a transport failure: it is reported
+        // as a declined review so the main agent keeps its own judgment instead of
+        // treating an unreadable advisor as an error to retry.
         return {
-          status: finishKind === 'max-tokens' ? 'truncated' : 'ok', advice,
+          status: advice === '' ? 'declined' : finishKind === 'max-tokens' ? 'truncated' : 'ok',
+          advice,
           advisor: options.route, usage: usageOf(usage), omittedMessages: options.transcript.omittedMessages,
         }
       } catch (error) {

@@ -4,6 +4,7 @@ export const ADVISOR_STATE_PATH = '/advisor/state'
 export const ADVISOR_DEFAULT_TIMEOUT_MS = 300_000
 export const ADVISOR_DEFAULT_MAX_TOKENS = 4_096
 export const ADVISOR_DEFAULT_CONTEXT_TOKENS = 100_000
+export const ADVISOR_DEFAULT_SESSION_TOKEN_BUDGET = 200_000
 
 export type AdvisorFocus = 'plan' | 'stuck' | 'direction' | 'completion' | 'other'
 export interface AdvisorRoute {
@@ -16,17 +17,30 @@ export interface AdvisorLimits {
   timeoutMs: number
   maxRetries: number
   contextTokenBudget: number
+  /** Cumulative advisor tokens one conversation may spend before consultations stop. */
+  sessionTokenBudget: number
 }
-export interface AdvisorSelection extends AdvisorRoute { enabled: boolean }
+/** Cumulative advisor spend for one conversation, reported separately from main-model usage. */
+export interface AdvisorUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  /** How many consultations were actually answered. */
+  calls: number
+}
 export interface AdvisorStateDto {
   sessionId: string
   enabled: boolean
   selection: AdvisorRoute | null
   defaultEnabled: boolean
   defaultSelection: AdvisorRoute | null
+  /** True when this conversation inherits the user-level default rather than an explicit choice. */
+  inherited: boolean
   limits: AdvisorLimits
+  usage: AdvisorUsage
 }
-export type AdvisorResultStatus = 'ok' | 'truncated' | 'disabled' | 'unconfigured' | 'unavailable' | 'cancelled'
+export type AdvisorResultStatus = 'ok' | 'truncated' | 'declined' | 'disabled' | 'unconfigured' | 'unavailable' | 'cancelled' | 'budget-exhausted'
 export interface AdvisorTokenUsage {
   inputTokens?: number
   outputTokens?: number
@@ -40,4 +54,10 @@ export interface AdvisorResult {
   usage?: AdvisorTokenUsage
   omittedMessages?: number
   detail?: string
+}
+
+/** One `/advisor` command surface result, returned to the command handler for display. */
+export interface AdvisorCommandOutcome {
+  kind: 'success' | 'error'
+  text: string
 }

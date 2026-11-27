@@ -359,6 +359,8 @@ export interface Config {
   advisorTimeoutMs?: Volatile<number>
   advisorMaxRetries?: Volatile<number>
   advisorContextTokenBudget?: Volatile<number>
+  /** 单个对话累计可消耗的顾问 token 上限；0 表示不限制。默认 200000。 */
+  advisorSessionTokenBudget?: Volatile<number>
   /**
    * 「计划模式管线」总开关：打开后调度模式可以在 R-G 澄清访谈收敛之后用
    * `enter_plan_mode` 主动进入计划模式（下一步才开始探索并出计划，计划由官方
@@ -593,6 +595,8 @@ export interface ConfigInput {
   advisorTimeoutMs?: number
   advisorMaxRetries?: number
   advisorContextTokenBudget?: number
+  /** 单个对话累计可消耗的顾问 token 上限；0 表示不限制。 */
+  advisorSessionTokenBudget?: number
   /** 「计划模式管线」总开关（默认开启）：允许调度模式用 enter_plan_mode / leave_plan_mode。 */
   planModePipeline?: boolean
   /** 「调度执行守卫」总开关（默认开启）：执行期拦截子代理越权调用与等待期空等。 */
@@ -675,6 +679,8 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('顾问遇到临时错误时的最大追加重试次数。'),
   advisorContextTokenBudget: z.number().min(8000).max(1000000).step(1).default(100000).volatile()
     .description('转发给顾问的对话上下文预算。'),
+  advisorSessionTokenBudget: z.number().min(0).max(10000000).step(1).default(200000).volatile()
+    .description('单个对话累计可消耗的顾问 token 上限；0 表示不限制。'),
   planModePipeline: z.boolean().default(true).volatile()
     .description('允许调度模式按需进入或退出计划模式。'),
   dispatchExecutionGuard: z.boolean().default(true).volatile()

@@ -16,7 +16,8 @@ afterEach(() => { act(() => root.unmount()); container.remove(); document.getEle
 function state(): AdvisorStateDto {
   return {
     sessionId: 's1', enabled: false, selection: null, defaultEnabled: false, defaultSelection: null,
-    limits: { maxTokens: 4096, timeoutMs: 300000, maxRetries: 1, contextTokenBudget: 100000 },
+    limits: { maxTokens: 4096, timeoutMs: 300000, maxRetries: 1, contextTokenBudget: 100000, sessionTokenBudget: 200000 },
+    inherited: true, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, calls: 0 },
   }
 }
 function directory(): { subscribe: (cb: () => void) => () => void; getSnapshot: () => ModelDirectoryState } {
