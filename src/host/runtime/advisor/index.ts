@@ -156,90 +156,9 @@ export function installAdvisor(ctx: Context, config: AdvisorHostConfig): () => v
     execute: async (args, exec): Promise<JsonValue> => await service.consult(args, exec.agent, exec.signal) as unknown as JsonValue,
   }))
   const disposeRoute = ctx.webServer?.register({ kind: 'exact', path: ADVISOR_STATE_PATH, handler: createAdvisorStateHandler(store) })
-  const disposeCommand = installAdvisorCommand(ctx, store)
-  return () => { disposeCommand(); disposeRoute?.(); disposeTool() }
+  return () => { disposeRoute?.(); disposeTool() }
 }
 
-interface CommandsRegistryLike { register(definition: unknown): unknown }
-interface InjectHostLike { inject?(deps: string[], callback: (scope: unknown) => void): unknown }
-
-/** Read an optional service; a missing service or a throwing getter is simply absent. */
-function serviceOf<T>(ctx: unknown, service: string): T | undefined {
-  const read = (ctx as { get?: (name: string) => unknown } | undefined)?.get
-  if (typeof read !== 'function') return undefined
-  try {
-    return read.call(ctx, service) as T | undefined
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * `/advisor` — the same surface Claude Code offers: no argument prints the current
- * advisor, `<provider>/<model>` sets it for the conversation and as the user default,
- * `default` moves only the user default, and `off` disables it.
- */
-function installAdvisorCommand(ctx: Context, store: AdvisorSelectionStore): () => void {
-  const host = ctx as unknown as InjectHostLike
-  if (typeof host.inject !== 'function') return () => {}
-  try {
-    host.inject.call(ctx, ['commands'], (scope: unknown) => {
-      const commands = serviceOf<CommandsRegistryLike>(scope, 'commands')
-      if (commands === undefined || typeof commands.register !== 'function') return
-      try {
-        commands.register({
-          definitionId: 'dsh-chatgpt-subscription:advisor',
-          name: 'advisor',
-          description: 'Show or set the read-only advisor model for this conversation',
-          input: { hint: '[<provider>/<model>|default|off]' },
-          handler: async (payload: { agent?: AdvisorAgent; rawInput?: string }) => {
-            const sessionId = String(payload?.agent?.session?.id ?? '')
-            if (sessionId === '') return { kind: 'error' as const, text: 'Advisor needs an active conversation.' }
-            const raw = typeof payload?.rawInput === 'string' ? payload.rawInput.trim() : ''
-            const state = await store.state(sessionId)
-            if (raw === '') {
-              const current = state.selection === null ? 'no advisor' : `${state.selection.provider}/${state.selection.model}`
-              const inherited = state.inherited ? ' (following the user default)' : ''
-              return {
-                kind: 'success' as const,
-                text: `Advisor: ${state.enabled ? current : `off (${current})`}${inherited}.\nSpent ${spentTokens(state.usage)} of ${state.limits.sessionTokenBudget} advisor tokens in this conversation.`,
-              }
-            }
-            if (raw === 'off') {
-              await store.update(sessionId, { enabled: false })
-              return { kind: 'success' as const, text: 'Advisor off.' }
-            }
-            if (raw === 'on') {
-              if (state.selection === null) return { kind: 'error' as const, text: 'Choose an advisor model first: /advisor <provider>/<model>.' }
-              await store.update(sessionId, { enabled: true })
-              return { kind: 'success' as const, text: `Advisor set to ${state.selection.provider}/${state.selection.model}.` }
-            }
-            if (raw === 'default') {
-              if (state.selection === null) return { kind: 'error' as const, text: 'No advisor is configured to save as the default.' }
-              await store.setDefault(state.selection, true)
-              return { kind: 'success' as const, text: `Advisor default saved: ${state.selection.provider}/${state.selection.model}.` }
-            }
-            const route = parseModelKey(raw)
-            if (route === null) return { kind: 'error' as const, text: 'Use <provider>/<model>, one of: on, off, default.' }
-            await store.update(sessionId, { enabled: true, selection: route })
-            return { kind: 'success' as const, text: `Advisor set to ${route.provider}/${route.model}.` }
-          },
-        })
-      } catch { /* another plugin already claimed /advisor */ }
-    })
-  } catch { /* this harness generation has no command surface */ }
-  return () => {}
-}
-
-/** Accept the source-qualified key the rest of the client already uses. */
-function parseModelKey(raw: string): AdvisorRoute | null {
-  const index = raw.indexOf('/')
-  if (index <= 0 || index === raw.length - 1) return null
-  const provider = raw.slice(0, index).trim()
-  const model = raw.slice(index + 1).trim()
-  if (provider === '' || model === '') return null
-  return { provider, model }
-}
 export function createAdvisorStateHandler(store: AdvisorSelectionStore) {
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const send = (status: number, body: unknown) => {

@@ -56,8 +56,3 @@ export interface AdvisorResult {
   detail?: string
 }
 
-/** One `/advisor` command surface result, returned to the command handler for display. */
-export interface AdvisorCommandOutcome {
-  kind: 'success' | 'error'
-  text: string
-}
