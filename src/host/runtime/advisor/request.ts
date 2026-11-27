@@ -16,12 +16,19 @@ export interface AdvisorLlm {
   }>
 }
 
+/**
+ * The advisor's own usage, with absent counters left out rather than set to `undefined`.
+ *
+ * `TokenUsage` makes the cache counters optional, so a provider that reports no cache
+ * figures leaves them undefined — and an undefined member is not lossless JSON, which
+ * costs the tool call its whole result after the answer has already been paid for.
+ */
 function usageOf(usage: TokenUsage | undefined): AdvisorTokenUsage | undefined {
   if (usage === undefined) return undefined
-  return {
-    inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
-    cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens,
-  }
+  const counted: AdvisorTokenUsage = { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }
+  if (usage.cacheReadTokens !== undefined) counted.cacheReadTokens = usage.cacheReadTokens
+  if (usage.cacheWriteTokens !== undefined) counted.cacheWriteTokens = usage.cacheWriteTokens
+  return counted
 }
 
 function retryable(error: unknown): boolean {
@@ -85,10 +92,14 @@ export async function requestAdvisor(options: {
         // An empty answer is a real outcome, not a transport failure: it is reported
         // as a declined review so the main agent keeps its own judgment instead of
         // treating an unreadable advisor as an error to retry.
+        const spent = usageOf(usage)
         return {
           status: advice === '' ? 'declined' : finishKind === 'max-tokens' ? 'truncated' : 'ok',
           advice,
-          advisor: options.route, usage: usageOf(usage), omittedMessages: options.transcript.omittedMessages,
+          advisor: options.route,
+          // Absent rather than undefined: see usageOf.
+          ...(spent === undefined ? {} : { usage: spent }),
+          omittedMessages: options.transcript.omittedMessages,
         }
       } catch (error) {
         if (controller.signal.aborted) break

@@ -34,6 +34,13 @@ function agent(messages = [user('Implement the feature')], header?: { provider: 
     },
   }
 }
+/** True when any member of a value is `undefined`, which a tool result may not contain. */
+function hasUndefinedValue(value: unknown): boolean {
+  if (value === undefined) return true
+  if (Array.isArray(value)) return value.some(hasUndefinedValue)
+  if (typeof value === 'object' && value !== null) return Object.values(value).some(hasUndefinedValue)
+  return false
+}
 function success(text = 'Check the completion criteria.'): AsyncIterable<StreamChunk> {
   return (async function* () {
     yield { type: 'text-delta', index: 0, text } as const
@@ -146,6 +153,22 @@ describe('AdvisorService', () => {
   })
 })
 
+describe('AdvisorService result shape', () => {
+  it('returns a consultation the harness can accept as JSON', async () => {
+    const selections = store()
+    await selections.update('session-a', { enabled: true, selection: { provider: 'kimi-code', model: 'k3.1-pro', reasoningEffort: 'max' } })
+    const llm: AdvisorLlm = { stream: () => (async function* () {
+      yield { type: 'text-delta', index: 0, text: 'Content matches the request.' } as const
+      yield { type: 'usage', usage: { inputTokens: 30, outputTokens: 6 } } as const
+      yield { type: 'finish', reason: { kind: 'stop' } } as const
+    })() }
+    const result = await new AdvisorService(selections, llm).consult({ question: 'done?', focus: 'completion' }, agent(), new AbortController().signal)
+    expect(result.status).toBe('ok')
+    expect(hasUndefinedValue(result)).toBe(false)
+    expect(JSON.parse(JSON.stringify(result))).toEqual(result)
+  })
+})
+
 describe('requestAdvisor', () => {
   const base = () => ({
     route: { provider: 'minimax-code', model: 'm3' },
@@ -172,6 +195,27 @@ describe('requestAdvisor', () => {
     const result = await requestAdvisor({ ...base(), llm: { stream }, signal: controller.signal })
     expect(result.status).toBe('cancelled')
     expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('returns a result the harness can accept as JSON when the provider reports no cache counters', async () => {
+    // The harness rejects a tool value that is not lossless JSON, and an undefined member
+    // is exactly that: the answer would be paid for and then thrown away.
+    const noCache: AdvisorLlm = { stream: () => (async function* () {
+      yield { type: 'text-delta', index: 0, text: 'Looks complete.' } as const
+      yield { type: 'usage', usage: { inputTokens: 40, outputTokens: 4 } } as const
+      yield { type: 'finish', reason: { kind: 'stop' } } as const
+    })() }
+    const counted = await requestAdvisor({ ...base(), llm: noCache, signal: new AbortController().signal })
+    expect(counted.usage).toEqual({ inputTokens: 40, outputTokens: 4 })
+    expect(JSON.parse(JSON.stringify(counted))).toEqual(counted)
+
+    const silent: AdvisorLlm = { stream: () => (async function* () {
+      yield { type: 'text-delta', index: 0, text: 'Looks complete.' } as const
+      yield { type: 'finish', reason: { kind: 'stop' } } as const
+    })() }
+    const uncounted = await requestAdvisor({ ...base(), llm: silent, signal: new AbortController().signal })
+    expect('usage' in uncounted).toBe(false)
+    expect(JSON.parse(JSON.stringify(uncounted))).toEqual(uncounted)
   })
 
   it('reports an empty answer as declined instead of retrying it', async () => {
