@@ -141,6 +141,8 @@ export type ClaudeCacheTtl = '5m' | '1h'
 export const CLAUDE_SUBSCRIPTION_CACHE_TTL: ClaudeCacheTtl = '1h'
 /** The plain marker, i.e. the default five-minute tier. */
 export const CLAUDE_DEFAULT_CACHE_TTL: ClaudeCacheTtl = '5m'
+/** Tier the official client uses outside the main conversation: subagents and auxiliary requests. */
+export const CLAUDE_SUBAGENT_CACHE_TTL: ClaudeCacheTtl = '5m'
 
 /** A cache marker for one tier. Absent `ttl` means the five-minute default. */
 export function cacheControlFor(ttl: ClaudeCacheTtl): { type: 'ephemeral'; ttl: ClaudeCacheTtl } {

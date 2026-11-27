@@ -110,6 +110,12 @@ export interface ClaudeModelSettings {
    * on included usage.
    */
   cacheTtl: ClaudeCacheTtl | null
+  /**
+   * Prompt-cache tier for everything outside the main conversation (subagents,
+   * compaction, titles and other auxiliary requests). `null` follows the
+   * official client, which uses five minutes there.
+   */
+  subagentCacheTtl: ClaudeCacheTtl | null
   /** Account pinned in the card, by {@link ClaudeAccountRecord.internalId}. */
   selectedAccountId: string | null
 }
@@ -128,6 +134,8 @@ export interface ClaudeSettingsPatch {
   cacheKeepalive?: boolean
   /** `null` restores the subscription default (the one-hour tier). */
   cacheTtl?: ClaudeCacheTtl | null
+  /** `null` restores the official default for work outside the main conversation (five minutes). */
+  subagentCacheTtl?: ClaudeCacheTtl | null
   selectedAccountId?: string | null
 }
 
@@ -150,6 +158,7 @@ export function defaultClaudeSettings(): ClaudeModelSettings {
     cacheKeepalive: false,
     deviceId: '',
     cacheTtl: null,
+    subagentCacheTtl: null,
     selectedAccountId: null,
   }
 }
@@ -446,6 +455,7 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
   // An unrecognised tier is read as "not set" rather than passed through: a
   // value the wire would reject must not become a stored preference.
   const cacheTtl = isClaudeCacheTtl(record.cacheTtl) ? record.cacheTtl : null
+  const subagentCacheTtl = isClaudeCacheTtl(record.subagentCacheTtl) ? record.subagentCacheTtl : null
   const selectedAccountId = nonEmptyString(record.selectedAccountId) ?? null
   return {
     enabled: record.enabled !== false,
@@ -456,6 +466,7 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
     cacheKeepalive,
     deviceId,
     cacheTtl,
+    subagentCacheTtl,
     selectedAccountId,
   }
 }
@@ -475,6 +486,7 @@ function mergeClaudeSettings(current: ClaudeModelSettings, patch: ClaudeSettings
     cacheKeepalive: patch.cacheKeepalive ?? current.cacheKeepalive,
     deviceId: current.deviceId,
     cacheTtl: patch.cacheTtl !== undefined ? patch.cacheTtl : current.cacheTtl,
+    subagentCacheTtl: patch.subagentCacheTtl !== undefined ? patch.subagentCacheTtl : current.subagentCacheTtl,
     selectedAccountId: patch.selectedAccountId !== undefined ? patch.selectedAccountId : current.selectedAccountId,
   }
 }
@@ -816,6 +828,7 @@ export function registerClaudePreferenceStore(
     cacheKeepalive: z.boolean().default(false),
     deviceId: z.string().default(''),
     cacheTtl: z.union([z.const('5m'), z.const('1h'), z.const(null)]).default(null),
+    subagentCacheTtl: z.union([z.const('5m'), z.const('1h'), z.const(null)]).default(null),
     selectedAccountId: z.union([z.string(), z.const(null)]).default(null),
   })) as SettingsScope<{
     enabled: boolean
@@ -826,6 +839,7 @@ export function registerClaudePreferenceStore(
     cacheKeepalive: boolean
     deviceId: string
     cacheTtl: ClaudeCacheTtl | null
+    subagentCacheTtl: ClaudeCacheTtl | null
     selectedAccountId: string | null
   }>
 
@@ -841,6 +855,7 @@ export function registerClaudePreferenceStore(
         cacheKeepalive: value.cacheKeepalive === true,
         deviceId: typeof value.deviceId === 'string' && /^[0-9a-f]{64}$/.test(value.deviceId) ? value.deviceId : '',
         cacheTtl: isClaudeCacheTtl(value.cacheTtl) ? value.cacheTtl : null,
+        subagentCacheTtl: isClaudeCacheTtl(value.subagentCacheTtl) ? value.subagentCacheTtl : null,
         selectedAccountId: value.selectedAccountId ?? null,
       }
     },

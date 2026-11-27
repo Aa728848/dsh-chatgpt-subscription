@@ -209,6 +209,7 @@ import {
 import {
   installDispatchExecutionGuard,
   resolveDispatchExecutionGuardEnabled,
+  isDelegatedSession,
 } from './host/runtime/guards/dispatch-execution-guard.ts'
 import { canonicalPromptSourceText, installDispatchLedger } from './host/runtime/dispatch-ledger/index.ts'
 import { promptRefDescriptor } from './host/runtime/dispatch-ledger/policy.ts'
@@ -1572,7 +1573,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       claudeStore,
       claudeModelSettings,
       claudePreferences,
-      { fetchFn: modelFetch.claude, attachments: ctx.attachments, accountPool: claudeAccountPool, promptCache: promptCacheOverrides.claude, version: claudeCodeVersion },
+      { fetchFn: modelFetch.claude, attachments: ctx.attachments, accountPool: claudeAccountPool, promptCache: promptCacheOverrides.claude, version: claudeCodeVersion, isDelegatedSession: (sessionId) => isDelegatedSession(sessionId, ctx) },
     )
     // Registered unconditionally: there is no acknowledgement, flag or other
     // prior state that can hold this line back. The only thing that can keep the

@@ -225,6 +225,7 @@ function makeAdapter(
     loadCatalog?: () => Promise<never[]>
     attachments?: { readImage: unknown; readImageRequest: unknown }
     capabilityMemory?: ClaudeCapabilityMemory
+    isDelegatedSession?: (sessionId: string) => boolean
   } = {},
 ): ClaudeAdapter {
   return new ClaudeAdapter(store, settings, undefined, {
@@ -233,6 +234,7 @@ function makeAdapter(
     ...(extra.accountPool === undefined ? {} : { accountPool: extra.accountPool }),
     ...(extra.attachments === undefined ? {} : { attachments: extra.attachments as never }),
     ...(extra.capabilityMemory === undefined ? {} : { capabilityMemory: extra.capabilityMemory }),
+    ...(extra.isDelegatedSession === undefined ? {} : { isDelegatedSession: extra.isDelegatedSession }),
   })
 }
 
@@ -1236,6 +1238,46 @@ describe('Claude subscription wait-time cache activity', () => {
     await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-act-5m') })))
     expect(calls[0]!.headers['anthropic-beta'] ?? '').not.toContain(EXTENDED_TTL_BETA)
     expect(activityStore.read('claude-act-5m')).toMatchObject({ ttlMs: 300_000, totalTokens: 112 })
+  })
+
+  it('uses five minutes outside the main conversation by default, like the official client', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn, { isDelegatedSession: id => id === 'claude-ttl-child' })
+    const markers = (body: unknown) => JSON.stringify(body).match(/"cache_control":\{[^}]*\}/g) ?? []
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-ttl-main') })))
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-ttl-child') })))
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-ttl-main'), purpose: 'compaction' })))
+    const [main, child, compaction] = calls
+    expect(main!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
+    expect(markers(main!.body).every(m => m.includes('"ttl":"1h"'))).toBe(true)
+    for (const call of [child!, compaction!]) {
+      expect(call.headers['anthropic-beta'] ?? '').not.toContain(EXTENDED_TTL_BETA)
+      expect(markers(call.body).length).toBeGreaterThan(0)
+      expect(markers(call.body).every(m => m.includes('"ttl":"5m"'))).toBe(true)
+    }
+    expect(activityStore.read('claude-ttl-child')).toMatchObject({ ttlMs: 300_000 })
+  })
+
+  it('applies the two tiers independently', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ cacheTtl: '5m', subagentCacheTtl: '1h' })
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn, { isDelegatedSession: id => id === 'claude-ttl2-child' })
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-ttl2-main') })))
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-ttl2-child') })))
+    expect(calls[0]!.headers['anthropic-beta'] ?? '').not.toContain(EXTENDED_TTL_BETA)
+    expect(calls[1]!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
+    expect(activityStore.read('claude-ttl2-main')).toMatchObject({ ttlMs: 300_000 })
+    expect(activityStore.read('claude-ttl2-child')).toMatchObject({ ttlMs: 3_600_000 })
+  })
+
+  it('treats a session as main when the delegation lookup throws', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => usageAnswer())
+    const adapter = makeAdapter(store, settings, fn, { isDelegatedSession: () => { throw new Error('no agents service') } })
+    await drain(adapter.stream(options('claude-sonnet-4-6', { sessionId: sid('claude-ttl-throw') })))
+    expect(calls[0]!.headers['anthropic-beta']).toContain(EXTENDED_TTL_BETA)
   })
 
   it('records 3600000 for an explicit 1h choice', async () => {

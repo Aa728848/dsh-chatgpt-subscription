@@ -5,6 +5,7 @@ import {
   hasRunningChildSubagent,
   installDispatchExecutionGuard,
   isDelegatedCaller,
+  isDelegatedSession,
   isPureSleepCommand,
   resolveDispatchExecutionGuardEnabled,
   validateAskUserQuestionArgs,
@@ -111,6 +112,23 @@ describe('调度执行守卫：子代理越权调用主控专用工具', () => {
     const { guard } = host()
     expect(guard()({ name: 'read', arguments: {}, agent: subagentAgent() })).toBeUndefined()
     expect(guard()({ name: 'subagent', arguments: {}, agent: subagentAgent() })).toBeUndefined()
+  })
+})
+
+describe('isDelegatedSession：按会话 id 判定', () => {
+  it('存活的子代理会话是委派会话，主控与未知会话不是', () => {
+    const child = bareAgent('child-2')
+    const root = bareAgent('root-2')
+    const ctx = {
+      get: () => ({
+        get: (id: string) => (id === 'child-2' ? child : id === 'root-2' ? root : undefined),
+        roots: () => [root],
+      }),
+    }
+    expect(isDelegatedSession('child-2', ctx)).toBe(true)
+    expect(isDelegatedSession('root-2', ctx)).toBe(false)
+    expect(isDelegatedSession('gone', ctx)).toBe(false)
+    expect(isDelegatedSession('child-2')).toBe(false)
   })
 })
 

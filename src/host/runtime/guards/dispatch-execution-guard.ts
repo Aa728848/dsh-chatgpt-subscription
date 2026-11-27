@@ -270,6 +270,22 @@ function rootsOf(agents: Record<string, unknown>): unknown[] | undefined {
  * @param command - 候选命令。
  * @returns 是纯等待时为 true。
  */
+/**
+ * Whether a session id belongs to a delegated agent that is live on this host.
+ * Unknown sessions (no agents service, already finished) count as not delegated.
+ */
+export function isDelegatedSession(sessionId: string, ctx?: unknown): boolean {
+  const agents = readService(ctx, 'agents')
+  if (!isRecord(agents) || typeof agents['get'] !== 'function') return false
+  let agent: unknown
+  try {
+    agent = (agents['get'] as (id: string) => unknown).call(agents, sessionId)
+  } catch {
+    return false
+  }
+  return agent !== undefined && isDelegatedCaller(agent, ctx)
+}
+
 export function isPureSleepCommand(command: unknown): boolean {
   if (typeof command !== 'string') return false
   const trimmed = command.trim()
