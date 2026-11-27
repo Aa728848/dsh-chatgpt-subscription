@@ -253,6 +253,30 @@ describe('claude model and context settings', () => {
     expect([...select!.options].map((option) => option.value)).toEqual(['', 'low', 'medium', 'high', 'xhigh', 'max'])
   })
 
+  it('shows the model limit or the saved max_tokens, and posts a number or null', async () => {
+    const { node, fetchMock } = await mountSection(status({ maxTokensOverrides: { 'claude-opus-4-6': 16_000 } }))
+    const input = node.querySelector<HTMLInputElement>(`input[aria-label="Claude Opus 4.6 max output tokens"]`)
+    expect(input?.value).toBe('16K')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '24K')
+      input!.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => {
+      input!.closest('.dsha-context-row')!.querySelector<HTMLButtonElement>('.dsha-context-save:not(.dsha-context-reset)')!.click()
+    })
+    const reset = node.querySelector<HTMLButtonElement>(
+      `button[aria-label="Claude Opus 4.6 ${zh.maxTokensSection} ${zh.contextWindowReset}"]`,
+    )
+    expect(reset?.disabled).toBe(false)
+    await act(async () => reset?.click())
+    const writes = fetchMock.mock.calls.filter((entry) => String(entry[0]).endsWith('/claude/api/settings'))
+      .map((entry) => JSON.parse(String(entry[1]?.body)))
+    expect(writes).toEqual([
+      { maxTokensOverrides: { 'claude-opus-4-6': 24_000 } },
+      { maxTokensOverrides: { 'claude-opus-4-6': null } },
+    ])
+  })
+
   it('posts a number to save a context window and null to restore the default', async () => {
     const { node, fetchMock } = await mountSection(status({
       contextWindowOverrides: { 'claude-opus-4-6': 500_000 },

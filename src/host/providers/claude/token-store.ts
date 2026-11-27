@@ -97,6 +97,12 @@ export interface ClaudeModelSettings {
   enabled?: boolean
   enabledModelIds: string[]
   contextWindowOverrides: Record<string, number>
+  /**
+   * Per-model max_tokens, like the official CLAUDE_CODE_MAX_OUTPUT_TOKENS: the
+   * final ceiling of one reply (thinking included), capped at the model's own
+   * limit. A model without one keeps the route default, which is that limit.
+   */
+  maxTokensOverrides: Record<string, number>
   defaultReasoningEffort: string | null
   /** Send speed: fast on models whose catalog entry supports it. */
   fastMode: boolean
@@ -129,6 +135,8 @@ export interface ClaudeSettingsPatch {
   enabledModelIds?: string[]
   /** `null` deletes one override and falls back to the catalog default. */
   contextWindowOverrides?: ContextWindowOverridePatch
+  /** `null` deletes one override and restores the model's limit. */
+  maxTokensOverrides?: ContextWindowOverridePatch
   defaultReasoningEffort?: string | null
   fastMode?: boolean
   cacheKeepalive?: boolean
@@ -153,6 +161,7 @@ export function defaultClaudeSettings(): ClaudeModelSettings {
     enabled: true,
     enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
     contextWindowOverrides: {},
+    maxTokensOverrides: {},
     defaultReasoningEffort: null,
     fastMode: false,
     cacheKeepalive: false,
@@ -448,6 +457,12 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
       if (typeof window === 'number' && Number.isFinite(window) && window > 0) contextWindowOverrides[model] = window
     }
   }
+  const maxTokensOverrides: Record<string, number> = {}
+  if (isRecord(record.maxTokensOverrides)) {
+    for (const [model, tokens] of Object.entries(record.maxTokensOverrides)) {
+      if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens > 0) maxTokensOverrides[model] = Math.floor(tokens)
+    }
+  }
   const defaultReasoningEffort = nonEmptyString(record.defaultReasoningEffort) ?? null
   const fastMode = record.fastMode === true
   const cacheKeepalive = record.cacheKeepalive === true
@@ -461,6 +476,7 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
     enabled: record.enabled !== false,
     enabledModelIds,
     contextWindowOverrides,
+    maxTokensOverrides,
     defaultReasoningEffort,
     fastMode,
     cacheKeepalive,
@@ -479,6 +495,9 @@ function mergeClaudeSettings(current: ClaudeModelSettings, patch: ClaudeSettings
     contextWindowOverrides: patch.contextWindowOverrides !== undefined
       ? mergeContextWindowOverrides(current.contextWindowOverrides, patch.contextWindowOverrides)
       : current.contextWindowOverrides,
+    maxTokensOverrides: patch.maxTokensOverrides !== undefined
+      ? mergeContextWindowOverrides(current.maxTokensOverrides, patch.maxTokensOverrides)
+      : current.maxTokensOverrides,
     defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
       ? patch.defaultReasoningEffort
       : current.defaultReasoningEffort,
@@ -823,6 +842,7 @@ export function registerClaudePreferenceStore(
     enabled: z.boolean().default(true),
     enabledModelIds: z.array(z.string()).default([...DEFAULT_ENABLED_MODEL_IDS]),
     contextWindowOverrides: z.dict(z.number()).default({}),
+    maxTokensOverrides: z.dict(z.number()).default({}),
     defaultReasoningEffort: z.union([z.string(), z.const(null)]).default(null),
     fastMode: z.boolean().default(false),
     cacheKeepalive: z.boolean().default(false),
@@ -834,6 +854,7 @@ export function registerClaudePreferenceStore(
     enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
+    maxTokensOverrides: Record<string, number>
     defaultReasoningEffort: string | null
     fastMode: boolean
     cacheKeepalive: boolean
@@ -850,6 +871,7 @@ export function registerClaudePreferenceStore(
         enabled: value.enabled !== false,
         enabledModelIds: value.enabledModelIds,
         contextWindowOverrides: value.contextWindowOverrides,
+        maxTokensOverrides: value.maxTokensOverrides ?? {},
         defaultReasoningEffort: value.defaultReasoningEffort,
         fastMode: value.fastMode === true,
         cacheKeepalive: value.cacheKeepalive === true,

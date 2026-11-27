@@ -231,6 +231,8 @@ export interface ClaudeWebStatus extends Partial<AccountPoolStatusDto> {
   quotaError?: string | null
   models: ClaudeModelOption[]
   contextWindowOverrides: Record<string, number>
+  /** Saved max_tokens per model; a model without one sends its own limit. */
+  maxTokensOverrides?: Record<string, number>
   defaultReasoningEffort: ClaudeReasoningEffort | null
   /** Prompt-cache tier; `null` means "follow the official subscription default". */
   cacheTtl: ClaudeCacheTtl | null
@@ -255,6 +257,8 @@ export interface ClaudeSettingsUpdateDto {
   enabledModelIds?: string[]
   /** A number sets an override for that model; `null` restores the default. */
   contextWindowOverrides?: Record<string, number | null>
+  /** A number sets that model's max_tokens; `null` restores the model's limit. */
+  maxTokensOverrides?: Record<string, number | null>
   defaultReasoningEffort?: ClaudeReasoningEffort | null
   /** `null` restores the subscription default. */
   cacheTtl?: ClaudeCacheTtl | null

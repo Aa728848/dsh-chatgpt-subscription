@@ -204,6 +204,12 @@ export interface ClaudeAccountPoolLike {
   markAuthFailed(accountId: string, reason: string): Promise<void>
 }
 
+/** The model's saved max_tokens, capped at its limit; undefined when none is saved. */
+function savedMaxTokensFor(settings: ClaudeModelSettings | null, modelId: string, limit: number): number | undefined {
+  const saved = settings?.maxTokensOverrides?.[modelId]
+  return typeof saved === 'number' && Number.isFinite(saved) && saved > 0 ? Math.min(Math.floor(saved), limit) : undefined
+}
+
 export interface ClaudeAdapterOptions {
   fetchFn?: typeof fetch
   /** Attachment seam: durable images become inline bytes for one request. */
@@ -444,7 +450,7 @@ export class ClaudeAdapter extends LlmAdapter {
       name: entry.name,
       inputModalities: entry.supportsImage ? ['text', 'image'] : ['text'],
       context: { contextWindow: contextWindow || DEFAULT_CONTEXT_WINDOW },
-      ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, maxOutputTokensFor(modelId, catalog)),
+      ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, savedMaxTokensFor(settings, modelId, maxOutputTokensFor(modelId, catalog)) ?? maxOutputTokensFor(modelId, catalog)),
       // `toolUpdate: 'in-history'` for models that accept a mid-conversation
       // system message: a tool change then rides a `tool_addition` /
       // `tool_removal` block in that message, the declaration list at the head
@@ -624,10 +630,18 @@ export class ClaudeAdapter extends LlmAdapter {
       ...(systemRoleUnsupported ? { midConversationSystem: false } : {}),
     }
     const effectiveCatalog = [entry, ...catalog.filter(candidate => candidate.id !== entry.id)]
+    // A saved max_tokens is the final ceiling of a reply that uses the route's
+    // default, as the official CLAUDE_CODE_MAX_OUTPUT_TOKENS; a caller's own cap
+    // keeps its handling and is only lowered to it. Nothing saved: unchanged.
+    const modelLimit = maxOutputTokensFor(requestOptions.model, catalog)
+    const saved = savedMaxTokensFor(settings, requestOptions.model, modelLimit)
+    const asked = requestOptions.maxTokens
+    const usesDefault = saved !== undefined && (asked === undefined || asked === saved || asked === modelLimit)
     const payload = buildClaudeRequestBody({
       ...requestOptions,
-      maxTokens: requestOptions.maxTokens ?? maxOutputTokensFor(requestOptions.model, catalog),
+      maxTokens: usesDefault ? saved : (asked ?? modelLimit),
     }, images, {
+      ...(saved === undefined ? {} : usesDefault ? { maxTokensFinal: true } : { maxOutputLimit: saved }),
       // THE SAME table createStreamState is given — see the module note. Built
       // once by the caller and handed to both sides.
       toolNames,

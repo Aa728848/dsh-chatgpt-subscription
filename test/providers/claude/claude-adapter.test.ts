@@ -1353,6 +1353,42 @@ describe('Claude first-party protocol corrections', () => {
     }
   })
 
+  it('sends the model limit when nothing is saved, as before', async () => {
+    const { store, settings } = await mount()
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'high' as never })))
+    await drain(adapter.stream(options('claude-haiku-4-5', { reasoningEffort: 'high' as never })))
+    expect(calls.map(call => call.body.max_tokens)).toEqual([128_000, 64_000])
+  })
+
+  it('uses a saved max_tokens as the final ceiling, capped at the model limit', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ maxTokensOverrides: { 'claude-opus-5-5': 32_000, 'claude-haiku-4-5': 8_000, 'claude-fable-5-1': 900_000 } })
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    expect((await adapter.resolveModel(PROVIDER_ID, 'claude-opus-5-5')).defaultMaxTokens).toBe(32_000)
+    await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'high' as never })))
+    await drain(adapter.stream(options('claude-haiku-4-5', { reasoningEffort: 'high' as never })))
+    await drain(adapter.stream(options('claude-fable-5-1', { reasoningEffort: 'high' as never })))
+    await drain(adapter.stream(options('claude-sonnet-4-6', { reasoningEffort: 'high' as never })))
+    expect(calls.map(call => call.body.max_tokens)).toEqual([32_000, 8_000, 128_000, 128_000])
+    // A budget-thinking model keeps its budget inside the saved ceiling.
+    expect((calls[1]!.body.thinking as { budget_tokens: number }).budget_tokens).toBeLessThan(8_000)
+  })
+
+  it('only lowers a caller-supplied max_tokens to the saved value', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ maxTokensOverrides: { 'claude-opus-5-5': 32_000 } })
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', { maxTokens: 1_000 })))
+    await drain(adapter.stream(options('claude-opus-5-5', { maxTokens: 100_000 })))
+    // A caller's own cap keeps the route's handling (thinking room on top of
+    // it, 1,000 + 8,192 here) and the saved value only ever lowers the result.
+    expect(calls.map(call => call.body.max_tokens)).toEqual([9_192, 32_000])
+  })
+
   it('signs the exact final body and links headers, metadata and system context', async () => {
     const { store, settings } = await mount()
     const { fn, calls } = recordingFetch(() => answerResponse('ok'))

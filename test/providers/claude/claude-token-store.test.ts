@@ -623,6 +623,7 @@ describe('claude model settings', () => {
       enabled: false,
       enabledModelIds: ['claude-sonnet-5'],
       contextWindowOverrides: { 'claude-opus-5': 500_000 },
+      maxTokensOverrides: {},
       defaultReasoningEffort: 'high',
       // A legacy document states no cache tier, and "no tier stored" is the
       // subscription default rather than a value the reader has to invent.
@@ -800,3 +801,13 @@ describe.skipIf(process.platform !== 'win32')('claude credential storage / Windo
     expect(await new FileCredentialStore(path).read()).toEqual(await store.read())
   }, 30_000)
 })
+
+describe('Claude max_tokens overrides', () => {
+  it('keeps positive whole numbers and drops everything else', async () => {
+    const { parseClaudeModelSettings } = await import('../../../src/host/providers/claude/token-store.ts')
+    expect(parseClaudeModelSettings({ maxTokensOverrides: { a: 32_000.7, b: -1, c: 'x', d: 0 } }).maxTokensOverrides)
+      .toEqual({ a: 32_000 })
+    expect(parseClaudeModelSettings({}).maxTokensOverrides).toEqual({})
+  })
+})
+

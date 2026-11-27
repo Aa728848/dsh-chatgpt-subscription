@@ -31,6 +31,8 @@ export interface ContextWindowRow {
   meta?: string
   /** `aria-label` of this row's input; the one card that labels it with nothing omits it. */
   inputLabel?: string
+  /** Accessible name of the restore button when the row name alone is ambiguous. */
+  resetLabel?: string
   /**
    * Whether the host stores an override for this model. A model with none has
    * nothing to drop, so its restore button stays disabled.
@@ -133,7 +135,7 @@ export function ContextWindowEditor({
           <button
             type="button"
             className="dsha-context-save dsha-context-reset"
-            aria-label={`${row.name} ${labels.reset}`}
+            aria-label={row.resetLabel ?? `${row.name} ${labels.reset}`}
             disabled={row.saving || !row.hasOverride}
             onClick={() => onReset(row.id)}
           >

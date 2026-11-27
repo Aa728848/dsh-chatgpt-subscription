@@ -57,12 +57,13 @@ function modelFacts(model: ClaudeModelOption, t: typeof zh): string[] {
 
 export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSectionProps): React.ReactElement {
   const { state, derived, actions } = useClaudeSection({ onModelChange, loadModelDirectory })
-  const { status, loading, busy, error, flow, connection, pasteValue, contextDrafts, savingModel } = state
-  const { accounts, hasAdopted, contextModels, overrideCount, quota, windows, poolLabels } = derived
+  const { status, loading, busy, error, flow, connection, pasteValue, contextDrafts, savingModel, maxTokensDrafts } = state
+  const { accounts, hasAdopted, contextModels, overrideCount, maxTokensOverrideCount, quota, windows, poolLabels } = derived
   const {
     login, cancelLogin, submitPaste, adopt, stopImporting, accountAction, setStrategy, relogin,
     refreshQuota, refreshCatalog, testConnection, toggleModel, setAllModels, updateEffort,
     updateCacheTtl, updateSubagentCacheTtl, updateFastMode, updateCacheKeepalive, saveContextWindow, resetContextWindow, resetAllContextWindows,
+    updateMaxTokensDraft, saveMaxTokens, resetMaxTokens, resetAllMaxTokens,
     updateContextDraft, setPasteValue,
   } = actions
 
@@ -401,6 +402,38 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
           onCommit={(id) => void saveContextWindow(id)}
           onReset={(id) => void resetContextWindow(id)}
           onResetAll={() => void resetAllContextWindows()}
+        />
+      </section>
+
+      <section className="dsha-group">
+        <div className="dsha-grouphead">
+          <h3>{t.maxTokensSection}</h3>
+        </div>
+        <p className="dsha-muted">{t.maxTokensHint}</p>
+        <ContextWindowEditor
+          rows={contextModels.map((model: ClaudeModelOption) => ({
+            id: model.id,
+            name: model.name,
+            draft: maxTokensDrafts[model.id] ?? '',
+            inputLabel: `${model.name} max output tokens`,
+            resetLabel: `${model.name} ${t.maxTokensSection} ${t.contextWindowReset}`,
+            hasOverride: status?.maxTokensOverrides?.[model.id] !== undefined,
+            saving: savingModel === model.id,
+          }))}
+          labels={{
+            tokens: t.tokens,
+            save: t.save,
+            saving: t.saving,
+            reset: t.contextWindowReset,
+            resetAll: t.contextWindowResetAll,
+            empty: t.contextWindowNoneEnabled,
+          }}
+          busy={busy !== null}
+          overrideCount={maxTokensOverrideCount}
+          onDraftChange={(id, draft) => updateMaxTokensDraft(id, draft)}
+          onCommit={(id) => void saveMaxTokens(id)}
+          onReset={(id) => void resetMaxTokens(id)}
+          onResetAll={() => void resetAllMaxTokens()}
         />
       </section>
 

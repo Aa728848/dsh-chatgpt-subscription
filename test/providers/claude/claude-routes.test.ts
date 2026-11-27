@@ -351,6 +351,7 @@ describe('Claude settings routes', () => {
         contextWindowOverrides: { 'claude-opus-4-6': 123_456 },
         defaultReasoningEffort: 'high',
         subagentCacheTtl: '1h',
+        maxTokensOverrides: { 'claude-opus-4-6': 32_000, ignored: 'x' },
       })
 
       expect(result.status).toBe(200)
@@ -362,10 +363,13 @@ describe('Claude settings routes', () => {
       expect(stored.contextWindowOverrides).toEqual({ 'claude-opus-4-6': 123_456 })
       expect(stored.defaultReasoningEffort).toBe('high')
       expect(stored.subagentCacheTtl).toBe('1h')
+      expect(stored.maxTokensOverrides).toEqual({ 'claude-opus-4-6': 32_000 })
+      expect((await call('/settings', 'POST', { maxTokensOverrides: { 'claude-opus-4-6': null } })).status).toBe(200)
+      expect((await modelSettings.read()).maxTokensOverrides).toEqual({})
       // And the settings document states no acceptance field of any kind.
       const raw = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as Record<string, unknown>
       expect(Object.keys(raw).sort()).toEqual([
-        'cacheKeepalive', 'cacheTtl', 'contextWindowOverrides', 'defaultReasoningEffort', 'deviceId', 'enabled', 'enabledModelIds', 'fastMode', 'selectedAccountId', 'subagentCacheTtl',
+        'cacheKeepalive', 'cacheTtl', 'contextWindowOverrides', 'defaultReasoningEffort', 'deviceId', 'enabled', 'enabledModelIds', 'fastMode', 'maxTokensOverrides', 'selectedAccountId', 'subagentCacheTtl',
       ])
     })
 

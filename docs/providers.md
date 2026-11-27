@@ -151,6 +151,7 @@
   - 本地预检 `minCliVersion`（如 Opus 5.5 要求 `>= 2.1.280`，插件默认申报版本高于表内全部门槛，亦可用 `DSH_CLAUDE_CLI_VERSION` 覆盖）；
   - 四档思考形态按模型精确匹配：`mid-convo`（adaptive + `block_binding: drop_block` + `output_config.effort`）、`adaptive`（绑定前缀模型自动附带 `block_binding: drop_block`）、`budget`（`budget_tokens`，为正文至少预留 1024 token）、`none`；带签名的 `thinking` / `redacted_thinking` 块原样回放；
   - 支持合法位置的会话中途原生 `role: 'system'` 消息；单图 5 MiB base64 防线与整请求 8 MiB 图片预算独立执行；
+  - **单次输出上限**：默认发送模型本身的上限；设置卡可按模型改为更小的值（含思考），作用同官方 `CLAUDE_CODE_MAX_OUTPUT_TOKENS`，可给对话多留上下文，但回复写到上限会被截断、本轮随之结束。
   - **提示缓存 TTL** 分两档设置：主对话可选「跟随官方（1h）/ 1 小时 / 5 分钟」；主对话以外的请求（子代理会话、上下文压缩、生成标题等带 purpose 的辅助请求）单独设置，默认「跟随官方（5 分钟）」，与官方 Claude Code 一致；快速模式与 cache-keepalive 是两个独立、默认关闭的开关。开启后者时仅 1h 主请求携带 cache-keepalive beta，等待续热优先按上一响应的 request-id 调用 cache_touch，失败回退原轻量请求；touch 固定产生该响应的账号。
   - 官方 context_management、尾部 assistant 防护、thinking-token-count 摘除重试与按账号+模型的 7 天能力记忆均已接入；压缩请求跟随会话最近主轮次 effort。cache_touch 的真实订阅直连和 55 分钟效果尚未验证。
   - **等待续热（仅 1 小时档，含「跟随官方」）**：主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时，自动发一次很小的续热请求保住前缀缓存，该轮结束后重新计时；5 分钟档从不续热。空闲时钟从请求**发出**时算起，沿用全局 `cacheWaitWarmup` 开关；新的 cache-keepalive 开关只把优先续热方式换成 cache_touch，失败仍走这里的真实请求。每次 steer 续热是一次真实请求，按缓存读取价格读回整段前缀并计入订阅额度。选号与该会话下一次真实请求完全一致（默认 sequential 取 primary、sticky 取上次账号，只在凭据失效或账号级限流后换号）；若把轮换策略显式设为 `round-robin`，续热可能落到另一个账号、白写一次缓存。

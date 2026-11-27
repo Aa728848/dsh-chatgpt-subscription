@@ -379,6 +379,7 @@ export async function getClaudeWebStatus(
     quotaError,
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
+    maxTokensOverrides: settings.maxTokensOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort as ClaudeWebStatus['defaultReasoningEffort'],
     cacheTtl: settings.cacheTtl,
     subagentCacheTtl: settings.subagentCacheTtl,
@@ -742,6 +743,15 @@ export function registerClaudeRoutes(
               else if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) overrides[key] = Math.floor(raw)
             }
             patch.contextWindowOverrides = overrides
+          }
+          if (typeof body.maxTokensOverrides === 'object' && body.maxTokensOverrides !== null) {
+            // Same shape and rules as the context window: `null` restores the default.
+            const overrides: ContextWindowOverridePatch = {}
+            for (const [key, raw] of Object.entries(body.maxTokensOverrides as Record<string, unknown>)) {
+              if (raw === null) overrides[key] = null
+              else if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) overrides[key] = Math.floor(raw)
+            }
+            patch.maxTokensOverrides = overrides
           }
           if (body.defaultReasoningEffort !== undefined) {
             const effort = body.defaultReasoningEffort
