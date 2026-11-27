@@ -350,7 +350,7 @@ describe('Claude settings routes', () => {
         enabledModelIds: ['claude-opus-4-6'],
         contextWindowOverrides: { 'claude-opus-4-6': 123_456 },
         defaultReasoningEffort: 'high',
-        maxOutputOverrides: { 'claude-opus-4-6': { default: 32_000, low: 8_000 } },
+        maxTokensOverrides: { 'claude-opus-4-6': 32_000, ignored: 'x' },
       })
 
       expect(result.status).toBe(200)
@@ -361,18 +361,13 @@ describe('Claude settings routes', () => {
       const stored = await modelSettings.read()
       expect(stored.contextWindowOverrides).toEqual({ 'claude-opus-4-6': 123_456 })
       expect(stored.defaultReasoningEffort).toBe('high')
-      expect(stored.maxOutputOverrides).toEqual({ 'claude-opus-4-6': { default: 32_000, low: 8_000 } })
-      for (const bad of [{ 'claude-opus-4-6': { bogus: 1 } }, { 'claude-opus-4-6': { low: 0 } }, { 'claude-opus-4-6': [1] }, []]) {
-        expect((await call('/settings', 'POST', { maxOutputOverrides: bad })).status).toBe(400)
-      }
-      expect((await call('/settings', 'POST', { maxOutputOverrides: { 'claude-opus-4-6': { low: null } } })).status).toBe(200)
-      expect((await modelSettings.read()).maxOutputOverrides).toEqual({ 'claude-opus-4-6': { default: 32_000 } })
-      expect((await call('/settings', 'POST', { maxOutputOverrides: { 'claude-opus-4-6': null } })).status).toBe(200)
-      expect((await modelSettings.read()).maxOutputOverrides).toEqual({})
+      expect(stored.maxTokensOverrides).toEqual({ 'claude-opus-4-6': 32_000 })
+      expect((await call('/settings', 'POST', { maxTokensOverrides: { 'claude-opus-4-6': null } })).status).toBe(200)
+      expect((await modelSettings.read()).maxTokensOverrides).toEqual({})
       // And the settings document states no acceptance field of any kind.
       const raw = JSON.parse(await fs.readFile(modelSettings.path(), 'utf8')) as Record<string, unknown>
       expect(Object.keys(raw).sort()).toEqual([
-        'cacheKeepalive', 'cacheTtl', 'contextWindowOverrides', 'defaultReasoningEffort', 'deviceId', 'enabled', 'enabledModelIds', 'fastMode', 'maxOutputOverrides', 'selectedAccountId',
+        'cacheKeepalive', 'cacheTtl', 'contextWindowOverrides', 'defaultReasoningEffort', 'deviceId', 'enabled', 'enabledModelIds', 'fastMode', 'maxTokensOverrides', 'selectedAccountId',
       ])
     })
 

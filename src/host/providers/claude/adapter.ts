@@ -40,8 +40,6 @@ import {
   type ClaudeCacheTtl,
 } from './types.ts'
 import {
-  isMaxOutputLimit,
-  maxOutputLimitFor,
   FileCredentialStore,
   FileModelSettingsStore,
   type ClaudeAccountRecord,
@@ -50,7 +48,6 @@ import {
   type ClaudePreferenceStore,
 } from './token-store.ts'
 import {
-  defaultMaxTokensFor,
   DEFAULT_VISIBLE_MODEL_IDS,
   FALLBACK_MODELS,
   claudeMinCliVersionFor,
@@ -206,13 +203,10 @@ export interface ClaudeAccountPoolLike {
   markAuthFailed(accountId: string, reason: string): Promise<void>
 }
 
-/**
- * The max_tokens this route uses when a caller states none: the saved "all
- * levels" value, else the official Claude Code default, never above the model limit.
- */
-function routeMaxTokensFor(settings: ClaudeModelSettings | null, modelId: string, catalog: readonly ClaudeModelEntry[]): number {
-  const saved = settings?.maxOutputOverrides?.[modelId]?.['default']
-  return Math.min(isMaxOutputLimit(saved) ? saved : defaultMaxTokensFor(modelId, catalog), maxOutputTokensFor(modelId, catalog))
+/** The model's saved max_tokens, capped at its limit; undefined when none is saved. */
+function savedMaxTokensFor(settings: ClaudeModelSettings | null, modelId: string, limit: number): number | undefined {
+  const saved = settings?.maxTokensOverrides?.[modelId]
+  return typeof saved === 'number' && Number.isFinite(saved) && saved > 0 ? Math.min(Math.floor(saved), limit) : undefined
 }
 
 export interface ClaudeAdapterOptions {
@@ -449,7 +443,7 @@ export class ClaudeAdapter extends LlmAdapter {
       name: entry.name,
       inputModalities: entry.supportsImage ? ['text', 'image'] : ['text'],
       context: { contextWindow: contextWindow || DEFAULT_CONTEXT_WINDOW },
-      ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, routeMaxTokensFor(settings, modelId, catalog)),
+      ...outputReservation(contextWindow || DEFAULT_CONTEXT_WINDOW, savedMaxTokensFor(settings, modelId, maxOutputTokensFor(modelId, catalog)) ?? maxOutputTokensFor(modelId, catalog)),
       // `toolUpdate: 'in-history'` for models that accept a mid-conversation
       // system message: a tool change then rides a `tool_addition` /
       // `tool_removal` block in that message, the declaration list at the head
@@ -616,21 +610,18 @@ export class ClaudeAdapter extends LlmAdapter {
       ...(systemRoleUnsupported ? { midConversationSystem: false } : {}),
     }
     const effectiveCatalog = [entry, ...catalog.filter(candidate => candidate.id !== entry.id)]
-    // A request carrying the route's own default (or the model limit an older
-    // host cached as that default) follows the official client: one final
-    // max_tokens, thinking included — the saved level value, else the saved
-    // "all levels" value, else Claude Code's default for the model.
+    // A saved max_tokens is the final ceiling of a reply that uses the route's
+    // default, as the official CLAUDE_CODE_MAX_OUTPUT_TOKENS; a caller's own cap
+    // keeps its handling and is only lowered to it. Nothing saved: unchanged.
     const modelLimit = maxOutputTokensFor(requestOptions.model, catalog)
-    const routeMax = routeMaxTokensFor(settings, requestOptions.model, catalog)
+    const saved = savedMaxTokensFor(settings, requestOptions.model, modelLimit)
     const asked = requestOptions.maxTokens
-    const routeDefault = asked === undefined || asked === routeMax || asked === modelLimit
-    const maxOutputLimit = maxOutputLimitFor(settings, requestOptions.model, requestOptions.reasoningEffort)
+    const usesDefault = saved !== undefined && (asked === undefined || asked === saved || asked === modelLimit)
     const payload = buildClaudeRequestBody({
       ...requestOptions,
-      maxTokens: routeDefault ? Math.min(maxOutputLimit ?? routeMax, modelLimit) : asked,
+      maxTokens: usesDefault ? saved : (asked ?? modelLimit),
     }, images, {
-      // A caller's own smaller cap keeps this route's existing handling, under the saved limit.
-      ...(routeDefault ? { maxTokensFinal: true } : maxOutputLimit === undefined ? {} : { maxOutputLimit }),
+      ...(saved === undefined ? {} : usesDefault ? { maxTokensFinal: true } : { maxOutputLimit: saved }),
       // THE SAME table createStreamState is given — see the module note. Built
       // once by the caller and handed to both sides.
       toolNames,

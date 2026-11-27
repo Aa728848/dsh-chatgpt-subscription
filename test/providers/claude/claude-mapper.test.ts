@@ -2316,29 +2316,24 @@ describe('The four modes as complete bodies', () => {
   })
 })
 
-describe('saved output limit', () => {
-  it('is the final max_tokens ceiling and keeps a thinking budget inside it', () => {
-    const body = buildClaudeRequestBody({
-      provider: 'claude-subscription',
-      model: 'claude-haiku-4-5',
-      reasoningEffort: 'high',
-      maxTokens: 64_000,
-      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-    } as never, new Map(), { maxOutputLimit: 4_000 })
-    expect(body.max_tokens).toBe(4_000)
-    const thinking = body.thinking as { type: string; budget_tokens?: number } | undefined
-    if (thinking?.budget_tokens !== undefined) expect(thinking.budget_tokens).toBeLessThan(4_000)
+describe('final max_tokens and caller ceilings', () => {
+  const ask = (model: string, maxTokens: number) => ({
+    provider: 'claude-subscription', model, reasoningEffort: 'high', maxTokens,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  }) as never
+
+  it('does not widen a final max_tokens for a thinking budget', () => {
+    const widened = buildClaudeRequestBody(ask('claude-haiku-4-5', 8_000), new Map())
+    const final = buildClaudeRequestBody(ask('claude-haiku-4-5', 8_000), new Map(), { maxTokensFinal: true })
+    expect(widened.max_tokens).toBeGreaterThan(8_000)
+    expect(final.max_tokens).toBe(8_000)
+    expect((final.thinking as { budget_tokens: number }).budget_tokens).toBeLessThan(8_000)
   })
 
-  it('never raises a smaller request', () => {
-    const body = buildClaudeRequestBody({
-      provider: 'claude-subscription',
-      model: 'claude-opus-5-5',
-      maxTokens: 1_000,
-      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-    } as never, new Map(), { maxOutputLimit: 50_000 })
-    expect(body.max_tokens).toBeLessThanOrEqual(50_000)
-    expect(body.max_tokens).toBeGreaterThanOrEqual(1_000)
+  it('caps a caller max_tokens, thinking included, without raising it', () => {
+    expect(buildClaudeRequestBody(ask('claude-haiku-4-5', 30_000), new Map(), { maxOutputLimit: 4_000 }).max_tokens).toBe(4_000)
+    const unlimited = buildClaudeRequestBody(ask('claude-opus-5-5', 1_000), new Map()).max_tokens
+    expect(buildClaudeRequestBody(ask('claude-opus-5-5', 1_000), new Map(), { maxOutputLimit: 50_000 }).max_tokens).toBe(unlimited)
   })
 })
 

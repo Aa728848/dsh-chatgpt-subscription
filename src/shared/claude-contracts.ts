@@ -40,13 +40,6 @@ export type ClaudeThinkingMode = 'mid-convo' | 'adaptive' | 'budget' | 'none'
  * 'src/host/claude/routes.ts'; see the module comment.
  */
 export const CLAUDE_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
-/** Keys of one model's output-limit override: every thinking level, or all of them. */
-export type ClaudeMaxOutputKey = 'default' | (typeof CLAUDE_REASONING_EFFORTS)[number]
-/**
- * Per-model max_tokens by thinking level (thinking included); `default` applies
- * to levels without their own value. Capped at the model's limit.
- */
-export type ClaudeMaxOutputOverrides = Record<string, Partial<Record<ClaudeMaxOutputKey, number>>>
 
 /** One selectable thinking level. */
 export type ClaudeReasoningEffort = (typeof CLAUDE_REASONING_EFFORTS)[number]
@@ -91,10 +84,8 @@ export interface ClaudeModelOption {
   defaultContextWindow: number
   /** Effective context window: the override when one is saved, else the default. */
   contextWindow: number
-  /** max_tokens this route sends when nothing overrides it: the official Claude Code default. */
+  /** Maximum output tokens this route requests when a caller omits one. */
   defaultMaxTokens: number
-  /** The model's own output limit; a saved value is capped at it. */
-  maxTokensLimit?: number
   /** Thinking levels this model exposes; empty for a model that takes none. */
   reasoningEfforts: string[]
   /**
@@ -240,11 +231,11 @@ export interface ClaudeWebStatus extends Partial<AccountPoolStatusDto> {
   quotaError?: string | null
   models: ClaudeModelOption[]
   contextWindowOverrides: Record<string, number>
+  /** Saved max_tokens per model; a model without one sends its own limit. */
+  maxTokensOverrides?: Record<string, number>
   defaultReasoningEffort: ClaudeReasoningEffort | null
   /** Prompt-cache tier; `null` means "follow the official subscription default". */
   cacheTtl: ClaudeCacheTtl | null
-  /** Output limits per model and thinking level; absent levels keep the route's default. */
-  maxOutputOverrides?: ClaudeMaxOutputOverrides
   /** Whether eligible models receive speed: fast. */
   fastMode?: boolean
   /** Whether 1h main requests advertise cache-keepalive and permit cache_touch. */
@@ -264,11 +255,11 @@ export interface ClaudeSettingsUpdateDto {
   enabledModelIds?: string[]
   /** A number sets an override for that model; `null` restores the default. */
   contextWindowOverrides?: Record<string, number | null>
+  /** A number sets that model's max_tokens; `null` restores the model's limit. */
+  maxTokensOverrides?: Record<string, number | null>
   defaultReasoningEffort?: ClaudeReasoningEffort | null
   /** `null` restores the subscription default. */
   cacheTtl?: ClaudeCacheTtl | null
-  /** A number sets one level's limit; `null` removes that level, or the whole model when given for the model. */
-  maxOutputOverrides?: Record<string, Partial<Record<ClaudeMaxOutputKey, number | null>> | null>
   fastMode?: boolean
   cacheKeepalive?: boolean
   selectedAccountId?: string | null

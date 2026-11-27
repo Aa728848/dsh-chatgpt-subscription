@@ -16,7 +16,6 @@ import type {
 import { CLAUDE_REASONING_EFFORTS } from '../../../shared/claude-contracts.ts'
 import { AccountPoolSection } from '../../common/AccountPoolSection.tsx'
 import { ContextWindowEditor } from '../../common/ContextWindowEditor.tsx'
-import { MaxOutputEditor } from './MaxOutputEditor.tsx'
 import { ModelChecklist } from '../../common/ModelChecklist.tsx'
 import { formatCapacity, formatDate } from '../../common/format.ts'
 import { useClaudeSection, type ClaudeSectionProps } from './useClaudeSection.ts'
@@ -58,20 +57,17 @@ function modelFacts(model: ClaudeModelOption, t: typeof zh): string[] {
 
 export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSectionProps): React.ReactElement {
   const { state, derived, actions } = useClaudeSection({ onModelChange, loadModelDirectory })
-  const { status, loading, busy, error, flow, connection, pasteValue, contextDrafts, savingModel, maxOutputDrafts } = state
-  const { accounts, hasAdopted, contextModels, overrideCount, quota, windows, poolLabels } = derived
+  const { status, loading, busy, error, flow, connection, pasteValue, contextDrafts, savingModel, maxTokensDrafts } = state
+  const { accounts, hasAdopted, contextModels, overrideCount, maxTokensOverrideCount, quota, windows, poolLabels } = derived
   const {
     login, cancelLogin, submitPaste, adopt, stopImporting, accountAction, setStrategy, relogin,
     refreshQuota, refreshCatalog, testConnection, toggleModel, setAllModels, updateEffort,
     updateCacheTtl, updateFastMode, updateCacheKeepalive, saveContextWindow, resetContextWindow, resetAllContextWindows,
-    updateMaxOutputDraft, saveMaxOutput, resetMaxOutput,
+    updateMaxTokensDraft, saveMaxTokens, resetMaxTokens, resetAllMaxTokens,
     updateContextDraft, setPasteValue,
   } = actions
 
   const t = useLineDict(NS_CLAUDE, zh)
-  const EFFORT_LABELS_LOCAL: Record<ClaudeReasoningEffort, string> = {
-    low: t.effortLow, medium: t.effortMedium, high: t.effortHigh, xhigh: t.effortXHigh, max: t.effortMax,
-  }
 
   if (loading) {
     return (
@@ -391,31 +387,33 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
 
       <section className="dsha-group">
         <div className="dsha-grouphead">
-          <h3>{t.maxOutputSection}</h3>
+          <h3>{t.maxTokensSection}</h3>
         </div>
-        <p className="dsha-muted">{t.maxOutputHint}</p>
-        <MaxOutputEditor
+        <p className="dsha-muted">{t.maxTokensHint}</p>
+        <ContextWindowEditor
           rows={contextModels.map((model: ClaudeModelOption) => ({
             id: model.id,
             name: model.name,
-            defaultLabel: formatCapacity(model.defaultMaxTokens),
-            ...(model.maxTokensLimit === undefined ? {} : { limitLabel: t.maxOutputLimitMeta.replace('{value}', formatCapacity(model.maxTokensLimit)) }),
-            levels: model.reasoningEfforts.filter((level): level is ClaudeReasoningEffort => (CLAUDE_REASONING_EFFORTS as readonly string[]).includes(level)),
-            drafts: maxOutputDrafts[model.id] ?? {},
-            hasOverride: status?.maxOutputOverrides?.[model.id] !== undefined,
+            draft: maxTokensDrafts[model.id] ?? '',
+            inputLabel: `${model.name} max output tokens`,
+            resetLabel: `${model.name} ${t.maxTokensSection} ${t.contextWindowReset}`,
+            hasOverride: status?.maxTokensOverrides?.[model.id] !== undefined,
             saving: savingModel === model.id,
           }))}
           labels={{
-            levels: { default: t.maxOutputAll, ...EFFORT_LABELS_LOCAL },
-            inherit: t.maxOutputInherit,
+            tokens: t.tokens,
             save: t.save,
             saving: t.saving,
             reset: t.contextWindowReset,
+            resetAll: t.contextWindowResetAll,
             empty: t.contextWindowNoneEnabled,
           }}
-          onDraftChange={(id, level, draft) => updateMaxOutputDraft(id, level, draft)}
-          onCommit={(id) => void saveMaxOutput(id)}
-          onReset={(id) => void resetMaxOutput(id)}
+          busy={busy !== null}
+          overrideCount={maxTokensOverrideCount}
+          onDraftChange={(id, draft) => updateMaxTokensDraft(id, draft)}
+          onCommit={(id) => void saveMaxTokens(id)}
+          onReset={(id) => void resetMaxTokens(id)}
+          onResetAll={() => void resetAllMaxTokens()}
         />
       </section>
 

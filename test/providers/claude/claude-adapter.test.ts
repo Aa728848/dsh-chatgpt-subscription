@@ -338,14 +338,12 @@ describe('claude adapter catalog', () => {
 describe('claude adapter model resolution', () => {
   it.each([undefined, 4096])('keeps a live wire cap after omitting an unsafe reservation (%s)', async maxTokens => {
     const { store, settings } = await mount()
-    // A window this small cannot hold the reservation, so none is reported.
-    const live = [{ ...FALLBACK_MODELS.find(m => m.id === 'claude-sonnet-4-6')!, contextWindow: 100_000, maxTokens: 128_000 }]
+    const live = [{ ...FALLBACK_MODELS.find(m => m.id === 'claude-sonnet-4-6')!, contextWindow: 200_000, maxTokens: 128_000 }]
     const fetchStub = recordingFetch(() => answerResponse())
     const adapter = makeAdapter(store, settings, fetchStub.fn, { loadCatalog: async () => live as never[] })
     expect(await adapter.resolveModel(PROVIDER_ID, 'claude-sonnet-4-6')).not.toHaveProperty('defaultMaxTokens')
     await drain(adapter.stream(options('claude-sonnet-4-6', { maxTokens, reasoningEffort: 'none' as never })))
-    // Without a caller cap the official Claude Code default for the model goes out.
-    expect(fetchStub.calls[0]?.body.max_tokens).toBe(maxTokens ?? 32_000)
+    expect(fetchStub.calls[0]?.body.max_tokens).toBe(maxTokens ?? 128_000)
   })
 
   it('passes the effort ladder through unconverged, xhigh included', async () => {
@@ -360,8 +358,7 @@ describe('claude adapter model resolution', () => {
     expect(resolved.reasoning?.efforts.at(-2)?.id).toBe('xhigh')
     expect(resolved.reasoning?.efforts.at(-1)?.id).toBe('max')
     expect(resolved.reasoning?.efforts.at(-2)?.name).toBe('xhigh')
-    // The official Claude Code default for Opus 4.7; 128K stays its limit.
-    expect(resolved.defaultMaxTokens).toBe(64_000)
+    expect(resolved.defaultMaxTokens).toBe(128_000)
     expect(resolved.context?.contextWindow).toBe(1_000_000)
   })
 
@@ -378,22 +375,7 @@ describe('claude adapter model resolution', () => {
       .toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
     expect(unknown.inputModalities).toEqual(['text', 'image'])
     expect(unknown.context?.contextWindow).toBe(1_000_000)
-    // The official client's fallback default for a model its table lacks.
-    expect(unknown.defaultMaxTokens).toBe(32_000)
-  })
-
-  it('reports the official Claude Code default max_tokens per model, or the saved all-levels value', async () => {
-    const { store, settings } = await mount()
-    const adapter = makeAdapter(store, settings, vi.fn() as unknown as typeof fetch)
-    const expected: Record<string, number> = {
-      'claude-opus-5-5': 128_000, 'claude-fable-5-2': 128_000, 'claude-fable-5-1': 64_000, 'claude-fable-5': 64_000,
-      'claude-sonnet-5-5': 128_000, 'claude-sonnet-4-6': 32_000, 'claude-haiku-5-5': 128_000, 'claude-haiku-4-5': 32_000,
-    }
-    for (const [id, tokens] of Object.entries(expected)) {
-      expect((await adapter.resolveModel(PROVIDER_ID, id)).defaultMaxTokens, id).toBe(tokens)
-    }
-    await settings.updateSettings({ maxOutputOverrides: { 'claude-fable-5-1': { default: 100_000 } } })
-    expect((await adapter.resolveModel(PROVIDER_ID, 'claude-fable-5-1')).defaultMaxTokens).toBe(100_000)
+    expect(unknown.defaultMaxTokens).toBe(128_000)
   })
 
   it('prefers a finite positive context override and ignores a broken one', async () => {
@@ -1306,30 +1288,40 @@ describe('Claude subscription wait-time cache activity', () => {
 })
 
 describe('Claude first-party protocol corrections', () => {
-  it('sends the saved value for the request thinking level as the final max_tokens', async () => {
+  it('sends the model limit when nothing is saved, as before', async () => {
     const { store, settings } = await mount()
-    await settings.updateSettings({ maxOutputOverrides: { 'claude-opus-5-5': { default: 64_000, low: 16_000 } } })
     const { fn, calls } = recordingFetch(() => answerResponse('ok'))
     const adapter = makeAdapter(store, settings, fn)
-    await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'low' as never })))
     await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'high' as never })))
-    await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'low' as never, maxTokens: 1_000 })))
-    await drain(adapter.stream(options('claude-fable-5-1', { reasoningEffort: 'low' as never })))
-    // The limit is the final ceiling; a caller asking for less keeps its own
-    // request, which this route already widens by the thinking budget.
-    // The last model has no saved limit: the official default (64K for Fable 5.1).
-    expect(calls.map(call => call.body.max_tokens)).toEqual([16_000, 64_000, 3_048, 64_000])
+    await drain(adapter.stream(options('claude-haiku-4-5', { reasoningEffort: 'high' as never })))
+    expect(calls.map(call => call.body.max_tokens)).toEqual([128_000, 64_000])
   })
 
-  it('lets a saved limit raise the default up to the model limit, as the official environment override does', async () => {
+  it('uses a saved max_tokens as the final ceiling, capped at the model limit', async () => {
     const { store, settings } = await mount()
-    await settings.updateSettings({ maxOutputOverrides: { 'claude-fable-5-1': { high: 100_000, max: 900_000 } } })
+    await settings.updateSettings({ maxTokensOverrides: { 'claude-opus-5-5': 32_000, 'claude-haiku-4-5': 8_000, 'claude-fable-5-1': 900_000 } })
     const { fn, calls } = recordingFetch(() => answerResponse('ok'))
     const adapter = makeAdapter(store, settings, fn)
+    expect((await adapter.resolveModel(PROVIDER_ID, 'claude-opus-5-5')).defaultMaxTokens).toBe(32_000)
+    await drain(adapter.stream(options('claude-opus-5-5', { reasoningEffort: 'high' as never })))
+    await drain(adapter.stream(options('claude-haiku-4-5', { reasoningEffort: 'high' as never })))
     await drain(adapter.stream(options('claude-fable-5-1', { reasoningEffort: 'high' as never })))
-    await drain(adapter.stream(options('claude-fable-5-1', { reasoningEffort: 'max' as never })))
-    await drain(adapter.stream(options('claude-fable-5-1', { reasoningEffort: 'low' as never })))
-    expect(calls.map(call => call.body.max_tokens)).toEqual([100_000, 128_000, 64_000])
+    await drain(adapter.stream(options('claude-sonnet-4-6', { reasoningEffort: 'high' as never })))
+    expect(calls.map(call => call.body.max_tokens)).toEqual([32_000, 8_000, 128_000, 128_000])
+    // A budget-thinking model keeps its budget inside the saved ceiling.
+    expect((calls[1]!.body.thinking as { budget_tokens: number }).budget_tokens).toBeLessThan(8_000)
+  })
+
+  it('only lowers a caller-supplied max_tokens to the saved value', async () => {
+    const { store, settings } = await mount()
+    await settings.updateSettings({ maxTokensOverrides: { 'claude-opus-5-5': 32_000 } })
+    const { fn, calls } = recordingFetch(() => answerResponse('ok'))
+    const adapter = makeAdapter(store, settings, fn)
+    await drain(adapter.stream(options('claude-opus-5-5', { maxTokens: 1_000 })))
+    await drain(adapter.stream(options('claude-opus-5-5', { maxTokens: 100_000 })))
+    // A caller's own cap keeps the route's handling (thinking room on top of
+    // it, 1,000 + 8,192 here) and the saved value only ever lowers the result.
+    expect(calls.map(call => call.body.max_tokens)).toEqual([9_192, 32_000])
   })
 
   it('signs the exact final body and links headers, metadata and system context', async () => {

@@ -13,11 +13,8 @@ import {
   type ClaudeModelSettings,
   type ClaudePreferenceStore,
   type ClaudeSettingsPatch,
-  MAX_OUTPUT_KEYS,
-  isMaxOutputLimit,
 } from './token-store.ts'
 import {
-  defaultMaxTokensFor,
   DEFAULT_VISIBLE_MODEL_IDS,
   FALLBACK_MODELS,
   claudeModelCanDisableThinking,
@@ -155,28 +152,6 @@ export function resolveEnabledModelIds(
 }
 
 /** Build the model options the settings card renders, in catalog order. */
-/** Validate one output-limit patch: model id → level → limit or null, or null for the whole model. */
-function parseMaxOutputPatch(value: unknown): Record<string, Record<string, number | null> | null> | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-  const out: Record<string, Record<string, number | null> | null> = {}
-  for (const [modelId, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (modelId.trim() === '') return undefined
-    if (entry === null) {
-      out[modelId] = null
-      continue
-    }
-    if (typeof entry !== 'object' || Array.isArray(entry)) return undefined
-    const levels: Record<string, number | null> = {}
-    for (const [key, limit] of Object.entries(entry as Record<string, unknown>)) {
-      if (!MAX_OUTPUT_KEYS.includes(key)) return undefined
-      if (limit !== null && !isMaxOutputLimit(limit)) return undefined
-      levels[key] = limit as number | null
-    }
-    out[modelId] = levels
-  }
-  return out
-}
-
 export function buildClaudeModelOptions(
   catalog: readonly ClaudeModelEntry[],
   available: readonly string[],
@@ -196,8 +171,7 @@ export function buildClaudeModelOptions(
       contextWindow: typeof override === 'number' && Number.isFinite(override) && override > 0
         ? override
         : defaultWindow,
-      defaultMaxTokens: defaultMaxTokensFor(id, catalog),
-      maxTokensLimit: maxOutputTokensFor(id, catalog),
+      defaultMaxTokens: maxOutputTokensFor(id, catalog),
       reasoningEfforts: [...claudeReasoningEfforts(id, catalog)],
       canDisableThinking: claudeModelCanDisableThinking(id, catalog),
       thinkingMode: claudeThinkingMode(id, catalog),
@@ -405,9 +379,9 @@ export async function getClaudeWebStatus(
     quotaError,
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
+    maxTokensOverrides: settings.maxTokensOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort as ClaudeWebStatus['defaultReasoningEffort'],
     cacheTtl: settings.cacheTtl,
-    maxOutputOverrides: settings.maxOutputOverrides,
     fastMode: settings.fastMode,
     cacheKeepalive: settings.cacheKeepalive,
     selectedAccountId: settings.selectedAccountId,
@@ -769,6 +743,15 @@ export function registerClaudeRoutes(
             }
             patch.contextWindowOverrides = overrides
           }
+          if (typeof body.maxTokensOverrides === 'object' && body.maxTokensOverrides !== null) {
+            // Same shape and rules as the context window: `null` restores the default.
+            const overrides: ContextWindowOverridePatch = {}
+            for (const [key, raw] of Object.entries(body.maxTokensOverrides as Record<string, unknown>)) {
+              if (raw === null) overrides[key] = null
+              else if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) overrides[key] = Math.floor(raw)
+            }
+            patch.maxTokensOverrides = overrides
+          }
           if (body.defaultReasoningEffort !== undefined) {
             const effort = body.defaultReasoningEffort
             // \`null\` clears the choice and lets the catalog default apply; a
@@ -782,13 +765,6 @@ export function registerClaudeRoutes(
             if (ttl === null || isClaudeCacheTtl(ttl)) {
               patch.cacheTtl = ttl
             }
-          }
-          if (body.maxOutputOverrides !== undefined) {
-            const parsed = parseMaxOutputPatch(body.maxOutputOverrides)
-            if (parsed === undefined) {
-              return sendJson(response, 400, { ok: false, error: 'maxOutputOverrides must map model ids to token limits by thinking level.' })
-            }
-            patch.maxOutputOverrides = parsed
           }
           if (body.fastMode !== undefined) {
             if (typeof body.fastMode !== 'boolean') return sendJson(response, 400, { ok: false, error: 'fastMode must be boolean.' })

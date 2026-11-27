@@ -97,6 +97,12 @@ export interface ClaudeModelSettings {
   enabled?: boolean
   enabledModelIds: string[]
   contextWindowOverrides: Record<string, number>
+  /**
+   * Per-model max_tokens, like the official CLAUDE_CODE_MAX_OUTPUT_TOKENS: the
+   * final ceiling of one reply (thinking included), capped at the model's own
+   * limit. A model without one keeps the route default, which is that limit.
+   */
+  maxTokensOverrides: Record<string, number>
   defaultReasoningEffort: string | null
   /** Send speed: fast on models whose catalog entry supports it. */
   fastMode: boolean
@@ -110,13 +116,6 @@ export interface ClaudeModelSettings {
    * on included usage.
    */
   cacheTtl: ClaudeCacheTtl | null
-  /**
-   * Output limits per model, by thinking level (`default` covers levels without
-   * their own value). Like the official CLAUDE_CODE_MAX_OUTPUT_TOKENS, a value
-   * replaces the model's default max_tokens (thinking included) and is capped
-   * at the model's limit; a caller's own smaller cap is only ever lowered.
-   */
-  maxOutputOverrides: Record<string, Record<string, number>>
   /** Account pinned in the card, by {@link ClaudeAccountRecord.internalId}. */
   selectedAccountId: string | null
 }
@@ -130,13 +129,13 @@ export interface ClaudeSettingsPatch {
   enabledModelIds?: string[]
   /** `null` deletes one override and falls back to the catalog default. */
   contextWindowOverrides?: ContextWindowOverridePatch
+  /** `null` deletes one override and restores the model's limit. */
+  maxTokensOverrides?: ContextWindowOverridePatch
   defaultReasoningEffort?: string | null
   fastMode?: boolean
   cacheKeepalive?: boolean
   /** `null` restores the subscription default (the one-hour tier). */
   cacheTtl?: ClaudeCacheTtl | null
-  /** A number sets one level; `null` removes a level, or a whole model. */
-  maxOutputOverrides?: Record<string, Record<string, number | null> | null>
   selectedAccountId?: string | null
 }
 
@@ -154,12 +153,12 @@ export function defaultClaudeSettings(): ClaudeModelSettings {
     enabled: true,
     enabledModelIds: [...DEFAULT_ENABLED_MODEL_IDS],
     contextWindowOverrides: {},
+    maxTokensOverrides: {},
     defaultReasoningEffort: null,
     fastMode: false,
     cacheKeepalive: false,
     deviceId: '',
     cacheTtl: null,
-    maxOutputOverrides: {},
     selectedAccountId: null,
   }
 }
@@ -449,6 +448,12 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
       if (typeof window === 'number' && Number.isFinite(window) && window > 0) contextWindowOverrides[model] = window
     }
   }
+  const maxTokensOverrides: Record<string, number> = {}
+  if (isRecord(record.maxTokensOverrides)) {
+    for (const [model, tokens] of Object.entries(record.maxTokensOverrides)) {
+      if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens > 0) maxTokensOverrides[model] = Math.floor(tokens)
+    }
+  }
   const defaultReasoningEffort = nonEmptyString(record.defaultReasoningEffort) ?? null
   const fastMode = record.fastMode === true
   const cacheKeepalive = record.cacheKeepalive === true
@@ -456,83 +461,19 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
   // An unrecognised tier is read as "not set" rather than passed through: a
   // value the wire would reject must not become a stored preference.
   const cacheTtl = isClaudeCacheTtl(record.cacheTtl) ? record.cacheTtl : null
-  const maxOutputOverrides = normalizeMaxOutputOverrides(record.maxOutputOverrides)
   const selectedAccountId = nonEmptyString(record.selectedAccountId) ?? null
   return {
     enabled: record.enabled !== false,
     enabledModelIds,
     contextWindowOverrides,
+    maxTokensOverrides,
     defaultReasoningEffort,
     fastMode,
     cacheKeepalive,
     deviceId,
     cacheTtl,
-    maxOutputOverrides,
     selectedAccountId,
   }
-}
-
-/** Keys one model's output-limit override may use. */
-export const MAX_OUTPUT_KEYS: readonly string[] = ['default', 'low', 'medium', 'high', 'xhigh', 'max']
-/** Upper bound accepted for one limit; the model's own maximum still applies per request. */
-export const MAX_OUTPUT_LIMIT = 1_000_000
-
-/** Whether a value is a usable output limit. */
-export function isMaxOutputLimit(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= MAX_OUTPUT_LIMIT
-}
-
-/** Keep only known keys with usable limits, and only models that keep one. */
-export function normalizeMaxOutputOverrides(value: unknown): Record<string, Record<string, number>> {
-  const out: Record<string, Record<string, number>> = {}
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return out
-  for (const [modelId, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (modelId.trim() === '' || typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
-    const kept: Record<string, number> = {}
-    for (const key of MAX_OUTPUT_KEYS) {
-      const limit = (entry as Record<string, unknown>)[key]
-      if (isMaxOutputLimit(limit)) kept[key] = limit
-    }
-    if (Object.keys(kept).length > 0) out[modelId] = kept
-  }
-  return out
-}
-
-function mergeMaxOutputOverrides(
-  current: Record<string, Record<string, number>>,
-  patch: Record<string, Record<string, number | null> | null>,
-): Record<string, Record<string, number>> {
-  const next: Record<string, Record<string, number>> = { ...current }
-  for (const [modelId, entry] of Object.entries(patch)) {
-    if (entry === null) {
-      delete next[modelId]
-      continue
-    }
-    const merged: Record<string, number> = { ...(next[modelId] ?? {}) }
-    for (const [key, limit] of Object.entries(entry)) {
-      if (limit === null) delete merged[key]
-      else merged[key] = limit
-    }
-    if (Object.keys(merged).length > 0) next[modelId] = merged
-    else delete next[modelId]
-  }
-  return normalizeMaxOutputOverrides(next)
-}
-
-/**
- * The output limit one request may use: the model's value for this thinking
- * level, else its `default`, else none.
- */
-export function maxOutputLimitFor(
-  settings: Pick<ClaudeModelSettings, 'maxOutputOverrides'> | null,
-  modelId: string,
-  effort: unknown,
-): number | undefined {
-  const entry = settings?.maxOutputOverrides?.[modelId]
-  if (entry === undefined) return undefined
-  const level = typeof effort === 'string' && effort !== '' ? entry[effort] : undefined
-  const limit = level ?? entry['default']
-  return isMaxOutputLimit(limit) ? limit : undefined
 }
 
 /** Merge one patch over a settings document, applying the override semantics. */
@@ -543,6 +484,9 @@ function mergeClaudeSettings(current: ClaudeModelSettings, patch: ClaudeSettings
     contextWindowOverrides: patch.contextWindowOverrides !== undefined
       ? mergeContextWindowOverrides(current.contextWindowOverrides, patch.contextWindowOverrides)
       : current.contextWindowOverrides,
+    maxTokensOverrides: patch.maxTokensOverrides !== undefined
+      ? mergeContextWindowOverrides(current.maxTokensOverrides, patch.maxTokensOverrides)
+      : current.maxTokensOverrides,
     defaultReasoningEffort: patch.defaultReasoningEffort !== undefined
       ? patch.defaultReasoningEffort
       : current.defaultReasoningEffort,
@@ -550,9 +494,6 @@ function mergeClaudeSettings(current: ClaudeModelSettings, patch: ClaudeSettings
     cacheKeepalive: patch.cacheKeepalive ?? current.cacheKeepalive,
     deviceId: current.deviceId,
     cacheTtl: patch.cacheTtl !== undefined ? patch.cacheTtl : current.cacheTtl,
-    maxOutputOverrides: patch.maxOutputOverrides !== undefined
-      ? mergeMaxOutputOverrides(current.maxOutputOverrides, patch.maxOutputOverrides)
-      : current.maxOutputOverrides,
     selectedAccountId: patch.selectedAccountId !== undefined ? patch.selectedAccountId : current.selectedAccountId,
   }
 }
@@ -889,23 +830,23 @@ export function registerClaudePreferenceStore(
     enabled: z.boolean().default(true),
     enabledModelIds: z.array(z.string()).default([...DEFAULT_ENABLED_MODEL_IDS]),
     contextWindowOverrides: z.dict(z.number()).default({}),
+    maxTokensOverrides: z.dict(z.number()).default({}),
     defaultReasoningEffort: z.union([z.string(), z.const(null)]).default(null),
     fastMode: z.boolean().default(false),
     cacheKeepalive: z.boolean().default(false),
     deviceId: z.string().default(''),
     cacheTtl: z.union([z.const('5m'), z.const('1h'), z.const(null)]).default(null),
-    maxOutputOverrides: z.dict(z.dict(z.number())).default({}),
     selectedAccountId: z.union([z.string(), z.const(null)]).default(null),
   })) as SettingsScope<{
     enabled: boolean
     enabledModelIds: string[]
     contextWindowOverrides: Record<string, number>
+    maxTokensOverrides: Record<string, number>
     defaultReasoningEffort: string | null
     fastMode: boolean
     cacheKeepalive: boolean
     deviceId: string
     cacheTtl: ClaudeCacheTtl | null
-    maxOutputOverrides: Record<string, Record<string, number>>
     selectedAccountId: string | null
   }>
 
@@ -916,12 +857,12 @@ export function registerClaudePreferenceStore(
         enabled: value.enabled !== false,
         enabledModelIds: value.enabledModelIds,
         contextWindowOverrides: value.contextWindowOverrides,
+        maxTokensOverrides: value.maxTokensOverrides ?? {},
         defaultReasoningEffort: value.defaultReasoningEffort,
         fastMode: value.fastMode === true,
         cacheKeepalive: value.cacheKeepalive === true,
         deviceId: typeof value.deviceId === 'string' && /^[0-9a-f]{64}$/.test(value.deviceId) ? value.deviceId : '',
         cacheTtl: isClaudeCacheTtl(value.cacheTtl) ? value.cacheTtl : null,
-        maxOutputOverrides: normalizeMaxOutputOverrides(value.maxOutputOverrides),
         selectedAccountId: value.selectedAccountId ?? null,
       }
     },

@@ -12,12 +12,6 @@ export interface ClaudeModelEntry {
   contextWindow: number
   /** Output cap requested when the caller omits one. */
   maxTokens: number
-  /**
-   * max_tokens the official Claude Code sends when nothing overrides it (its
-   * per-model `max_output_tokens.default`); `maxTokens` stays the upper limit.
-   * Absent means the official fallback of 32,000, capped at `maxTokens`.
-   */
-  defaultMaxTokens?: number
   /** Whether the model accepts image input. */
   supportsImage: boolean
   /** Whether a `temperature` may be sent at all. */
@@ -126,7 +120,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Fable 5',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 64000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'adaptive',
@@ -138,7 +131,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Fable 5.1',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 64000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'mid-convo',
@@ -152,7 +144,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Fable 5.2',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 128000,
     supportsImage: true,
     supportsTemperature: false,
     thinkingMode: 'adaptive',
@@ -165,7 +156,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Haiku 4.5 (latest)',
     contextWindow: 200000,
     maxTokens: 64000,
-    defaultMaxTokens: 32000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'budget',
@@ -177,7 +167,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Haiku 4.5',
     contextWindow: 200000,
     maxTokens: 64000,
-    defaultMaxTokens: 32000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'budget',
@@ -194,7 +183,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Haiku 5.5',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 128000,
     supportsImage: true,
     // Documented as unsupported, and not merely "incompatible with thinking" as
     // on the opus rows: the migration guide states the request must OMIT
@@ -245,7 +233,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Opus 4.5 (latest)',
     contextWindow: 200000,
     maxTokens: 64000,
-    defaultMaxTokens: 32000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'budget',
@@ -257,7 +244,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Opus 4.5',
     contextWindow: 200000,
     maxTokens: 64000,
-    defaultMaxTokens: 32000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'budget',
@@ -269,7 +255,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Opus 4.6',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 64000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'adaptive',
@@ -281,7 +266,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Opus 4.7',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 64000,
     supportsImage: true,
     supportsTemperature: false,
     thinkingMode: 'adaptive',
@@ -293,7 +277,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Opus 4.8',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 64000,
     supportsImage: true,
     supportsTemperature: false,
     thinkingMode: 'adaptive',
@@ -305,7 +288,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Opus 5',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 64000,
     supportsImage: true,
     supportsTemperature: false,
     thinkingMode: 'mid-convo',
@@ -325,7 +307,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Opus 5.5',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 128000,
     supportsImage: true,
     // Documented as unsupported: temperature is incompatible with extended
     // thinking on this model, which is always on (same generation as the
@@ -374,7 +355,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Sonnet 4.5 (latest)',
     contextWindow: 200000,
     maxTokens: 64000,
-    defaultMaxTokens: 32000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'budget',
@@ -386,7 +366,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Sonnet 4.5',
     contextWindow: 200000,
     maxTokens: 64000,
-    defaultMaxTokens: 32000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'budget',
@@ -398,7 +377,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Sonnet 4.6',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 32000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'adaptive',
@@ -410,7 +388,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Sonnet 5',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 64000,
     supportsImage: true,
     supportsTemperature: true,
     thinkingMode: 'adaptive',
@@ -425,7 +402,6 @@ export const CLAUDE_MODELS: readonly ClaudeModelEntry[] = Object.freeze([
     name: 'Claude Sonnet 5.5',
     contextWindow: 1000000,
     maxTokens: 128000,
-    defaultMaxTokens: 128000,
     supportsImage: true,
     // Documented: a non-default temperature, top_p or top_k is a 400.
     supportsTemperature: false,
@@ -557,8 +533,6 @@ export function resolveClaudeModel(modelId: string, catalog: readonly ClaudeMode
     // mid-conversation tool-change capability. Live availability remains unverified.
     return {
       ...resolved,
-      // Official default 64K within a 128K limit (binary table 2.1.318).
-      defaultMaxTokens: 64_000,
       thinkingMode: 'budget',
       reasoningEfforts: [],
       canDisableThinking: true,
@@ -644,15 +618,6 @@ export function defaultContextWindowFor(modelId: string, catalog?: readonly Clau
 /** Output cap one request asks for when the caller omits one. */
 export function maxOutputTokensFor(modelId: string, catalog?: readonly ClaudeModelEntry[]): number {
   return resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS).maxTokens
-}
-
-/** The official client's fallback default for a model its table does not describe. */
-export const CLAUDE_CODE_FALLBACK_MAX_TOKENS = 32_000
-
-/** max_tokens the official Claude Code sends for this model by default, never above its limit. */
-export function defaultMaxTokensFor(modelId: string, catalog?: readonly ClaudeModelEntry[]): number {
-  const entry = resolveClaudeModel(modelId, catalog ?? CLAUDE_MODELS)
-  return Math.min(entry.defaultMaxTokens ?? CLAUDE_CODE_FALLBACK_MAX_TOKENS, entry.maxTokens)
 }
 
 /**

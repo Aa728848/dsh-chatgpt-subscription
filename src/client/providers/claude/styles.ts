@@ -24,11 +24,6 @@ export function installClaudeStyles(): void {
 .dshcl-paste-row input{flex:1 1 260px;min-width:200px}
 .dshcl-mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
 .dshcl-model-meta{color:var(--dsw-alias-label-tertiary);font-size:11px;margin-left:5px}
-.dshcl-max-output-row{display:flex;flex-direction:column;gap:6px;padding:8px 0;border-bottom:1px solid var(--dsw-alias-separator, rgba(127,127,127,.18))}
-.dshcl-max-output-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px}
-.dshcl-max-output-levels{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:6px}
-.dshcl-max-output-level{display:flex;flex-direction:column;gap:2px;font-size:11px;color:var(--dsw-alias-label-tertiary)}
-.dshcl-max-output-level input{width:100%;box-sizing:border-box}
 .dshcl-empty-inline{color:var(--dsw-alias-label-tertiary);font-size:12px}
 `, STYLE_ID)
 }

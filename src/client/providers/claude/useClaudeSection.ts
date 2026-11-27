@@ -19,7 +19,6 @@ import type {
   ClaudeQuotaWindow,
   ClaudeReasoningEffort,
   ClaudeWebStatus,
-  ClaudeMaxOutputKey,
 } from '../../../shared/claude-contracts.ts'
 import { contextDraftsFor } from '../../common/ContextWindowEditor.tsx'
 import { formatCapacity, parsePositiveCapacity } from '../../common/format.ts'
@@ -74,8 +73,8 @@ export interface ClaudeSectionView {
     contextDrafts: Record<string, string>
     /** Model id whose context-window save or restore is in flight. */
     savingModel: string | null
-    /** Output-limit drafts per model and level, as typed. */
-    maxOutputDrafts: Record<string, Partial<Record<ClaudeMaxOutputKey, string>>>
+    /** One free-text max_tokens draft per model, keyed by model id. */
+    maxTokensDrafts: Record<string, string>
   }
   /** Facts read straight off the current status answer. */
   derived: {
@@ -87,6 +86,8 @@ export interface ClaudeSectionView {
     contextModels: ClaudeModelOption[]
     /** How many stored overrides exist, whether or not a row still shows them. */
     overrideCount: number
+    /** Models with a saved max_tokens. */
+    maxTokensOverrideCount: number
     /** The displayed account's quota snapshot, when the host has one. */
     quota: ClaudeAccountQuota | null | undefined
     /** Windows of that snapshot, shortest first. */
@@ -128,11 +129,12 @@ export interface ClaudeSectionView {
     updateFastMode(checked: boolean): Promise<void>
     updateCacheKeepalive(checked: boolean): Promise<void>
     saveContextWindow(modelId: string): Promise<void>
-    updateMaxOutputDraft(modelId: string, level: ClaudeMaxOutputKey, draft: string): void
-    saveMaxOutput(modelId: string): Promise<void>
-    resetMaxOutput(modelId: string): Promise<void>
     resetContextWindow(modelId: string): Promise<void>
     resetAllContextWindows(): Promise<void>
+    updateMaxTokensDraft(modelId: string, draft: string): void
+    saveMaxTokens(modelId: string): Promise<void>
+    resetMaxTokens(modelId: string): Promise<void>
+    resetAllMaxTokens(): Promise<void>
     /** Edit one capacity draft mid-typing; the editor never parses it. */
     updateContextDraft(modelId: string, draft: string): void
     /** Edit the manual-paste box. */
@@ -149,16 +151,16 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
   const [pasteValue, setPasteValue] = useState('')
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [savingModel, setSavingModel] = useState<string | null>(null)
-  const [maxOutputDrafts, setMaxOutputDrafts] = useState<Record<string, Partial<Record<ClaudeMaxOutputKey, string>>>>({})
-  const savedMaxOutput = JSON.stringify(status?.maxOutputOverrides ?? {})
-  // Drafts follow what the host has saved; they reset only when a saved limit changes.
+  const [maxTokensDrafts, setMaxTokensDrafts] = useState<Record<string, string>>({})
+  // Drafts follow what the host reports; they reset only when a saved value or a default changes.
+  const maxTokensKey = JSON.stringify([
+    status?.maxTokensOverrides ?? {},
+    (status?.models ?? []).map((model) => [model.id, model.defaultMaxTokens]),
+  ])
   useEffect(() => {
-    const drafts: Record<string, Partial<Record<ClaudeMaxOutputKey, string>>> = {}
-    for (const [modelId, levels] of Object.entries(JSON.parse(savedMaxOutput) as Record<string, Partial<Record<ClaudeMaxOutputKey, number>>>)) {
-      drafts[modelId] = Object.fromEntries(Object.entries(levels).map(([level, limit]) => [level, formatCapacity(limit as number)]))
-    }
-    setMaxOutputDrafts(drafts)
-  }, [savedMaxOutput])
+    const [overrides, defaults] = JSON.parse(maxTokensKey) as [Record<string, number>, [string, number][]]
+    setMaxTokensDrafts(Object.fromEntries(defaults.map(([id, fallback]) => [id, formatCapacity(overrides[id] ?? fallback)])))
+  }, [maxTokensKey])
   const [connection, setConnection] = useState<ClaudeConnectionDto | null>(null)
 
   /** Follow-up poll owed while the host refreshes the quota behind an answer. */
@@ -514,48 +516,6 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
   const updateFastMode = (checked: boolean) => updateBooleanSetting('fastMode', checked)
   const updateCacheKeepalive = (checked: boolean) => updateBooleanSetting('cacheKeepalive', checked)
 
-  const updateMaxOutputDraft = (modelId: string, level: ClaudeMaxOutputKey, draft: string) => {
-    setMaxOutputDrafts((prev) => ({ ...prev, [modelId]: { ...(prev[modelId] ?? {}), [level]: draft } }))
-  }
-
-  const postMaxOutput = async (modelId: string, levels: Partial<Record<ClaudeMaxOutputKey, number | null>> | null) => {
-    try {
-      setSavingModel(modelId)
-      setError(null)
-      const updated = await api.request<ClaudeWebStatus>('/settings', {
-        method: 'POST',
-        body: JSON.stringify({ maxOutputOverrides: { [modelId]: levels } }),
-      })
-      setStatus(updated)
-      notifyChange()
-    } catch (err) {
-      reportError(err)
-    } finally {
-      setSavingModel(null)
-    }
-  }
-
-  /** Every level is sent: an emptied box removes that level's saved limit. */
-  const saveMaxOutput = async (modelId: string) => {
-    const levels: Partial<Record<ClaudeMaxOutputKey, number | null>> = {}
-    for (const level of ['default', 'low', 'medium', 'high', 'xhigh', 'max'] as const) {
-      const raw = (maxOutputDrafts[modelId]?.[level] ?? '').trim()
-      if (raw === '') {
-        levels[level] = null
-        continue
-      }
-      const parsed = parsePositiveCapacity(raw)
-      if (parsed === null) {
-        setError(t.maxOutputInvalid.replace('{value}', raw))
-        return
-      }
-      levels[level] = parsed
-    }
-    await postMaxOutput(modelId, levels)
-  }
-
-  const resetMaxOutput = (modelId: string) => postMaxOutput(modelId, null)
-
   const saveContextWindow = async (modelId: string) => {
     const raw = contextDrafts[modelId] || ''
     const parsed = parsePositiveCapacity(raw)
@@ -630,6 +590,49 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
     }
   }
 
+  const postMaxTokens = async (patch: Record<string, number | null>, modelId: string | null) => {
+    try {
+      if (modelId === null) setBusy('maxTokens')
+      else setSavingModel(modelId)
+      setError(null)
+      const updated = await api.request<ClaudeWebStatus>('/settings', {
+        method: 'POST',
+        body: JSON.stringify({ maxTokensOverrides: patch }),
+      })
+      setStatus(updated)
+      notifyChange()
+    } catch (err) {
+      reportError(err)
+    } finally {
+      if (modelId === null) setBusy(null)
+      else setSavingModel(null)
+    }
+  }
+
+  const saveMaxTokens = async (modelId: string) => {
+    const raw = maxTokensDrafts[modelId] || ''
+    const parsed = parsePositiveCapacity(raw)
+    if (parsed === null) {
+      setError(t.maxTokensInvalid.replace('{value}', raw))
+      return
+    }
+    await postMaxTokens({ [modelId]: parsed }, modelId)
+  }
+
+  /** `null` restores the model's own limit; the host deletes the saved value. */
+  const resetMaxTokens = (modelId: string) => postMaxTokens({ [modelId]: null }, modelId)
+
+  const resetAllMaxTokens = async () => {
+    const models = Object.keys(status?.maxTokensOverrides ?? {})
+    if (models.length === 0) return
+    if (typeof window !== 'undefined' && !window.confirm(t.maxTokensResetAllConfirm)) return
+    await postMaxTokens(Object.fromEntries(models.map((model) => [model, null])), null)
+  }
+
+  const updateMaxTokensDraft = (modelId: string, draft: string): void => {
+    setMaxTokensDrafts((prev) => ({ ...prev, [modelId]: draft }))
+  }
+
   const updateContextDraft = (modelId: string, draft: string): void => {
     setContextDrafts((prev) => ({ ...prev, [modelId]: draft }))
   }
@@ -638,6 +641,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
   const hasAdopted = accounts.some((account) => account.adopted === true || account.removable === false)
   const contextModels = status?.models.filter((model) => model.enabled) ?? []
   const overrideCount = Object.keys(status?.contextWindowOverrides ?? {}).length
+  const maxTokensOverrideCount = Object.keys(status?.maxTokensOverrides ?? {}).length
   const quota = status?.quota
   const windows: ClaudeQuotaWindow[] = quota?.windows ?? []
 
@@ -651,7 +655,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
       connection,
       pasteValue,
       contextDrafts,
-      maxOutputDrafts,
+      maxTokensDrafts,
       savingModel,
     },
     derived: {
@@ -659,6 +663,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
       hasAdopted,
       contextModels,
       overrideCount,
+      maxTokensOverrideCount,
       quota,
       windows,
       poolLabels: t,
@@ -682,11 +687,12 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
       updateFastMode,
       updateCacheKeepalive,
       saveContextWindow,
-      updateMaxOutputDraft,
-      saveMaxOutput,
-      resetMaxOutput,
       resetContextWindow,
       resetAllContextWindows,
+      updateMaxTokensDraft,
+      saveMaxTokens,
+      resetMaxTokens,
+      resetAllMaxTokens,
       updateContextDraft,
       setPasteValue,
     },
