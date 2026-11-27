@@ -1378,8 +1378,18 @@ function markClaudeCacheBreakpoints(body: Record<string, unknown>, ttl: ClaudeCa
     }
   }
 
+  // A tool breakpoint is only legal ABOVE every system block: the wire renders
+  // tools before system, so once a system block carries a 'global' scope the
+  // narrow marker on a tool would sit before it and the request is refused as
+  // "a global block was found after content with a narrower cache scope". The
+  // global system breakpoint already covers every declaration rendered before
+  // it, so skip the tool marker there and keep that breakpoint budget for the
+  // messages. A per-request opt-out is applied by the caller before this runs.
+  const systemHasGlobal = Array.isArray(system) && system.some(
+    (block) => isRecord(block) && isRecord(block.cache_control) && block.cache_control.scope === 'global',
+  )
   const tools = body.tools
-  if (Array.isArray(tools) && tools.length > 0) {
+  if (!systemHasGlobal && Array.isArray(tools) && tools.length > 0) {
     // A deferred declaration stays out of the cached prefix, so a marker on it
     // is a 400 upstream and would not cover the declarations before it. Mark
     // the LAST non-deferred declaration instead; if every declaration is

@@ -286,10 +286,15 @@ describe('claude-api replay', () => {
 })
 
 describe('claude-api cache breakpoints and speed', () => {
-  it('marks system prompt, last user block and last tool, never identity, at 5m', () => {
+  it('marks the global system block and last user block, never identity, and skips the tool', () => {
     const opts = options([userText('u')], { system: 'prompt', tools: [tool('Bash'), tool('Read')] })
     const body = build(opts)
-    expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
+    // The static system block is globally scoped, and the wire renders tools before
+    // system: a marker on a tool would render BEFORE the global block and be refused
+    // as "a global block was found after content with a narrower cache scope". The
+    // global breakpoint already covers the declarations rendered before it, so no
+    // tool marker is written.
+    expect(countClaudeApiCacheBreakpoints(body)).toBe(2)
     const markers: unknown[] = []
     const visit = (value: unknown): void => {
       if (Array.isArray(value)) { value.forEach(visit); return }
@@ -299,19 +304,20 @@ describe('claude-api cache breakpoints and speed', () => {
       Object.values(record).forEach(visit)
     }
     visit(body)
-    expect(markers).toHaveLength(3)
+    expect(markers).toHaveLength(2)
     expect(markers).toContainEqual({ type: 'ephemeral', scope: 'global' })
     const tools = body.tools as Array<Record<string, unknown>>
     expect(tools[0]?.cache_control).toBeUndefined()
-    expect(tools[1]?.cache_control).toEqual({ type: 'ephemeral' })
+    expect(tools[1]?.cache_control).toBeUndefined()
   })
 
-  it('writes ttl 1h at the 1h tier and never marks deferred tools', () => {
+  it('writes ttl 1h at the 1h tier on the global system block and never marks tools there', () => {
     const opts = options([userText('u')], { system: 'prompt', tools: [tool('Bash'), tool('Read', true)] })
     const body = build(opts, fable(), { cacheTtl: '1h' })
-    expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
+    // No tool marker while the global system block exists (see the test above).
+    expect(countClaudeApiCacheBreakpoints(body)).toBe(2)
     const tools = body.tools as Array<Record<string, unknown>>
-    expect(tools[0]?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(tools[0]?.cache_control).toBeUndefined()
     expect(tools[1]?.cache_control).toBeUndefined()
     expect(systemOf(body)[1]?.cache_control).toBeUndefined()
     expect(systemOf(body)[2]?.cache_control).toEqual({ type: 'ephemeral', ttl: '1h', scope: 'global' })
@@ -329,7 +335,7 @@ describe('claude-api cache breakpoints and speed', () => {
     const messages = messagesOf(body)
     expect(messages.at(-1)?.role).toBe('system')
     expect(messages.at(-1)?.clear_at).toBe('next_user_message')
-    expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
+    expect(countClaudeApiCacheBreakpoints(body)).toBe(2)
     expect((messages[0]?.content as Array<Record<string, unknown>>)[0]?.cache_control).toEqual({ type: 'ephemeral' })
     expect(JSON.stringify(messages.at(-1))).not.toContain('cache_control')
   })
@@ -340,7 +346,7 @@ describe('claude-api cache breakpoints and speed', () => {
     const messages = messagesOf(body)
     expect(messages.at(-1)?.role).toBe('system')
     expect(messages.at(-1)?.clear_at).toBeUndefined()
-    expect(countClaudeApiCacheBreakpoints(body)).toBe(3)
+    expect(countClaudeApiCacheBreakpoints(body)).toBe(2)
     expect((messages[0]?.content as Array<Record<string, unknown>>)[0]?.cache_control).toEqual({ type: 'ephemeral' })
     expect(JSON.stringify(messages.at(-1))).not.toContain('cache_control')
   })
@@ -358,7 +364,7 @@ describe('claude-api cache breakpoints and speed', () => {
     const secondPrevious = (messagesOf(second)[2]?.content as Array<Record<string, unknown>>)[0]
     expect(firstTail?.cache_control).toEqual({ type: 'ephemeral' })
     expect(secondPrevious).toEqual(firstTail)
-    expect(countClaudeApiCacheBreakpoints(second)).toBe(4)
+    expect(countClaudeApiCacheBreakpoints(second)).toBe(3)
 
     const third = build(options([
       ...history,
@@ -369,7 +375,7 @@ describe('claude-api cache breakpoints and speed', () => {
     ], requestOptions))
     const thirdPrevious = (messagesOf(third)[4]?.content as Array<Record<string, unknown>>)[0]
     expect(thirdPrevious?.cache_control).toEqual({ type: 'ephemeral' })
-    expect(countClaudeApiCacheBreakpoints(third)).toBe(4)
+    expect(countClaudeApiCacheBreakpoints(third)).toBe(3)
   })
 
   it('reserves the history-marker budget when static and dynamic system blocks coexist', () => {

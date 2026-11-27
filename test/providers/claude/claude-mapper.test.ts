@@ -371,6 +371,30 @@ describe('Prompt-cache breakpoints', () => {
     expect(countClaudeCacheBreakpoints(built)).toBe(3)
   })
 
+  it('skips the tool breakpoint when a globally scoped system block exists', () => {
+    // Fixes the "a global block was found after content with a narrower cache
+    // scope" 400: with a subscription (first-party) request the static system
+    // block is globally scoped, and the wire renders tools before system, so a
+    // plain tool marker would sit ahead of the global block. The global
+    // breakpoint already covers those declarations, so no tool marker is sent.
+    const built = body(
+      { model: 'claude-opus-5-5', system: 'static prompt', tools: TOOLS },
+      {
+        firstParty: {
+          version: '2.1.330',
+          deviceId: 'device',
+          accountUuid: 'account',
+          context: { sessionUuid: 'session', promptUuid: 'prompt', promptIndex: 0, turnIndex: 1 },
+        },
+      },
+    )
+    const system = systemBlocksOf(built)
+    expect(system.some((block) => (block.cache_control as { scope?: string } | undefined)?.scope === 'global')).toBe(true)
+    const tools = built.tools as Array<Record<string, unknown>>
+    expect(tools[0]!.cache_control).toBeUndefined()
+    expect(tools[1]!.cache_control).toBeUndefined()
+  })
+
   it('marks the LAST of two system blocks for a model that FOLDS its system messages', () => {
     // Sonnet 4.6 is not on the vendor's mid-conversation list, so its
     // historical system message is folded into the top-level field and the

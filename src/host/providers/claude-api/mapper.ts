@@ -498,8 +498,16 @@ function markCacheBreakpoints(body: Record<string, unknown>, settings: ClaudeApi
     }
     for (const block of historyBlocks) block.cache_control = { ...marker }
   }
+  // The tool marker is only legal ABOVE every system block: the wire renders tools
+  // before system, so a 'global'-scoped system block ahead of it turns the narrower
+  // tool marker into the exact "a global block was found after content with a
+  // narrower cache scope" 400. The global system breakpoint already covers every
+  // declaration rendered before it, so skip the tool marker there.
+  const systemHasGlobal = Array.isArray(system) && system.some(
+    block => isRecord(block) && isRecord(block.cache_control) && block.cache_control.scope === 'global',
+  )
   const tools = body.tools
-  if (Array.isArray(tools)) {
+  if (!systemHasGlobal && Array.isArray(tools)) {
     const last = [...tools].reverse().find(tool => isRecord(tool) && tool.defer_loading !== true)
     if (isRecord(last)) last.cache_control = { ...marker }
   }

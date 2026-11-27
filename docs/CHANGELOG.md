@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[claude / claude-api] 修复工具缓存标记排在 global system 块之前导致的偶发 400**（#138）：请求体渲染顺序为 tools → system → messages，当静态 system 块携带 `scope: "global"` 时，最后一个工具上的普通 `ephemeral` 标记会排在其前面，触发“`scope: "global"` 之后出现更窄缓存范围”的校验错误。现在只要 system 中存在 global 作用域的缓存块就跳过工具标记（global 断点已覆盖其前面的全部工具定义），并把这一个断点名额留给消息；两条线路行为一致。
+
 ## 0.89.0 - 2026-11-27
 
 - **[codex-chatgpt] 支持导入 CPA 与 sub2api 账号**（#136）：新增同源、限容的 ZIP / JSON 导入入口，校验并映射 OAuth 凭据，在单个账号池存储事务中提交；导入账号继续受现有刷新、轮换与删除控制管理。登录操作区在窄宽下按标题与操作组换行，保持四个入口完整可用。
