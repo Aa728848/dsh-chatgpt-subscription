@@ -47,6 +47,14 @@
     progressUpdates: true                 # 启用 progress_update 进展汇报（热生效）
     progressUpdatesNudgeThreshold: 8      # 连续多少步工具调用未汇报时温和提醒（1–50，热生效）
     progressUpdatesLanguage: auto         # auto | zh | en | ru（热生效）
+    advisorEnabled: false                 # 新对话默认关闭顾问；对话模型菜单可单独覆盖
+    advisorProvider: ''                   # 新对话默认顾问 Provider
+    advisorModel: ''                      # 新对话默认顾问模型
+    advisorReasoningEffort: auto          # auto 使用模型默认推理强度
+    advisorMaxTokens: 4096                # 单次顾问输出上限
+    advisorTimeoutMs: 300000              # 单次咨询总超时（最长 5 分钟）
+    advisorMaxRetries: 1                  # 临时错误的最大追加重试次数
+    advisorContextTokenBudget: 100000     # 顾问历史的独立上下文预算
     planModePipeline: true                # 启用调度模式 enter_plan_mode / leave_plan_mode（热生效）
     dispatchExecutionGuard: true          # 启用调度执行守卫与 Mandate v2 账本守卫（热生效）
     teamPolicyCacheGuard: true            # 摘除 Agent Teams team:policy 系统段并改为尾部投递（热生效）
@@ -91,6 +99,14 @@
 | `cacheWaitWarmup` | `boolean` | `true` | **热生效（volatile）** | 等待期缓存保活，子代理与后台任务都算委派：默认用于 Kimi（空闲 20 分钟 / TTL 25 分钟）、Claude 订阅与 Claude API 的 1 小时缓存档（空闲 55 分钟 / TTL 60 分钟，5m 档不做）；其他线路需 TTL 与显式策略 |
 | `cacheAffinity` | `boolean` | `true` | **热生效（volatile）** | 轮换时优先选择该前缀缓存仍热且剩余额度 ≥20% 的账号 |
 | `promptCacheOverrides` | `Record<string, object>` | `{}` | **重载插件** | 覆盖线路缓存 TTL、账号作用域、冷启动、亲和、续热（`waitWarmup` / `waitJobs`）与提示；未知证据默认关闭 |
+
+#### 顾问（Advisor）
+
+在输入框的模型选择弹层中开启 **顾问（Beta）**，再进入 **顾问模型** 选择任意已配置线路及推理强度。开关和选择按当前对话保存；未单独设置的对话继承上述全局默认值。主模型负责执行，顾问只在主模型判断需要第二意见时通过 `consult_advisor` 审阅对话。
+
+顾问请求复用 DSH 已注册的 Adapter 和 Host 凭据，不向 Web DTO 暴露密钥。每次咨询都是独立模型请求，单独消耗顾问线路额度。**对话、工具调用与结果以及顾问支持的图片会发送给所选 Provider**；使用第三方线路前请确认其数据政策。默认关闭，关闭或未配置时不会发起请求。
+
+顾问没有工具，不读取或修改文件、不执行命令。长历史按顾问自己的上下文窗口裁剪，保留首条任务与最近证据；主对话只增加正常工具结果。模型不可用、超时、取消或输出截断都不会阻断主任务。工具声明保持稳定，开关变化不重建主模型工具表或系统前缀。
 
 #### `promptCacheOverrides` 示例
 

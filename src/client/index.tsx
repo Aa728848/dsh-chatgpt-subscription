@@ -74,6 +74,9 @@ import { installRelayOneStyles } from './providers/relayone/styles.ts'
 import { CompactAfterTurnToggle, type CompactAfterTurnToggleProps } from './features/compact-after-turn/CompactAfterTurnToggle.tsx'
 import { dictionaries as compactAfterTurnDicts, NS_COMPACT_AFTER_TURN, type CompactAfterTurnLocaleKey } from './features/compact-after-turn/locales.ts'
 import { installCompactAfterTurnStyles } from './features/compact-after-turn/styles.ts'
+import { AdvisorEffortTrigger, AdvisorModelTrigger, type AdvisorInjected } from './features/advisor/AdvisorModelOption.tsx'
+import { dictionaries as advisorDicts, NS_ADVISOR, type AdvisorLocaleKey } from './features/advisor/locales.ts'
+import { installAdvisorStyles } from './features/advisor/styles.ts'
 import { dictionaries as claudeApiDicts, NS_CLAUDE_API, type ClaudeApiLocaleKey } from './providers/claude-api/locales.ts'
 import { installClaudeApiStyles } from './providers/claude-api/styles.ts'
 import { dictionaries as awsQuickDicts, NS_AWS_QUICK, type AwsQuickLocaleKey } from './providers/aws-quick/locales.ts'
@@ -125,6 +128,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'dsh-relayone': RelayOneLocaleKey
     'dsh-claude-api': ClaudeApiLocaleKey
     'dsh-aws-quick': AwsQuickLocaleKey
+    'dsh-advisor': AdvisorLocaleKey
     'dsh-opencode-go': OpenCodeGoLocaleKey
     'dsh-compact-after-turn': CompactAfterTurnLocaleKey
     'dsh-session-quota': SessionQuotaLocaleKey
@@ -230,6 +234,8 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
   }, 'dsh-relayone: styles')
   ctx.effect(() => ctx.locale.register(NS_COMPACT_AFTER_TURN, compactAfterTurnDicts), 'dsh-compact-after-turn: dictionaries')
   ctx.effect(() => installCompactAfterTurnStyles(), 'dsh-compact-after-turn: styles')
+  ctx.effect(() => ctx.locale.register(NS_ADVISOR, advisorDicts), 'dsh-advisor: dictionaries')
+  ctx.effect(() => installAdvisorStyles(), 'dsh-advisor: styles')
   ctx.effect(() => ctx.locale.register(NS_SESSION_QUOTA, sessionQuotaDicts), 'dsh-session-quota: dictionaries')
   ctx.effect(() => installSessionQuotaStyles(), 'dsh-session-quota: styles')
   // Claude API: dictionaries and styles only. The line has no quota badge, so it
@@ -381,6 +387,23 @@ ctx.effect(() => installHostLocaleMirror(ctx.locale), 'dsh-chatgpt-subscription:
     } catch {
       return () => {}
     }
+  })
+  // Advisor expands its model list inline, so native and redrawn model selectors
+  // both work even when the selector skin does not implement keyed detail panes.
+  ctx.slots.inject('conversation.input.right', () => {
+    try {
+      const inject = (sessionId: string): AdvisorInjected => {
+        const directory = ctx.modelDirectories.directoryFor(sessionId as SessionId)
+        return { sessionId: String(sessionId), directory: directory.store, load: () => { void directory.load().catch(() => undefined) } }
+      }
+      const modelRow = ctx.slots.register({
+        name: 'conversation.input.right', id: 'advisor-model', order: 52, locale: NS_ADVISOR, inject,
+      }, AdvisorModelTrigger)
+      const effortRow = ctx.slots.register({
+        name: 'conversation.input.right', id: 'advisor-effort', order: 53, locale: NS_ADVISOR, inject,
+      }, AdvisorEffortTrigger)
+      return () => { effortRow(); modelRow() }
+    } catch { return () => {} }
   })
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',

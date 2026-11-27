@@ -1,0 +1,43 @@
+export const NS_ADVISOR = 'dsh-advisor'
+export const zh = {
+  label: '顾问',
+  model: '顾问模型',
+  none: '未选择',
+  enabled: '已开启',
+  disabled: '已关闭',
+  choose: '选择顾问模型',
+  search: '搜索顾问模型',
+  enableFirst: '未开启',
+  enableHint: '开启顾问后可选择模型。',
+  reasoning: '顾问推理强度',
+  defaultReasoning: '模型默认',
+  faster: '更快',
+  stronger: '更强',
+  privacy: '咨询时，当前对话、工具结果及支持的图片会发送给顾问模型，并产生独立用量。',
+  loading: '正在加载模型…',
+  empty: '当前没有可用模型。',
+  failed: '顾问设置失败：{message}',
+  inherited: '当前使用新对话默认设置；修改后只影响当前对话。',
+}
+export type AdvisorLocaleKey = keyof typeof zh
+export const en: Record<AdvisorLocaleKey, string> = {
+  label: 'Advisor',
+  model: 'Advisor model',
+  none: 'Not selected',
+  enabled: 'On',
+  disabled: 'Off',
+  choose: 'Choose advisor model',
+  search: 'Search advisor models',
+  enableFirst: 'Off',
+  enableHint: 'Turn Advisor on to choose a model.',
+  reasoning: 'Advisor reasoning effort',
+  defaultReasoning: 'Model default',
+  faster: 'Faster',
+  stronger: 'Stronger',
+  privacy: 'Consulting sends this conversation, tool results, and supported images to the advisor model and uses its quota separately.',
+  loading: 'Loading models…',
+  empty: 'No models are currently available.',
+  failed: 'Could not update Advisor: {message}',
+  inherited: 'This conversation inherits the new-conversation default until you change it.',
+}
+export const dictionaries = { zh, en }

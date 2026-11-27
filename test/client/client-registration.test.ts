@@ -351,6 +351,8 @@ describe('client registration', () => {
       'conversation.input.right',
       // 模型菜单里的「本轮结束后压缩」一次性开关。
       'conversation.input.model.options',
+      // Advisor：输入框右侧的独立入口，自带弹层，不占用模型菜单。
+      'conversation.input.right',
       'tool.call.toolview',
       // MiniMax 生成视频：第二个媒体工具卡片，同一个 keyed 槽，按工具名再注册一次。
       'tool.call.toolview',
@@ -403,6 +405,8 @@ describe('client registration', () => {
       expect.objectContaining({ name: 'conversation.input.right', id: 'qianwen-token-plan-quota', order: 49 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'relayone-quota', order: 50 }),
       expect.objectContaining({ name: 'conversation.input.right', id: 'opencode-go-quota', order: 51 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'advisor-model', order: 52 }),
+      expect.objectContaining({ name: 'conversation.input.right', id: 'advisor-effort', order: 53 }),
     ])
     expect(registrations.filter((registration) => registration.name === 'conversation.input.model.options')).toEqual([
       expect.objectContaining({ name: 'conversation.input.model.options', id: 'compact-after-turn', locale: 'dsh-compact-after-turn' }),

@@ -39,6 +39,7 @@ import { registerHubOverviewRoutes, type HubSummarySource } from './host/infra/h
 import { registerUpdateRoutes } from './host/infra/hub/update-check.ts'
 import { registerRoutes } from './host/providers/codex-chatgpt/routes.ts'
 import { installCompactAfterTurn, type CompactAfterTurnHost } from './host/runtime/compact-after-turn/index.ts'
+import { installAdvisor } from './host/runtime/advisor/index.ts'
 import { CODEX_MODEL_CATALOG } from './shared/model-catalog.ts'
 import { createPlatformTokenStore } from './host/infra/storage/platform-token-store.ts'
 import { SearchProviderSwitcher } from './host/infra/network/search-provider-switcher.ts'
@@ -349,6 +350,15 @@ export interface Config {
   progressUpdatesNudgeThreshold?: Volatile<number>
   /** 进展更新的输出语言：`auto` 跟随对话（默认）、`zh` 中文、`en` 英文、`ru` 俄文。 */
   progressUpdatesLanguage?: Volatile<ProgressUpdateLanguage>
+  /** Read-only second-model review; volatile fields apply without rebuilding the tool table. */
+  advisorEnabled?: Volatile<boolean>
+  advisorProvider?: Volatile<string>
+  advisorModel?: Volatile<string>
+  advisorReasoningEffort?: Volatile<string>
+  advisorMaxTokens?: Volatile<number>
+  advisorTimeoutMs?: Volatile<number>
+  advisorMaxRetries?: Volatile<number>
+  advisorContextTokenBudget?: Volatile<number>
   /**
    * 「计划模式管线」总开关：打开后调度模式可以在 R-G 澄清访谈收敛之后用
    * `enter_plan_mode` 主动进入计划模式（下一步才开始探索并出计划，计划由官方
@@ -574,6 +584,15 @@ export interface ConfigInput {
   progressUpdatesNudgeThreshold?: number
   /** 进展更新的输出语言（默认 auto：跟随对话）。 */
   progressUpdatesLanguage?: ProgressUpdateLanguage
+  /** 顾问默认关闭；Provider/Model 是全局默认，对话内选择会覆盖它们。 */
+  advisorEnabled?: boolean
+  advisorProvider?: string
+  advisorModel?: string
+  advisorReasoningEffort?: string
+  advisorMaxTokens?: number
+  advisorTimeoutMs?: number
+  advisorMaxRetries?: number
+  advisorContextTokenBudget?: number
   /** 「计划模式管线」总开关（默认开启）：允许调度模式用 enter_plan_mode / leave_plan_mode。 */
   planModePipeline?: boolean
   /** 「调度执行守卫」总开关（默认开启）：执行期拦截子代理越权调用与等待期空等。 */
@@ -640,6 +659,22 @@ export const Config: z<ConfigInput, Config> = z.object({
     .description('连续工具调用达到该轮数仍未汇报进展时发出提醒。'),
   progressUpdatesLanguage: z.union([z.const('auto'), z.const('zh'), z.const('en'), z.const('ru')]).default('auto').volatile()
     .description('进展更新的输出语言：auto 跟随对话语言。'),
+  advisorEnabled: z.boolean().default(false).volatile()
+    .description('新对话默认开启顾问；开启后会把对话和工具结果发给所选顾问模型。'),
+  advisorProvider: z.string().default('').volatile()
+    .description('新对话的默认顾问 Provider。'),
+  advisorModel: z.string().default('').volatile()
+    .description('新对话的默认顾问模型。'),
+  advisorReasoningEffort: z.string().default('auto').volatile()
+    .description('顾问模型的推理强度；auto 使用模型默认值。'),
+  advisorMaxTokens: z.number().min(256).max(32768).step(1).default(4096).volatile()
+    .description('顾问单次回复的最大 token 数。'),
+  advisorTimeoutMs: z.number().min(1000).max(300000).step(1).default(300000).volatile()
+    .description('顾问单次咨询的总超时毫秒数。'),
+  advisorMaxRetries: z.number().min(0).max(3).step(1).default(1).volatile()
+    .description('顾问遇到临时错误时的最大追加重试次数。'),
+  advisorContextTokenBudget: z.number().min(8000).max(1000000).step(1).default(100000).volatile()
+    .description('转发给顾问的对话上下文预算。'),
   planModePipeline: z.boolean().default(true).volatile()
     .description('允许调度模式按需进入或退出计划模式。'),
   dispatchExecutionGuard: z.boolean().default(true).volatile()
@@ -735,6 +770,10 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // 两行分属 host 面与 agent 面、挂载顺序不归任何一方管，递交下去的是**读取函数**
   // 而不是一份值：每次都重读 volatile 活引用，设置一保存下一步就生效。
   attachPlanModePipelineSettings(() => resolvePlanModePipelineEnabled(pluginConfig))
+
+  // The Advisor tool stays registered with a stable schema. Session switches are
+  // read only when the tool executes, so toggling never rebuilds the main prefix.
+  ctx.effect(() => installAdvisor(ctx, pluginConfig), 'dsh-chatgpt-subscription: advisor')
 
   const store = createPlatformTokenStore()
   const preferences = registerPreferenceStore(ctx.settings)
