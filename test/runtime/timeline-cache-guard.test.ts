@@ -330,4 +330,38 @@ describe('installTimelineCacheGuard', () => {
     expect(result).toBe(reject)
     guard.dispose()
   })
+
+  it('freezes timeline_tasks description in assembly.tools without wrapping getAll() on 0.2.3-alpha.3+', async () => {
+    let description = 'task prompt A'
+    const rawDef = {
+      name: TIMELINE_TASK_TOOL,
+      get description(): string { return description },
+    }
+    const tools = { getAll: () => [rawDef] }
+    const { ctx, listeners, warnings } = createHost(tools)
+    const guard = installTimelineCacheGuard(ctx)
+    expect(warnings).toEqual([])
+
+    const assembleListener = listeners.get('system-prompt/assemble')!
+    const scopeA = scopeOf('kimi-code')
+    const scopeB = scopeOf('kimi-code')
+    const run = async (scope: unknown) => await assembleListener(
+      {},
+      { scope },
+      async () => ({
+        sections: [{ name: TIMELINE_SECTION, text: 'plan v1' }],
+        tools: [{ name: TIMELINE_TASK_TOOL, description: rawDef.description }, { name: 'read', description: 'Read file' }],
+      }),
+    ) as { tools: Array<{ name: string; description: string }> }
+
+    expect((await run(scopeA)).tools[0]!.description).toBe('task prompt A')
+    description = 'task prompt B'
+    // 原 ToolDefinition 对象引用丝毫未变（保障 ToolStep.declares 引用相等）
+    expect(tools.getAll()[0]).toBe(rawDef)
+    // scopeA 继续冻结在 A，新会话 scopeB 以 B 为基线，不受保护线路直通 B
+    expect((await run(scopeA)).tools[0]!.description).toBe('task prompt A')
+    expect((await run(scopeB)).tools[0]!.description).toBe('task prompt B')
+    expect((await run(scopeOf('claude'))).tools[0]!.description).toBe('task prompt B')
+    guard.dispose()
+  })
 })

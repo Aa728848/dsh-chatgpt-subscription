@@ -106,6 +106,12 @@ export interface SubagentModelSelectionPreference {
   readonly enabled: boolean
   readonly allowedModels: readonly AllowedModelRoute[]
   /**
+   * Optional default child route (DSH 0.2.3-alpha.3+ `subagentModelSelection.defaultRoute()`).
+   * When it falls within the Session's effective allowlist, an explicit delegation tool may omit
+   * `provider`, `model`, and `reasoning_effort` and fall through to this authorized default.
+   */
+  readonly defaultModel?: AllowedModelRoute
+  /**
    * True when this preference came from DSH 0.2.3+'s live `ctx.subagentModelSelection`
    * service (PR #8604), which no longer writes per-Session `subagent/model-selection-policy`
    * events and instead governs every Session directly.
@@ -315,9 +321,12 @@ export function subagentModelSelectionPreference(
     }))
     const value = asRecord(scope.get())
     if (value === undefined) return undefined
+    const defaultRecord = asRecord(value['defaultModel'])
+    const defaultModel = routeOf(defaultRecord?.['provider'], defaultRecord?.['model'])
     return {
       enabled: asBoolean(value['enabled']) === true,
       allowedModels: parseAllowedRoutes(value) ?? [],
+      ...(defaultModel === undefined ? {} : { defaultModel }),
     }
   } catch {
     // A deployment without this namespace, or with a malformed stored section,
@@ -369,6 +378,17 @@ export function liveSubagentModelSelectionPreference(
       return undefined
     }
   }
+  const readDefaultModel = (): AllowedModelRoute | undefined => {
+    const defaultRouteFn = safeProp(candidate, 'defaultRoute')
+    if (typeof defaultRouteFn !== 'function') return undefined
+    try {
+      const rawDefault = asRecord((defaultRouteFn as () => unknown).call(candidate))
+      return routeOf(rawDefault?.['provider'], rawDefault?.['model'])
+    } catch {
+      return undefined
+    }
+  }
+  const defaultModel = readDefaultModel()
   const allowedRoutesFn = safeProp(candidate, 'allowedRoutes')
   if (typeof allowedRoutesFn !== 'function') return undefined
   let raw: unknown
@@ -377,10 +397,10 @@ export function liveSubagentModelSelectionPreference(
   } catch {
     // INVALID_MODEL_SELECTION_SETTINGS (enabled with empty/malformed routes):
     // leave the native tool in charge of surfacing its configuration error.
-    return { enabled: true, allowedModels: [], liveService: true }
+    return { enabled: true, allowedModels: [], liveService: true, ...(defaultModel === undefined ? {} : { defaultModel }) }
   }
   if (raw === undefined) {
-    return { enabled: false, allowedModels: [], liveService: true }
+    return { enabled: false, allowedModels: [], liveService: true, ...(defaultModel === undefined ? {} : { defaultModel }) }
   }
   if (!Array.isArray(raw)) return undefined
   const routes: AllowedModelRoute[] = []
@@ -392,7 +412,12 @@ export function liveSubagentModelSelectionPreference(
     if (provider.length === 0 || model.length === 0) continue
     routes.push({ provider, model })
   }
-  return { enabled: true, allowedModels: routes, liveService: true }
+  return {
+    enabled: true,
+    allowedModels: routes,
+    liveService: true,
+    ...(defaultModel === undefined ? {} : { defaultModel }),
+  }
 }
 
 /**
@@ -610,6 +635,15 @@ function routesInclude(
   model: string,
 ): boolean {
   return allowed.some(route => route.provider === provider && route.model === model)
+}
+
+/** Return the configured default child route only when the Session allowlist authorizes it. */
+export function authorizedDefaultRoute(
+  defaultModel: AllowedModelRoute | undefined,
+  allowed: readonly AllowedModelRoute[] | undefined,
+): AllowedModelRoute | undefined {
+  if (defaultModel === undefined || allowed === undefined || allowed.length === 0) return undefined
+  return routesInclude(allowed, defaultModel.provider, defaultModel.model) ? defaultModel : undefined
 }
 
 /** The authorized routes rendered for one denial reason. */
@@ -974,6 +1008,7 @@ export function effectiveAllowParentFork(
 export function enrichListSubagentModelsOutput(
   output: string,
   allowed: readonly AllowedModelRoute[] | undefined,
+  defaultModel?: AllowedModelRoute,
 ): string {
   if (allowed === undefined) {
     if (output.includes(NO_ALLOWLIST_ROUTING_NOTICE)) return output
@@ -984,8 +1019,13 @@ export function enrichListSubagentModelsOutput(
   if (allowed.length === 0) {
     return 'Authorized child routes for this Session: (none)\n' + NO_COMPATIBLE_ROUTES_REASON
   }
-  const header = 'Authorized child routes for this Session (already filtered by the Session allowlist; '
-    + 'only these routes are accepted, and `provider` and `model` must be passed as separate fields):'
+  const authorizedDefault = authorizedDefaultRoute(defaultModel, allowed)
+  const header = authorizedDefault === undefined
+    ? 'Authorized child routes for this Session (already filtered by the Session allowlist; '
+      + 'only these routes are accepted, and `provider` and `model` must be passed as separate fields):'
+    : 'Authorized child routes for this Session (already filtered by the Session allowlist; '
+      + `only these routes are accepted — omit \`provider\`, \`model\`, and \`reasoning_effort\` to use the authorized default ${authorizedDefault.provider}/${authorizedDefault.model}, `
+      + 'or pass `provider` and `model` as separate fields):'
   if (output.includes(header)) return output
   const filtered = filterListSubagentModelsOutput(output, allowed)
   const lines = allowed.map(
@@ -1136,10 +1176,23 @@ export const NO_ALLOWLIST_ROUTING_NOTICE = 'No allowlist is in force for this Se
 export function rewriteAuthorizedToolDescriptions(
   text: string,
   allowed: readonly AllowedModelRoute[],
+  defaultModel?: AllowedModelRoute,
 ): string {
   if (allowed.length === 0 || text.length === 0) return text
   const routes = authorizedRoutesText(allowed)
-  const required = `Child LLM selection is required in this Session: pass an authorized \`provider\` and \`model\` from \`list_subagent_models\` (${routes}) as separate fields; omitting either field is rejected.`
+  const authorizedDefault = authorizedDefaultRoute(defaultModel, allowed)
+  const defaultLabel = authorizedDefault === undefined
+    ? undefined
+    : `${authorizedDefault.provider}/${authorizedDefault.model}`
+  const required = defaultLabel === undefined
+    ? `Child LLM selection is required in this Session: pass an authorized \`provider\` and \`model\` from \`list_subagent_models\` (${routes}) as separate fields; omitting either field is rejected.`
+    : `Child LLM selection is restricted to this Session's allowlist (${routes}): omit \`provider\`, \`model\`, and \`reasoning_effort\` to use the authorized default (${defaultLabel}), or pass an authorized \`provider\` and \`model\` from \`list_subagent_models\` as separate fields.`
+  const providerDesc = defaultLabel === undefined
+    ? `Required in this Session: pass an authorized provider id from list_subagent_models (${routes}).`
+    : `Authorized provider id from list_subagent_models (${routes}). Omit provider, model, and reasoning_effort together to use the authorized default (${defaultLabel}), or pass provider and model together.`
+  const modelDesc = defaultLabel === undefined
+    ? 'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.'
+    : `Authorized model id (without the provider/ prefix) for the selected provider; requires provider. Omit provider, model, and reasoning_effort together to use ${defaultLabel}.`
   return text
     .replaceAll(
       'Catalog membership is advisory: an adapter may accept an unlisted model id.',
@@ -1155,19 +1208,27 @@ export function rewriteAuthorizedToolDescriptions(
     )
     .replace(
       /Supply together with model; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit from the parent Agent\./g,
-      `Required in this Session: pass an authorized provider id from list_subagent_models (${routes}).`,
+      providerDesc,
     )
     .replace(
       /Supply together with provider; omit both to use configured child defaults or (?:inherit the parent route|this provider's route defaults)\.|Omit to use the configured child default or inherit when the child provider matches the parent provider\./g,
-      'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
+      modelDesc,
+    )
+    .replace(
+      /LLM provider id for the subagent\.\s*Set it with `?model`? only when the task requires a specific model\.(?:\s*Use a provider id listed by `?list_subagent_models`?\.)?/g,
+      providerDesc,
+    )
+    .replace(
+      /LLM provider id for the subagent;\s*requires `?model`?\.\s*Set only when the task needs a different model;\s*omit `?provider`?,\s*`?model`?,\s*and `?reasoning_effort`? to run the subagent on [^.]+\.(?:\s*Use a provider id listed by `?list_subagent_models`?\.)?/g,
+      providerDesc,
     )
     .replace(
       /Child LLM provider id(?:; requires `?model`?)?\./g,
-      `Required in this Session: pass an authorized provider id from list_subagent_models (${routes}).`,
+      providerDesc,
     )
     .replace(
       /Model id within that provider(?:; requires `?provider`?)?\./g,
-      'Required in this Session: pass the authorized model id (without the provider/ prefix) for the selected provider.',
+      modelDesc,
     )
 }
 
@@ -1223,6 +1284,7 @@ export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>
   allowed: readonly AllowedModelRoute[] | undefined,
   toolNames: readonly string[] = DEFAULT_DELEGATION_TOOLS,
   inheritToolNames: readonly string[] = DEFAULT_SUBAGENT_INHERIT_TOOLS,
+  defaultModel?: AllowedModelRoute,
 ): T {
   if (allowed === undefined) return assembly
   const noCompatibleRoutes = allowed.length === 0
@@ -1230,7 +1292,7 @@ export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>
   const sections = Array.isArray(assembly.sections)
     ? assembly.sections.map((section) => {
         if (section?.name !== 'tools:sdk' || typeof section.text !== 'string') return section
-        const rewritten = rewriteAuthorizedToolDescriptions(section.text, allowed)
+        const rewritten = rewriteAuthorizedToolDescriptions(section.text, allowed, defaultModel)
         // In PTC mode this section IS the whole tool surface, so one sentence at its
         // end reaches the same reader the per-tool description reaches in Native mode.
         const notice = noCompatibleRoutes
@@ -1254,7 +1316,7 @@ export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>
         const isInherit = inheritToolNames.includes(name)
         if (name !== 'list_subagent_models' && !isExplicit && !isInherit) return tool
         const rewrittenDescription = typeof tool.description === 'string'
-          ? rewriteAuthorizedToolDescriptions(tool.description, allowed)
+          ? rewriteAuthorizedToolDescriptions(tool.description, allowed, defaultModel)
           : tool.description
         // The route notice belongs on the delegation tools themselves: the explicit
         // tool carries the pair, the inherit tool carries none and now says so.
@@ -1278,7 +1340,7 @@ export function rewriteAuthorizedPromptAssembly<T extends MutablePromptAssembly>
             const prop = asRecord(propsRecord[field])
             const propDesc = asString(prop?.['description'])
             if (prop !== undefined && propDesc !== undefined) {
-              const nextDesc = rewriteAuthorizedToolDescriptions(propDesc, allowed)
+              const nextDesc = rewriteAuthorizedToolDescriptions(propDesc, allowed, defaultModel)
               if (nextDesc !== propDesc) {
                 nextProps[field] = { ...prop, description: nextDesc }
                 propsMutated = true
@@ -1386,13 +1448,19 @@ export function delegationDenialReason(
     }
   }
   // The route is explicit only when the model named a complete pair. A call that
-  // omits either half would let the built-in tool fall back to the configured
-  // child defaults or to the parent route, which is exactly the unauthorized
-  // route this guard exists to stop, so neither case reaches the parent route.
+  // omits all route fields (`provider`, `model`, `reasoning_effort`) is admitted
+  // only when the Host configured a `defaultModel` that itself lies inside this
+  // Session's effective allowlist; otherwise omission is rejected before falling
+  // back to an unauthorized default or to the parent route.
   if (requestedProvider === undefined) {
-    return requestedModel === undefined
-      ? missingRouteReason(allowed)
-      : partialRouteReason('provider', requestedModel, allowed)
+    if (requestedModel === undefined) {
+      if (request['reasoning_effort'] === undefined
+        && authorizedDefaultRoute(preference?.defaultModel, allowed) !== undefined) {
+        return undefined
+      }
+      return missingRouteReason(allowed)
+    }
+    return partialRouteReason('provider', requestedModel, allowed)
   }
   if (requestedModel === undefined) return partialRouteReason('model', requestedProvider, allowed)
   // The route as sent is checked first and by itself: a model id may legally
@@ -1732,9 +1800,10 @@ export function installSubagentModelAuthorization(
       if (exec.name !== 'list_subagent_models' || result.isError === true || decision?.kind !== 'accept') {
         return decision
       }
+      const pref = currentPreference()
       const allowed = effectiveAllowedRoutes(
         exec.agent as AuthorizationAgent | undefined,
-        currentPreference(),
+        pref,
         sessions,
         scope,
         true,
@@ -1743,7 +1812,7 @@ export function installSubagentModelAuthorization(
       // without a recorded allowlist gets that fact plus the host-policy caveat.
       const currentValue = decision.value !== undefined ? decision.value : result.value
       if (typeof currentValue === 'string') {
-        const enriched = enrichListSubagentModelsOutput(currentValue, allowed)
+        const enriched = enrichListSubagentModelsOutput(currentValue, allowed, pref?.defaultModel)
         if (enriched === currentValue) return decision
         return {
           kind: 'accept' as const,
@@ -1754,7 +1823,7 @@ export function installSubagentModelAuthorization(
       const currentContent = decision.content ?? result.content
       const firstBlock = Array.isArray(currentContent) ? currentContent[0] : undefined
       if (firstBlock?.type === 'text' && typeof firstBlock.text === 'string') {
-        const enriched = enrichListSubagentModelsOutput(firstBlock.text, allowed)
+        const enriched = enrichListSubagentModelsOutput(firstBlock.text, allowed, pref?.defaultModel)
         if (enriched === firstBlock.text) return decision
         return {
           kind: 'accept' as const,
@@ -1775,8 +1844,9 @@ export function installSubagentModelAuthorization(
     ) => {
       const assembled = await next()
       const agent = (context?.agent ?? context?.scope) as AuthorizationAgent | undefined
-      const allowed = effectiveAllowedRoutes(agent, currentPreference(), sessions, scope, true)
-      return rewriteAuthorizedPromptAssembly(assembled, allowed, toolNames, inheritToolNames)
+      const pref = currentPreference()
+      const allowed = effectiveAllowedRoutes(agent, pref, sessions, scope, true)
+      return rewriteAuthorizedPromptAssembly(assembled, allowed, toolNames, inheritToolNames, pref?.defaultModel)
     },
   )
 

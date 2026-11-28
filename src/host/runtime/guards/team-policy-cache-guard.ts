@@ -8,6 +8,16 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 /** 官方 Agent Teams 的指引段名。 */
 export const TEAM_POLICY_SECTION = 'team:policy'
 
+/** 官方 Agent Teams 的四个共享任务板工具名（DSH 0.2.3-alpha.3+ 通过 `AgentToolRegistry` + `ctx.tools.include()` 注入）。 */
+export const TEAM_TOOL_NAMES: readonly string[] = Object.freeze([
+  'team_task_create',
+  'team_task_list',
+  'team_task_get',
+  'team_task_update',
+])
+
+const TEAM_TOOL_NAME_SET: ReadonlySet<string> = new Set(TEAM_TOOL_NAMES)
+
 /** 尾部撤销通知的来源 kind（本包自有，见下方 MessageSourceMap 增补）。 */
 export const TEAM_BOARD_NOTICE_SOURCE_KIND = 'team-board-notice'
 
@@ -75,6 +85,68 @@ interface EventHostLike {
 interface LoggerLike {
   /** 警告级日志。 */
   warn(message: string, ...rest: unknown[]): void
+}
+
+/** 注入面。 */
+interface InjectHostLike {
+  inject?(deps: string[], callback: (scope: unknown) => void): unknown
+}
+
+/** 轻量动态工具源结构（对齐 DSH 0.2.3-alpha.3+ `ToolSource`）。 */
+interface ToolSourceLike {
+  get(name: string, scope?: unknown): unknown
+  getAll(scope?: unknown): readonly unknown[]
+}
+
+/** 工具注册面（只读我们用到的 `include`）。 */
+interface ToolsRegistryLike {
+  include?(source: ToolSourceLike, ...rest: unknown[]): unknown
+}
+
+type UnboundMethod = (this: unknown, ...args: unknown[]) => unknown
+
+interface MethodTarget {
+  holder: object
+  name: string
+  original: UnboundMethod
+  descriptor: PropertyDescriptor | undefined
+}
+
+function serviceOf<T>(ctx: unknown, service: string): T | undefined {
+  const read = (ctx as { get?: (name: string) => unknown } | undefined)?.get
+  if (typeof read !== 'function') return undefined
+  try {
+    return read.call(ctx, service) as T | undefined
+  } catch {
+    return undefined
+  }
+}
+
+function resolveMethodTarget(service: unknown, name: string): MethodTarget | undefined {
+  if (typeof service !== 'object' || service === null) return undefined
+  const own = service as Record<string, unknown>
+  if (Object.prototype.hasOwnProperty.call(own, name)) {
+    const original = own[name]
+    if (typeof original !== 'function') return undefined
+    return {
+      holder: own,
+      name,
+      original: original as UnboundMethod,
+      descriptor: Object.getOwnPropertyDescriptor(own, name),
+    }
+  }
+  const proto = Object.getPrototypeOf(service) as object | null
+  if (proto === null || proto === (Object.prototype as object) || proto === (Function.prototype as object)) {
+    return undefined
+  }
+  const original = (proto as Record<string, unknown>)[name]
+  if (typeof original !== 'function') return undefined
+  return {
+    holder: proto,
+    name,
+    original: original as UnboundMethod,
+    descriptor: Object.getOwnPropertyDescriptor(proto, name),
+  }
 }
 
 /** 系统段（只读名字、正文与退役标记）。 */
@@ -191,6 +263,7 @@ export function installTeamPolicyCacheGuard(
   const states = new WeakMap<object, GuardState>()
   const stats: GuardStats = { seen: false, warned: false }
   const restores: (() => void)[] = []
+  const patchedMethods = new WeakMap<object, Set<string>>()
   let closed = false
 
   const enabled = (): boolean => {
@@ -296,6 +369,114 @@ export function installTeamPolicyCacheGuard(
   const offPreStep = subscribe(ctx, 'agent/pre-step', onPreStep as unknown as (...args: never[]) => unknown)
   if (offAssemble !== undefined) restores.push(() => { offAssemble() })
   if (offPreStep !== undefined) restores.push(() => { offPreStep() })
+
+  // ── 3. DSH 0.2.3-alpha.3+：保持 Agent Teams 工具表跨开关恒定 ───────────────
+  // 官方 `tool-agent-team` 改用 `AgentToolRegistry` + `ctx.tools.include()` 按 Team 开关
+  // 动态增删 4 个 `team_task_*` 工具，在原生 `standard` 预设中途切 `/team` 时会重建工具表
+  // 导致前缀缓存失效；上游 `agent-team` 任务板本身会检查 `state.enabled` 并干净拒掉未启用
+  // 时的调用（`TEAM_DISABLED`），因此开启守卫时恒定暴露原始 `ToolDefinition` 引用即可。
+  const wrapTeamToolsSource = (source: ToolSourceLike): ToolSourceLike => {
+    const readUnscoped = (name: string): unknown => {
+      try {
+        return source.get(name)
+      } catch {
+        return undefined
+      }
+    }
+    return {
+      get(name: string, scope?: unknown): unknown {
+        const found = source.get(name, scope)
+        if (found !== undefined || closed || !enabled() || scope === undefined || !TEAM_TOOL_NAME_SET.has(name)) {
+          return found
+        }
+        return readUnscoped(name)
+      },
+      getAll(scope?: unknown): readonly unknown[] {
+        const list = source.getAll(scope)
+        if (closed || !enabled() || scope === undefined || !Array.isArray(list)) return list
+        const present = new Set<string>()
+        for (const entry of list) {
+          if (typeof entry === 'object' && entry !== null) {
+            const name = (entry as { name?: unknown }).name
+            if (typeof name === 'string') present.add(name)
+          }
+        }
+        const missing: unknown[] = []
+        for (const name of TEAM_TOOL_NAMES) {
+          if (present.has(name)) continue
+          const def = readUnscoped(name)
+          if (def !== undefined) missing.push(def)
+        }
+        return missing.length === 0 ? list : [...list, ...missing]
+      },
+    }
+  }
+
+  const wrapTools = (tools: ToolsRegistryLike | undefined): void => {
+    if (tools === undefined) return
+    const target = resolveMethodTarget(tools, 'include')
+    if (target === undefined) return
+    if (patchedMethods.get(target.holder)?.has(target.name) === true) return
+    const originalInclude = target.original
+    const wrappedInclude: UnboundMethod = function (this: unknown, ...args: unknown[]): unknown {
+      const receiver = this ?? tools
+      const source = args[0] as Partial<ToolSourceLike> | undefined
+      if (typeof source?.get === 'function' && typeof source?.getAll === 'function') {
+        let offersTeamTools = false
+        try {
+          offersTeamTools = TEAM_TOOL_NAMES.some(name => source.get!(name) !== undefined)
+        } catch {
+          offersTeamTools = false
+        }
+        if (offersTeamTools) {
+          return originalInclude.call(receiver, wrapTeamToolsSource(source as ToolSourceLike), ...args.slice(1))
+        }
+      }
+      return originalInclude.call(receiver, ...args)
+    }
+    try {
+      Object.defineProperty(target.holder, target.name, {
+        value: wrappedInclude,
+        configurable: true,
+        writable: true,
+        enumerable: target.descriptor?.enumerable ?? false,
+      })
+    } catch {
+      return
+    }
+    const names = patchedMethods.get(target.holder) ?? new Set<string>()
+    names.add(target.name)
+    patchedMethods.set(target.holder, names)
+    restores.push(() => {
+      try {
+        // 仅在仍位于包装链顶层时还原，避免与其他拦截 `include` 的守卫交叉卸载时踩掉对方。
+        if (Object.getOwnPropertyDescriptor(target.holder, target.name)?.value !== wrappedInclude) return
+        if (target.descriptor === undefined) Reflect.deleteProperty(target.holder, target.name)
+        else Object.defineProperty(target.holder, target.name, target.descriptor)
+      } catch {
+        // 忽略卸载期单点异常。
+      }
+    })
+  }
+
+  const initialTools = serviceOf<ToolsRegistryLike>(ctx, 'tools')
+  if (initialTools !== undefined) {
+    wrapTools(initialTools)
+  } else {
+    const inject = (ctx as InjectHostLike | undefined)?.inject
+    if (typeof inject === 'function') {
+      let wrapped = false
+      try {
+        inject.call(ctx, ['tools'], (scope: unknown) => {
+          if (wrapped || closed) return
+          wrapped = true
+          wrapTools(serviceOf<ToolsRegistryLike>(scope, 'tools'))
+        })
+      } catch {
+        // 没有注入面时静默跳过。
+      }
+    }
+  }
 
   return {
     dispose(): void {

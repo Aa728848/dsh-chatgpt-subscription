@@ -110,6 +110,8 @@ interface AssembledSectionLike {
 interface PresentationLike {
   /** 已解析的段。 */
   sections?: AssembledSectionLike[]
+  /** 传给模型的工具 schema 列表（DSH 0.2.3-alpha.3+ 在此冻结描述，不触碰原始 ToolDefinition 引用）。 */
+  tools?: readonly ToolDefinitionLike[]
 }
 
 /** 装配上下文里本守卫会读的部分。 */
@@ -279,7 +281,7 @@ export function installTimelineCacheGuard(
     return state
   }
 
-  // ── 1. 冻结 timeline:planning ─────────────────────────────────────────────
+  // ── 1. 冻结 timeline:planning 与 assembly.tools 中的 timeline_tasks ─────────
   const onAssemble = async (
     _assembly: PresentationLike,
     context: AssembleContextLike,
@@ -289,8 +291,15 @@ export function installTimelineCacheGuard(
     if (disposed || !enabled()) return result
     const scope = context?.scope ?? context?.agent
     if (!isProtected(scope, context?.modelSelection)) return result
+
+    const tools = Array.isArray(result?.tools) ? result.tools : undefined
+    const frozenTools = tools !== undefined ? freezeDefinitions(scope, tools) as readonly ToolDefinitionLike[] : undefined
+    const toolsChanged = frozenTools !== undefined && frozenTools !== tools
+
     const sections = Array.isArray(result?.sections) ? result.sections : undefined
-    if (sections === undefined) return result
+    if (sections === undefined) {
+      return toolsChanged ? { ...result, tools: frozenTools } : result
+    }
     const index = sections.findIndex(section => section?.name === TIMELINE_SECTION)
     if (index < 0) {
       // 启用却一直没见过这个段：说明 timeline 没装，或它改了段名，本守卫在空转。
@@ -302,7 +311,7 @@ export function installTimelineCacheGuard(
           + TIMELINE_SECTION + '" section has appeared; the guard is inert on this deployment',
         )
       }
-      return result
+      return toolsChanged ? { ...result, tools: frozenTools } : result
     }
     stats.seen = true
     const current = sections[index]
@@ -310,24 +319,32 @@ export function installTimelineCacheGuard(
     if (current?.retire === true) {
       // DSH 0.2.3+ 退役段：原样放行退役通知，不以旧冻结正文覆盖，也不再投递过期更新。
       state.pending = undefined
-      return result
+      return toolsChanged ? { ...result, tools: frozenTools } : result
     }
     const text = typeof current?.text === 'string' ? current.text : ''
-    if (text === '') return result
+    if (text === '') {
+      return toolsChanged ? { ...result, tools: frozenTools } : result
+    }
     if (state.frozen === '') {
       // 首次见到：这一份就是本会话的基线，原样放行。
       state.frozen = text
       state.pending = undefined
-      return result
+      return toolsChanged ? { ...result, tools: frozenTools } : result
     }
     if (text !== state.frozen) {
       // 变了：记下待投递的新正文，但**继续回放冻结副本**，系统段逐字节恒定。
       state.pending = text
     }
-    if (text === state.frozen) return result
+    if (text === state.frozen) {
+      return toolsChanged ? { ...result, tools: frozenTools } : result
+    }
     const frozenSections = sections.map((section, position) =>
       position === index ? { ...section, text: state.frozen } : section)
-    return { ...result, sections: frozenSections }
+    return {
+      ...result,
+      sections: frozenSections,
+      ...(toolsChanged ? { tools: frozenTools } : {}),
+    }
   }
 
   // ── 2. 一次变更投一次尾部消息 ─────────────────────────────────────────────
@@ -407,35 +424,35 @@ export function installTimelineCacheGuard(
    */
   const resolveMethodTarget = (
     service: unknown,
-  ): { holder: object; name: 'definitions' | 'getAll'; original: DefinitionsMethod; descriptor?: PropertyDescriptor } | undefined => {
+  ): { holder: object; name: 'definitions'; original: DefinitionsMethod; descriptor?: PropertyDescriptor } | undefined => {
     if (typeof service !== 'object' || service === null) return undefined
     const own = service as Record<string, unknown>
     const proto = Object.getPrototypeOf(service) as object | null
     const validProto = proto !== null && proto !== (Object.prototype as object) && proto !== (Function.prototype as object)
       ? proto
       : undefined
-    // 优先包装旧代 definitions()；DSH 0.2.3-alpha.3+ 移除 definitions() 后回退包装 getAll()。
-    for (const methodName of ['definitions', 'getAll'] as const) {
-      if (Object.prototype.hasOwnProperty.call(own, methodName)) {
-        const original = own[methodName]
-        if (typeof original === 'function') {
-          return {
-            holder: own,
-            name: methodName,
-            original: original as DefinitionsMethod,
-            descriptor: Object.getOwnPropertyDescriptor(own, methodName),
-          }
+    // 仅包装旧代 `definitions()`；DSH 0.2.3-alpha.3+ 移除 `definitions()` 后，`ToolStep.declares()`
+    // 依赖 `getAll()` 返回的原始 `ToolDefinition` 对象引用相等，因此新代绝不浅拷贝 `getAll()`，
+    // 改由 `system-prompt/assemble` 冻结 `assembly.tools` 描述。
+    if (Object.prototype.hasOwnProperty.call(own, 'definitions')) {
+      const original = own['definitions']
+      if (typeof original === 'function') {
+        return {
+          holder: own,
+          name: 'definitions',
+          original: original as DefinitionsMethod,
+          descriptor: Object.getOwnPropertyDescriptor(own, 'definitions'),
         }
       }
-      if (validProto !== undefined) {
-        const original = (validProto as Record<string, unknown>)[methodName]
-        if (typeof original === 'function') {
-          return {
-            holder: validProto,
-            name: methodName,
-            original: original as DefinitionsMethod,
-            descriptor: Object.getOwnPropertyDescriptor(validProto, methodName),
-          }
+    }
+    if (validProto !== undefined) {
+      const original = (validProto as Record<string, unknown>)['definitions']
+      if (typeof original === 'function') {
+        return {
+          holder: validProto,
+          name: 'definitions',
+          original: original as DefinitionsMethod,
+          descriptor: Object.getOwnPropertyDescriptor(validProto, 'definitions'),
         }
       }
     }
@@ -447,6 +464,12 @@ export function installTimelineCacheGuard(
     if (alreadyWrapped.has(tools)) return false
     const target = resolveMethodTarget(tools)
     if (target === undefined) {
+      // DSH 0.2.3-alpha.3+ 暴露 `getAll()` 而无 `definitions()`：描述冻结已由 `system-prompt/assemble`
+      // 接管，不打告警也不触碰 `getAll()` 引用身份。
+      if (typeof (tools as { getAll?: unknown }).getAll === 'function') {
+        alreadyWrapped.add(tools)
+        return false
+      }
       if (!stats.warnedTools) {
         stats.warnedTools = true
         logWarn(
@@ -463,22 +486,14 @@ export function installTimelineCacheGuard(
       return false
     }
     const original = target.original
-    const replacement = target.name === 'getAll'
-      ? function (this: unknown, scope?: unknown): readonly unknown[] {
-          const receiver = this ?? tools
-          const list = original.call(receiver, scope)
-          if (!Array.isArray(list) || disposed || !enabled()) return list
-          if (!isProtected(scope)) return list
-          return freezeDefinitions(scope, list)
-        }
-      : function (this: unknown, scope?: unknown, toolSet?: unknown): readonly unknown[] {
-          // receiver 用**调用方**的 this：服务里的 this.ctx 留在调用方那一层作用域。
-          const receiver = this ?? tools
-          const list = original.call(receiver, scope, toolSet)
-          if (!Array.isArray(list) || disposed || !enabled()) return list
-          if (!isProtected(scope)) return list
-          return freezeDefinitions(scope, list)
-        }
+    const replacement = function (this: unknown, scope?: unknown, toolSet?: unknown): readonly unknown[] {
+      // receiver 用**调用方**的 this：服务里的 this.ctx 留在调用方那一层作用域。
+      const receiver = this ?? tools
+      const list = original.call(receiver, scope, toolSet)
+      if (!Array.isArray(list) || disposed || !enabled()) return list
+      if (!isProtected(scope)) return list
+      return freezeDefinitions(scope, list)
+    }
     try {
       Object.defineProperty(target.holder, target.name, {
         value: replacement,

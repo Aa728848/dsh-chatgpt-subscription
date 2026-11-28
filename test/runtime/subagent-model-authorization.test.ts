@@ -24,6 +24,7 @@ import {
   inheritRouteDenialReason,
   inheritedRouteOf,
   installSubagentModelAuthorization,
+  liveSubagentModelSelectionPreference,
   normalizeDelegationToolNames,
   normalizeInheritToolNames,
   parseAllowedRoutes,
@@ -1145,6 +1146,60 @@ describe('路由约束写进工具描述', () => {
     // 未给显式工具名时退回旧说法，不产生半截句子。
     expect(inheritOverrideReason('subagent_fork', 'a', 'b'))
       .toContain('a tool that supports explicit child model selection')
+  })
+
+  it('0.2.3-alpha.3：defaultModel 落在当前会话白名单内时允许省略，并改写新版 provider 参数描述', () => {
+    const CODEX: AllowedModelRoute = { provider: 'codex-chatgpt', model: 'gpt-6-astra' }
+    const upstream023ProviderDesc = 'LLM provider id for the subagent. Set it with `model` only when the task requires a specific model. Use a provider id listed by `list_subagent_models`.'
+    // 1. 未配 defaultModel 时：新版 provider 描述被改写为显式必选
+    const strict = rewriteAuthorizedToolDescriptions(upstream023ProviderDesc, [MINIMAX, CODEX])
+    expect(strict).toContain('Required in this Session: pass an authorized provider id')
+    expect(strict).not.toContain('only when the task requires a specific model')
+
+    // 2. 0.2.3-alpha.3 活服务配置了 defaultRoute() 且落在白名单内 -> 读取到 defaultModel
+    const pref = liveSubagentModelSelectionPreference({
+      allowedRoutes: () => [MINIMAX, CODEX],
+      defaultRoute: () => MINIMAX,
+    })
+    expect(pref?.defaultModel).toEqual(MINIMAX)
+
+    const agent = { session: routedSession([MINIMAX, CODEX], OPUS) }
+    // 三者全省略 -> 放行走 defaultModel
+    expect(delegationDenialReason(agent, 'subagent', { prompt: 'work' }, pref, NO_SESSIONS)).toBeUndefined()
+    // 仅传 reasoning_effort 省略 provider/model -> 仍拦截（上游不会走 defaultRoute）
+    expect(delegationDenialReason(agent, 'subagent', { prompt: 'work', reasoning_effort: 'high' }, pref, NO_SESSIONS))
+      .toContain('requires an explicit child model')
+    // 显式传白名单外模型 -> 仍拦截
+    expect(delegationDenialReason(agent, 'subagent', { provider: 'claude', model: 'claude-opus-4-6' }, pref, NO_SESSIONS))
+      .toContain('is not on the Session allowlist')
+    // inherit 工具不受 defaultModel 影响
+    expect(delegationDenialReason(
+      agent, 'subagent_fork', {}, pref, NO_SESSIONS, ['subagent'], 'session', ['subagent_fork'],
+    )).toContain('subagent_fork')
+
+    // 3. defaultModel 在全局白名单但被按主模型路由覆盖排除 -> 拒绝省略（新会话以按主模型规则锁定）
+    const narrowed = mergePreferenceOverrides(pref, {
+      byMainModel: { 'claude/claude-opus-4-6': [CODEX] },
+    })
+    const narrowedAgent = { session: routedSession([MINIMAX, CODEX], OPUS) }
+    expect(delegationDenialReason(narrowedAgent, 'subagent', { prompt: 'work' }, narrowed, NO_SESSIONS))
+      .toContain('requires an explicit child model')
+
+    // 4. defaultModel 不在白名单内 -> 拒绝省略
+    const outsidePref = liveSubagentModelSelectionPreference({
+      allowedRoutes: () => [CODEX],
+      defaultRoute: () => MINIMAX,
+    })
+    expect(delegationDenialReason(
+      { session: routedSession([CODEX], OPUS) }, 'subagent', { prompt: 'work' }, outsidePref, NO_SESSIONS,
+    )).toContain('requires an explicit child model')
+
+    // 5. 文案与 list_subagent_models 输出在有已授权 defaultModel 时明确告知可省略直走默认模型
+    const defaultRewritten = rewriteAuthorizedToolDescriptions(upstream023ProviderDesc, [MINIMAX, CODEX], MINIMAX)
+    expect(defaultRewritten).toContain('Omit provider, model, and reasoning_effort together')
+    expect(defaultRewritten).toContain('minimax-code/MiniMax-M3.1-Flash')
+    expect(enrichListSubagentModelsOutput('minimax-code — MiniMax Code', [MINIMAX, CODEX], MINIMAX))
+      .toContain('use the authorized default minimax-code/MiniMax-M3.1-Flash')
   })
 })
 

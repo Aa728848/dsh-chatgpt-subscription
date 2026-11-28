@@ -518,6 +518,31 @@ describe('Kimi K3/K3.1 专属防线（只读空转、ESC ANSI 清洗、入库前
     expect(ababGuard.observe({ toolName: 'a', arguments: { x: 1 } })).toBeUndefined()
     expect(ababGuard.observe({ toolName: 'b', arguments: { x: 2 } })?.kind).toBe('abab_action_cycle')
 
+    // DSH 0.2.3-alpha.3 todo-reminder（form: 'snapshot'）不应重置 A-B-A-B 计数器
+    const v4SnapAgent = createFakeAgent({ provider: 'deepseek', model: 'deepseek-v4-pro', sessionId: 'v4-abab-snap' })
+    for (const [name, args] of calls.slice(0, 2)) {
+      await host.runWaterfall(
+        'tools/post-execute',
+        [{ name, arguments: args, agent: v4SnapAgent }, { content: [{ type: 'text', text: 'ok' }], isError: false }],
+        () => ({ kind: 'accept' }),
+      )
+    }
+    const todoSnapshot = [{
+      role: 'user',
+      content: [{ type: 'text', text: '<system-reminder>\nCurrent todo list:\n1. [pending] "check"\n</system-reminder>' }],
+      source: { kind: 'todo-reminder', form: 'snapshot' },
+    }]
+    await host.runWaterfall('agent/pre-step', [{ agent: v4SnapAgent, messages: todoSnapshot }], () => ({ kind: 'enter', messages: todoSnapshot }))
+    let afterSnapshotDecision: { additionalContexts?: Array<{ content?: Array<{ text?: string }> }> } | undefined
+    for (const [name, args] of calls.slice(2)) {
+      afterSnapshotDecision = await host.runWaterfall(
+        'tools/post-execute',
+        [{ name, arguments: args, agent: v4SnapAgent }, { content: [{ type: 'text', text: 'ok' }], isError: false }],
+        () => ({ kind: 'accept' }),
+      ) as { additionalContexts?: Array<{ content?: Array<{ text?: string }> }> }
+    }
+    expect(afterSnapshotDecision?.additionalContexts?.[0]?.content?.[0]?.text).toContain('A-B-A-B tool loop')
+
     dispose()
   })
 })

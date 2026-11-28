@@ -885,7 +885,7 @@ describe('DSH 0.2.3-alpha.3 根注册表、守卫、审计与提醒适配', () =
     }
   })
 
-  it('ptc-sdk-cache-guard 与 timeline-cache-guard：在无 definitions() 的 0.2.3-alpha.3 注册表上分别按 tools/change 与 getAll() 生效', async () => {
+  it('ptc-sdk-cache-guard 与 timeline-cache-guard：在无 definitions() 的 0.2.3-alpha.3 注册表上保持 ToolDefinition 引用并冻结描述', async () => {
     // 1. ptc-sdk-cache-guard：无 definitions() 时按 tools/change 刷新缓存，常规步骤冻结 tools:sdk
     const listeners = new Map<string, (...args: unknown[]) => unknown>()
     const ptcTools = { getAll: () => [{ name: 'run_code' }] }
@@ -911,32 +911,53 @@ describe('DSH 0.2.3-alpha.3 根注册表、守卫、审计与提醒适配', () =
     expect(third.sections[0]?.text).toBe('SDK v2')
     ptcGuard.dispose()
 
-    // 2. timeline-cache-guard：无 definitions() 时自动回退包装 getAll()，不打告警且冻结 timeline_tasks 描述
+    // 2. timeline-cache-guard：无 definitions() 时绝不浅拷贝 getAll() 返回的原始 ToolDefinition 引用
+    //    （避免 ToolStep.declares() 严格引用相等校验失败报 UNKNOWN_TOOL），改在 system-prompt/assemble
+    //    冻结传给模型的 assembly.tools 描述且不打告警。
     let taskDesc = 'Task prompt v1'
+    const rawTimelineDef = {
+      name: 'timeline_tasks',
+      get description() { return taskDesc },
+    }
     const warnings: string[] = []
+    const tlListeners = new Map<string, (...args: unknown[]) => unknown>()
     class FakeGetAllTools {
       getAll() {
-        return [{
-          name: 'timeline_tasks',
-          get description() { return taskDesc },
-        }]
+        return [rawTimelineDef]
       }
     }
     const tlTools = new FakeGetAllTools()
     const tlGuard = installTimelineCacheGuard({
       get: (name: string) => (name === 'tools' ? tlTools : undefined),
-      on: () => () => undefined,
+      on: (event: string, fn: (...args: unknown[]) => unknown) => {
+        tlListeners.set(event, fn)
+        return () => { tlListeners.delete(event) }
+      },
       logger: { warn: (msg: string) => warnings.push(msg) },
     }, { enabled: () => true })
     expect(warnings).toEqual([])
-    const firstDefs = tlTools.getAll() as Array<{ name: string; description: string }>
-    expect(firstDefs[0]?.description).toBe('Task prompt v1')
-    // 传入受保护 scope 冻结
-    const scopedFirst = (tlTools.getAll as (s?: unknown) => Array<{ name: string; description: string }>)(scope)
-    expect(scopedFirst[0]?.description).toBe('Task prompt v1')
+    const tlAssemble = tlListeners.get('system-prompt/assemble') as (
+      a: unknown,
+      c: unknown,
+      n: () => Promise<unknown>,
+    ) => Promise<{ sections: Array<{ name: string; text: string }>; tools: Array<{ name: string; description: string }> }>
+
+    // 首步装配与原始引用校验
+    const firstAssembly = await tlAssemble({}, { scope }, async () => ({
+      sections: [{ name: TIMELINE_SECTION, text: 'Timeline v1' }],
+      tools: [{ name: 'timeline_tasks', description: rawTimelineDef.description }],
+    }))
+    expect(firstAssembly.tools[0]?.description).toBe('Task prompt v1')
+    expect(tlTools.getAll()[0]).toBe(rawTimelineDef)
+
+    // 中途修改 taskPrompt：getAll() 仍返回原引用，但传给模型的 assembly.tools 描述已冻结在 v1
     taskDesc = 'Task prompt v2'
-    const scopedSecond = (tlTools.getAll as (s?: unknown) => Array<{ name: string; description: string }>)(scope)
-    expect(scopedSecond[0]?.description).toBe('Task prompt v1')
+    expect(tlTools.getAll()[0]).toBe(rawTimelineDef)
+    const secondAssembly = await tlAssemble({}, { scope }, async () => ({
+      sections: [{ name: TIMELINE_SECTION, text: 'Timeline v1' }],
+      tools: [{ name: 'timeline_tasks', description: rawTimelineDef.description }],
+    }))
+    expect(secondAssembly.tools[0]?.description).toBe('Task prompt v1')
     tlGuard.dispose()
   })
 

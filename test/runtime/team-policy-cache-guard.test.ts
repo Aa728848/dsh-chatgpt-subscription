@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   TEAM_POLICY_SECTION,
+  TEAM_TOOL_NAMES,
   installTeamPolicyCacheGuard,
   resolveTeamPolicyCacheGuardEnabled,
 } from '../../src/host/runtime/guards/team-policy-cache-guard.ts'
@@ -237,5 +238,69 @@ describe('installTeamPolicyCacheGuard', () => {
     // dispose 摘掉监听器：瀑布里已经没有人，装配由下游直接决定。
     expect(listeners.has('system-prompt/assemble')).toBe(false)
     expect(listeners.has('agent/pre-step')).toBe(false)
+  })
+
+  it('keeps all 4 team_task_* tools constantly visible through ctx.tools.include() on 0.2.3-alpha.3+ and respects enabled/dispose', () => {
+    let guardEnabled = true
+    let teamModeOn = false
+    const defs = new Map(TEAM_TOOL_NAMES.map(name => [name, { name, description: `${name} desc` }]))
+    const rawSource = {
+      get(name: string, scope?: unknown) {
+        if (scope === undefined) return defs.get(name)
+        return teamModeOn ? defs.get(name) : undefined
+      },
+      getAll(scope?: unknown) {
+        if (scope === undefined) return [...defs.values()]
+        return teamModeOn ? [...defs.values()] : []
+      },
+    }
+    const otherSource = {
+      get: (name: string) => (name === 'unrelated' ? { name: 'unrelated' } : undefined),
+      getAll: () => [{ name: 'unrelated' }],
+    }
+    let includedTeam: typeof rawSource | undefined
+    let includedOther: typeof otherSource | undefined
+    class FakeToolsRegistry {
+      include(source: unknown) {
+        const s = source as typeof rawSource
+        if (s.get('team_task_create') !== undefined) includedTeam = s
+        else includedOther = s as unknown as typeof otherSource
+        return () => undefined
+      }
+    }
+    const tools = new FakeToolsRegistry()
+    const originalInclude = FakeToolsRegistry.prototype.include
+    const { ctx } = createHost()
+    ctx['get'] = (name: string) => (name === 'tools' ? tools : undefined)
+
+    const guard = installTeamPolicyCacheGuard(ctx, { enabled: () => guardEnabled })
+    tools.include(rawSource)
+    tools.include(otherSource)
+
+    // 非 team 工具源原样透传
+    expect(includedOther).toBe(otherSource)
+    expect(includedTeam).toBeDefined()
+    expect(includedTeam).not.toBe(rawSource)
+
+    const agent = { id: 'lead' }
+    // Team 模式关闭时，守卫开启 -> 4 个工具仍全部可见且保持原 ToolDefinition 引用
+    expect(includedTeam!.getAll(agent).map(entry => (entry as { name: string }).name)).toEqual([...TEAM_TOOL_NAMES])
+    expect(includedTeam!.get('team_task_create', agent)).toBe(defs.get('team_task_create'))
+
+    // 动态关闭守卫 -> 立刻回到上游按开关隐藏行为
+    guardEnabled = false
+    expect(includedTeam!.getAll(agent)).toEqual([])
+    expect(includedTeam!.get('team_task_create', agent)).toBeUndefined()
+
+    // 打开 Team 模式后仍返回原引用
+    teamModeOn = true
+    expect(includedTeam!.getAll(agent)).toEqual([...defs.values()])
+
+    // dispose 恢复原型 include 方法，并停止兜底暴露
+    teamModeOn = false
+    guardEnabled = true
+    guard.dispose()
+    expect(FakeToolsRegistry.prototype.include).toBe(originalInclude)
+    expect(includedTeam!.getAll(agent)).toEqual([])
   })
 })

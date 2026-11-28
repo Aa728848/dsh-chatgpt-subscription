@@ -532,6 +532,52 @@ describe('DeepSeek V4.1 Flash pre-write observation tagger & official runaway re
 
     dispose()
   })
+
+  it('does not reset official V4.1 Flash runaway counter on todo-reminder or runtime-context snapshot messages', async () => {
+    const { ctx, emitWaterfall } = createEventHost()
+    const dispose = installDeepSeekV41FlashObservationTagger(ctx)
+    const officialFlash = makeAgent('deepseek-official', 'deepseek-flash', 'sess-snapshot-reset')
+
+    const callOnce = async (i: number) => await emitWaterfall<PostToolDecision>(
+      'tools/post-execute',
+      [
+        { name: 'bash', callId: `s${i}`, arguments: { command: 'npm test' }, agent: officialFlash } as unknown as ToolExecution,
+        { isError: false, content: [{ type: 'text', text: 'short' }] } as unknown as Readonly<ToolExecutionResult>,
+      ],
+      () => ({ kind: 'accept' }),
+    )
+
+    // 先累计 2 次相同工具调用
+    await callOnce(1)
+    await callOnce(2)
+
+    // 注入 DSH 0.2.3-alpha.3 todo-reminder（form: 'snapshot'）与 runtime-context：不应重置计数器
+    const snapshotMsgs = [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: '<system-reminder>\nCurrent todo list:\n1. [in_progress] "fix"\n</system-reminder>' }],
+        source: { kind: 'todo-reminder', form: 'snapshot' },
+      },
+      {
+        role: 'user',
+        content: [{ type: 'text', text: '<system-reminder>\nCurrent time: 2026-11-28\n</system-reminder>' }],
+        source: { kind: 'runtime-context', form: 'snapshot' },
+      },
+    ]
+    await emitWaterfall('agent/pre-step', [{ agent: officialFlash, messages: snapshotMsgs }], () => ({ kind: 'enter', messages: snapshotMsgs }))
+
+    // 再连续调用 2 次仍触发失控提醒（证明没有被 snapshot 重置）
+    let reminded = false
+    for (let i = 3; i <= 5; i++) {
+      const r = await callOnce(i)
+      if (r.additionalContexts?.some(m => (m.source as { kind?: string } | undefined)?.kind === DEEPSEEK_V41_FLASH_RUNAWAY_SOURCE_KIND)) {
+        reminded = true
+      }
+    }
+    expect(reminded).toBe(true)
+
+    dispose()
+  })
 })
 
 describe('DeepSeek V4.1 Flash scoped reasoning-collapse guard', () => {

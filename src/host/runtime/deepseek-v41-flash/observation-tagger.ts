@@ -36,6 +36,7 @@ import {
   type ToolRunawayReminder,
 } from '../../common/tool-runaway.ts'
 import { DEEPSEEK_OFFICIAL_PROVIDERS, isDeepSeekV41Flash, readScopeRoute } from './match.ts'
+import { isRealUserMessage } from './goal-intake.ts'
 
 /** 观测头前缀（用于幂等防重复）。 */
 export const OBSERVATION_HEADER_PREFIX = '[OBS | '
@@ -283,8 +284,8 @@ export function installDeepSeekV41FlashObservationTagger(
       && isDeepSeekV41Flash(route.model, route.provider)
     ) {
       const messages = Array.isArray(payload?.messages) ? payload.messages : []
-      const hasRealUser = messages.some(msg => isRecord(msg) && msg['role'] === 'user' && !(isRecord(msg['source']) && msg['source']['form'] === 'notice'))
-      if (hasRealUser) {
+      // 用白名单而非仅排除 `form === 'notice'`，避免 `todo-reminder` / `runtime-context`（`form: 'snapshot'`）误重置计数器。
+      if (messages.some(isRealUserMessage)) {
         runawayGuards.get(route.sessionId)?.reset()
       }
     }

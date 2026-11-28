@@ -42,6 +42,7 @@ import {
   buildObservationHeader,
 } from '../deepseek-v41-flash/observation-tagger.ts'
 import { defaultEstimateContextTokens } from '../deepseek-v41-flash/state-anchor.ts'
+import { isRealUserMessage } from '../deepseek-v41-flash/goal-intake.ts'
 import { readScopeRoute } from '../deepseek-v41-flash/match.ts'
 import { matchOpenModelProfile, matchOpenModelScope } from './profiles.ts'
 
@@ -341,8 +342,8 @@ export function installOpenModelObservationGuard(
     const sessionKey = matched.route.sessionId
     if (sessionKey === undefined) return decision
     const messages = Array.isArray(payload?.messages) ? payload.messages : []
-    const hasRealUser = messages.some(msg => isRecord(msg) && msg['role'] === 'user' && !(isRecord(msg['source']) && msg['source']['form'] === 'notice'))
-    if (hasRealUser) {
+    // 用白名单而非仅排除 `form === 'notice'`，避免 `todo-reminder` / `runtime-context`（`form: 'snapshot'`）误重置空转与失控计数器。
+    if (messages.some(isRealUserMessage)) {
       const spin = spinStates.get(sessionKey)
       if (spin !== undefined) {
         spin.tracker.reset()
