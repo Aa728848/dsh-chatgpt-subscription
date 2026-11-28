@@ -242,6 +242,8 @@ export interface ClaudeWebStatus extends Partial<AccountPoolStatusDto> {
   fastMode?: boolean
   /** Whether 1h main requests advertise cache-keepalive and permit cache_touch. */
   cacheKeepalive?: boolean
+  /** Compact each delegated session after its completed run. Defaults to true. */
+  autoCompactSubagents?: boolean
   /** Account selected for catalog, quota and all requests; null means automatic. */
   selectedAccountId: string | null
   /** Signed-in accounts; empty or absent when no pool is installed. */
@@ -266,6 +268,7 @@ export interface ClaudeSettingsUpdateDto {
   subagentCacheTtl?: ClaudeCacheTtl | null
   fastMode?: boolean
   cacheKeepalive?: boolean
+  autoCompactSubagents?: boolean
   selectedAccountId?: string | null
 }
 

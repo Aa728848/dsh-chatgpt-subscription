@@ -20,6 +20,7 @@ import {
   type ClaudeApiSettingsStore,
 } from './token-store.ts'
 import { CLAUDE_API_CATALOG_TTL_MS, claudeApiSafeDetail } from './types.ts'
+import { ClaudeApiAccountPool } from './account-pool.ts'
 
 export interface ClaudeApiCatalogSnapshot {
   entries: readonly ClaudeApiModelEntry[]
@@ -52,6 +53,7 @@ function fingerprint(entries: readonly ClaudeApiModelEntry[]): string {
  * and is reported as NOT live, so a user's whitelist never filters it away.
  */
 export class ClaudeApiCatalogManager {
+  private readonly pool: ClaudeApiAccountPool
   private readonly version: ClaudeApiClientVersionResolver
   private readonly fetchFn: typeof fetch
   private readonly now: () => number
@@ -70,10 +72,11 @@ export class ClaudeApiCatalogManager {
   private epoch = 0
 
   constructor(
-    private readonly store: ClaudeApiCredentialStore,
+    store: ClaudeApiCredentialStore | ClaudeApiAccountPool,
     private readonly settingsStore: ClaudeApiSettingsStore,
     options: ClaudeApiCatalogManagerOptions,
   ) {
+    this.pool = store instanceof ClaudeApiAccountPool ? store : new ClaudeApiAccountPool({ store, settingsStore })
     this.version = options.version
     this.fetchFn = options.fetchFn ?? fetch
     this.now = options.now ?? Date.now
@@ -115,10 +118,8 @@ export class ClaudeApiCatalogManager {
     if (this.warming !== null) return this.warming
     const epoch = this.epoch
     this.warming = (async () => {
-      const [credentials, settings] = await Promise.all([
-        this.store.read().catch(() => null),
-        this.settingsStore.read(),
-      ])
+      const account = await this.pool.stableAccount()
+      const credentials = account?.credentials ?? null
       if (credentials === null) {
         if (epoch === this.epoch) {
           this.entries = claudeApiFallbackEntries()
@@ -132,7 +133,7 @@ export class ClaudeApiCatalogManager {
         return fingerprint(this.entries)
       }
       // The endpoint is part of the scope: the same key against a gateway lists other models.
-      const scope = claudeApiCredentialFingerprint(credentials, settings.baseUrl)
+      const scope = claudeApiCredentialFingerprint(credentials, credentials.baseUrl)
       if (epoch !== this.epoch) return fingerprint(this.entries)
       if (this.warmedScope === scope && this.credentialScope === scope) return fingerprint(this.entries)
       if (this.credentialScope !== null && this.credentialScope !== scope) {
@@ -175,12 +176,10 @@ export class ClaudeApiCatalogManager {
   /** Network refresh, deduplicated per credential scope. Never waits in warm(). */
   async refresh(force = false): Promise<boolean> {
     await this.warm()
-    const [credentials, settings] = await Promise.all([
-      this.store.read().catch(() => null),
-      this.settingsStore.read(),
-    ])
+    const account = await this.pool.stableAccount()
+    const credentials = account?.credentials ?? null
     if (credentials === null) return false
-    const scope = claudeApiCredentialFingerprint(credentials, settings.baseUrl)
+    const scope = claudeApiCredentialFingerprint(credentials, credentials.baseUrl)
     if (this.credentialScope !== null && this.credentialScope !== scope) {
       this.entries = claudeApiFallbackEntries()
       this.fetchedAt = null
@@ -196,7 +195,7 @@ export class ClaudeApiCatalogManager {
       try {
         await this.version.warm()
         const entries = await listClaudeApiModels({
-          baseUrl: settings.baseUrl,
+          baseUrl: credentials.baseUrl,
           apiKey: credentials.apiKey,
           version: this.version.current().value,
           fetchFn: this.fetchFn,

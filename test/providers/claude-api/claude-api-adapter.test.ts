@@ -6,6 +6,8 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '../../../src/host/common/llm-compat.ts'
 import { flushCatalogSnapshots } from '../../../src/host/common/catalog-snapshot.ts'
 import { COMPACTION_INSTRUCTION } from '../../../src/host/infra/hub/compaction-prompt.ts'
+import { ClaudeApiAccountPool, type ClaudeApiPoolAccount } from '../../../src/host/providers/claude-api/account-pool.ts'
+import type { PoolData } from '../../../src/host/common/account-pool.ts'
 import { ClaudeApiAdapter, isClaudeApiSpeedNeedsBeta, isClaudeApiSpeedUnsupported, isClaudeApiSystemRoleUnsupported } from '../../../src/host/providers/claude-api/adapter.ts'
 import { CLAUDE_API_CAPABILITY_MEMORY_TTL_MS, ClaudeApiCapabilityMemory } from '../../../src/host/providers/claude-api/capability-memory.ts'
 import { ClaudeApiCatalogManager } from '../../../src/host/providers/claude-api/catalog-manager.ts'
@@ -77,6 +79,21 @@ function textStream(text = 'ok'): Response {
     { type: 'message_stop' },
   ])
 }
+function brokenStream(afterOutput: boolean): Response {
+  const encoder = new TextEncoder()
+  let sent = false
+  return new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (afterOutput && !sent) {
+        sent = true
+        controller.enqueue(encoder.encode('data: ' + JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }) + '\n\n'))
+        controller.enqueue(encoder.encode('data: ' + JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } }) + '\n\n'))
+        return
+      }
+      controller.error(new Error('socket ended'))
+    },
+  }), { status: 200 })
+}
 function compactionStream(content: string, signature = 'sig-1'): Response {
   return sse([
     { type: 'message_start', message: { usage: { input_tokens: 0, output_tokens: 0 } } },
@@ -103,6 +120,7 @@ interface Setup {
   resolver: ClaudeApiClientVersionResolver
   npmFetch: ReturnType<typeof vi.fn>
   catalog: ClaudeApiCatalogManager
+  pool: ClaudeApiAccountPool
   compactionStore: ClaudeApiCompactionStore
   adapter: ClaudeApiAdapter
   calls: Array<{ url: string; init?: RequestInit }>
@@ -111,6 +129,15 @@ interface Setup {
 function setup(generation?: (callIndex: number, url: string, init?: RequestInit) => Promise<Response>, key: string | null = KEY, now?: () => number, capabilityMemory?: ClaudeApiCapabilityMemory): Setup {
   const store = fakeCredentialStore(key)
   const settingsStore = new ClaudeApiSettingsStore()
+  let poolData: PoolData<ClaudeApiPoolAccount> | null = null
+  const pool = new ClaudeApiAccountPool({
+    store, settingsStore,
+    backend: {
+      load: async () => poolData,
+      save: async value => { poolData = structuredClone(value) },
+      clear: async () => { poolData = null },
+    },
+  })
   const npmFetch = vi.fn(async () => Response.json({ version: '2.1.330' }))
   const profiles = ['2.1.330', '2.1.9', '2.0.1', '2.2.0', '2.3.0', '2.4.0'].map(version => ({ version, seed: 1n }))
   const resolver = new ClaudeApiClientVersionResolver({ fetchFn: npmFetch as unknown as typeof fetch, env: {}, profiles, ...(now !== undefined ? { now } : {}) })
@@ -121,11 +148,11 @@ function setup(generation?: (callIndex: number, url: string, init?: RequestInit)
     calls.push({ url, init })
     return generation !== undefined ? generation(calls.length - 1, url, init) : textStream()
   }) as unknown as typeof fetch
-  const catalog = new ClaudeApiCatalogManager(store, settingsStore, { version: resolver, fetchFn })
+  const catalog = new ClaudeApiCatalogManager(pool, settingsStore, { version: resolver, fetchFn })
   const compactionStore = new ClaudeApiCompactionStore()
-  const adapter = new ClaudeApiAdapter(store, settingsStore, catalog, { fetchFn, version: resolver, compactionStore, ...(capabilityMemory !== undefined ? { capabilityMemory } : {}) })
+  const adapter = new ClaudeApiAdapter(pool, settingsStore, catalog, { fetchFn, version: resolver, compactionStore, isDelegatedSession: sessionId => sessionId === 'child', ...(capabilityMemory !== undefined ? { capabilityMemory } : {}) })
   return {
-    settingsStore, resolver, npmFetch, catalog, compactionStore, adapter, calls,
+    settingsStore, resolver, npmFetch, catalog, pool, compactionStore, adapter, calls,
     goLive: async () => { await resolver.refresh({ force: true }); await catalog.refresh(true) },
   }
 }
@@ -237,6 +264,58 @@ describe('Claude API adapter wire shape', () => {
     try { await collect(s.adapter.stream(options())) } catch (error) { message = (error as Error).message }
     expect(message).toContain('[REDACTED]')
     expect(message).not.toContain(KEY)
+  })
+})
+
+
+describe('Claude API account failover and cache tiers', () => {
+  it.each(['network', 401, 429, 500] as const)('fails over from the primary for %s and keeps credentials paired', async failure => {
+    const s = setup(async callIndex => {
+      if (callIndex > 0) return textStream()
+      if (failure === 'network') throw new Error('socket closed')
+      return Response.json({ error: { message: 'primary failed' } }, { status: failure })
+    })
+    await s.pool.addAccount({ apiKey: 'sk-backup', authenticatedAt: 2, baseUrl: 'https://backup.example' })
+    await collect(s.adapter.stream(options({ sessionId: 'failover' })))
+    expect(s.calls).toHaveLength(2)
+    expect(s.calls[0]!.url).toBe(claudeApiUrl(CLAUDE_API_DEFAULT_BASE_URL, CLAUDE_API_MESSAGES_PATH))
+    expect(headersOf(s.calls[0]!).get('x-api-key')).toBe(KEY)
+    expect(s.calls[1]!.url).toBe(claudeApiUrl('https://backup.example', CLAUDE_API_MESSAGES_PATH))
+    expect(headersOf(s.calls[1]!).get('x-api-key')).toBe('sk-backup')
+    const primary = (await s.pool.read()).accounts.find(account => account.isPrimary)!
+    if (failure === 401) expect(primary.authStatus).toBe('invalid')
+    else expect(primary.cooldownUntil).toBeGreaterThan(0)
+  })
+
+  it('does not fan a request-content 400 out to backup accounts', async () => {
+    const s = setup(async () => Response.json({ error: { message: 'bad request' } }, { status: 400 }))
+    await s.pool.addAccount({ apiKey: 'sk-backup', authenticatedAt: 2, baseUrl: 'https://backup.example' })
+    await expect(collect(s.adapter.stream(options({ sessionId: 'bad-request' })))).rejects.toThrow()
+    expect(s.calls).toHaveLength(1)
+  })
+
+
+  it('rotates a transport failure before output but never replays a partial answer', async () => {
+    const before = setup(async callIndex => callIndex === 0 ? brokenStream(false) : textStream())
+    await before.pool.addAccount({ apiKey: 'sk-backup', authenticatedAt: 2, baseUrl: 'https://backup.example' })
+    await collect(before.adapter.stream(options({ sessionId: 'stream-before' })))
+    expect(before.calls).toHaveLength(2)
+
+    const after = setup(async () => brokenStream(true))
+    await after.pool.addAccount({ apiKey: 'sk-backup', authenticatedAt: 2, baseUrl: 'https://backup.example' })
+    const chunks: StreamChunk[] = []
+    await expect((async () => { for await (const chunk of after.adapter.stream(options({ sessionId: 'stream-after' }))) chunks.push(chunk) })()).rejects.toThrow()
+    expect(chunks.length).toBeGreaterThan(0)
+    expect(after.calls).toHaveLength(1)
+  })
+
+  it('uses the main and delegated cache settings independently', async () => {
+    const s = setup()
+    await s.settingsStore.update({ cacheTtl: '1h', subagentCacheTtl: '5m' })
+    await collect(s.adapter.stream(options({ sessionId: 'main' })))
+    await collect(s.adapter.stream(options({ sessionId: 'child' })))
+    expect(JSON.stringify(bodyOf(s.calls[0]!))).toContain('"ttl":"1h"')
+    expect(JSON.stringify(bodyOf(s.calls[1]!))).not.toContain('"ttl":"1h"')
   })
 })
 

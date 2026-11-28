@@ -601,6 +601,8 @@ describe('claude model settings', () => {
     expect(defaults.selectedAccountId).toBeNull()
     expect(defaults.fastMode).toBe(false)
     expect(defaults.cacheKeepalive).toBe(false)
+    expect(defaults.autoCompactSubagents).toBe(true)
+    expect(parseClaudeModelSettings({ autoCompactSubagents: false }).autoCompactSubagents).toBe(false)
     expect(defaults.deviceId).toBe('')
   })
 
@@ -631,6 +633,7 @@ describe('claude model settings', () => {
       subagentCacheTtl: null,
       fastMode: false,
       cacheKeepalive: false,
+      autoCompactSubagents: true,
       deviceId: '',
       selectedAccountId: 'cl_0123456789abcdef0123',
     })

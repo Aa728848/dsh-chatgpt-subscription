@@ -92,8 +92,10 @@ describe('ClaudeApiSettings', () => {
       contextWindowOverrides: {},
       defaultReasoningEffort: null,
       cacheTtl: '5m',
+      subagentCacheTtl: '5m',
       fastMode: false,
       serverCompaction: true,
+      autoCompactSubagents: true,
       deviceId: '',
     })
   })

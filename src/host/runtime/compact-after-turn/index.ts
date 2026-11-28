@@ -18,8 +18,13 @@ const MAX_TRACKED_SESSIONS = 256
 const MAX_BODY_BYTES = 4 * 1024
 
 /** The slice of an Agent this controller reads. */
+export interface CompactAfterTurnSession {
+  readonly id?: unknown
+  readonly requestHeader?: (() => { config?: { provider?: unknown } | undefined } | undefined) | undefined
+}
+
 export interface CompactAfterTurnAgent {
-  readonly session?: { readonly id?: unknown } | undefined
+  readonly session?: CompactAfterTurnSession | undefined
   /**
    * The agent's own scope. A preset loads its compaction engine inside it, so
    * the engine is read from here rather than from the plugin's root scope.
@@ -39,6 +44,8 @@ export interface CompactAfterTurnDeps {
    * the session was seen); undefined when there is no engine to call.
    */
   readonly compactor: (agent: CompactAfterTurnAgent | undefined) => CompactNow | undefined
+  /** Persistent per-line policy for an eligible delegated session. */
+  readonly autoCompact?: (agent: CompactAfterTurnAgent) => boolean | Promise<boolean>
   readonly now?: () => number
   readonly logger?: { warn(message: string): void; info?(message: string): void } | undefined
   /** Defers the compaction out of the status listener; tests run it inline. */
@@ -128,8 +135,11 @@ export class CompactAfterTurnController {
   observe(session: { readonly id?: unknown } | undefined, event: CompactAfterTurnEvent | undefined): void {
     const id = sessionIdOf(session)
     if (id === undefined) return
-    const state = this.sessions.get(id)
-    if (state === undefined) return
+    let state = this.sessions.get(id)
+    if (state === undefined) {
+      if (event?.type !== 'turn/end') return
+      state = this.ensure(id)
+    }
     switch (event?.type) {
       case 'compaction/start':
         state.compactionOpen = true
@@ -145,7 +155,6 @@ export class CompactAfterTurnController {
       default:
         return
     }
-    if (state.phase !== 'armed') return
     const reason = (event.data as { reason?: { kind?: unknown } } | undefined)?.reason?.kind
     state.lastTurnEnd = typeof reason === 'string' ? reason : 'completed'
   }
@@ -163,7 +172,8 @@ export class CompactAfterTurnController {
     }
     // No turn has ended since the switch was armed: arming while idle waits for
     // the next turn instead of compacting on the spot.
-    if (state?.phase !== 'armed' || state.lastTurnEnd === null) return
+    if (state === undefined || (state.phase !== 'armed' && state.phase !== 'off') || state.lastTurnEnd === null) return
+    if (state.phase === 'off' && this.deps.autoCompact === undefined) return
     if (state.lastTurnEnd === 'aborted') {
       state.lastTurnEnd = null
       return
@@ -175,12 +185,13 @@ export class CompactAfterTurnController {
       state.last = { kind: 'failed', detail: 'This session has no compaction engine.', at: this.now() }
       return
     }
+    const automatic = state.phase === 'off'
     state.phase = 'compacting'
     state.lastTurnEnd = null
     state.contended = false
     const abort = new AbortController()
     state.abort = abort
-    this.defer(() => { void this.run(id, state, agent, compactNow, abort) })
+    this.defer(() => { void this.run(id, state, agent, compactNow, abort, automatic) })
   }
 
   /** `agent/disposed` listener: a compaction must not outlive its agent. */
@@ -204,12 +215,14 @@ export class CompactAfterTurnController {
     agent: CompactAfterTurnAgent,
     compactNow: CompactNow,
     abort: AbortController,
+    automatic: boolean,
   ): Promise<void> {
     let rearm = false
     // Our own attempt has not appended its marker yet, so an open one is foreign.
     const lockedBefore = state.compactionOpen
     try {
       if (abort.signal.aborted) throw abort.signal.reason
+      if (automatic && !await this.deps.autoCompact?.(agent)) return
       const result = await compactNow(agent, abort.signal)
       state.last = { kind: result === null || result === undefined ? 'nothing' : 'compacted', at: this.now() }
       this.deps.logger?.info?.(`compact-after-turn: session ${id} ${state.last.kind}`)
@@ -224,7 +237,7 @@ export class CompactAfterTurnController {
     } finally {
       if (state.abort === abort) state.abort = null
       if (this.sessions.get(id) === state) {
-        state.phase = rearm ? 'armed' : 'off'
+        state.phase = rearm && !automatic ? 'armed' : 'off'
         // A busy refusal means a new turn is (or was just) open; its own
         // turn/end re-establishes the trigger.
         state.lastTurnEnd = null
@@ -275,6 +288,8 @@ export interface CompactAfterTurnHost {
 }
 
 export interface CompactAfterTurnOptions {
+  /** Persistent per-line policy for delegated sessions. */
+  readonly autoCompact?: (agent: CompactAfterTurnAgent) => boolean | Promise<boolean>
   /**
    * The compaction engine as the caller's `inject(['compaction'])` scope holds
    * it. A plugin that does not declare the service cannot read it through a
@@ -336,7 +351,11 @@ function compactorOf(host: CompactAfterTurnHost, options: CompactAfterTurnOption
 /** Install the listeners and the route; returns the disposer (undefined on a Host without an event bus). */
 export function installCompactAfterTurn(host: CompactAfterTurnHost, options: CompactAfterTurnOptions = {}): (() => void) | undefined {
   if (typeof host.on !== 'function') return undefined
-  const controller = new CompactAfterTurnController({ compactor: (agent) => compactorOf(host, options, agent), logger: host.logger })
+  const controller = new CompactAfterTurnController({
+    compactor: (agent) => compactorOf(host, options, agent),
+    autoCompact: options.autoCompact,
+    logger: host.logger,
+  })
   const handles = [
     host.on('session/event', (session: { id?: unknown }, event: CompactAfterTurnEvent) => controller.observe(session, event)),
     host.on('agent/status', (payload: { agent?: CompactAfterTurnAgent; status?: unknown } | undefined) => controller.onStatus(payload?.agent, payload?.status)),

@@ -7,14 +7,16 @@ import { createLineApi } from '../../common/line-api.ts'
  *
  *   GET    /status            -> ClaudeApiStatusDto
  *   POST   /settings          ClaudeApiSettingsUpdateDto -> ClaudeApiStatusDto
- *   POST   /key               { apiKey }
- *   DELETE /key
+ *   POST   /accounts          account CRUD and rotation strategy
+ *   POST   /key               legacy primary-account key update
+ *   DELETE /key               legacy primary-account delete
  *   POST   /test              -> ClaudeApiConnectionDto
  *   POST   /catalog/refresh
  */
 export const CLAUDE_API_CLIENT_ROUTES = {
   status: '/status',
   settings: '/settings',
+  accounts: '/accounts',
   key: '/key',
   test: '/test',
   catalogRefresh: '/catalog/refresh',

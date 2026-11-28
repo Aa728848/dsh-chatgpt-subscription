@@ -52,7 +52,7 @@
 | `antigravity-acp` | Antigravity（ACP） | ACP v1 / stdio JSON-RPC（官方 `agy acp` 服务端） | 复用官方 CLI 自己的登录态（`agy acp --login`）；插件不读取、不保存凭据 | 实时 ACP `session/new` 目录 + 本地快照 | `/antigravity-acp/api` |
 | `qianwen-token-plan` | Qwen Token Plan（千问） | OpenAI Chat Completions | 单个 Token Plan 专属 API Key，系统加密存储；无账号池 | 官方个人版/团队版 23 个文本与视觉理解模型静态能力表 | `/qianwen-token-plan/api` |
 | `relayone` | RelayOne | Responses / Chat / Anthropic Messages | 多 API Key 存储 + 手动切换，系统加密存储 | 当前 Key live listing + 分组/端点元数据 + 凭据隔离快照 | `/relayone/api` |
-| `claude-api` | Claude API | Anthropic Messages（官方 Claude Code 形态） | 单个 API Key，系统加密存储；无账号池 | 当前 Key live listing + 随包能力表 + 凭据隔离快照 | `/claude-api/api` |
+| `claude-api` | Claude API | Anthropic Messages（官方 Claude Code 形态） | 加密账号池；每账号独立 API Key + 端点，主备/轮询/粘性调度 | 主账号 live listing + 随包能力表 + 凭据隔离快照 | `/claude-api/api` |
 | `opencode-go` | OpenCode Go（订阅） | OpenAI Chat Completions（Console gateway 转换） | OpenCode Console 个人 / 服务账号 API Key，独立账号池 | 当前 Key live listing + 凭据隔离快照 | `/opencode-go/api` |
 
 > **合规与风险声明**：
@@ -391,14 +391,14 @@
 
 ## 18. Claude API：`claude-api`
 
-- **鉴权**：单个 Anthropic API Key，`x-api-key` 头；Windows DPAPI / macOS Keychain / Linux Secret Service，无账号池。端点默认官方地址，可自定义（http 与 https 都接受）。
+- **鉴权与主备**：账号池内每个账号独立保存 Anthropic API Key 与端点，`x-api-key` 头；Windows DPAPI / macOS Keychain / Linux Secret Service。旧单 Key 自动投影为主账号。默认主账号优先，网络/超时/5xx、鉴权失败和 429 自动尝试备用账号；400 不跨账号重试，已有流式输出后不重放。也支持轮询与粘性策略。
 - **请求形态**：使用 Claude Code 第一方形态：5 个第一方头、带 cch 的计费块、metadata/diagnostics，以及按实际内容构造的计费/身份/静态/动态 system 块。User-Agent、计费块、cch 种子共用同一版本组合；仅采用已有种子的 npm 版本，且两条 Claude 线路都超过各自缓存 TTL 后才切换。beta 从最终 body 推导并去重，cch 在最终序列化后计算；尾部 assistant 与 thinking-token-count 拒绝均有有界保护。
-- **目录**：当前 Key 的 `GET /v1/models` 决定可用 id；能力行来自随包表（官方文档支持列表转录），快照按 Key+端点指纹隔离；随包兜底表不被用户白名单过滤，显式空选在两个阶段都表示「全不启用」。
-- **可选能力**：5m/1h 缓存断点（默认 5m）、思考开启时的 `context_management` 清理、快速模式（默认关；未知 `claude-*` 模型乐观尝试并按上游应答纠正，结论记忆 7 天）、单轮提醒 `clear_at`、对话中 system 消息与工具增删；仅对支持对话中 system 消息的模型声明 `toolUpdate: 'in-history'`（上游拒绝 system 角色时记入能力记忆 7 天：折叠重试、期间不再声明）。
+- **目录**：主账号的 `GET /v1/models` 决定全线路共享的可用 id；能力行来自随包表（官方文档支持列表转录），快照按 Key+端点指纹隔离；随包兜底表不被用户白名单过滤，显式空选在两个阶段都表示「全不启用」。
+- **可选能力**：主对话与子代理/后台请求分别设置 5m/1h 缓存断点（均默认 5m）、子代理完成后自动压缩其自身上下文（默认开，主对话不受影响）、思考开启时的 `context_management` 清理、快速模式（默认关；未知 `claude-*` 模型乐观尝试并按上游应答纠正，结论记忆 7 天）、单轮提醒 `clear_at`、对话中 system 消息与工具增删；仅对支持对话中 system 消息的模型声明 `toolUpdate: 'in-history'`（上游拒绝 system 角色时记入能力记忆 7 天：折叠重试、期间不再声明）。
 - **等待续热**：仅 1 小时缓存档生效。主会话空闲满 55 分钟（TTL 前 5 分钟）且仍有子代理或后台任务在跑时，自动发一次很小的续热请求保住前缀缓存，该轮结束后重新计时；5 分钟档从不续热。空闲时钟从请求发出时算起。沿用全局 `cacheWaitWarmup` 开关，无新增设置项；每次续热是一次真实请求，按缓存读取价格读回整段前缀。
 - **服务端压缩**：默认开、设置页可关；仅当模型支持、本进程内该会话由本线路服务过主轮次、且请求带压缩指令时生效。上游 400 明确指向 compaction 或返回空摘要时，同一次调用内退回原样客户端请求，并把该端点+模型标记为不支持 30 分钟。压缩块以摘要哈希为键持久化（属主可读写、条数与天数有上限），后续主轮次在历史最前整块回放并带 compact beta；陈旧块被 400 拒绝时遗忘并以文本形重试一次。
-- **不做**：额度显示与输入框徽章、账号池、原生 API 形态、阈值压缩、媒体工具、任务预算。
-- **路由**：`GET status`、`POST settings`、`POST key`、`DELETE key`、`POST test`、`POST catalog/refresh`；写操作全部同源校验。
+- **不做**：额度显示与输入框徽章、每账号独立模型目录、原生 API 形态、阈值压缩、媒体工具、任务预算。
+- **路由**：`GET status`、`POST settings`、`POST accounts`、兼容 `POST key` / `DELETE key`、`POST test`、`POST catalog/refresh`；写操作全部同源校验。
 - **验证边界**：第一方字段和 cch 有抓包/算法及离线最终 body 验证；旧能力曾兼容网关实测。新形态未直连官方端点实测，真实订阅 cache_touch、交互式多轮计数器、部分模型快速模式和 Mythos 可用性未验证。详见 [线路设计与证据](claude-api-line-plan.md)。
 
 ---

@@ -62,7 +62,7 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
   const {
     login, cancelLogin, submitPaste, adopt, stopImporting, accountAction, setStrategy, relogin,
     refreshQuota, refreshCatalog, testConnection, toggleModel, setAllModels, updateEffort,
-    updateCacheTtl, updateSubagentCacheTtl, updateFastMode, updateCacheKeepalive, saveContextWindow, resetContextWindow, resetAllContextWindows,
+    updateCacheTtl, updateSubagentCacheTtl, updateFastMode, updateCacheKeepalive, updateAutoCompactSubagents, saveContextWindow, resetContextWindow, resetAllContextWindows,
     updateMaxTokensDraft, saveMaxTokens, resetMaxTokens, resetAllMaxTokens,
     updateContextDraft, setPasteValue,
   } = actions
@@ -358,6 +358,10 @@ export function ClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSecti
         <div className="dsha-pref-row">
           <div><strong>{t.cacheKeepalive}</strong><p className="dsha-muted">{t.cacheKeepaliveHint}</p></div>
           <input type="checkbox" aria-label={t.cacheKeepalive} checked={status?.cacheKeepalive === true} disabled={busy !== null || status === null} onChange={event => { void updateCacheKeepalive(event.currentTarget.checked) }} />
+        </div>
+        <div className="dsha-pref-row">
+          <div><strong>{t.autoCompactSubagents}</strong><p className="dsha-muted">{t.autoCompactSubagentsHint}</p></div>
+          <input type="checkbox" aria-label={t.autoCompactSubagents} checked={status?.autoCompactSubagents !== false} disabled={busy !== null || status === null} onChange={event => { void updateAutoCompactSubagents(event.currentTarget.checked) }} />
         </div>
         <p className="dsha-muted" style={{ paddingTop: 10 }}>{t.modelLadders}</p>
         {status?.models.map((model) => (

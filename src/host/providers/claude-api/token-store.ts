@@ -32,8 +32,10 @@ export interface ClaudeApiSettings {
   contextWindowOverrides: Record<string, number>
   defaultReasoningEffort: ClaudeApiReasoningEffort | null
   cacheTtl: ClaudeApiCacheTtl
+  subagentCacheTtl: ClaudeApiCacheTtl
   fastMode: boolean
   serverCompaction: boolean
+  autoCompactSubagents: boolean
   /** 64 hex chars, generated once per install; '' until ensureDeviceId ran. Never sent to the client. */
   deviceId: string
 }
@@ -46,8 +48,10 @@ export interface ClaudeApiSettingsPatch {
   contextWindowOverrides?: ContextWindowOverridePatch
   defaultReasoningEffort?: ClaudeApiReasoningEffort | null
   cacheTtl?: ClaudeApiCacheTtl
+  subagentCacheTtl?: ClaudeApiCacheTtl
   fastMode?: boolean
   serverCompaction?: boolean
+  autoCompactSubagents?: boolean
 }
 
 const DEVICE_ID_PATTERN = /^[0-9a-f]{64}$/
@@ -130,8 +134,10 @@ export function defaultClaudeApiSettings(): ClaudeApiSettings {
     contextWindowOverrides: {},
     defaultReasoningEffort: null,
     cacheTtl: '5m',
+    subagentCacheTtl: '5m',
     fastMode: false,
     serverCompaction: true,
+    autoCompactSubagents: true,
     deviceId: '',
   }
 }
@@ -155,8 +161,10 @@ export function parseClaudeApiSettings(value: unknown): ClaudeApiSettings {
     contextWindowOverrides: overrides,
     defaultReasoningEffort: isClaudeApiReasoningEffort(value.defaultReasoningEffort) ? value.defaultReasoningEffort : null,
     cacheTtl: isClaudeApiCacheTtl(value.cacheTtl) ? value.cacheTtl : fallback.cacheTtl,
+    subagentCacheTtl: isClaudeApiCacheTtl(value.subagentCacheTtl) ? value.subagentCacheTtl : fallback.subagentCacheTtl,
     fastMode: value.fastMode === true,
     serverCompaction: value.serverCompaction !== false,
+    autoCompactSubagents: value.autoCompactSubagents !== false,
     deviceId: typeof value.deviceId === 'string' && DEVICE_ID_PATTERN.test(value.deviceId) ? value.deviceId : '',
   }
 }

@@ -168,29 +168,32 @@ describe('claude card with nothing held back', () => {
     expect(modelInput?.disabled).toBe(false)
   })
 
-  it('keeps both new toggles in the existing preference-row vocabulary and posts their settings', async () => {
+  it('keeps all three toggles in the existing preference-row vocabulary and posts their settings', async () => {
     const { node, fetchMock } = await mountSection(status())
     const enhanced = [...node.querySelectorAll('.dsha-group')]
       .find(section => section.querySelector('h3')?.textContent === zh.enhanced)
     expect(enhanced).not.toBeUndefined()
     const rows = [...enhanced!.querySelectorAll(':scope > .dsha-pref-row')]
-    expect(rows).toHaveLength(5)
+    expect(rows).toHaveLength(6)
     const fast = enhanced!.querySelector<HTMLInputElement>(`input[aria-label="${zh.fastMode}"]`)
     const keepalive = enhanced!.querySelector<HTMLInputElement>(`input[aria-label="${zh.cacheKeepalive}"]`)
+    const autoCompact = enhanced!.querySelector<HTMLInputElement>(`input[aria-label="${zh.autoCompactSubagents}"]`)
     expect(fast?.type).toBe('checkbox')
     expect(keepalive?.type).toBe('checkbox')
     expect(fast?.disabled).toBe(false)
     expect(keepalive?.disabled).toBe(false)
     expect(fast?.checked).toBe(false)
     expect(keepalive?.checked).toBe(false)
+    expect(autoCompact?.checked).toBe(true)
     expect(fast?.closest('.dsha-pref-row')?.querySelector('strong')?.textContent).toBe(zh.fastMode)
     expect(keepalive?.closest('.dsha-pref-row')?.querySelector('strong')?.textContent).toBe(zh.cacheKeepalive)
     expect(enhanced!.querySelector('.dsha-grouphead')?.querySelectorAll('button')).toHaveLength(0)
 
     await act(async () => { fast?.click() })
     await act(async () => { keepalive?.click() })
+    await act(async () => { autoCompact?.click() })
     const writes = fetchMock.mock.calls.filter(entry => String(entry[0]).endsWith('/claude/api/settings'))
-    expect(writes.map(entry => JSON.parse(String(entry[1]?.body)))).toEqual([{ fastMode: true }, { cacheKeepalive: true }])
+    expect(writes.map(entry => JSON.parse(String(entry[1]?.body)))).toEqual([{ fastMode: true }, { cacheKeepalive: true }, { autoCompactSubagents: false }])
   })
 
   it('sets the main-conversation and subagent cache tiers separately', async () => {
