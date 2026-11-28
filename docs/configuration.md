@@ -274,6 +274,7 @@ $env:DSH_PROVIDER_CONCURRENCY = '{"default":2,"codex-chatgpt":1,"ollama":2,"queu
 | **OpenDesign** | `OPENDESIGN_API_KEY` | 号池为空时自动投射为首要账号的静态 API Key（不落盘） |
 | **WorkBuddy** | `CODEBUDDY_AUTH_DIR` / `WORKBUDDY_CONFIG_DIR` / `CODEBUDDY_CONFIG_DIR` | 覆盖本机 CodeBuddy / WorkBuddy 桌面端凭据与密钥目录 |
 | **Antigravity (ACP)** | `DSH_ANTIGRAVITY_ACP_BIN` | 显式覆盖官方 `agy` / `agy_acp_server` 可执行文件路径 |
+| **RelayOne** | `DSH_RELAYONE_REMOTE_COMPACTION` | 默认开启 GPT/OpenAI Responses remote-v2 原生压缩；设为 `0` 恢复仅使用 DSH 压缩 |
 | **Claude API** | `DSH_CLAUDE_API_CLI_VERSION` | 两条 Claude 线路共享版本的兼容别名；与订阅变量冲突会报错。仅自动采用已有 cch 种子的 npm 版本，双方均超过各自缓存 TTL 后切换 |
 | | `DSH_CLAUDE_CCH_SEED` | 与未知版本的显式 pin 成对提供 cch 种子（64 位 hex）；没有种子的 pin 不会发出可能错误的签名 |
 

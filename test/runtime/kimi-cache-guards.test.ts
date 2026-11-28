@@ -28,6 +28,10 @@ import {
   installCompactionPolicyGuard,
 } from '../../src/host/runtime/guards/compaction-policy-guard.ts'
 import { resolvedKimiContextWindow } from '../../src/host/providers/kimi-code/client.ts'
+import {
+  noteRelayOneRemoteCompactionResult,
+  resetRelayOneRemoteCompaction,
+} from '../../src/host/providers/relayone/remote-compaction.ts'
 import { kimiCodeModelDef } from '../../src/host/providers/kimi-code/model-catalog.ts'
 import {
   COMPACTION_INSTRUCTION,
@@ -546,6 +550,31 @@ describe('installCompactionPolicyGuard', () => {
     await engine.compactIfNeeded(agent, 'pressure')
     expect(spy).toHaveBeenCalledTimes(2)
     vi.unstubAllEnvs()
+    guard.dispose()
+  })
+
+  it('lets RelayOne use native pressure compaction until its upstream refuses', async () => {
+    resetRelayOneRemoteCompaction()
+    const engine = new FakeEngine()
+    const spy = vi.spyOn(engine, 'compactIfNeeded')
+    const guard = installCompactionPolicyGuard(createHost(undefined).ctx)
+    guard.patchEngine(engine)
+    const agent = { config: { provider: 'relayone', model: 'gpt-6.2-astra' }, session: { id: 'relay-guard-session' } }
+    await engine.compactIfNeeded(agent, 'pressure')
+    expect(spy).not.toHaveBeenCalled()
+    await engine.compactIfNeeded(agent, 'context-overflow')
+    expect(spy).toHaveBeenCalledTimes(1)
+    noteRelayOneRemoteCompactionResult('relay-guard-session', 'gpt-6.2-astra', false)
+    await engine.compactIfNeeded(agent, 'pressure')
+    expect(spy).toHaveBeenCalledTimes(2)
+    noteRelayOneRemoteCompactionResult('relay-guard-session', 'gpt-6.2-astra', true)
+    await engine.compactIfNeeded(agent, 'pressure')
+    expect(spy).toHaveBeenCalledTimes(2)
+    vi.stubEnv('DSH_RELAYONE_REMOTE_COMPACTION', '0')
+    await engine.compactIfNeeded(agent, 'pressure')
+    expect(spy).toHaveBeenCalledTimes(3)
+    vi.unstubAllEnvs()
+    resetRelayOneRemoteCompaction()
     guard.dispose()
   })
 

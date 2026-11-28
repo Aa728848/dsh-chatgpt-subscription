@@ -6,6 +6,7 @@ import type { ResolvedRequestImages } from '../../common/request-images.ts'
 import { appendGptEngineeringGuidance } from '../../common/gpt-engineering-guidance.ts'
 import { isRelayOneOpenAIModel, type RelayOneModelEntry } from './model-catalog.ts'
 import type { RelayOneSettings } from './token-store.ts'
+import { latestRelayOneCompaction } from './remote-compaction.ts'
 import {
   isRelayOneRecord,
   relayOneArgsText,
@@ -90,13 +91,19 @@ export function buildRelayOneResponsesRequest(
   images: ResolvedRequestImages,
   entry: RelayOneModelEntry,
   settings: RelayOneSettings,
+  compactionScope?: string,
 ): Record<string, unknown> {
   const input: Record<string, unknown>[] = []
   const knownCalls = new Set<string>()
+  const nativeCompaction = compactionScope === undefined
+    ? null : latestRelayOneCompaction(options.messages, options.model, compactionScope)
   const { base, current, leadingEnd, developerInInstructions } = relayOneResponsesInstructions(options, entry)
   if (base !== '') input.push({ type: 'message', role: 'developer', content: [{ type: 'input_text', text: base }] })
   for (let index = leadingEnd; index < options.messages.length; index += 1) {
     const message = options.messages[index]!
+    // The encrypted checkpoint replaces earlier wire input only; DSH keeps the
+    // original transcript for display, editing, key changes, and local fallback.
+    if (nativeCompaction !== null && index < nativeCompaction.index && message.role !== 'developer') continue
     if (message.role === 'developer' && developerInInstructions) continue
     if (message.role === 'system' || message.role === 'developer') {
       const text = relayOneInstructionText(message)
@@ -111,7 +118,10 @@ export function buildRelayOneResponsesRequest(
       else input.push({ role: 'user', content: [{ type: 'input_text', text: 'Tool result for unavailable call ' + callId + ':\n' + output }] })
       continue
     }
-    const replay = message.role === 'assistant' ? relayOneReplayOutputItems(message) : null
+    const replay = message.role === 'assistant'
+      ? relayOneReplayOutputItems(message)?.filter(item => item.type !== 'compaction'
+        || (nativeCompaction !== null && index === nativeCompaction.index)) ?? null
+      : null
     const content = responseMessageContent(message, images, entry.supportsImages)
     const hasReplayText = replay?.some(item => item.type === 'message' && Array.isArray(item.content) && item.content.some(part => {
       if (!isRelayOneRecord(part)) return false

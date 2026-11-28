@@ -20,6 +20,13 @@ import {
   RELAYONE_RESPONSES_URL,
 } from '../../../src/host/providers/relayone/types.ts'
 import { RELAYONE_PROVIDER_ID } from '../../../src/shared/relayone-contracts.ts'
+import {
+  latestRelayOneCompaction,
+  relayOneCompactionReplayMetadata,
+  relayOneRemoteCompactionOwns,
+  resetRelayOneRemoteCompaction,
+  type RelayOneRemoteCompactionCheckpoint,
+} from '../../../src/host/providers/relayone/remote-compaction.ts'
 
 const models = {
   object: 'list', data: [
@@ -101,6 +108,7 @@ beforeEach(async () => {
   vi.stubEnv('DSH_HOME', testHome)
 })
 afterEach(async () => {
+  resetRelayOneRemoteCompaction()
   await flushCatalogSnapshots()
   vi.unstubAllEnvs()
   const directory = path.join(testHome, 'storages')
@@ -303,6 +311,159 @@ describe('RelayOne adapter protocol integration', () => {
     const adapter = new RelayOneAdapter(stores.store, stores.settingsStore, catalog, { fetchFn })
     await expect(collect(adapter.stream(options('gpt-6-astra', true)))).rejects.toThrow(/invalid tool arguments for \[REDACTED\]/)
     expect(generation).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs native compaction with the v2 header and replays the scoped checkpoint', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    const headers: Headers[] = []
+    const compaction = { type: 'compaction', id: 'cp-relay-1', encrypted_content: 'opaque-checkpoint' }
+    const fetchFn = catalogFetch(async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      headers.push(new Headers(init?.headers))
+      const events = bodies.length === 1
+        ? [
+            { type: 'response.output_item.done', item: compaction },
+            { type: 'response.completed', response: { output: [] } },
+          ]
+        : [
+            { type: 'response.output_text.delta', delta: 'ok' },
+            { type: 'response.completed', response: { output: [] } },
+          ]
+      return new Response(events.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''))
+    })
+    const stores = fakeStores('sk-test', {
+      ...defaultRelayOneSettings(),
+      contextWindowOverrides: { 'gpt-6-astra': 128 },
+    })
+    const catalog = new RelayOneCatalogManager(stores.store, { fetchFn })
+    await catalog.refresh(true)
+    const adapter = new RelayOneAdapter(stores.store, stores.settingsStore, catalog, { fetchFn })
+    const turn = {
+      ...options('gpt-6-astra'),
+      sessionId: 'relay-native-session',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'old-'.repeat(400) }] }],
+    } as unknown as GenerateOptions
+    const chunks = await collect(adapter.stream(turn))
+    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'ok' }])
+    expect(bodies).toHaveLength(2)
+    expect((bodies[0]!.input as unknown[]).at(-1)).toEqual({ type: 'compaction_trigger' })
+    expect(headers[0]!.get('x-codex-beta-features')).toBe('remote_compaction_v2')
+    expect(headers[1]!.get('x-codex-beta-features')).toBeNull()
+    expect(bodies[1]!.input).toContainEqual(compaction)
+    expect(bodies[1]!.input).not.toContainEqual({ type: 'compaction_trigger' })
+    const finish = chunks.find(chunk => chunk.type === 'finish')
+    expect(finish?.replayState).toMatchObject({
+      response: {
+        nativeCompaction: {
+          model: 'gpt-6-astra',
+          scope: relayOneCredentialFingerprint({ apiKey: 'sk-test', authenticatedAt: 1 }),
+          item: compaction,
+        },
+      },
+    })
+    const assistant = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+      source: { kind: 'model', replayState: finish?.replayState },
+    }
+    await collect(adapter.stream({
+      ...turn,
+      messages: [...turn.messages, assistant, { role: 'user', content: [{ type: 'text', text: 'next' }] }],
+    } as GenerateOptions))
+    expect(bodies).toHaveLength(3)
+    expect(bodies[2]!.input).toEqual([
+      compaction,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'next' }] },
+    ])
+  })
+
+  it('falls back to the full request and releases DSH compaction when the trigger is ignored', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    const fetchFn = catalogFetch(async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return new Response('data: ' + JSON.stringify({ type: 'response.completed', response: { output: [] } }) + '\n\n')
+    })
+    const stores = fakeStores('sk-test', {
+      ...defaultRelayOneSettings(),
+      contextWindowOverrides: { 'gpt-6-astra': 128 },
+    })
+    const catalog = new RelayOneCatalogManager(stores.store, { fetchFn })
+    await catalog.refresh(true)
+    const adapter = new RelayOneAdapter(stores.store, stores.settingsStore, catalog, { fetchFn })
+    const turn = {
+      ...options('gpt-6-astra'),
+      sessionId: 'relay-native-refusal',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'old-'.repeat(400) }] }],
+    } as unknown as GenerateOptions
+    await collect(adapter.stream(turn))
+    expect(bodies).toHaveLength(2)
+    expect((bodies[0]!.input as unknown[]).at(-1)).toEqual({ type: 'compaction_trigger' })
+    expect(bodies[1]!.input).not.toContainEqual({ type: 'compaction_trigger' })
+    expect(relayOneRemoteCompactionOwns('relay-native-refusal', 'gpt-6-astra')).toBe(false)
+    await collect(adapter.stream(turn))
+    expect(bodies).toHaveLength(3)
+    expect(bodies[2]!.input).not.toContainEqual({ type: 'compaction_trigger' })
+  })
+
+  it('drops a rejected stored checkpoint and retries the complete transcript once', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    const compaction = { type: 'compaction', id: 'cp-stale', encrypted_content: 'stale-opaque-state' }
+    const fetchFn = catalogFetch(async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      if (bodies.length === 1) {
+        return new Response([
+          { type: 'response.output_item.done', item: compaction },
+          { type: 'response.completed', response: { output: [] } },
+        ].map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''))
+      }
+      if (bodies.length === 3) {
+        return Response.json({ error: { message: 'invalid_encrypted_content' } }, { status: 400 })
+      }
+      return new Response('data: ' + JSON.stringify({ type: 'response.completed', response: { output: [] } }) + '\n\n')
+    })
+    const stores = fakeStores('sk-test', {
+      ...defaultRelayOneSettings(),
+      contextWindowOverrides: { 'gpt-6-astra': 128 },
+    })
+    const catalog = new RelayOneCatalogManager(stores.store, { fetchFn })
+    await catalog.refresh(true)
+    const adapter = new RelayOneAdapter(stores.store, stores.settingsStore, catalog, { fetchFn })
+    const turn = {
+      ...options('gpt-6-astra'),
+      sessionId: 'relay-stale-checkpoint',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'old-'.repeat(400) }] }],
+    } as unknown as GenerateOptions
+    const first = await collect(adapter.stream(turn))
+    const firstFinish = first.find(chunk => chunk.type === 'finish')
+    const assistant = {
+      role: 'assistant', content: [],
+      source: { kind: 'model', replayState: firstFinish?.replayState },
+    }
+    await collect(adapter.stream({
+      ...turn,
+      messages: [...turn.messages, assistant, { role: 'user', content: [{ type: 'text', text: 'next' }] }],
+    } as GenerateOptions))
+    expect(bodies).toHaveLength(4)
+    expect(bodies[2]!.input).toContainEqual(compaction)
+    expect(bodies[3]!.input).not.toContainEqual(compaction)
+    expect(JSON.stringify(bodies[3]!.input)).toContain('old-')
+    expect(JSON.stringify(bodies[3]!.input)).toContain('next')
+    expect(relayOneRemoteCompactionOwns('relay-stale-checkpoint', 'gpt-6-astra')).toBe(false)
+  })
+
+  it('does not replay a checkpoint across credentials or models', () => {
+    const checkpoint: RelayOneRemoteCompactionCheckpoint = {
+      model: 'gpt-6-astra', scope: 'key-a',
+      item: { type: 'compaction', encrypted_content: 'opaque' },
+    }
+    const messages = [{
+      role: 'assistant', content: [],
+      source: { kind: 'model', replayState: { response: { nativeCompaction: relayOneCompactionReplayMetadata(checkpoint) } } },
+    }] as never
+    expect(latestRelayOneCompaction(messages, 'gpt-6-astra', 'key-a')?.checkpoint).toEqual(checkpoint)
+    expect(latestRelayOneCompaction(messages, 'gpt-6-astra', 'key-b')).toBeNull()
+    expect(latestRelayOneCompaction(messages, 'gpt-6-other', 'key-a')).toBeNull()
   })
 })
 

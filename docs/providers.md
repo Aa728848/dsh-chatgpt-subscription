@@ -382,6 +382,7 @@
 - **鉴权与多 Key**：可添加多个 RelayOne `sk-` API Key，Bearer 鉴权；号池文档走 Windows DPAPI / macOS Keychain / Linux Secret Service。**不自动轮询**：设置卡里手动「切换到此 Key」，选中的 Key 服务所有请求，直到再次切换，选择会持久化并在重启后生效。401/403 只标记该 Key 失效、429 只记 60 秒冷却，两者都不会偷偷换号——请求照常失败并提示切换，避免消耗用户没选的账号。新增的 Key 先向 `/v1/models` 验证再入库。升级前保存的单 Key 文件会被投影为主账号，并继续作为镜像回写目标，无需重新粘贴。
 - **目录**：当前选中的 Key 的 `GET /v1/models` 决定可用 id；公开 `/api/pricing` 只补充分组、端点、vendor 与媒体元数据。快照按 Key 指纹隔离，后台 TTL 刷新，内容变化才通知模型选择器。
 - **协议**：OpenAI 优先 `/v1/responses`，Claude 优先 `/v1/messages`，其他对话模型使用 `/v1/chat/completions`。仅明确协议不支持且在流输出前回退。
+- **原生 remote-v2 上下文压缩**：GPT/Codex/o 系列模型的原生 Responses 主回合在窗口 90% 处先发送带 `x-codex-beta-features: remote_compaction_v2` 的 `compaction_trigger`，加密 checkpoint 按 Key 指纹与模型隔离回放。上游忽略/拒绝 trigger 或 checkpoint 时恢复完整历史并交还 DSH 压力/溢出压缩；设 `DSH_RELAYONE_REMOTE_COMPACTION=0` 可关闭。
 - **额度**：通过官方 `GET /api/usage/token` 读取当前选中 Key 的授予/已用/剩余额度，结合 `/api/status` 的 `quota_per_unit` 显示百分比与美元；无限令牌与有限账户余额并存时取有效较小值。切换 Key 会重新读取。
 - **会话粘性**：同一 Key、模型和 DSH 会话使用稳定的匿名标识：Responses 及 GPT 的 Chat 回退发送 `prompt_cache_key`，Anthropic Messages 发送 `metadata.user_id`。身份不明或辅助请求不共用主会话键。是否复用渠道取决于网关配置；缓存读取量以实际 `usage` 为准。
 - **GPT 本地策略**：默认上下文 272K，可覆盖 500K；完整推理档位原值透传，覆盖值作为独立元数据显示，不改变模型名。

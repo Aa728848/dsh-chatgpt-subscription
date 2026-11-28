@@ -7,6 +7,7 @@ import { replaceCompactionInstruction, type PromptMessage } from '../../infra/hu
 import { codexRemoteCompactionEnabled } from '../../providers/codex-chatgpt/codex-remote-compaction.ts'
 import { kimiCodeModelDef } from '../../providers/kimi-code/model-catalog.ts'
 import { MINIMAX_CODE_MODELS } from '../../providers/minimax-code/model-catalog.ts'
+import { relayOneRemoteCompactionOwns } from '../../providers/relayone/remote-compaction.ts'
 
 /** 压缩服务的名字（`ctx.reflect.store` 与 `ctx.get` 都用它）。 */
 export const COMPACTION_SERVICE_NAME = 'compaction'
@@ -15,6 +16,7 @@ export const COMPACTION_SERVICE_NAME = 'compaction'
 export const KIMI_COMPACTION_PROVIDER = 'kimi-code'
 export const MINIMAX_COMPACTION_PROVIDER = 'minimax-code'
 export const CODEX_COMPACTION_PROVIDER = 'codex-chatgpt'
+export const RELAYONE_COMPACTION_PROVIDER = 'relayone'
 
 /** 判定为 1M 长上下文档位的生效窗口阈值（>= 512K）。 */
 export const KIMI_LONG_CONTEXT_WINDOW_THRESHOLD = 524_288
@@ -449,13 +451,15 @@ export function installCompactionPolicyGuard(
         // 观测：这些方法的入参里一定带着 agent 或 header。
         observeFrom(args[0])
         observeFrom(args[1])
-        // Native Codex compaction owns ordinary pressure and model-switch
-        // compaction. Context-overflow remains available as a safety fallback
-        // after a native refusal or an unexpectedly large request.
-        if (codexRemoteCompactionEnabled()
-          && providerFrom(args[0]) === CODEX_COMPACTION_PROVIDER
-          && (name === 'compactPressure' || (name === 'compactIfNeeded' && args[1] !== 'context-overflow'))) {
-          return null
+        // Native Codex/RelayOne compaction owns ordinary pressure and model-switch
+        // compaction while the session supports it. Context-overflow remains the
+        // safety fallback after a native refusal or an unexpectedly large request.
+        if (name === 'compactPressure' || (name === 'compactIfNeeded' && args[1] !== 'context-overflow')) {
+          const targetProvider = providerFrom(args[0])
+          if (codexRemoteCompactionEnabled() && targetProvider === CODEX_COMPACTION_PROVIDER) return null
+          const relayTarget = targetProvider === RELAYONE_COMPACTION_PROVIDER ? relayOneTargetFrom(args[0]) : undefined
+          if (relayTarget !== undefined
+            && relayOneRemoteCompactionOwns(relayTarget.sessionId, relayTarget.model)) return null
         }
         let nextArgs = args
         if (name === 'summarize') {
@@ -669,6 +673,38 @@ function providerFrom(source: unknown): string | undefined {
     try {
       const current = (model['current'] as () => unknown).call(model)
       if (isRecord(current) && typeof current['provider'] === 'string') return current['provider']
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+/** Read the session/model pair needed to release a failed RelayOne native route back to DSH. */
+function relayOneTargetFrom(source: unknown): { sessionId: string | undefined; model: string } | undefined {
+  if (!isRecord(source)) return undefined
+  const session = isRecord(source['session']) ? source['session'] as Record<string, unknown> : undefined
+  const sessionId = typeof session?.['id'] === 'string' ? session['id'] : undefined
+  const direct = isRecord(source['config']) ? source['config'] as Record<string, unknown> : undefined
+  if (typeof direct?.['model'] === 'string') return { sessionId, model: direct['model'] }
+  const options = isRecord(source['options']) ? source['options'] as Record<string, unknown> : undefined
+  if (typeof options?.['model'] === 'string') return { sessionId, model: options['model'] }
+  const requestHeader = session?.['requestHeader']
+  if (typeof requestHeader === 'function') {
+    try {
+      const header = requestHeader.call(session)
+      if (isRecord(header) && isRecord(header['config']) && typeof header['config']['model'] === 'string') {
+        return { sessionId, model: header['config']['model'] }
+      }
+    } catch {
+      return undefined
+    }
+  }
+  const model = isRecord(source['model']) ? source['model'] as Record<string, unknown> : undefined
+  if (typeof model?.['current'] === 'function') {
+    try {
+      const current = (model['current'] as () => unknown).call(model)
+      if (isRecord(current) && typeof current['model'] === 'string') return { sessionId, model: current['model'] }
     } catch {
       return undefined
     }

@@ -72,6 +72,17 @@ import {
   closeRelayOneAnthropicStream,
 } from './mapper-anthropic.ts'
 import { outputReservation } from '../../common/output-reservation.ts'
+import {
+  isDefiniteRelayOneCompactionFailure,
+  latestRelayOneCompaction,
+  noteRelayOneRemoteCompactionResult,
+  projectFreshRelayOneCompaction,
+  relayOneCheckpointFromOutputItems,
+  shouldCompactRelayOnePayload,
+  withRelayOneCompactionMetadata,
+  withRelayOneCompactionTrigger,
+  type RelayOneRemoteCompactionCheckpoint,
+} from './remote-compaction.ts'
 
 const RETRY_POLICY = resolveRetryPolicy({
   mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'SERVER', 'NETWORK', 'TIMEOUT', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'],
@@ -123,6 +134,8 @@ export async function classifyRelayOneResponse(response: Response, apiKey?: stri
 export class RelayOneAdapter extends LlmAdapter {
   private readonly fetchFn: typeof fetch
   private readonly fallbacks = new Map<string, RelayOneProtocol>()
+  /** Endpoint/model pairs that definitively refused remote compaction. */
+  private readonly unsupportedRemoteCompaction = new Set<string>()
   /** The pool, when this line runs several keys; null means the single-key path. */
   private readonly pool: RelayOneAccountPool | null
   /**
@@ -236,6 +249,7 @@ export class RelayOneAdapter extends LlmAdapter {
     images: ResolvedRequestImages,
     entry: RelayOneModelEntry,
     settings: Awaited<ReturnType<RelayOneSettingsStore['read']>>,
+    compactionScope: string | undefined,
     sessionKey: string | undefined,
   ): Record<string, unknown> {
     // New API's reference affinity rules read prompt_cache_key on Responses and metadata.user_id
@@ -246,7 +260,7 @@ export class RelayOneAdapter extends LlmAdapter {
       return body
     }
     const responses = protocol === 'openai-responses'
-    const body = responses ? buildRelayOneResponsesRequest(options, images, entry, settings)
+    const body = responses ? buildRelayOneResponsesRequest(options, images, entry, settings, compactionScope)
       : buildRelayOneChatRequest(options, images, entry, settings)
     if (sessionKey !== undefined && (responses || isRelayOneOpenAIModel(entry.id, entry.vendor))) body.prompt_cache_key = sessionKey
     return body
@@ -257,6 +271,7 @@ export class RelayOneAdapter extends LlmAdapter {
     body: Record<string, unknown>,
     apiKey: string,
     signal: AbortSignal,
+    remoteCompaction = false,
   ): Promise<Response> {
     let response: Response
     try {
@@ -266,6 +281,7 @@ export class RelayOneAdapter extends LlmAdapter {
           ...relayOneHeaders(apiKey),
           accept: 'text/event-stream',
           ...(protocol === 'anthropic' ? { 'anthropic-version': '2023-06-01' } : {}),
+          ...(remoteCompaction ? { 'x-codex-beta-features': 'remote_compaction_v2' } : {}),
         },
         body: JSON.stringify(body),
         signal,
@@ -317,6 +333,37 @@ export class RelayOneAdapter extends LlmAdapter {
     }
   }
 
+  /** Run the side request without emitting its chunks into the user-visible turn. */
+  private async remoteCompact(
+    body: Record<string, unknown>,
+    model: string,
+    scope: string,
+    key: string,
+    signal: AbortSignal,
+    activity?: StreamActivity,
+  ): Promise<RelayOneRemoteCompactionCheckpoint> {
+    const response = await this.openRequest('openai-responses', withRelayOneCompactionTrigger(body), key, signal, true)
+    let checkpoint: RelayOneRemoteCompactionCheckpoint | null = null
+    try {
+      for await (const chunk of parseResponsesStream(response, signal, undefined, activity)) {
+        if (chunk.type !== 'finish') continue
+        if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
+          checkpoint = null
+          continue
+        }
+        const replay = chunk.replayState as { response?: { outputItems?: unknown } } | undefined
+        const items = replay?.response?.outputItems
+        if (Array.isArray(items)) checkpoint = relayOneCheckpointFromOutputItems(items, model, scope)
+      }
+      if (checkpoint === null) {
+        throw new LlmError('RelayOne remote compaction did not return exactly one encrypted compaction item.', 'PROTOCOL_ERROR')
+      }
+      return checkpoint
+    } finally {
+      await response.body?.cancel().catch(() => undefined)
+    }
+  }
+
   private async *requestStream(
     rawOptions: GenerateOptions,
     entry: RelayOneModelEntry,
@@ -341,7 +388,33 @@ export class RelayOneAdapter extends LlmAdapter {
     if (primary === null) throw new LlmError('RelayOne selected a media-only model for a chat request.', 'NOT_FOUND')
     const fallbackKey = scope + ':' + entry.id + ':' + primary
     let protocol = this.fallbacks.get(fallbackKey) ?? primary
-    let body = this.buildRequest(protocol, requestOptions, images, entry, settings, sessionKey)
+    const remotePair = scope + ':' + entry.id
+    let nativeCompaction = protocol === 'openai-responses'
+      ? latestRelayOneCompaction(requestOptions.messages, entry.id, scope)?.checkpoint ?? null
+      : null
+    if (protocol !== 'openai-responses') {
+      this.unsupportedRemoteCompaction.add(remotePair)
+      noteRelayOneRemoteCompactionResult(sessionId, entry.id, false)
+    }
+    let body = this.buildRequest(protocol, requestOptions, images, entry, settings, scope, sessionKey)
+    if (nativeCompaction === null && protocol === 'openai-responses'
+      && requestOptions.purpose === undefined && !this.unsupportedRemoteCompaction.has(remotePair)
+      && shouldCompactRelayOnePayload(body, settings.contextWindowOverrides[entry.id] ?? entry.contextWindow, sessionId, entry.id)) {
+      try {
+        nativeCompaction = await this.remoteCompact(body, entry.id, scope, key, signal, activity)
+        this.unsupportedRemoteCompaction.delete(remotePair)
+        noteRelayOneRemoteCompactionResult(sessionId, entry.id, true)
+        body = projectFreshRelayOneCompaction(body, nativeCompaction)
+      } catch (error) {
+        if (signal.aborted) throw error
+        if (isDefiniteRelayOneCompactionFailure(error)) {
+          this.unsupportedRemoteCompaction.add(remotePair)
+          noteRelayOneRemoteCompactionResult(sessionId, entry.id, false)
+        }
+        // A failed side request never fabricates a checkpoint. Send the original
+        // full window; DSH pressure/overflow compaction remains the fallback.
+      }
+    }
     let response: Response
     try {
       response = await this.openRequest(protocol, body, key, signal)
@@ -352,27 +425,29 @@ export class RelayOneAdapter extends LlmAdapter {
       // chose this one, and spending a different account silently is the
       // behaviour this line deliberately does not have.
       await this.noteAccountVerdict(accountId, classified)
-      const fallback = fallbackRelayOneProtocol(entry, protocol)
-      if (fallback === null || protocol !== primary
-        || !isRelayOneProtocolUnsupported(classified.relayOneStatus ?? classified.status ?? 0, classified.relayOneDetail ?? '')) throw error
-      this.fallbacks.set(fallbackKey, fallback)
-      protocol = fallback
-      body = this.buildRequest(protocol, requestOptions, images, entry, settings, sessionKey)
-      response = await this.openRequest(protocol, body, key, signal)
+      if (nativeCompaction !== null && isDefiniteRelayOneCompactionFailure(classified)) {
+        this.unsupportedRemoteCompaction.add(remotePair)
+        noteRelayOneRemoteCompactionResult(sessionId, entry.id, false)
+        nativeCompaction = null
+        body = this.buildRequest(protocol, requestOptions, images, entry, settings, undefined, sessionKey)
+        response = await this.openRequest(protocol, body, key, signal)
+      } else {
+        const fallback = fallbackRelayOneProtocol(entry, protocol)
+        if (fallback === null || protocol !== primary
+          || !isRelayOneProtocolUnsupported(classified.relayOneStatus ?? classified.status ?? 0, classified.relayOneDetail ?? '')) throw error
+        this.fallbacks.set(fallbackKey, fallback)
+        protocol = fallback
+        nativeCompaction = null
+        this.unsupportedRemoteCompaction.add(remotePair)
+        noteRelayOneRemoteCompactionResult(sessionId, entry.id, false)
+        body = this.buildRequest(protocol, requestOptions, images, entry, settings, undefined, sessionKey)
+        response = await this.openRequest(protocol, body, key, signal)
+      }
     }
     if (accountId !== null && this.pool !== null) await this.pool.recordModel(accountId, entry.id).catch(() => undefined)
     activity?.pulse()
     if (protocol === 'openai-responses') {
-      try {
-        yield* parseResponsesStream(response, signal, undefined, activity)
-      } catch (error) {
-        if (error instanceof LlmError && /Codex|ChatGPT/.test(error.message)) {
-          throw new LlmError(error.message.replace(/Codex|ChatGPT/g, 'RelayOne'), error.code, { cause: error })
-        }
-        throw error
-      } finally {
-        await response.body?.cancel().catch(() => undefined)
-      }
+      yield* this.pumpResponses(response, nativeCompaction, signal, activity)
       return
     }
     if (response.body === null) throw new LlmError('RelayOne returned no response stream.', 'PROVIDER_ERROR')
@@ -412,6 +487,26 @@ export class RelayOneAdapter extends LlmAdapter {
       }
     } finally {
       await reader.cancel().catch(() => undefined)
+    }
+  }
+
+  private async *pumpResponses(
+    response: Response,
+    checkpoint: RelayOneRemoteCompactionCheckpoint | null,
+    signal: AbortSignal,
+    activity?: StreamActivity,
+  ): AsyncGenerator<StreamChunk> {
+    try {
+      for await (const chunk of parseResponsesStream(response, signal, undefined, activity, checkpoint ?? undefined)) {
+        yield checkpoint === null ? chunk : withRelayOneCompactionMetadata(chunk, checkpoint)
+      }
+    } catch (error) {
+      if (error instanceof LlmError && /Codex|ChatGPT/.test(error.message)) {
+        throw new LlmError(error.message.replace(/Codex|ChatGPT/g, 'RelayOne'), error.code, { cause: error })
+      }
+      throw error
+    } finally {
+      await response.body?.cancel().catch(() => undefined)
     }
   }
 }

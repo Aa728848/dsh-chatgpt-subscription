@@ -836,9 +836,18 @@ export async function* parseResponsesStream(
       if (Array.isArray(output)) {
         const terminalOutput = output.filter((item): item is Record<string, unknown> => record(item) !== null)
           .map((item) => structuredClone(item))
+        // sub2api can deliver the sole compaction item in output_item.done while
+        // the terminal response.output is empty. Preserve that raw item without
+        // duplicating a terminal copy; dropping it makes remote-v2 report zero
+        // compaction items even though the upstream request succeeded.
+        const carriedCompaction = replayOutput.filter(item => item.type === 'compaction'
+          && (nativeCompaction === undefined || JSON.stringify(item) !== JSON.stringify(nativeCompaction.item))
+          && !terminalOutput.some(candidate => (
+            typeof candidate.id === 'string' && candidate.id === item.id
+          ) || JSON.stringify(candidate) === JSON.stringify(item)))
         replayOutput = nativeCompaction === undefined
-          ? terminalOutput
-          : [structuredClone(nativeCompaction.item), ...terminalOutput]
+          ? [...terminalOutput, ...carriedCompaction]
+          : [structuredClone(nativeCompaction.item), ...terminalOutput, ...carriedCompaction]
         for (const item of output) yield* adoptText(messageItemText(record(item)))
       }
       if (type === 'response.incomplete') {
@@ -1095,4 +1104,3 @@ function number(value: unknown): number | undefined {
 function acceptIdentity(current: string, incoming: unknown): string {
   return typeof incoming === 'string' && incoming.length > 0 ? incoming : current
 }
-
