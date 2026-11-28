@@ -29,12 +29,16 @@ import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import * as dshLlm from '@deepseek-ai/dsh-llm'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 
 import { PLUGIN_MESSAGE_SOURCE_KIND } from '../host/common/llm-compat.ts'
 import { candidatePackageRoots } from '../host/runtime/presets/preset-sync.ts'
 import { createDiscoveryDefinitions } from '../host/runtime/codemode/discovery.ts'
-import { createCodemodeExecutor } from '../host/runtime/codemode/executor.ts'
+import {
+  createCodemodeExecutor,
+  createCodemodeRootRegistry,
+  sectionOrderOf,
+  type CodemodeRootRegistry,
+} from '../host/runtime/codemode/executor.ts'
 import { createRetention } from '../host/runtime/codemode/retention.ts'
 import {
   buildCodemodeSectionText,
@@ -82,6 +86,133 @@ export interface HostPtcRuntimeClasses {
 
 const CORDIS_ORIGINAL_DESCRIPTION = 'cordis.original'
 const PTC_RUNTIME_PACKAGE = '@deepseek-ai/dsh-ptc-runtime'
+const LEGACY_NATIVE_EXECUTOR_PACKAGE = '@deepseek-ai/dsh-tool-executor-native'
+const TOOLS_PIPELINE_PACKAGE = '@deepseek-ai/dsh-tools/pipeline'
+
+type LegacyNativeToolExecutorCtor = new (ctx: unknown) => unknown
+
+interface ToolsPipelineModuleLike {
+  readonly ToolExecutionPipeline: new (
+    ctx: unknown,
+    source: {
+      get(name: string, scope: unknown, toolStep: unknown): unknown
+    },
+  ) => unknown
+  readonly executeToolBatch: (input: unknown, pipeline: unknown) => Promise<ToolBatchResultLike>
+}
+
+let cachedToolsPipelinePromise: Promise<ToolsPipelineModuleLike | undefined> | undefined
+
+/** 从给定根目录解析包（或子路径）的真实入口 file:// URL（经过 realpathSync 归一化）。 */
+function resolvePackageModuleUrl(rootDir: string, specifier: string): string | undefined {
+  let req: NodeRequire
+  try {
+    req = createRequire(join(rootDir, 'package.json'))
+  } catch {
+    return undefined
+  }
+  let entryPath: string | undefined
+  try {
+    entryPath = req.resolve(specifier)
+  } catch {
+    const parts = specifier.split('/')
+    const pkgName = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!
+    const subpath = specifier.slice(pkgName.length)
+    const exportKey = subpath === '' ? '.' : `.${subpath}`
+    try {
+      const manifestPath = req.resolve(`${pkgName}/package.json`)
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        main?: unknown
+        exports?: Record<string, unknown>
+      }
+      const target = manifest.exports?.[exportKey]
+      const rel = typeof target === 'string'
+        ? target
+        : typeof target === 'object' && target !== null
+          ? (target as Record<string, unknown>)['import'] ?? (target as Record<string, unknown>)['default']
+          : exportKey === '.' ? manifest.main : undefined
+      if (typeof rel === 'string' && rel.length > 0) {
+        const candidate = resolve(dirname(manifestPath), rel)
+        if (existsSync(candidate)) entryPath = candidate
+      }
+    } catch {
+      return undefined
+    }
+  }
+  if (entryPath === undefined) return undefined
+  try {
+    return pathToFileURL(realpathSync(entryPath)).href
+  } catch {
+    return pathToFileURL(entryPath).href
+  }
+}
+
+/** 同步加载旧代（0.2.2–0.2.3-alpha.2）的 `@deepseek-ai/dsh-tool-executor-native`。 */
+function loadLegacyNativeToolExecutor(ctx: unknown): LegacyNativeToolExecutorCtor | undefined {
+  const roots = new Set<string>()
+  contextBaseDirs(ctx, roots)
+  for (const dir of candidatePackageRoots()) roots.add(dir)
+  const tryRequire = (req: NodeRequire): LegacyNativeToolExecutorCtor | undefined => {
+    try {
+      const mod = req(LEGACY_NATIVE_EXECUTOR_PACKAGE) as { NativeToolExecutor?: unknown }
+      return typeof mod?.NativeToolExecutor === 'function'
+        ? mod.NativeToolExecutor as LegacyNativeToolExecutorCtor
+        : undefined
+    } catch {
+      return undefined
+    }
+  }
+  for (const rootDir of roots) {
+    try {
+      const found = tryRequire(createRequire(join(rootDir, 'package.json')))
+      if (found !== undefined) return found
+    } catch {
+      // 忽略无法构造 require 的候选目录。
+    }
+  }
+  try {
+    return tryRequire(createRequire(import.meta.url))
+  } catch {
+    return undefined
+  }
+}
+
+/** 按需加载 DSH 0.2.3-alpha.3+ `@deepseek-ai/dsh-tools/pipeline`，供程序内子调用走完整策略管线。 */
+async function loadToolsPipeline(ctx: unknown): Promise<ToolsPipelineModuleLike | undefined> {
+  if (cachedToolsPipelinePromise !== undefined) return cachedToolsPipelinePromise
+  cachedToolsPipelinePromise = (async (): Promise<ToolsPipelineModuleLike | undefined> => {
+    const roots = new Set<string>()
+    contextBaseDirs(ctx, roots)
+    for (const dir of candidatePackageRoots()) roots.add(dir)
+    const seen = new Set<string>()
+    const tryImport = async (specifier: string): Promise<ToolsPipelineModuleLike | undefined> => {
+      if (seen.has(specifier)) return undefined
+      seen.add(specifier)
+      try {
+        const mod = (await import(specifier)) as Record<string, unknown>
+        if (typeof mod['ToolExecutionPipeline'] === 'function' && typeof mod['executeToolBatch'] === 'function') {
+          return {
+            ToolExecutionPipeline: mod['ToolExecutionPipeline'] as ToolsPipelineModuleLike['ToolExecutionPipeline'],
+            executeToolBatch: mod['executeToolBatch'] as ToolsPipelineModuleLike['executeToolBatch'],
+          }
+        }
+      } catch {
+        // 尝试下一个候选路径。
+      }
+      return undefined
+    }
+    for (const rootDir of roots) {
+      const url = resolvePackageModuleUrl(rootDir, TOOLS_PIPELINE_PACKAGE)
+      if (url === undefined) continue
+      const loaded = await tryImport(url)
+      if (loaded !== undefined) return loaded
+    }
+    return tryImport(TOOLS_PIPELINE_PACKAGE)
+  })()
+  const resolved = await cachedToolsPipelinePromise
+  if (resolved === undefined) cachedToolsPipelinePromise = undefined
+  return resolved
+}
 
 const resolvedPtcClassesByProto = new WeakMap<object, HostPtcRuntimeClasses>()
 const pendingPtcClassesByProto = new WeakMap<object, Promise<HostPtcRuntimeClasses>>()
@@ -309,14 +440,18 @@ function loadPtcRuntimeClassesFor(runtime: unknown, ctx?: unknown): Promise<Host
 interface ToolsServiceLike {
   /** 注册一个工具定义。 */
   register(definition: unknown): () => void
-  /** 选中本作用域的执行器。 */
-  setExecutor(executor: unknown): () => void
+  /** DSH 0.2.3-alpha.3+：选中本作用域的根注册表。 */
+  setRoot?(registry: unknown): () => void
+  /** DSH 0.2.2–0.2.3-alpha.2：选中本作用域的执行器。 */
+  setExecutor?(executor: unknown): () => void
   /** 执行一整批调用。 */
   execute(input: unknown): Promise<ToolBatchResultLike>
   /** 按名字解析定义。 */
   get(name: string, scope?: object): unknown
-  /** 按调用方作用域与步骤准入枚举可见定义（DSH 0.2.2+）。 */
+  /** 按调用方作用域与步骤准入枚举可见定义（DSH 0.2.2–0.2.3-alpha.2）。 */
   definitions?(scope?: unknown, toolSet?: unknown): readonly unknown[]
+  /** 守卫校验面（用于判断 ctx 是否为真实 ToolsService 管线）。 */
+  checkGuards?(exec: unknown): unknown
 }
 
 /** 一次批量执行的结果（只读需要的字段）。 */
@@ -495,22 +630,38 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       + rules.options.hiddenPrefixes.join(', ') + '). Mount this row inside an agent preset to hide every tool the preset does not own.')
   }
 
-  /** 最近一次 describe 收到的完整定义集（含被遮蔽的），作为无 `tools.definitions` 时的回退快照。 */
+  /** 最近一次 describe / getAll 收到的完整定义集（含被遮蔽的），作为兜底快照。 */
   let catalog: CatalogEntry[] = []
   const debugRing: unknown[] = []
   let firstDescribeLogged = false
+  let rootRegistry: CodemodeRootRegistry | undefined
+  let rootPipelineInstance: unknown
+  let rootPipelineModule: ToolsPipelineModuleLike | undefined
 
   /**
-   * 解析当前调用方 agent 与步骤准入下的工具清单（对齐内核 `ptc.ts:662`）。
+   * 解析当前调用方 agent 与步骤准入下的完整未遮蔽工具清单。
    *
-   * 优先通过 `ctx.tools.definitions(agent, toolSet)` 实时读取调用方自己的可见集合（含
-   * `agent.ctx` 专属工具与 `tools.restrict` 过滤），避免多会话并发时被另一个会话的
-   * `describe()` 覆盖；测试替身未提供 `definitions` 时回退到最近一次 `catalog`。
+   * - DSH 0.2.3-alpha.3+（`setRoot` 模式）：从 `rootRegistry.bindings(agent, toolStep)` 读取
+   *   `ctx.tools` 注入的未遮蔽注册表视图，并按 `toolStep` 钉死步骤绑定；
+   * - DSH 0.2.2–0.2.3-alpha.2（`setExecutor` 模式）：从 `ctx.tools.definitions(agent, toolSet)` 实时读取；
+   * - 测试替身未提供上述接口时回退到最近一次 `catalog`。
    */
-  const resolveCatalog = (agent?: unknown, toolSet?: unknown): readonly CatalogEntry[] => {
+  const resolveCatalog = (agent?: unknown, stepOrToolSet?: unknown): readonly CatalogEntry[] => {
+    if (rootRegistry !== undefined) {
+      try {
+        const scopeObj = typeof agent === 'object' && agent !== null ? agent : undefined
+        const defs = rootRegistry.bindings(scopeObj, stepOrToolSet)
+        if (Array.isArray(defs) && defs.length > 0) {
+          const entries = defs.map(toCatalogEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
+          if (entries.length > 0) return entries
+        }
+      } catch {
+        // 回退到最近一次清单。
+      }
+    }
     if (agent !== undefined && typeof tools.definitions === 'function') {
       try {
-        const defs = tools.definitions(agent, toolSet)
+        const defs = tools.definitions(agent, stepOrToolSet)
         if (Array.isArray(defs) && defs.length > 0) {
           const entries = defs.map(toCatalogEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
           if (entries.length > 0) return entries
@@ -665,12 +816,50 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
       }
       let batch: ToolBatchResultLike
       try {
-        batch = await tools.execute({
-          calls: [call],
-          signal: request.signal,
-          ...request.agent === undefined ? {} : { agent: request.agent },
-          ...request.toolSet === undefined ? {} : { toolSet: request.toolSet },
-        })
+        const useRootPipeline = rootRegistry !== undefined
+          && typeof context.waterfall === 'function'
+          && typeof tools.checkGuards === 'function'
+        if (useRootPipeline) {
+          const mod = rootPipelineModule ?? await loadToolsPipeline(ctx)
+          if (mod !== undefined) {
+            rootPipelineModule = mod
+            if (rootPipelineInstance === undefined) {
+              const registry = rootRegistry!
+              rootPipelineInstance = new mod.ToolExecutionPipeline(ctx, {
+                get: (calledName, scope, toolStep) => registry.binding(
+                  calledName,
+                  typeof scope === 'object' && scope !== null ? scope : undefined,
+                  toolStep,
+                ),
+              })
+            }
+            const step = request.toolStep ?? request.toolSet
+            batch = await mod.executeToolBatch({
+              calls: [call],
+              signal: request.signal,
+              ...request.agent === undefined ? {} : { agent: request.agent },
+              ...step === undefined ? {} : { toolStep: step },
+            }, rootPipelineInstance)
+          } else {
+            batch = await tools.execute({
+              calls: [call],
+              signal: request.signal,
+              ...request.agent === undefined ? {} : { agent: request.agent },
+              ...request.toolStep !== undefined
+                ? { toolStep: request.toolStep }
+                : request.toolSet === undefined ? {} : { toolSet: request.toolSet },
+            })
+          }
+        } else {
+          batch = await tools.execute({
+            calls: [call],
+            signal: request.signal,
+            ...request.agent === undefined ? {} : { agent: request.agent },
+            ...request.toolStep !== undefined
+              ? { toolStep: request.toolStep }
+              : request.toolSet === undefined ? {} : { toolSet: request.toolSet },
+          })
+        }
       } catch (error: unknown) {
         return { error: messageOf(error) }
       }
@@ -710,75 +899,138 @@ export function apply(ctx: unknown, config: CodemodeConfig = {}): void {
     tools.register(definition)
   }
   // 2. 程序传输。
-  tools.register(createTransportDefinition(host, rules))
+  const transportDef = createTransportDefinition(host, rules)
+  tools.register(transportDef)
 
-  // 3. + 4. 执行器与恒定说明段。
-  if (typeof tools.setExecutor !== 'function') {
-    log('warn', '[codemode] this DSH build has no ctx.tools.setExecutor(); Code Mode requires DSH 0.2.2 or later. '
-      + 'Switch this session to the built-in ptc preset.')
+  const sectionText = (): string => {
+    const runtime = runtimeOf()
+    return buildCodemodeSectionText({
+      runToolName: rules.options.runToolName,
+      metaTools: rules.options.metaTools,
+      language: runtime?.language,
+      programFormat: runtime?.programFormat,
+      nativeToolsOnly: rules.options.nativeToolsOnly,
+      nativeTools: rules.options.nativeTools,
+    })
+  }
+
+  const resetEnvironment = async (agent: unknown): Promise<void> => {
+    const runtime = runtimeOf()
+    if (runtime === undefined) {
+      throw new Error('codemode: no PTC runtime is mounted (ctx.ptcRuntime); the program transport is unavailable')
+    }
+    if (!runtime.retainsState) {
+      throw new CodeResetFailedError('The PTC runtime does not retain an environment')
+    }
+    try {
+      await retention.reset(agent, () => {
+        const inject = typeof agent === 'object' && agent !== null
+          ? (agent as { readonly inject?: (message: unknown) => void }).inject
+          : undefined
+        if (typeof inject === 'function') {
+          inject.call(agent, createUserMessage({
+            content: [{ type: 'text', text: 'Program environment reset; retained variables cleared. Completed tool effects remain.' }],
+            source: { kind: PLUGIN_MESSAGE_SOURCE_KIND },
+          }))
+        }
+      })
+    } catch (error: unknown) {
+      throw new CodeResetFailedError(
+        'Program environment reset failed: ' + messageOf(error) + '. State may not be cleared; retry the host reset before running more code.',
+      )
+    }
+  }
+
+  const recordDescribe = (decision: { readonly visible: readonly string[]; readonly masked: readonly string[] }): void => {
+    const hidden = summarizeHidden(decision.masked)
+    debugRing.push({ at: new Date().toISOString(), visible: decision.visible, hidden })
+    while (debugRing.length > DEBUG_RING) debugRing.shift()
+    const namespaces = hidden.namespaces.map((entry) => entry.namespace + '=' + String(entry.count)).join(', ')
+    const line = '[codemode] masked ' + String(hidden.total) + ' non-standard tool(s)'
+      + (namespaces === '' ? '' : ' (' + namespaces + ')')
+      + '; request tools: ' + decision.visible.join(', ')
+    if (!firstDescribeLogged) {
+      firstDescribeLogged = true
+      log('info', line)
+    } else {
+      log('debug', line)
+    }
+  }
+
+  // 3. + 4. 根注册表（DSH 0.2.3-alpha.3+）或执行器（DSH 0.2.2–0.2.3-alpha.2）与恒定说明段。
+  if (typeof tools.setRoot === 'function') {
+    // 预热宿主 `@deepseek-ai/dsh-tools/pipeline`，不阻塞同步 apply。
+    void loadToolsPipeline(ctx).then((mod) => {
+      if (mod !== undefined) rootPipelineModule = mod
+    })
+    let probingSetRoot = false
+    rootRegistry = createCodemodeRootRegistry(rules, {
+      view: (names, sourceView) => resolveCatalogView(sourceView, scopeKey, names),
+      viewForName: (toolName, sourceView) => resolveNameView(sourceView, scopeKey, toolName),
+      onCatalog: (definitions) => {
+        catalog = definitions.map(toCatalogEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
+      },
+      onDescribe: recordDescribe,
+      isProbing: () => probingSetRoot,
+      reset: resetEnvironment,
+    })
+    probingSetRoot = true
+    try {
+      tools.setRoot(rootRegistry)
+    } finally {
+      probingSetRoot = false
+    }
+    const systemPrompt = (context as { systemPrompt?: unknown }).systemPrompt ?? serviceOf('systemPrompt')
+    const registerSection = typeof systemPrompt === 'object' && systemPrompt !== null
+      ? (systemPrompt as { section?: (def: unknown) => () => void }).section
+      : undefined
+    if (rules.options.sdkSection && typeof registerSection === 'function') {
+      registerSection.call(systemPrompt, {
+        name: 'tools:sdk',
+        order: sectionOrderOf(ctx),
+        interpolate: false,
+        text: (assembleCtx?: { readonly toolStep?: { declares?: (def: unknown) => boolean }; readonly scope?: object }) => {
+          const step = assembleCtx?.toolStep
+          if (step !== undefined && typeof step.declares === 'function') {
+            return step.declares(transportDef) ? sectionText() : ''
+          }
+          try {
+            return tools.get(rules.options.runToolName, assembleCtx?.scope) === transportDef ? sectionText() : ''
+          } catch {
+            return ''
+          }
+        },
+      })
+    }
+    const scopeNote = scopeKey === undefined ? '' : ', everything outside this preset scope'
+    log('info', '[codemode] active (root registry): transport [' + rules.options.runToolName + '], discovery ['
+      + rules.options.metaTools.join(', ') + '], hiding [' + rules.options.hiddenPrefixes.join(', ') + ']' + scopeNote)
     return
   }
-  const delegate = new NativeToolExecutor(ctx as never)
+
+  if (typeof tools.setExecutor !== 'function') {
+    log('warn', '[codemode] this DSH build has neither ctx.tools.setRoot() nor ctx.tools.setExecutor(); '
+      + 'Code Mode requires DSH 0.2.2 or later. Switch this session to the built-in ptc preset.')
+    return
+  }
+  const LegacyNativeToolExecutor = loadLegacyNativeToolExecutor(ctx)
+  if (LegacyNativeToolExecutor === undefined) {
+    log('warn', '[codemode] could not resolve @deepseek-ai/dsh-tool-executor-native for legacy ctx.tools.setExecutor(); '
+      + 'switch this session to the built-in ptc preset.')
+    return
+  }
+  const delegate = new LegacyNativeToolExecutor(ctx as never)
   const view = (): CodemodeView => resolveCatalogView(tools, scopeKey, catalog.map((entry) => entry.name))
   const executor = createCodemodeExecutor(ctx, rules, {
     delegate: delegate as never,
     view,
     viewForName: (toolName) => resolveNameView(tools, scopeKey, toolName),
-    sectionText: () => {
-      const runtime = runtimeOf()
-      return buildCodemodeSectionText({
-        runToolName: rules.options.runToolName,
-        metaTools: rules.options.metaTools,
-        language: runtime?.language,
-        programFormat: runtime?.programFormat,
-        nativeToolsOnly: rules.options.nativeToolsOnly,
-        nativeTools: rules.options.nativeTools,
-      })
-    },
+    sectionText,
     onCatalog: (definitions) => {
       catalog = definitions.map(toCatalogEntry).filter((entry): entry is CatalogEntry => entry !== undefined)
     },
-    async reset(agent: unknown): Promise<void> {
-      const runtime = runtimeOf()
-      if (runtime === undefined) {
-        throw new Error('codemode: no PTC runtime is mounted (ctx.ptcRuntime); the program transport is unavailable')
-      }
-      if (!runtime.retainsState) {
-        throw new CodeResetFailedError('The PTC runtime does not retain an environment')
-      }
-      try {
-        await retention.reset(agent, () => {
-          const inject = typeof agent === 'object' && agent !== null
-            ? (agent as { readonly inject?: (message: unknown) => void }).inject
-            : undefined
-          if (typeof inject === 'function') {
-            inject.call(agent, createUserMessage({
-              content: [{ type: 'text', text: 'Program environment reset; retained variables cleared. Completed tool effects remain.' }],
-              source: { kind: PLUGIN_MESSAGE_SOURCE_KIND },
-            }))
-          }
-        })
-      } catch (error: unknown) {
-        throw new CodeResetFailedError(
-          'Program environment reset failed: ' + messageOf(error) + '. State may not be cleared; retry the host reset before running more code.',
-        )
-      }
-    },
-    onDescribe: (decision) => {
-      const hidden = summarizeHidden(decision.masked)
-      debugRing.push({ at: new Date().toISOString(), visible: decision.visible, hidden })
-      while (debugRing.length > DEBUG_RING) debugRing.shift()
-      const namespaces = hidden.namespaces.map((entry) => entry.namespace + '=' + String(entry.count)).join(', ')
-      const line = '[codemode] masked ' + String(hidden.total) + ' non-standard tool(s)'
-        + (namespaces === '' ? '' : ' (' + namespaces + ')')
-        + '; request tools: ' + decision.visible.join(', ')
-      if (!firstDescribeLogged) {
-        firstDescribeLogged = true
-        log('info', line)
-      } else {
-        log('debug', line)
-      }
-    },
+    reset: resetEnvironment,
+    onDescribe: recordDescribe,
   })
   tools.setExecutor(executor)
   const scopeNote = scopeKey === undefined ? '' : ', everything outside this preset scope'

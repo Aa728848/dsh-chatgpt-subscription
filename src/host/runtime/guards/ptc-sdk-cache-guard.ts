@@ -215,11 +215,18 @@ export function installPtcSdkCacheGuard(
   const patchedMethods = new WeakMap<object, Set<string>>()
   /** 每个 scope 的 SDK 段缓存。 */
   const cache = new WeakMap<object, SdkCacheEntry>()
+  /** DSH 0.2.3-alpha.3+ 移除 definitions() 后，以 `tools/change` 版本号感知工具集合增删。 */
+  let registryEpoch = 0
   /** 事件监听的 disposer。 */
   const disposers: Array<() => void> = []
   /** 被包装过的工具层与其还原动作。 */
   const restores: Array<() => void> = []
   let disposed = false
+
+  const offToolsChange = subscribe(host, 'tools/change', () => {
+    registryEpoch += 1
+  })
+  if (offToolsChange !== undefined) disposers.push(offToolsChange)
 
   /**
    * 取一个 scope 桶键。
@@ -241,17 +248,17 @@ export function installPtcSdkCacheGuard(
    * @returns 指纹；读不到时为空串（缓存永不失效）。
    */
   const toolFingerprint = (tools: unknown, scope: unknown): string => {
-    if (!isRecord(tools)) return ''
+    if (!isRecord(tools)) return registryEpoch > 0 ? `epoch:${String(registryEpoch)}` : ''
     // 取原型上那份**未绑定**的实现：跟踪代理读出来的那份绑在读取它的那一层作用域上。
     const target = resolveMethodTarget(tools, 'definitions')
-    if (target === undefined) return ''
+    if (target === undefined) return `epoch:${String(registryEpoch)}`
     let list: unknown
     try {
       list = (target.original as DefinitionsMethod).call(tools, scope, undefined)
     } catch {
-      return ''
+      return `epoch:${String(registryEpoch)}`
     }
-    if (!Array.isArray(list)) return ''
+    if (!Array.isArray(list)) return `epoch:${String(registryEpoch)}`
     return list
       .map(entry => (isRecord(entry) && typeof entry['name'] === 'string' ? entry['name'] : '?'))
       .join('\u0000')

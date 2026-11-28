@@ -66,9 +66,18 @@ import {
   liveSubagentModelSelectionPreference,
   readSubagentRoutingPreference,
 } from '../../src/host/runtime/guards/subagent-model-authorization.ts'
-import { auditedRoutesOf } from '../../src/host/runtime/guards/subagent-route-audit.ts'
+import { auditedRoutesOf, auditChildRoutes, childRoutesOf } from '../../src/host/runtime/guards/subagent-route-audit.ts'
 import { installDispatchLedger } from '../../src/host/runtime/dispatch-ledger/index.ts'
 import { policyForSession, routesForSession } from '../../src/host/runtime/dispatch-ledger/guard.ts'
+import { installCompactionPolicyGuard } from '../../src/host/runtime/guards/compaction-policy-guard.ts'
+import { routeParameterProbe } from '../../src/host/runtime/guards/subagent-model-authorization.ts'
+import { cacheWarmupNavigationIntentOf } from '../../src/host/runtime/cache-warmup/retrieval-intent.ts'
+import {
+  apply as applyPlanModePipeline,
+  attachPlanModePipelineSettings,
+  ENTER_PLAN_MODE_TOOL,
+  LEAVE_PLAN_MODE_TOOL,
+} from '../../src/entries/plan-mode-pipeline.ts'
 
 /** 构造带双块前导 system、普通对话及中置增量 system（含闭合标签注入测试）的基准对话。 */
 function incrementalConversation(withMidSystem: boolean): Message[] {
@@ -797,5 +806,216 @@ describe('DSH 0.2.3 ImageRequestTarget 双代契约', () => {
     expect(resized.maxPixels).toBeGreaterThan(0)
     expect(resized.maxBytes).toBe(resized.maxImageBytes)
     expect(resized.imageTargetBytes).toBe(resized.maxBytes)
+  })
+})
+
+describe('DSH 0.2.3-alpha.3 根注册表、守卫、审计与提醒适配', () => {
+  it('plan-mode-cache-guard：拦截 tools.include(AgentToolRegistry) 使 exit_plan_mode 对任意 scope 恒定可见并在 dispose 后还原', () => {
+    const exitDef = { name: 'exit_plan_mode', description: 'exit' }
+    // 模拟 0.2.3-alpha.3 官方 AgentToolRegistry：unscoped 可见，未授权 agent scope 不可见
+    const agentRegistry = {
+      get: (name: string, scope?: unknown) => (scope === undefined && name === 'exit_plan_mode' ? exitDef : undefined),
+      getAll: (scope?: unknown) => (scope === undefined ? [exitDef] : []),
+    }
+    const included: Array<{ get(name: string, scope?: unknown): unknown; getAll(scope?: unknown): readonly unknown[] }> = []
+    class FakeTools023 {
+      register() { return () => undefined }
+      include(source: { get(name: string, scope?: unknown): unknown; getAll(scope?: unknown): readonly unknown[] }) {
+        included.push(source)
+        return () => undefined
+      }
+      get() { return undefined }
+    }
+    const tools = new FakeTools023()
+    const ctx = {
+      get: (name: string) => (name === 'tools' ? tools : undefined),
+      on: () => () => undefined,
+      logger: { warn: () => undefined },
+    }
+    const guard = installPlanModeCacheGuard(ctx)
+    tools.include(agentRegistry)
+
+    const agentScope = { id: 'agent-a' }
+    expect(included).toHaveLength(1)
+    expect(included[0]!.get('exit_plan_mode', agentScope)).toBe(exitDef)
+    expect(included[0]!.getAll(agentScope)).toEqual([exitDef])
+
+    guard.dispose()
+    // 还原后再次 include 不再包装
+    tools.include(agentRegistry)
+    expect(included[1]).toBe(agentRegistry)
+    expect(included[1]!.getAll(agentScope)).toEqual([])
+  })
+
+  it('plan-mode-pipeline：在提供 tools.include 的 0.2.3-alpha.3 宿主上通过 ToolSource 随开关实时显隐', () => {
+    let enabled = true
+    attachPlanModePipelineSettings(() => enabled)
+    try {
+      let includedSource: { get(name: string): unknown; getAll(): readonly { name: string }[] } | undefined
+      const ctx = {
+        get(name: string) {
+          if (name === 'planMode') return { set: () => 'committed' }
+          if (name === 'tools') {
+            return {
+              register: () => { throw new Error('must use include() when available') },
+              include: (source: typeof includedSource) => {
+                includedSource = source
+                return () => { includedSource = undefined }
+              },
+            }
+          }
+          return undefined
+        },
+        effect: (fn: () => () => void) => fn(),
+        logger: { info: () => undefined },
+      }
+      applyPlanModePipeline(ctx as never)
+      expect(includedSource).toBeDefined()
+      expect(includedSource!.getAll().map((t) => t.name)).toEqual([ENTER_PLAN_MODE_TOOL, LEAVE_PLAN_MODE_TOOL])
+      expect(includedSource!.get(ENTER_PLAN_MODE_TOOL)).toBeDefined()
+
+      enabled = false
+      expect(includedSource!.getAll()).toEqual([])
+      expect(includedSource!.get(ENTER_PLAN_MODE_TOOL)).toBeUndefined()
+
+      enabled = true
+      expect(includedSource!.getAll().map((t) => t.name)).toEqual([ENTER_PLAN_MODE_TOOL, LEAVE_PLAN_MODE_TOOL])
+    } finally {
+      attachPlanModePipelineSettings(() => true)
+    }
+  })
+
+  it('ptc-sdk-cache-guard 与 timeline-cache-guard：在无 definitions() 的 0.2.3-alpha.3 注册表上分别按 tools/change 与 getAll() 生效', async () => {
+    // 1. ptc-sdk-cache-guard：无 definitions() 时按 tools/change 刷新缓存，常规步骤冻结 tools:sdk
+    const listeners = new Map<string, (...args: unknown[]) => unknown>()
+    const ptcTools = { getAll: () => [{ name: 'run_code' }] }
+    const ptcHost = {
+      get: (name: string) => (name === 'tools' ? ptcTools : undefined),
+      on: (event: string, fn: (...args: unknown[]) => unknown) => {
+        listeners.set(event, fn)
+        return () => { listeners.delete(event) }
+      },
+    }
+    const ptcGuard = installPtcSdkCacheGuard(ptcHost)
+    const scope = { model: { current: () => ({ provider: 'kimi-code', model: 'kimi-for-coding' }) } }
+    const assemble = listeners.get('system-prompt/assemble') as (a: unknown, c: unknown, n: () => Promise<unknown>) => Promise<{ sections: Array<{ name: string; text: string }> }>
+
+    const first = await assemble({}, { scope }, async () => ({ sections: [{ name: PTC_SDK_SECTION_NAME, text: 'SDK v1' }] }))
+    expect(first.sections[0]?.text).toBe('SDK v1')
+    const second = await assemble({}, { scope }, async () => ({ sections: [{ name: PTC_SDK_SECTION_NAME, text: 'SDK drifted' }] }))
+    expect(second.sections[0]?.text).toBe('SDK v1')
+
+    // 触发 tools/change -> 缓存失效，接纳新版本 SDK
+    listeners.get('tools/change')?.()
+    const third = await assemble({}, { scope }, async () => ({ sections: [{ name: PTC_SDK_SECTION_NAME, text: 'SDK v2' }] }))
+    expect(third.sections[0]?.text).toBe('SDK v2')
+    ptcGuard.dispose()
+
+    // 2. timeline-cache-guard：无 definitions() 时自动回退包装 getAll()，不打告警且冻结 timeline_tasks 描述
+    let taskDesc = 'Task prompt v1'
+    const warnings: string[] = []
+    class FakeGetAllTools {
+      getAll() {
+        return [{
+          name: 'timeline_tasks',
+          get description() { return taskDesc },
+        }]
+      }
+    }
+    const tlTools = new FakeGetAllTools()
+    const tlGuard = installTimelineCacheGuard({
+      get: (name: string) => (name === 'tools' ? tlTools : undefined),
+      on: () => () => undefined,
+      logger: { warn: (msg: string) => warnings.push(msg) },
+    }, { enabled: () => true })
+    expect(warnings).toEqual([])
+    const firstDefs = tlTools.getAll() as Array<{ name: string; description: string }>
+    expect(firstDefs[0]?.description).toBe('Task prompt v1')
+    // 传入受保护 scope 冻结
+    const scopedFirst = (tlTools.getAll as (s?: unknown) => Array<{ name: string; description: string }>)(scope)
+    expect(scopedFirst[0]?.description).toBe('Task prompt v1')
+    taskDesc = 'Task prompt v2'
+    const scopedSecond = (tlTools.getAll as (s?: unknown) => Array<{ name: string; description: string }>)(scope)
+    expect(scopedSecond[0]?.description).toBe('Task prompt v1')
+    tlGuard.dispose()
+  })
+
+  it('compaction-policy-guard 从 agent/pre-step.modelSelection 观测切换后模型，且 routeParameterProbe 兼容 get()/getAll()', async () => {
+    // 1. compaction-policy-guard：观测 agent/pre-step 载荷中的 modelSelection
+    const events = new Map<string, (...args: unknown[]) => unknown>()
+    const engine = { config: { modelPolicies: [] as Array<{ provider: string; model: string }> } }
+    const compGuard = installCompactionPolicyGuard({
+      get: (name: string) => (name === 'compaction' ? engine : undefined),
+      on: (event: string, fn: (...args: unknown[]) => unknown) => {
+        events.set(event, fn)
+        return () => { events.delete(event) }
+      },
+    })
+    const preStep = events.get('agent/pre-step') as (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>
+    await preStep({
+      agent: {},
+      modelSelection: { provider: 'kimi-code', model: 'kimi-observed-023' },
+    }, async () => ({ kind: 'enter', messages: [] }))
+    const matched = engine.config.modelPolicies.find((p) => p.provider === 'kimi-code' && p.model === 'kimi-observed-023')
+    expect(matched).toBeDefined()
+    compGuard.dispose()
+
+    // 2. routeParameterProbe：无 definitions() 时使用 get() 识别平铺参数与 JSON Schema 参数
+    const probe = routeParameterProbe({
+      tools: {
+        get: (toolName: string) => {
+          if (toolName === 'subagent') return { name: 'subagent', parameters: { provider: { type: 'string' }, model: { type: 'string' } } }
+          if (toolName === 'subagent_fork') return { name: 'subagent_fork', parameters: { prompt: { type: 'string' } } }
+          return undefined
+        },
+      },
+    } as never)
+    expect(probe).toBeDefined()
+    expect(probe!({} as never, 'subagent')).toBe(true)
+    expect(probe!({} as never, 'subagent_fork')).toBe(false)
+    expect(probe!({} as never, 'unknown')).toBeUndefined()
+  })
+
+  it('subagent-route-audit 从 0.2.3-alpha.3 子会话 model/selection 事件还原路由，retrieval-intent 跳过 todo/reminder 与 time-context', () => {
+    const parent = {
+      id: 'parent-023',
+      events: [{ type: 'subagent/catalog', data: { childId: 'child-023' } }],
+      requestHeader: () => ({ config: { provider: 'claude', model: 'claude-sonnet-4-6' } }),
+    }
+    const child = {
+      id: 'child-023',
+      header: { parentSession: 'parent-023', origin: 'subagent' },
+      // 0.2.3-alpha.3：descriptor 不再带 agentProvider / agentModel，路由记在 model/selection 事件里
+      events: [
+        { type: 'subagent/descriptor', data: { provider: 'spawn', label: 'worker-023' } },
+        { type: 'model/selection', data: { provider: 'codex-chatgpt', model: 'gpt-6-astra' } },
+      ],
+    }
+    const resolver = {
+      get: (id: string) => (id === 'parent-023' ? parent : id === 'child-023' ? child : undefined),
+    }
+    const findings = childRoutesOf(parent, resolver)
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({
+      childId: 'child-023',
+      childProvider: 'codex-chatgpt',
+      childModel: 'gpt-6-astra',
+    })
+    const violations = auditChildRoutes(parent, resolver, [{ provider: 'claude', model: 'claude-sonnet-4-6' }])
+    expect(violations).toHaveLength(1)
+    expect(violations[0]?.route).toEqual({ provider: 'codex-chatgpt', model: 'gpt-6-astra' })
+    expect(violations[0]?.sameAsParent).toBe(false)
+
+    // retrieval-intent 跳过 todo/reminder 与无标签旧版 time-context，向前命中真实导航请求
+    const navAgent = {
+      session: {
+        events: [
+          { type: 'user/message', data: { content: [{ type: 'text', text: '列出所有 provider 入口文件在哪里' }], source: { kind: 'user' } } },
+          { type: 'user/message', data: { content: [{ type: 'text', text: 'Time sampled while preparing turn 2: 2026-11-28' }], source: { kind: 'time-context', form: 'snapshot' } } },
+          { type: 'user/message', data: { content: [{ type: 'text', text: '<system-reminder>Todo list has not been updated.</system-reminder>' }], source: { kind: 'todo/reminder', form: 'snapshot' } } },
+        ],
+      },
+    }
+    expect(cacheWarmupNavigationIntentOf(navAgent)).toBe(true)
   })
 })

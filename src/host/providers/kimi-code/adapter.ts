@@ -224,7 +224,7 @@ export const KIMI_CODE_RETRY_POLICY_CONFIG: {
 } = {
   mode: 'normal',
   maxRetries: 3,
-  retryableCodes: ['RATE_LIMIT', 'SERVER', 'TRANSPORT'],
+  retryableCodes: ['RATE_LIMIT', 'SERVER', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'],
   backoff: { initialDelayMs: 1_500, maxDelayMs: 15_000, jitterRatio: 0.2 },
 }
 

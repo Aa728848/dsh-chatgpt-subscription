@@ -60,7 +60,7 @@ describe('CodexChatGptAdapter', () => {
       defaultMaxTokens: 32_768,
     })
     expect(adapter.providerRetryPolicy()).toMatchObject({
-      mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'SERVER', 'NETWORK', 'TIMEOUT', 'TRANSPORT'],
+      mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'SERVER', 'NETWORK', 'TIMEOUT', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'],
     })
     expect(adapter.imageRequestPricing(PROVIDER_ID, 'gpt-5.6-sol')).toBeUndefined()
 

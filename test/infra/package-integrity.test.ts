@@ -106,12 +106,16 @@ describe('Package Integrity & BOM Checks', () => {
     // `dependencies` that npm installed as a second, version-pinned copy. It is
     // an optional peer so npm never installs it, and Code Mode degrades to the
     // PTC row when the running harness does not ship it.
-    const executor = '@deepseek-ai/dsh-tool-executor-native'
-    expect(peerDeps[executor], `${executor} must be a peer`).toBeTruthy()
-    expect(
-      peerMeta[executor]?.optional,
-      `${executor} must be an optional peer so npm does not install a second copy`,
-    ).toBe(true)
+    for (const nativePkg of [
+      '@deepseek-ai/dsh-tool-executor-native',
+      '@deepseek-ai/dsh-tool-registry-native',
+    ]) {
+      expect(peerDeps[nativePkg], `${nativePkg} must be a peer`).toBeTruthy()
+      expect(
+        peerMeta[nativePkg]?.optional,
+        `${nativePkg} must be an optional peer so npm does not install a second copy`,
+      ).toBe(true)
+    }
   })
 
   it('declares a Node engines floor at least as new as the transport it bundles', () => {
@@ -138,15 +142,18 @@ describe('Package Integrity & BOM Checks', () => {
     ).toBe(true)
   })
 
-  it('keeps the native executor a real import in the built Code Mode bundle', () => {
+  it('keeps the kernel tool pipeline and legacy executor external in the built Code Mode bundle', () => {
     const bundlePath = path.join(ROOT_DIR, 'lib', 'codemode.js')
     if (!fs.existsSync(bundlePath)) return
     const content = fs.readFileSync(bundlePath, 'utf8')
 
-    // One executor per scope: Code Mode hands every program sub-call to the
-    // kernel's instance. Inlining a copy would apply that copy's own policy and
-    // approval pipeline beside the host's, which is the failure this guards.
-    expect(content).toMatch(/from\s*["']@deepseek-ai\/dsh-tool-executor-native["']/)
+    // One root/executor per scope: Code Mode hands every program sub-call to the
+    // kernel's own pipeline/executor rather than bundling a second copy, and it
+    // must NOT emit a top-level static import of removed 0.2.2 packages.
+    expect(content).not.toMatch(/from\s*["']@deepseek-ai\/dsh-tool-executor-native["']/)
+    expect(content).toContain('@deepseek-ai/dsh-tools/pipeline')
+    expect(content).toContain('@deepseek-ai/dsh-tool-executor-native')
+    expect(content).not.toContain('class ToolExecutionPipeline')
   })
 
   it('ensures built lib/index.js does not statically import CallId from @deepseek-ai/dsh-llm', () => {

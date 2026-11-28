@@ -332,19 +332,30 @@ describe('the dispatch definition', () => {
     expect(ptc.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
     expect(ptc.plugins.find(row => row.id === 'code-mode')).toBeUndefined()
 
-    // Native executor present: the declaration is used as written, with no PTC
-    // executor row mounted beside the Code Mode row.
-    const codemode = resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-executor-native')
-    expect(codemode.plugins.find(row => row.id === 'code-mode')).toEqual({
-      id: 'code-mode',
-      name: '@eddyskywalker/dsh-chatgpt-subscription/codemode',
-      config: {
-        nativeToolsOnly: true,
-        nativeTools: ['cache_warmup_result', 'dispatch_ledger', 'progress_update', 'structured_output'],
-      },
+    // Native executor or 0.2.3-alpha.3 native registry present: the declaration is
+    // used as written, with no PTC row mounted beside the Code Mode row.
+    for (const nativePkg of ['@deepseek-ai/dsh-tool-executor-native', '@deepseek-ai/dsh-tool-registry-native']) {
+      const codemode = resolveDispatchPreset(specifier => specifier === nativePkg)
+      expect(codemode.plugins.find(row => row.id === 'code-mode')).toEqual({
+        id: 'code-mode',
+        name: '@eddyskywalker/dsh-chatgpt-subscription/codemode',
+        config: {
+          nativeToolsOnly: true,
+          nativeTools: ['cache_warmup_result', 'dispatch_ledger', 'progress_update', 'structured_output'],
+        },
+      })
+      expect(codemode.plugins.find(row => row.id === 'tool-executor-ptc')).toBeUndefined()
+      expect(codemode.plugins.find(row => row.id === 'tool-registry-ptc')).toBeUndefined()
+      expect(codemode.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
+    }
+
+    // 0.2.3-alpha.3: native registry absent but PTC registry present -> falls back to tool-registry-ptc.
+    const ptcRegistry = resolveDispatchPreset(specifier => specifier === '@deepseek-ai/dsh-tool-registry-ptc')
+    expect(ptcRegistry.plugins.find(row => row.id === 'tool-registry-ptc')).toEqual({
+      id: 'tool-registry-ptc',
+      name: '@deepseek-ai/dsh-tool-registry-ptc',
     })
-    expect(codemode.plugins.find(row => row.id === 'tool-executor-ptc')).toBeUndefined()
-    expect(codemode.plugins.find(row => row.id === 'tool-presentation')).toBeUndefined()
+    expect(ptcRegistry.plugins.find(row => row.id === 'code-mode')).toBeUndefined()
   })
 
   it('mounts the harness 0.1.7 spelling of the renamed workflow package', () => {

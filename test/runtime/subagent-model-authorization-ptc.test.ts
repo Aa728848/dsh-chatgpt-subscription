@@ -81,20 +81,28 @@ function recordingAgent(routes: readonly AllowedModelRoute[]): Agent {
 }
 
 /**
- * Mount the real tool runtime and fake PTC runtime through the standalone
- * executor on 0.2.2, or ToolRuntime's own mode setting before it.
+ * Mount the real tool runtime and fake PTC runtime across all three harness
+ * generations: 0.2.3-alpha.3+ (`dsh-tool-registry-ptc`), 0.2.2–0.2.3-alpha.2
+ * (`dsh-tool-executor-ptc`), or older `ToolRuntime({ mode: 'ptc' })`.
  */
-async function setup(): Promise<{ ctx: Context; runtime: FakeRuntime }> {
+async function setup(): Promise<{ ctx: Context; runtime: FakeRuntime; mode: 'registry' | 'executor' | 'legacy' }> {
   const ctx = new Context()
   ctx.provide('workingDirectory', {
     ensure: () => Promise.resolve(process.cwd()),
   } as never)
-  let hasExecutor = false
+  const ptcRegistryPkg = '@deepseek-ai/dsh-tool-registry-ptc'
+  const ptcExecutorPkg = '@deepseek-ai/dsh-tool-executor-ptc'
+  let mode: 'registry' | 'executor' | 'legacy' = 'legacy'
   try {
-    import.meta.resolve('@deepseek-ai/dsh-tool-executor-ptc')
-    hasExecutor = true
+    import.meta.resolve(ptcRegistryPkg)
+    mode = 'registry'
   } catch {
-    // Harnesses before 0.2.2 select PTC through ToolRuntime's own mode config.
+    try {
+      import.meta.resolve(ptcExecutorPkg)
+      mode = 'executor'
+    } catch {
+      // Harnesses before 0.2.2 select PTC through ToolRuntime's own mode config.
+    }
   }
   try {
     const sessionProjectionPkg = '@deepseek-ai/dsh-session-projection'
@@ -108,16 +116,19 @@ async function setup(): Promise<{ ctx: Context; runtime: FakeRuntime }> {
     // Older harness generations without a standalone session-projection plugin.
   }
   await ctx.plugin(SystemPrompt)
-  if (hasExecutor) await ctx.plugin(ToolRuntime)
+  if (mode !== 'legacy') await ctx.plugin(ToolRuntime)
   else await ctx.plugin(ToolRuntime, { mode: CODE_MODE } as never)
   await ctx.plugin(FakeRuntime)
-  if (hasExecutor) {
-    const executor = await import('@deepseek-ai/dsh-tool-executor-ptc')
+  if (mode === 'registry') {
+    const registry = await import(ptcRegistryPkg)
+    await ctx.plugin(registry)
+  } else if (mode === 'executor') {
+    const executor = await import(ptcExecutorPkg)
     await ctx.plugin(executor)
   }
   const runtime = ctx.ptcRuntime as FakeRuntime
-  if (hasExecutor) batchedRuntimes.add(runtime)
-  return { ctx, runtime }
+  if (mode !== 'legacy') batchedRuntimes.add(runtime)
+  return { ctx, runtime, mode }
 }
 
 /** Register the delegation tool the program is allowed to call. */
@@ -248,7 +259,7 @@ describe('subagent authorization covers the run_code transport', () => {
   })
 
   it('enriches list_subagent_models inside run_code and rewrites the rendered tools:sdk section', async () => {
-    const { ctx, runtime } = await setup()
+    const { ctx, runtime, mode } = await setup()
     ctx.tools.register(defineTool({
       name: 'list_subagent_models',
       description:
@@ -301,7 +312,15 @@ describe('subagent authorization covers the run_code transport', () => {
     expect(observed.message).toContain('Authorized child routes for this Session')
     expect(observed.message).toContain('- claude/claude-sonnet-4-6 -> provider: "claude", model: "claude-sonnet-4-6"')
 
-    const assembled = await ctx.systemPrompt.assemble({ scope: agent })
+    let assembleContext: Record<string, unknown> = { scope: agent }
+    if (mode === 'registry') {
+      const pipelinePkg = '@deepseek-ai/dsh-tools/pipeline'
+      const pipelineMod = (await import(pipelinePkg)) as { ToolStep?: { capture(tools: unknown, agent: Agent): unknown } }
+      if (pipelineMod.ToolStep !== undefined) {
+        assembleContext = { scope: agent, toolStep: pipelineMod.ToolStep.capture(ctx.tools, agent) }
+      }
+    }
+    const assembled = await ctx.systemPrompt.assemble(assembleContext as never)
     const sdkSection = assembled.sections.find(section => section.name === 'tools:sdk')
     expect(sdkSection?.text).toContain("Output is already filtered to this Session's allowlist (claude/claude-sonnet-4-6)")
     expect(sdkSection?.text).toContain('Child LLM selection is required in this Session')

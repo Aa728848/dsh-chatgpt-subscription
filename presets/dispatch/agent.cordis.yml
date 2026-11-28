@@ -411,10 +411,11 @@
 # Code Mode for this agent alone: only its explicit native whitelist and
 # `code_run` stay natively callable. Every other registered tool — including
 # ask_user_question and the rows above — remains available from inside
-# `code_run`. The row brings its own executor, so no `tool-executor-ptc` row is
-# mounted beside it — one executor per scope. resolveDispatchPreset swaps this
-# row back to the PTC executor (or the deprecated presentation row) on
-# generations without @deepseek-ai/dsh-tool-executor-native.
+# `code_run`. The row brings its own root registry/executor, so no
+# `tool-registry-ptc` / `tool-executor-ptc` row is mounted beside it — one root
+# per scope. resolveDispatchPreset swaps this row back to the PTC registry/executor
+# (or the deprecated presentation row) on generations without
+# @deepseek-ai/dsh-tool-registry-native or @deepseek-ai/dsh-tool-executor-native.
 - id: code-mode
   name: '@eddyskywalker/dsh-chatgpt-subscription/codemode'
   config:

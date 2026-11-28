@@ -1227,7 +1227,7 @@ describe('DSH 内核 PTC 机制对齐与宿主层入参别名容错', () => {
 
   it('entry-codemode：按调用方 agent+toolSet 动态枚举工具清单，并暴露 executor.reset(agent)', async () => {
     const registered: { name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }[] = []
-    let capturedExecutor: { reset?: (agent: unknown) => Promise<void> } | undefined
+    let capturedRoot: { reset?: (agent: unknown) => Promise<void>; include?(source: unknown): () => void } | undefined
     const seenToolNames: string[][] = []
     const runtime = {
       language: 'typescript',
@@ -1240,26 +1240,31 @@ describe('DSH 内核 PTC 机制对齐与宿主层入参别名容错', () => {
         return { value: 'ok', logs: [] }
       },
     }
+    const defsFor = (scope?: { id?: string }) => {
+      if (scope?.id === 'agent-sub') {
+        return [{ name: 'read', description: 'r', parameters: {} }]
+      }
+      return [
+        { name: 'read', description: 'r', parameters: {} },
+        { name: 'subagent', description: 's', parameters: {} },
+      ]
+    }
     const ctx = {
       tools: {
         register(def: { name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }) {
           registered.push(def)
           return () => undefined
         },
-        setExecutor(exec: { reset?: (agent: unknown) => Promise<void> }) {
-          capturedExecutor = exec
+        setRoot(registry: { reset?: (agent: unknown) => Promise<void>; include?(source: unknown): () => void }) {
+          capturedRoot = registry
+          registry.include?.({
+            get: (name: string, scope?: { id?: string }) => defsFor(scope).find((d) => d.name === name),
+            getAll: (scope?: { id?: string }) => defsFor(scope),
+          })
           return () => undefined
         },
         get: () => undefined,
-        definitions(scope?: { id?: string }) {
-          if (scope?.id === 'agent-sub') {
-            return [{ name: 'read', description: 'r', parameters: {} }]
-          }
-          return [
-            { name: 'read', description: 'r', parameters: {} },
-            { name: 'subagent', description: 's', parameters: {} },
-          ]
-        },
+        definitions: defsFor,
         execute: async () => ({ results: [] }),
       },
       get: (name: string) => (name === 'ptcRuntime' ? runtime : undefined),
@@ -1277,14 +1282,14 @@ describe('DSH 内核 PTC 机制对齐与宿主层入参别名容错', () => {
     expect(seenToolNames).toEqual([['read', 'subagent'], ['read']])
 
     const injected: unknown[] = []
-    await capturedExecutor!.reset!({
+    await capturedRoot!.reset!({
       session: { id: 's1' },
       inject(msg: unknown) { injected.push(msg) },
     })
     expect(injected).toHaveLength(1)
 
     runtime.retainsState = false
-    await expect(capturedExecutor!.reset!({ session: { id: 's1' } })).rejects.toBeInstanceOf(CodeResetFailedError)
+    await expect(capturedRoot!.reset!({ session: { id: 's1' } })).rejects.toBeInstanceOf(CodeResetFailedError)
   })
 
   it('DSH 0.2.2-rc.2 scoped-repl：说明段采用 REPL 形态，且传输层自动剥离末尾顶层 return', async () => {

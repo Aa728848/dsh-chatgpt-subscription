@@ -193,13 +193,16 @@ type ToolAdmissionWhen = (context: { readonly agent?: unknown }) => boolean
 /**
  * 工具注册面。
  *
- * 第二参数的 `{ when }` 是**新代**才有的一步一准入开关（harness：
- * `ToolRegistrationOptions.when`）。已发布的 0.2.1-rc.3 的 `register` 只收一个
- * 参数，多给的那个被 JS 原样忽略——所以这里按结构类型调用：新代上开关逐步准入，
- * 老代上开关退化成 execute 里的同一次判定（见两个工具的实现）。
+ * - DSH 0.2.3-alpha.3+：移除 `{ when }`，通过 `include(source)` 实现动态按开关显隐。
+ * - DSH 0.2.2–0.2.3-alpha.2：`register(definition, { when })` 实现逐步准入。
+ * - 更老代：`register` 忽略第二参数，开关退化成 execute 里的同一次判定。
  */
 interface ToolsRegistryLike {
   register(definition: ToolDefinition, options?: { when?: ToolAdmissionWhen }): () => void
+  include?(source: {
+    get(name: string, scope?: unknown): ToolDefinition | undefined
+    getAll(scope?: unknown): readonly ToolDefinition[]
+  }): () => void
 }
 
 /** 日志面（可选）。 */
@@ -492,26 +495,7 @@ function registerTools(ctx: Context): void {
     return
   }
 
-  /**
-   * 逐步准入判定：开关关着就不把这个工具放进这一步的声明里。
-   *
-   * 新代 harness 会按这一步调用它；老代的 `register` 忽略第二个参数，那时开关由
-   * 两个 execute 里的同一次判定兜住（见 `readPlanModePipelineEnabled()`）。
-   */
-  const admission: ToolAdmissionWhen = () => readPlanModePipelineEnabled()
-
-  /**
-   * 把一个工具登记进 tools 服务，并让它在整行卸载时自动注销。
-   * @param definition - 工具定义。
-   */
-  const register = (definition: ToolDefinition): void => {
-    ctx.effect(
-      () => tools.register(definition, { when: admission }),
-      'dsh-chatgpt-subscription: ' + definition.name + ' tool',
-    )
-  }
-
-  register(defineTool({
+  const enterTool = defineTool({
     name: ENTER_PLAN_MODE_TOOL,
     description: ENTER_DESCRIPTION,
     parameters: {},
@@ -544,9 +528,9 @@ function registerTools(ctx: Context): void {
         || transition === 'cancelled' || transition === 'noop'
       return { active, transition }
     },
-  }))
+  })
 
-  register(defineTool({
+  const leaveTool = defineTool({
     name: LEAVE_PLAN_MODE_TOOL,
     description: LEAVE_DESCRIPTION,
     parameters: {
@@ -581,7 +565,39 @@ function registerTools(ctx: Context): void {
       const transition = transitionText(requirePlanMode(ctx).set(agent, false))
       return { active: false, transition }
     },
-  }))
+  })
+
+  if (typeof tools.include === 'function') {
+    // DSH 0.2.3-alpha.3+ 移除了 register 的 `{ when }`，通过动态 ToolSource + include()
+    // 随 planModePipeline 开关实时显隐两个工具。
+    const byName = new Map<string, ToolDefinition>([
+      [enterTool.name, enterTool],
+      [leaveTool.name, leaveTool],
+    ])
+    const allTools: readonly ToolDefinition[] = [enterTool, leaveTool]
+    ctx.effect(
+      () => tools.include!({
+        get: (toolName) => readPlanModePipelineEnabled() ? byName.get(toolName) : undefined,
+        getAll: () => readPlanModePipelineEnabled() ? allTools : [],
+      }),
+      'dsh-chatgpt-subscription: plan-mode-pipeline tools',
+    )
+    return
+  }
+
+  /**
+   * 逐步准入判定：开关关着就不把这个工具放进这一步的声明里。
+   *
+   * 0.2.2–0.2.3-alpha.2 会按这一步调用它；更老代的 `register` 忽略第二个参数，那时开关由
+   * 两个 execute 里的同一次判定兜住（见 `readPlanModePipelineEnabled()`）。
+   */
+  const admission: ToolAdmissionWhen = () => readPlanModePipelineEnabled()
+  for (const definition of [enterTool, leaveTool]) {
+    ctx.effect(
+      () => tools.register(definition, { when: admission }),
+      'dsh-chatgpt-subscription: ' + definition.name + ' tool',
+    )
+  }
 }
 
 // ── 返回给模型的正文 ────────────────────────────────────────────────────────

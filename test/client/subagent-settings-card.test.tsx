@@ -420,4 +420,40 @@ describe('subagent settings card', () => {
     expect(cleared.subagentAllowParentForkByMainModel['kimi-code/kimi-for-coding']).toBeNull()
     controller.dispose()
   })
+
+  it('supports selecting, saving, and clearing the 0.2.3-alpha.3 defaultModel even when allowlist selection is off', async () => {
+    const { controller, face, models } = await renderCard({ enabled: false, allowed: [] })
+    const defaultSelect = () => container.querySelector('[data-dsh-part="subagent-default-model"]') as HTMLSelectElement
+    expect(defaultSelect()).not.toBeNull()
+    expect(defaultSelect().value).toBe('')
+    expect(defaultSelect().options[0]!.textContent).toBe(zh.subagentDefaultModelInherit)
+
+    // 选择默认子智能体模型 -> 即使开关关着也能合法保存，并且只发出 defaultModel set 操作
+    await act(async () => { face.selectDefaultModel('kimi-code/kimi-for-coding') })
+    expect(defaultSelect().value).toBe('kimi-code/kimi-for-coding')
+    expect((container.querySelector('[data-dsh-part="subagent-save"]') as HTMLButtonElement).disabled).toBe(false)
+    await act(async () => { (container.querySelector('[data-dsh-part="subagent-save"]') as HTMLButtonElement).click() })
+    expect(models.writes).toHaveLength(1)
+    expect(models.writes[0]!.ops).toContainEqual({
+      op: 'set',
+      path: ['defaultModel'],
+      value: { provider: 'kimi-code', model: 'kimi-for-coding' },
+    })
+
+    // 切回「与父 Agent 相同」-> 发送 unset defaultModel
+    await act(async () => { face.selectDefaultModel(undefined) })
+    await act(async () => { (container.querySelector('[data-dsh-part="subagent-save"]') as HTMLButtonElement).click() })
+    expect(models.writes).toHaveLength(2)
+    expect(models.writes[1]!.ops).toContainEqual({ op: 'unset', path: ['defaultModel'] })
+    controller.dispose()
+  })
+
+  it('omits defaultModel op on save when defaultModel was never modified (legacy host compatibility)', async () => {
+    const { controller, face, models } = await renderCard({ enabled: true })
+    await act(async () => { face.toggleEnabled() })
+    await act(async () => { (container.querySelector('[data-dsh-part="subagent-save"]') as HTMLButtonElement).click() })
+    expect(models.writes).toHaveLength(1)
+    expect(models.writes[0]!.ops.some(op => op.path[0] === 'defaultModel')).toBe(false)
+    controller.dispose()
+  })
 })

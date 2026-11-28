@@ -206,8 +206,45 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
   const activeAnyOverridden = state.activeTargetOverridden || state.activeTargetForkOverridden
   const limitsHeadingId = headingId + '-limits'
   const modelsHeadingId = headingId + '-models'
+  const defaultModelId = headingId + '-default-model'
   const mainModelId = headingId + '-main-model'
   const blocked = !state.dirty || state.invalid || state.saving || !state.writable
+
+  const defaultGroups = new Map<string, { providerName: string; rows: SubagentSettingsState['defaultModelCandidates'][number][] }>()
+  const defaultUnavailable: SubagentSettingsState['defaultModelCandidates'][number][] = []
+  for (const candidate of state.defaultModelCandidates) {
+    if (!candidate.available) {
+      defaultUnavailable.push(candidate)
+      continue
+    }
+    const group = defaultGroups.get(candidate.provider)
+    if (group === undefined) defaultGroups.set(candidate.provider, { providerName: candidate.providerName, rows: [candidate] })
+    else group.rows.push(candidate)
+  }
+
+  const catalogFeedback = (
+    <>
+      {state.catalogStatus === 'loading'
+        ? <p className="dsh-subagent-notice" role="status">{t('subagentModelSelectionLoading')}</p>
+        : null}
+      {state.catalogStatus === 'error'
+        ? (
+          <div className="dsh-subagent-catalog-error" role="alert">
+            <span>{t('subagentModelSelectionLoadFailed')}</span>
+            <button
+              type="button"
+              data-dsh-part="subagent-retry-catalog"
+              disabled={state.saving}
+              onClick={() => { props.retryCatalog() }}
+            >
+              {t('subagentModelSelectionRetry')}
+            </button>
+          </div>
+        )
+        : null}
+      {state.catalogPartial ? <p className="dsh-subagent-notice">{t('subagentModelSelectionPartial')}</p> : null}
+    </>
+  )
 
   return (
     <div className="dsh-subagent-form" data-dsh-plugin="subagent" data-dsh-part="subagent-form">
@@ -272,6 +309,48 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
 
       <section className="dsh-subagent-section" aria-labelledby={modelsHeadingId}>
         <h3 className="dsh-subagent-heading" id={modelsHeadingId}>{t('subagentModelSelectionTitle')}</h3>
+        <div className="dsh-subagent-default-row">
+          <div className="dsh-subagent-default-meta">
+            <label className="dsh-subagent-label" htmlFor={defaultModelId}>{t('subagentDefaultModel')}</label>
+            <p className="dsh-subagent-hint" id={defaultModelId + '-hint'}>{t('subagentDefaultModelHint')}</p>
+          </div>
+          <select
+            id={defaultModelId}
+            className="dsh-subagent-select dsh-subagent-default-select"
+            data-dsh-part="subagent-default-model"
+            aria-label={t('subagentDefaultModel')}
+            aria-describedby={defaultModelId + '-hint'}
+            value={state.defaultModelKey ?? ''}
+            disabled={disabled}
+            onChange={(event) => {
+              const next = event.target.value
+              props.selectDefaultModel(next === '' ? undefined : next)
+            }}
+          >
+            <option value="">{t('subagentDefaultModelInherit')}</option>
+            {[...defaultGroups].map(([provider, group]) => (
+              <optgroup key={provider} label={group.providerName}>
+                {group.rows.map(candidate => (
+                  <option key={candidate.key} value={candidate.key}>
+                    {candidate.modelName + ' · ' + group.providerName}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+            {defaultUnavailable.length > 0
+              ? (
+                <optgroup label={t('subagentModelSelectionUnavailableGroup')}>
+                  {defaultUnavailable.map(candidate => (
+                    <option key={candidate.key} value={candidate.key}>
+                      {candidate.provider + '/' + candidate.model}
+                    </option>
+                  ))}
+                </optgroup>
+              )
+              : null}
+          </select>
+        </div>
+        {!state.enabled ? catalogFeedback : null}
         <div className="dsh-subagent-permission">
           <div className="dsh-subagent-toggle-row">
             <span className="dsh-subagent-toggle-label">{t('subagentModelSelectionToggle')}</span>
@@ -422,25 +501,7 @@ export function SubagentCard(props: SubagentCardProps): ReactNode {
                 <p className="dsh-subagent-hint">{t('subagentForkHint')}</p>
               </fieldset>
 
-              {state.catalogStatus === 'loading'
-                ? <p className="dsh-subagent-notice" role="status">{t('subagentModelSelectionLoading')}</p>
-                : null}
-              {state.catalogStatus === 'error'
-                ? (
-                  <div className="dsh-subagent-catalog-error" role="alert">
-                    <span>{t('subagentModelSelectionLoadFailed')}</span>
-                    <button
-                      type="button"
-                      data-dsh-part="subagent-retry-catalog"
-                      disabled={state.saving}
-                      onClick={() => { props.retryCatalog() }}
-                    >
-                      {t('subagentModelSelectionRetry')}
-                    </button>
-                  </div>
-                )
-                : null}
-              {state.catalogPartial ? <p className="dsh-subagent-notice">{t('subagentModelSelectionPartial')}</p> : null}
+              {catalogFeedback}
 
               {state.candidates.length > 0
                 ? (

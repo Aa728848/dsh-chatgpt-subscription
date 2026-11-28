@@ -175,6 +175,29 @@ export function auditedRoutesOf(
  * @param sessions - registry used to resolve each child's own log and header.
  * @returns one finding per child whose route could be read.
  */
+/**
+ * Read the latest `model/selection` event recorded in a child session's log.
+ * DSH 0.2.3-alpha.3+ records the child's resolved route as `model/selection`
+ * instead of stamping `agentProvider`/`agentModel` into `subagent/descriptor`.
+ */
+function readLatestModelSelection(session: AuditedSession): RouteViolation['route'] {
+  const events = eventsOf(session)
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'model/selection') continue
+    const record = asRecord(event.data)
+    const provider = asString(record?.['provider'])
+    const model = asString(record?.['model'])
+    if (provider !== undefined || model !== undefined) {
+      return {
+        ...provider === undefined ? {} : { provider },
+        ...model === undefined ? {} : { model },
+      }
+    }
+  }
+  return {}
+}
+
 export function childRoutesOf(parent: AuditedSession, sessions: AuditedSessions): ChildRouteFinding[] {
   const parentId = asString(parent.id)
   const seen = new Set<string>()
@@ -187,11 +210,25 @@ export function childRoutesOf(parent: AuditedSession, sessions: AuditedSessions)
       .map(event => event.type === 'subagent/descriptor' ? readChildDescriptor(event.data) : undefined)
       .find(entry => entry !== undefined)
     if (descriptor === undefined) return
+    let childProvider = descriptor.childProvider
+    let childModel = descriptor.childModel
+    if (childProvider === undefined && childModel === undefined) {
+      // DSH 0.2.3-alpha.3+ stores child route changes in `model/selection` (and
+      // completed requests in `requestHeader()`), rather than on `subagent/descriptor`.
+      const selected = readLatestModelSelection(child)
+      const fallback = selected.provider !== undefined || selected.model !== undefined
+        ? selected
+        : sessionRouteOf(child)
+      childProvider = fallback.provider
+      childModel = fallback.model
+    }
     const headerParent = asString(child.header?.parentSession)
     findings.push({
       childId,
       ...headerParent === undefined ? {} : { parentId: headerParent },
       ...descriptor,
+      ...childProvider === undefined ? {} : { childProvider },
+      ...childModel === undefined ? {} : { childModel },
     })
   }
 

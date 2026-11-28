@@ -95,6 +95,10 @@ export interface SubagentSettingsState {
 
   /** 模型选择总开关。 */
   enabled: boolean
+  /** 默认子智能体模型键（`<provider>/<model>`），`undefined` 表示继承父 Agent。 */
+  defaultModelKey: string | undefined
+  /** 默认子智能体模型下拉候选项（含已保存但当前不可用的路由）。 */
+  defaultModelCandidates: readonly SubagentModelCandidate[]
   /** 当前正在编辑的目标：`default` 或 `<provider>/<model>`。 */
   activeTarget: string
   /** 全局默认列表的条数。 */
@@ -131,6 +135,7 @@ export interface SubagentSettingsState {
 export interface SubagentSettingsActions {
   editLimit: (field: 'maxDepth' | 'maxActiveSubagents', text: string) => void
   resetLimit: (field: 'maxDepth' | 'maxActiveSubagents') => void
+  selectDefaultModel: (key: string | undefined) => void
   toggleEnabled: () => void
   toggleModel: (key: string) => void
   toggleAllowParentFork: () => void
@@ -200,6 +205,7 @@ export interface SubagentLimitsSettings {
 export interface SubagentModelSelectionSettings {
   enabled?: boolean
   allowedModels?: SubagentModelRoute[]
+  defaultModel?: SubagentModelRoute
 }
 
 /** 控制器的外部依赖：全部可注入，因此测试不需要真宿主。 */
@@ -259,6 +265,15 @@ function nativeAllowedRoutes(
   overrides: Readonly<Record<string, readonly SubagentModelRoute[]>>,
 ): SubagentModelRoute[] {
   return cloneRoutes([...defaults, ...Object.values(overrides).flat()])
+}
+
+function sameDefaultModel(
+  left: SubagentModelRoute | undefined,
+  right: SubagentModelRoute | undefined,
+): boolean {
+  return left === undefined || right === undefined
+    ? left === right
+    : routeKey(left) === routeKey(right)
 }
 
 function sameRouteSet(left: readonly SubagentModelRoute[], right: readonly SubagentModelRoute[]): boolean {
@@ -540,6 +555,7 @@ export class SubagentSettingsController {
   private draftActive: string | undefined
   private draftActiveCleared = false
   private draftEnabled: boolean | undefined
+  private draftDefaultModel: SubagentModelRoute | undefined
   private draftDefault: SubagentModelRoute[] | undefined
   private draftOverrides: Record<string, SubagentModelRoute[]> | undefined
   private draftDefaultFork: boolean | undefined
@@ -607,6 +623,7 @@ export class SubagentSettingsController {
       store: this.store,
       editLimit: (field, text) => { this.editLimit(field, text) },
       resetLimit: (field) => { this.resetLimit(field) },
+      selectDefaultModel: (key) => { this.selectDefaultModel(key) },
       toggleEnabled: () => { this.toggleEnabled() },
       toggleModel: (key) => { this.toggleModel(key) },
       toggleAllowParentFork: () => { this.toggleAllowParentFork() },
@@ -661,6 +678,16 @@ export class SubagentSettingsController {
     return this.modelSelection.getSnapshot().value?.enabled === true
   }
 
+  /** 宿主保存的子智能体默认模型（省略表示继承父 Agent）。 */
+  private currentDefaultModel(): SubagentModelRoute | undefined {
+    const raw = this.modelSelection.getSnapshot().value?.defaultModel
+    if (typeof raw?.provider !== 'string' || typeof raw?.model !== 'string') return undefined
+    const provider = raw.provider.trim()
+    const model = raw.model.trim()
+    if (provider.length === 0 || model.length === 0 || provider === 'undefined' || model === 'undefined') return undefined
+    return { provider, model }
+  }
+
   /**
    * 全局默认列表。
    *
@@ -703,6 +730,10 @@ export class SubagentSettingsController {
     return this.draftEnabled ?? this.currentEnabled()
   }
 
+  private desiredDefaultModel(): SubagentModelRoute | undefined {
+    return this.draftDefault !== undefined ? this.draftDefaultModel : this.currentDefaultModel()
+  }
+
   private defaultRoutes(): SubagentModelRoute[] {
     return cloneRoutes(this.draftDefault ?? this.currentDefault())
   }
@@ -738,6 +769,7 @@ export class SubagentSettingsController {
   private ensureDraft(): void {
     if (this.draftDefault !== undefined) return
     this.draftEnabled = this.currentEnabled()
+    this.draftDefaultModel = this.currentDefaultModel()
     this.draftDefault = this.currentDefault()
     this.draftOverrides = this.currentOverrides()
     this.draftDefaultFork = this.currentDefaultFork()
@@ -751,6 +783,7 @@ export class SubagentSettingsController {
     this.draftActive = undefined
     this.draftActiveCleared = false
     this.draftEnabled = undefined
+    this.draftDefaultModel = undefined
     this.draftDefault = undefined
     this.draftOverrides = undefined
     this.draftDefaultFork = undefined
@@ -788,6 +821,27 @@ export class SubagentSettingsController {
       this.draftActive = String(fallback)
       this.draftActiveCleared = true
     }
+    this.failed = false
+    this.publish()
+  }
+
+  private selectDefaultModel(key: string | undefined): void {
+    const snapshot = this.modelSelection.getSnapshot()
+    if (this.saving || snapshot.status !== 'ready' || !snapshot.writable) return
+    if (key === undefined || key === '') {
+      this.ensureDraft()
+      this.draftDefaultModel = undefined
+      this.failed = false
+      this.publish()
+      return
+    }
+    const candidate = this.defaultModelCandidates().find(item => item.key === key)
+    const route = candidate !== undefined
+      ? { provider: candidate.provider, model: candidate.model }
+      : parseRouteKey(key)
+    if (route === undefined) return
+    this.ensureDraft()
+    this.draftDefaultModel = route
     this.failed = false
     this.publish()
   }
@@ -886,6 +940,46 @@ export class SubagentSettingsController {
 
   // ── 派生视图 ────────────────────────────────────────────────────────────
 
+  /** 默认子智能体模型下拉候选：全量目录模型 + 当前/草稿中已保存但暂不可用的默认路由。 */
+  private defaultModelCandidates(): SubagentModelCandidate[] {
+    const desired = this.desiredDefaultModel()
+    const desiredKey = desired === undefined ? undefined : routeKey(desired)
+    const retained = new Map<string, SubagentModelRoute>()
+    for (const route of [this.currentDefaultModel(), desired]) {
+      if (route !== undefined) retained.set(routeKey(route), route)
+    }
+    const rows: SubagentModelCandidate[] = []
+    for (const group of this.catalogGroups) {
+      if (!group.provider || group.provider === 'undefined') continue
+      for (const model of group.models) {
+        if (!model.id || model.id === 'undefined') continue
+        const key = `${group.provider}/${model.id}`
+        retained.delete(key)
+        rows.push({
+          provider: group.provider,
+          model: model.id,
+          key,
+          providerName: group.providerName,
+          modelName: model.name,
+          available: true,
+          selected: desiredKey === key,
+        })
+      }
+    }
+    for (const [key, route] of retained) {
+      rows.push({
+        provider: route.provider,
+        model: route.model,
+        key,
+        providerName: route.provider,
+        modelName: route.model,
+        available: false,
+        selected: desiredKey === key,
+      })
+    }
+    return rows
+  }
+
   /** 当前目标的候选行：目录 ∪ 已保存 ∪ 草稿里出现的每一条。 */
   private candidates(): SubagentModelCandidate[] {
     const selected = new Set(this.activeRoutes().map(routeKey))
@@ -966,6 +1060,7 @@ export class SubagentSettingsController {
     const state = this.store.getSnapshot()
     if (this.disposed || this.saving || !state.available || !state.writable || !state.dirty || state.invalid) return
     const desiredEnabled = this.enabled()
+    const desiredDefaultModel = this.desiredDefaultModel()
     const desiredDefault = this.defaultRoutes()
     const desiredOverrides = this.overrides()
     const desiredDefaultFork = this.defaultAllowParentFork()
@@ -1011,16 +1106,23 @@ export class SubagentSettingsController {
       }
       this.preferencesStatus = 'ready'
 
-      // 2) 宿主授权清单：两份列表的并集，去重保序。
+      // 2) 宿主授权清单与默认模型：两份列表的并集，去重保序；默认模型仅在真的变更时写回（兼容旧代宿主）。
       const unionRoutes = nativeAllowedRoutes(desiredDefault, desiredOverrides)
       const scope = this.modelSelection
       const modelSnapshot = scope.getSnapshot()
+      const defaultModelDirty = !sameDefaultModel(this.currentDefaultModel(), desiredDefaultModel)
       const modelDirty = this.currentEnabled() !== desiredEnabled
         || !sameRouteSet(modelSnapshot.value?.allowedModels ?? [], unionRoutes)
+        || defaultModelDirty
       if (modelDirty && modelSnapshot.status === 'ready') {
         const ops: SubagentFormOp[] = [
           { op: 'set', path: ['enabled'], value: desiredEnabled },
           { op: 'set', path: ['allowedModels'], value: unionRoutes },
+          ...(defaultModelDirty
+            ? [desiredDefaultModel === undefined
+                ? { op: 'unset' as const, path: ['defaultModel'] }
+                : { op: 'set' as const, path: ['defaultModel'], value: { ...desiredDefaultModel } }]
+            : []),
         ]
         if (typeof scope.mutate === 'function') {
           const accepted = await scope.mutate(ops, modelSnapshot.revision ?? this.draftRevision)
@@ -1028,7 +1130,12 @@ export class SubagentSettingsController {
         } else if (typeof scope.set === 'function') {
           const ok1 = await scope.set('enabled', desiredEnabled)
           const ok2 = await scope.set('allowedModels', unionRoutes)
-          if (ok1 === false || ok2 === false) throw new Error('The deployment rejected the subagent model selection settings.')
+          const ok3 = defaultModelDirty
+            ? await scope.set('defaultModel', desiredDefaultModel)
+            : true
+          if (ok1 === false || ok2 === false || ok3 === false) {
+            throw new Error('The deployment rejected the subagent model selection settings.')
+          }
         }
       }
 
@@ -1113,6 +1220,8 @@ export class SubagentSettingsController {
     const maxDepth = this.limitField('maxDepth', 0, 1)
     const maxActive = this.limitField('maxActiveSubagents', 1, 8)
     const enabled = this.enabled()
+    const desiredDefaultModel = this.desiredDefaultModel()
+    const currentDefaultModel = this.currentDefaultModel()
     const desiredDefault = this.defaultRoutes()
     const desiredOverrides = this.overrides()
     const desiredDefaultFork = this.defaultAllowParentFork()
@@ -1128,6 +1237,7 @@ export class SubagentSettingsController {
       && (this.draftDefault !== undefined || (enabled && this.preferencesStatus === 'ready'))
       && !sameRouteSet(hostAllowed, nativeAllowedRoutes(desiredDefault, desiredOverrides))
     const modelsDirty = this.currentEnabled() !== enabled
+      || !sameDefaultModel(currentDefaultModel, desiredDefaultModel)
       || !sameRouteSet(currentDefault, desiredDefault)
       || !sameOverrides(currentOverrides, desiredOverrides)
       || currentDefaultFork !== desiredDefaultFork
@@ -1161,6 +1271,8 @@ export class SubagentSettingsController {
       maxDepth,
       maxActiveSubagents: maxActive,
       enabled,
+      defaultModelKey: desiredDefaultModel === undefined ? undefined : routeKey(desiredDefaultModel),
+      defaultModelCandidates: this.defaultModelCandidates(),
       activeTarget: this.activeTarget,
       defaultCount: desiredDefault.length,
       overridesByMainModel: desiredOverrides,

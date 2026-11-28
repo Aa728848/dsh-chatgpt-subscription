@@ -66,8 +66,16 @@ interface ProjectionsLike {
 interface ToolsRegistryLike {
   /** 注册一个工具定义。 */
   register(definition: ToolDefinition, options?: { when?: unknown }): unknown
+  /** DSH 0.2.3-alpha.3+：包含另一个动态工具源（如官方 plan-mode 的 AgentToolRegistry）。 */
+  include?(source: ToolSourceLike): unknown
   /** 按名字读一条已注册的定义（用来识别「守卫来晚了」）。 */
   get?(name: string, ...rest: unknown[]): unknown
+}
+
+/** 轻量动态工具源结构（对齐 DSH 0.2.3-alpha.3+ `ToolSource`）。 */
+interface ToolSourceLike {
+  get(name: string, scope?: unknown): unknown
+  getAll(scope?: unknown): readonly unknown[]
 }
 
 /** 系统段（只读名字、正文与退役标记）。 */
@@ -302,35 +310,93 @@ export function installPlanModeCacheGuard(ctx: unknown): PlanModeCacheGuard {
   })
   if (offReminder !== undefined) restores.push(() => { offReminder() })
 
-  // ── 3. 摘掉 exit_plan_mode 的 { when } ────────────────────────────────────
+  // ── 3. 摘掉 exit_plan_mode 的条件准入（旧代 { when } / 新代 AgentToolRegistry include）──
+  const wrapExitPlanSource = (source: ToolSourceLike): ToolSourceLike => {
+    const readUnscopedExit = (): unknown => {
+      try {
+        return source.get(EXIT_PLAN_MODE)
+      } catch {
+        return undefined
+      }
+    }
+    return {
+      get(name: string, scope?: unknown): unknown {
+        const found = source.get(name, scope)
+        if (found !== undefined || name !== EXIT_PLAN_MODE || scope === undefined) return found
+        return readUnscopedExit()
+      },
+      getAll(scope?: unknown): readonly unknown[] {
+        const list = source.getAll(scope)
+        if (scope === undefined || !Array.isArray(list)) return list
+        if (list.some(entry => typeof entry === 'object' && entry !== null && (entry as { name?: unknown }).name === EXIT_PLAN_MODE)) {
+          return list
+        }
+        const exitDef = readUnscopedExit()
+        return exitDef === undefined ? list : [...list, exitDef]
+      },
+    }
+  }
+
   const wrap = (tools: ToolsRegistryLike | undefined): void => {
     if (tools === undefined) return
     // 关键：原实现必须取**原型上那份未绑定的方法**。
     // Cordis 的 Service 代理读属性时会把方法绑到读取它的那一层作用域（根作用域），
     // 那份绑定版一旦再 original.call(tools, …)，每个 preset 的注册都被塞回根作用域，
     // 全局层于是撞上 "already registered"。
-    const target = resolveMethodTarget(tools, 'register')
-    if (target === undefined) return
-    if (alreadyPatched(patchedMethods, target.holder, target.name)) return
-    const original = target.original
-    const wrapped: UnboundMethod = function (this: unknown, ...args: unknown[]): unknown {
-      // receiver 用**调用方**的 this：Cordis 会把它换成那一层作用域的影子，
-      // 于是 ToolsService 里的 this.ctx 留在调用方自己的作用域里，而不是根上下文。
-      const receiver = this ?? tools
-      const definition = args[0] as ToolDefinition
-      const options = args[1] as { when?: unknown } | undefined
-      if (definition?.name === EXIT_PLAN_MODE && options !== undefined && options !== null && 'when' in options) {
-        const { when: _dropped, ...rest } = options
-        return original.call(receiver, definition, rest)
+    const registerTarget = resolveMethodTarget(tools, 'register')
+    if (registerTarget !== undefined && !alreadyPatched(patchedMethods, registerTarget.holder, registerTarget.name)) {
+      const original = registerTarget.original
+      const wrapped: UnboundMethod = function (this: unknown, ...args: unknown[]): unknown {
+        // receiver 用**调用方**的 this：Cordis 会把它换成那一层作用域的影子，
+        // 于是 ToolsService 里的 this.ctx 留在调用方自己的作用域里，而不是根上下文。
+        const receiver = this ?? tools
+        const definition = args[0] as ToolDefinition
+        const options = args[1] as { when?: unknown } | undefined
+        if (definition?.name === EXIT_PLAN_MODE && options !== undefined && options !== null && 'when' in options) {
+          const { when: _dropped, ...rest } = options
+          return original.call(receiver, definition, rest)
+        }
+        return original.call(receiver, definition, options)
       }
-      return original.call(receiver, definition, options)
+      if (installMethod(registerTarget, wrapped)) {
+        markPatched(patchedMethods, registerTarget.holder, registerTarget.name)
+        restores.push(() => {
+          restoreMethod(registerTarget)
+        })
+      }
     }
-    if (!installMethod(target, wrapped)) return
-    markPatched(patchedMethods, target.holder, target.name)
-    restores.push(() => {
-      restoreMethod(target)
-    })
-    // 守卫来晚了：那条注册已经带着 { when } 落进工具层，工具层没有公开的改法。
+
+    // DSH 0.2.3-alpha.3+：官方 plan-mode 改用 `AgentToolRegistry` + `ctx.tools.include()`
+    // 在首次进入计划模式时才为该 Agent 暴露 `exit_plan_mode`。拦截包含 `exit_plan_mode` 的源，
+    // 使其对所有 scope 从首步起恒定暴露，避免中途重建工具表破坏前缀缓存。
+    const includeTarget = resolveMethodTarget(tools, 'include')
+    if (includeTarget !== undefined && !alreadyPatched(patchedMethods, includeTarget.holder, includeTarget.name)) {
+      const originalInclude = includeTarget.original
+      const wrappedInclude: UnboundMethod = function (this: unknown, ...args: unknown[]): unknown {
+        const receiver = this ?? tools
+        const source = args[0] as Partial<ToolSourceLike> | undefined
+        if (typeof source?.get === 'function' && typeof source?.getAll === 'function') {
+          let offersExit = false
+          try {
+            offersExit = source.get(EXIT_PLAN_MODE) !== undefined
+          } catch {
+            offersExit = false
+          }
+          if (offersExit) {
+            return originalInclude.call(receiver, wrapExitPlanSource(source as ToolSourceLike), ...args.slice(1))
+          }
+        }
+        return originalInclude.call(receiver, ...args)
+      }
+      if (installMethod(includeTarget, wrappedInclude)) {
+        markPatched(patchedMethods, includeTarget.holder, includeTarget.name)
+        restores.push(() => {
+          restoreMethod(includeTarget)
+        })
+      }
+    }
+
+    // 守卫来晚了：那条注册已经带着条件准入落进工具层，工具层没有公开的改法。
     if (typeof tools.get === 'function') {
       try {
         if (tools.get(EXIT_PLAN_MODE) !== undefined) {
@@ -338,7 +404,7 @@ export function installPlanModeCacheGuard(ctx: unknown): PlanModeCacheGuard {
             + 'was already registered; this session keeps the conditional admission')
         }
       } catch {
-        // 只读探测失败不该影响守卫。
+        // 只读探测失败（含 0.2.3-alpha.3+ 尚未选择根注册表时）不该影响守卫。
       }
     }
   }

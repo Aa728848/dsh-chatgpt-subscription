@@ -277,12 +277,186 @@ function idOf(call: unknown): string | undefined {
 }
 
 /** 取 `tools:sdk` 的排序位；取不到时退回 5000（内核 TOOLS_SDK 的默认位）。 */
-function sectionOrderOf(ctx: unknown): number {
+export function sectionOrderOf(ctx: unknown): number {
   try {
     const systemPrompt = (ctx as { get?: (name: string) => unknown })?.get?.('systemPrompt')
     const order = (systemPrompt as { getSectionOrder?: (name: string) => unknown })?.getSectionOrder?.('TOOLS_SDK')
     return typeof order === 'number' && Number.isFinite(order) ? order : 5000
   } catch {
     return 5000
+  }
+}
+
+/** 轻量动态工具源契约（对齐 DSH 0.2.3-alpha.3+ `ToolSource`）。 */
+export interface CodemodeToolSource {
+  get(name: string, scope?: object): unknown
+  getAll(scope?: object): readonly unknown[]
+}
+
+/** DSH 0.2.3-alpha.3+ 可组合根注册表（对齐 `ToolRegistry`），供 `ctx.tools.setRoot()` 使用。 */
+export interface CodemodeRootRegistry extends CodemodeToolSource {
+  register(tool: unknown): () => void
+  include(source: CodemodeToolSource): () => void
+  /** 直接查询未遮蔽的底层绑定源（绝不回读 `ctx.tools`，避免 `ToolCompositionError`）。 */
+  readonly sourceView: { get(name: string, scope?: object): unknown }
+  /** 枚举程序内可用绑定（含被遮蔽工具）；带 `toolStep` 时首次查询即钉死该步绑定。 */
+  bindings(scope?: object, toolStep?: unknown): readonly unknown[]
+  /** 解析单条程序内绑定；带 `toolStep` 时校验其与该步钉死定义一致。 */
+  binding(name: string, scope?: object, toolStep?: unknown): unknown
+  /** 重置指定 Agent 的常驻程序环境。 */
+  reset?(agent: unknown): Promise<void>
+}
+
+/** 构造 {@link CodemodeRootRegistry} 的钩子。 */
+export interface RootRegistryHooks {
+  /** 基于未遮蔽绑定源建立整表归属视图。 */
+  view(names: readonly string[], sourceView: { get(name: string, scope?: object): unknown }): CodemodeView
+  /** 基于未遮蔽绑定源判定单个名字归属。 */
+  viewForName(name: string, sourceView: { get(name: string, scope?: object): unknown }): CodemodeView
+  /** 每次 `getAll` 观察到全量绑定时的回调。 */
+  onCatalog?(tools: readonly unknown[]): void
+  /** 每次面向模型投影后的决策回调。 */
+  onDescribe?(decision: DescribeDecision): void
+  /** `setRoot()` 同步初始化探针期间跳过日志与 debugRing 写入。 */
+  isProbing?(): boolean
+  /** 重置指定 Agent 的常驻程序环境。 */
+  reset?(agent: unknown): Promise<void>
+}
+
+/**
+ * 造一个面向 DSH 0.2.3-alpha.3+ `ctx.tools.setRoot()` 的 Code Mode 根注册表。
+ *
+ * - `include(registrations)` 接收 `ctx.tools` 自动注入的未遮蔽注册表视图；
+ * - `get()` / `getAll()` 仅暴露原生白名单与传输工具，模型直呼被遮蔽工具时由内核自动以
+ *   `UNKNOWN_TOOL` 拒绝；
+ * - `bindings()` / `binding()` 向程序传输层暴露完整未遮蔽绑定，并按 `ToolStep` 钉死步骤视图。
+ */
+export function createCodemodeRootRegistry(
+  rules: CodemodeRules,
+  hooks: RootRegistryHooks,
+): CodemodeRootRegistry {
+  const own = new Map<string, unknown>()
+  const sources: CodemodeToolSource[] = []
+  const stepBindings = new WeakMap<object, ReadonlyMap<string, unknown>>()
+
+  const resolveRaw = (name: string, scope?: object): unknown => {
+    const direct = own.get(name)
+    if (direct !== undefined) return direct
+    for (const source of sources) {
+      const found = source.get(name, scope)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+
+  const resolveAllRaw = (scope?: object): readonly unknown[] => {
+    const out: unknown[] = [...own.values()]
+    for (const source of sources) {
+      const entries = source.getAll(scope)
+      if (Array.isArray(entries)) {
+        for (const entry of entries) out.push(entry)
+      }
+    }
+    return out
+  }
+
+  const dedupeBindings = (list: readonly unknown[]): ReadonlyMap<string, unknown> => {
+    const map = new Map<string, unknown>()
+    for (const entry of list) {
+      const name = nameOf(entry)
+      if (name === undefined || map.has(name)) continue
+      map.set(name, entry)
+    }
+    return map
+  }
+
+  const ensureStepBindings = (toolStep: object, fallbackScope?: object): ReadonlyMap<string, unknown> => {
+    let declared = stepBindings.get(toolStep)
+    if (declared === undefined) {
+      const stepAgent = (toolStep as { readonly agent?: unknown }).agent
+      const scope = typeof stepAgent === 'object' && stepAgent !== null ? stepAgent : fallbackScope
+      declared = dedupeBindings(resolveAllRaw(scope))
+      stepBindings.set(toolStep, declared)
+    }
+    return declared
+  }
+
+  const sourceView = {
+    get: (name: string, scope?: object): unknown => resolveRaw(name, scope),
+  }
+
+  return {
+    sourceView,
+    register(tool: unknown): () => void {
+      const toolName = nameOf(tool)
+      if (toolName === undefined) return () => {}
+      if (own.has(toolName)) {
+        throw new Error(`tool "${toolName}" is already registered in codemode root registry`)
+      }
+      own.set(toolName, tool)
+      return () => {
+        if (own.get(toolName) === tool) own.delete(toolName)
+      }
+    },
+    include(source: CodemodeToolSource): () => void {
+      sources.push(source)
+      return () => {
+        const index = sources.indexOf(source)
+        if (index >= 0) sources.splice(index, 1)
+      }
+    },
+    get(name: string, scope?: object): unknown {
+      const raw = resolveRaw(name, scope)
+      if (raw === undefined) return undefined
+      if (rules.options.guard && name !== rules.options.runToolName) {
+        const view = hooks.viewForName(name, sourceView)
+        if (isMaskedName(name, rules, view)) return undefined
+      }
+      return raw
+    },
+    getAll(scope?: object): readonly unknown[] {
+      const all = resolveAllRaw(scope)
+      hooks.onCatalog?.(all)
+      const names: string[] = []
+      for (const tool of all) {
+        const name = nameOf(tool)
+        if (name !== undefined) names.push(name)
+      }
+      const view = hooks.view(names, sourceView)
+      const visible: unknown[] = []
+      const visibleNames: string[] = []
+      const masked: string[] = []
+      for (const tool of all) {
+        const name = nameOf(tool)
+        if (name === undefined) continue
+        if (isMaskedName(name, rules, view)) masked.push(name)
+        else {
+          visible.push(tool)
+          visibleNames.push(name)
+        }
+      }
+      if (hooks.isProbing?.() !== true) {
+        hooks.onDescribe?.({ visible: visibleNames, masked })
+      }
+      return visible
+    },
+    bindings(scope?: object, toolStep?: unknown): readonly unknown[] {
+      if (typeof toolStep === 'object' && toolStep !== null) {
+        return [...ensureStepBindings(toolStep, scope).values()]
+      }
+      return [...dedupeBindings(resolveAllRaw(scope)).values()]
+    },
+    binding(name: string, scope?: object, toolStep?: unknown): unknown {
+      const current = resolveRaw(name, scope)
+      if (current === undefined || typeof toolStep !== 'object' || toolStep === null) return current
+      return ensureStepBindings(toolStep, scope).get(name) === current ? current : undefined
+    },
+    ...(typeof hooks.reset === 'function'
+      ? {
+          async reset(agent: unknown): Promise<void> {
+            await hooks.reset!(agent)
+          },
+        }
+      : {}),
   }
 }

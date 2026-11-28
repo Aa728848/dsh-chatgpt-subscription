@@ -301,8 +301,10 @@ export interface CallToolRequest {
   readonly signal: AbortSignal
   /** 调用方 agent。 */
   readonly agent: unknown
-  /** 步骤准入集合。 */
+  /** 步骤准入集合（DSH <= 0.2.3-alpha.2）。 */
   readonly toolSet: unknown
+  /** 步骤声明句柄（DSH 0.2.3-alpha.3+）。 */
+  readonly toolStep?: unknown
 }
 
 /** 一次子调用的结果。 */
@@ -742,7 +744,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
         ? validateEscalationArgs(input.rawSandboxPermissions, input.rawJustification)
         : undefined
       await host.awaitPredecessors?.(exec.agent, exec.signal)
-      const catalog = host.catalog(exec.agent, exec.toolSet)
+      const catalog = host.catalog(exec.agent, exec.toolStep ?? exec.toolSet)
       const runController = new AbortController()
       const onOuterAbort = (): void => { runController.abort(exec.signal.reason) }
       if (exec.signal.aborted) runController.abort(exec.signal.reason)
@@ -798,6 +800,7 @@ export function createTransportDefinition(host: CodemodeHost, rules: CodemodeRul
               signal: nestedSignal,
               agent: exec.agent,
               toolSet: exec.toolSet,
+              ...(exec.toolStep === undefined ? {} : { toolStep: exec.toolStep }),
             }),
             /**
              * 提交阶段：按**提交顺序**逐条执行，落在会话里的副作用因此与提交顺序一致。
@@ -1329,8 +1332,10 @@ export interface TransportExecution {
   readonly signal: AbortSignal
   /** 调用方 agent。 */
   readonly agent?: unknown
-  /** 步骤准入集合。 */
+  /** 步骤准入集合（DSH <= 0.2.3-alpha.2）。 */
   readonly toolSet?: unknown
+  /** 步骤声明句柄（DSH 0.2.3-alpha.3+）。 */
+  readonly toolStep?: unknown
   /** 附加延迟上下文（图片块、催促通知等）。 */
   deferContext?(message: unknown): void
   /** 请求在当前批结算后结束回合。 */
@@ -1855,6 +1860,7 @@ async function forwardNarration(
       signal,
       agent: exec.agent,
       toolSet: exec.toolSet,
+      ...(exec.toolStep === undefined ? {} : { toolStep: exec.toolStep }),
     })
   } catch {
     // 见函数文档：简报是界面提示，不是运行结果。

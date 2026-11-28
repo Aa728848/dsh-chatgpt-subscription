@@ -407,31 +407,39 @@ export function installTimelineCacheGuard(
    */
   const resolveMethodTarget = (
     service: unknown,
-  ): { holder: object; name: string; original: DefinitionsMethod; descriptor?: PropertyDescriptor } | undefined => {
+  ): { holder: object; name: 'definitions' | 'getAll'; original: DefinitionsMethod; descriptor?: PropertyDescriptor } | undefined => {
     if (typeof service !== 'object' || service === null) return undefined
     const own = service as Record<string, unknown>
-    if (Object.prototype.hasOwnProperty.call(own, 'definitions')) {
-      const original = own['definitions']
-      if (typeof original !== 'function') return undefined
-      return {
-        holder: own,
-        name: 'definitions',
-        original: original as DefinitionsMethod,
-        descriptor: Object.getOwnPropertyDescriptor(own, 'definitions'),
+    const proto = Object.getPrototypeOf(service) as object | null
+    const validProto = proto !== null && proto !== (Object.prototype as object) && proto !== (Function.prototype as object)
+      ? proto
+      : undefined
+    // 优先包装旧代 definitions()；DSH 0.2.3-alpha.3+ 移除 definitions() 后回退包装 getAll()。
+    for (const methodName of ['definitions', 'getAll'] as const) {
+      if (Object.prototype.hasOwnProperty.call(own, methodName)) {
+        const original = own[methodName]
+        if (typeof original === 'function') {
+          return {
+            holder: own,
+            name: methodName,
+            original: original as DefinitionsMethod,
+            descriptor: Object.getOwnPropertyDescriptor(own, methodName),
+          }
+        }
+      }
+      if (validProto !== undefined) {
+        const original = (validProto as Record<string, unknown>)[methodName]
+        if (typeof original === 'function') {
+          return {
+            holder: validProto,
+            name: methodName,
+            original: original as DefinitionsMethod,
+            descriptor: Object.getOwnPropertyDescriptor(validProto, methodName),
+          }
+        }
       }
     }
-    const proto = Object.getPrototypeOf(service) as object | null
-    if (proto === null || proto === (Object.prototype as object) || proto === (Function.prototype as object)) {
-      return undefined
-    }
-    const original = (proto as Record<string, unknown>)['definitions']
-    if (typeof original !== 'function') return undefined
-    return {
-      holder: proto,
-      name: 'definitions',
-      original: original as DefinitionsMethod,
-      descriptor: Object.getOwnPropertyDescriptor(proto, 'definitions'),
-    }
+    return undefined
   }
 
   const wrapToolsService = (tools: unknown): boolean => {
@@ -444,7 +452,7 @@ export function installTimelineCacheGuard(
         logWarn(
           ctx,
           '[dsh-chatgpt-subscription] timeline cache guard cannot freeze the task tool description: '
-          + 'this tool registry exposes no definitions()',
+          + 'this tool registry exposes no definitions() or getAll()',
         )
       }
       return false
@@ -455,14 +463,22 @@ export function installTimelineCacheGuard(
       return false
     }
     const original = target.original
-    const replacement = function (this: unknown, scope?: unknown, toolSet?: unknown): readonly unknown[] {
-      // receiver 用**调用方**的 this：服务里的 this.ctx 留在调用方那一层作用域。
-      const receiver = this ?? tools
-      const list = original.call(receiver, scope, toolSet)
-      if (!Array.isArray(list) || disposed || !enabled()) return list
-      if (!isProtected(scope)) return list
-      return freezeDefinitions(scope, list)
-    }
+    const replacement = target.name === 'getAll'
+      ? function (this: unknown, scope?: unknown): readonly unknown[] {
+          const receiver = this ?? tools
+          const list = original.call(receiver, scope)
+          if (!Array.isArray(list) || disposed || !enabled()) return list
+          if (!isProtected(scope)) return list
+          return freezeDefinitions(scope, list)
+        }
+      : function (this: unknown, scope?: unknown, toolSet?: unknown): readonly unknown[] {
+          // receiver 用**调用方**的 this：服务里的 this.ctx 留在调用方那一层作用域。
+          const receiver = this ?? tools
+          const list = original.call(receiver, scope, toolSet)
+          if (!Array.isArray(list) || disposed || !enabled()) return list
+          if (!isProtected(scope)) return list
+          return freezeDefinitions(scope, list)
+        }
     try {
       Object.defineProperty(target.holder, target.name, {
         value: replacement,

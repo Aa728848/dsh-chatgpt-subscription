@@ -36,21 +36,28 @@ export const PRESET_REGISTRY_PACKAGE = '@deepseek-ai/dsh-agent-preset'
  */
 export const WORKING_DIRECTORY_PACKAGE = '@deepseek-ai/dsh-working-directory'
 
-/** The standalone PTC executor introduced when tool presentation split into executor plugins. */
+/** The standalone PTC executor introduced in 0.2.2 (replaced by tool-registry-ptc in 0.2.3-alpha.3). */
 export const PTC_EXECUTOR_PACKAGE = '@deepseek-ai/dsh-tool-executor-ptc'
 
+/** The standalone PTC root registry introduced in 0.2.3-alpha.3. */
+export const PTC_REGISTRY_PACKAGE = '@deepseek-ai/dsh-tool-registry-ptc'
+
 /**
- * The native executor this package delegates Code Mode execution to.
+ * The native executor/registry packages whose presence marks a harness that
+ * supports Code Mode (0.2.2–0.2.3-alpha.2 `setExecutor` or 0.2.3-alpha.3+ `setRoot`).
  *
  * A program sub-call must run through the harness's own policy, approval, and
  * post-execute pipeline; re-implementing that pipeline is how a plugin silently
- * drops policy. The package is therefore an *optional peer*: the running
- * harness supplies it, and npm never installs a second copy into the profile,
- * where a stale pinned version would shadow the kernel's own and desynchronise
- * the two on every desktop update. Code Mode degrades to the PTC row when it is
- * absent (see {@link resolveDispatchPreset}).
+ * drops policy. Both packages are *optional peers*: the running harness supplies
+ * them, and npm never installs a second copy into the profile, where a stale
+ * pinned version would shadow the kernel's own and desynchronise the two on
+ * every desktop update. Code Mode degrades to the PTC row when neither is
+ * present (see {@link resolveDispatchPreset}).
  */
 export const NATIVE_EXECUTOR_PACKAGE = '@deepseek-ai/dsh-tool-executor-native'
+
+/** The native root registry introduced in 0.2.3-alpha.3 when tool executors became composable registries. */
+export const NATIVE_REGISTRY_PACKAGE = '@deepseek-ai/dsh-tool-registry-native'
 
 /** This package's Code Mode row: the preset's own tools stay native, the rest is program-only. */
 export const CODEMODE_PACKAGE = '@eddyskywalker/dsh-chatgpt-subscription/codemode'
@@ -451,9 +458,12 @@ Fallback is a task-scoped, non-session-wide exception and covers only the single
 export function resolveDispatchPreset(resolves: SpecifierResolver = resolvesFromHere): PresetDefinition {
   const hasWorkingDirectory = resolves(WORKING_DIRECTORY_PACKAGE)
   const hasLegacyListAgents = resolves('@deepseek-ai/dsh-tool-subagent-control/list-agents')
+  const hasPtcRegistry = resolves(PTC_REGISTRY_PACKAGE)
   const hasPtcExecutor = resolves(PTC_EXECUTOR_PACKAGE)
-  const hasNativeExecutor = resolves(NATIVE_EXECUTOR_PACKAGE)
-  if (!hasWorkingDirectory && hasLegacyListAgents && !hasPtcExecutor && hasNativeExecutor) return DISPATCH_PRESET
+  const hasNativeToolSupport = resolves(NATIVE_REGISTRY_PACKAGE) || resolves(NATIVE_EXECUTOR_PACKAGE)
+  if (!hasWorkingDirectory && hasLegacyListAgents && !hasPtcRegistry && !hasPtcExecutor && hasNativeToolSupport) {
+    return DISPATCH_PRESET
+  }
   return {
     ...DISPATCH_PRESET,
     plugins: DISPATCH_PRESET.plugins.map((row) => {
@@ -463,7 +473,8 @@ export function resolveDispatchPreset(resolves: SpecifierResolver = resolvesFrom
           config: (row.config as PresetRow[]).filter(nested => nested.id !== 'tool-subagent-list-agents'),
         }
       }
-      if (row.id === 'code-mode' && !hasNativeExecutor) {
+      if (row.id === 'code-mode' && !hasNativeToolSupport) {
+        if (hasPtcRegistry) return { id: 'tool-registry-ptc', name: PTC_REGISTRY_PACKAGE }
         return hasPtcExecutor
           ? { id: 'tool-executor-ptc', name: PTC_EXECUTOR_PACKAGE }
           : { id: 'tool-presentation', name: AGENT_TOOL_PRESENTATION_PACKAGE, config: { mode: 'ptc' } }

@@ -44,6 +44,9 @@ export const zh = {
   subagentCapacityInvalid: '请输入不小于 1 的整数。',
 
   subagentModelSelectionTitle: '模型选择',
+  subagentDefaultModel: '子智能体默认模型',
+  subagentDefaultModelInherit: '与父 Agent 相同',
+  subagentDefaultModelHint: '父智能体未指定模型时使用此项；已单独配置模型的委派工具保持自身配置。',
   subagentModelSelectionToggle: '允许 Agent 为子智能体选择模型',
   subagentModelSelectionChoose: '开启后，Agent 可以从下方授权模型中，为每个子智能体选择提供方、模型和推理强度。修改会立即对所有会话生效。',
   subagentModelSelectionAllowed: 'Agent 可选择的模型',
@@ -105,6 +108,9 @@ export const en: Record<SubagentLocaleKey, string> = {
   subagentCapacityInvalid: 'Enter a whole number of 1 or more.',
 
   subagentModelSelectionTitle: 'Model selection',
+  subagentDefaultModel: 'Default Subagent model',
+  subagentDefaultModelInherit: 'Same as parent agent',
+  subagentDefaultModelHint: 'Used when an agent starts a Subagent without choosing a model. A delegation tool with its own configured model keeps that model.',
   subagentModelSelectionToggle: 'Allow agents to choose models for Subagents',
   subagentModelSelectionChoose: 'When enabled, agents can choose a provider, model, and reasoning effort for each Subagent from the authorized models below. Changes apply immediately to every session.',
   subagentModelSelectionAllowed: 'Models agents may choose',

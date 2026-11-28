@@ -242,6 +242,28 @@ export const SUBAGENT_CSS = `
   min-width: 0;
 }
 
+.dsh-subagent-default-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+.dsh-subagent-default-meta {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dsh-subagent-default-select {
+  flex: 0 1 260px;
+  width: auto;
+  min-width: 160px;
+  max-width: 60%;
+}
+
 .dsh-subagent-switch {
   box-sizing: border-box;
   position: relative;

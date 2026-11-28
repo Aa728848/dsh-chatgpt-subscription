@@ -41,7 +41,7 @@ import {
 import { qianwenPromptTokens, recordQianwenCacheUsage } from './cache-stats.ts'
 
 const RETRY_POLICY = resolveRetryPolicy({
-  mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER', 'TRANSPORT'],
+  mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'],
   backoff: { initialDelayMs: 1500, maxDelayMs: 15000, jitterRatio: 0.2 },
 }, 'dsh-chatgpt-subscription.qianwen-token-plan.retry')
 const prefixRequests = new PrefixRequestCoordinator({ waitMs: 2500 })

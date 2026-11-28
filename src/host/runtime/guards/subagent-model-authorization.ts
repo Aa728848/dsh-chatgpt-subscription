@@ -1593,19 +1593,32 @@ interface EventHost {
  */
 export function routeParameterProbe(ctx: Context): RouteParameterProbe | undefined {
   const registry = (ctx as unknown as {
-    tools?: { definitions?(scope?: unknown): readonly { readonly name?: unknown; readonly parameters?: unknown }[] }
+    tools?: {
+      definitions?(scope?: unknown): readonly { readonly name?: unknown; readonly parameters?: unknown }[]
+      get?(name: string, scope?: unknown): { readonly name?: unknown; readonly parameters?: unknown } | undefined
+      getAll?(scope?: unknown): readonly { readonly name?: unknown; readonly parameters?: unknown }[]
+    }
   }).tools
-  if (typeof registry?.definitions !== 'function') return undefined
-  const definitions = registry.definitions.bind(registry)
+  const hasDefinitions = typeof registry?.definitions === 'function'
+  const hasGet = typeof registry?.get === 'function'
+  const hasGetAll = typeof registry?.getAll === 'function'
+  if (!hasDefinitions && !hasGet && !hasGetAll) return undefined
   return (agent, toolName) => {
-    let visible: readonly { readonly name?: unknown; readonly parameters?: unknown }[]
+    let definition: { readonly name?: unknown; readonly parameters?: unknown } | undefined
     try {
-      visible = definitions(agent)
+      if (hasDefinitions) {
+        const visible = registry!.definitions!(agent)
+        definition = visible.find(entry => entry?.name === toolName)
+      } else {
+        definition = hasGet ? registry!.get!(toolName, agent) : undefined
+        if (definition === undefined && hasGetAll) {
+          definition = registry!.getAll!(agent).find(entry => entry?.name === toolName)
+        }
+      }
     } catch {
-      // A scope the registry cannot resolve says nothing about the tool.
+      // A scope the registry cannot resolve (or an unavailable root) says nothing about the tool.
       return undefined
     }
-    const definition = visible.find(entry => entry?.name === toolName)
     if (definition === undefined) return undefined
     const parameters = asRecord(definition.parameters)
     if (parameters === undefined) return undefined
@@ -1613,8 +1626,9 @@ export function routeParameterProbe(ctx: Context): RouteParameterProbe | undefin
     // live under `properties`: `{ type: 'object', properties: { provider, model } }`.
     // Reading only the flat form answered `false` for every real tool, which sent
     // each explicit dispatch down the inherit branch and denied it with a reason
-    // the call could not satisfy. A hand-built definition may still flatten the
-    // names onto the parameter object, so both readings are honoured.
+    // the call could not satisfy. A hand-built definition (or 0.2.3-alpha.3+
+    // `tools.get()` raw ToolDefinition) may still flatten the names onto the
+    // parameter object, so both readings are honoured.
     const properties = asRecord(parameters['properties'])
     if (properties !== undefined) return 'provider' in properties || 'model' in properties
     return 'provider' in parameters || 'model' in parameters

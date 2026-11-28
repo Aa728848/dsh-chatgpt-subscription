@@ -424,7 +424,7 @@ describe('CommandCodeAdapter streaming', () => {
     expect(adapter.providerRetryPolicy()).toMatchObject({
       mode: 'normal',
       maxRetries: 3,
-      retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+      retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'],
       initialDelayMs: 1_500,
       maxDelayMs: 15_000,
     })

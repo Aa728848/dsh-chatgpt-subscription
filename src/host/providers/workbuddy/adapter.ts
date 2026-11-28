@@ -104,7 +104,7 @@ import {
 const RETRY_POLICY = resolveRetryPolicy({
   mode: 'normal',
   maxRetries: 3,
-  retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+  retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'],
   backoff: { initialDelayMs: 1_500, maxDelayMs: 15_000, jitterRatio: 0.2 },
 }, 'dsh-chatgpt-subscription.workbuddy.retry')
 

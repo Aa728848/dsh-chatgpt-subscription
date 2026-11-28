@@ -67,7 +67,7 @@ import {
 } from './compaction.ts'
 
 const RETRY_POLICY = resolveRetryPolicy({
-  mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'SERVER', 'NETWORK', 'TIMEOUT', 'TRANSPORT'],
+  mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER_ERROR', 'SERVER', 'NETWORK', 'TIMEOUT', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'],
   backoff: { initialDelayMs: 1500, maxDelayMs: 15000, jitterRatio: 0.2 },
 }, 'dsh-chatgpt-subscription.claude-api.retry')
 

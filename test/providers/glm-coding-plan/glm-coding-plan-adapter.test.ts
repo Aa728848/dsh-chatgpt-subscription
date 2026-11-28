@@ -271,7 +271,7 @@ describe('GLM 适配器：冷却键看 429，而不是只看 code', () => {
 describe('GLM 适配器：重试策略', () => {
   it('可重试集合与兄弟线路一致，额度类不在其中', () => {
     expect(GLM_CODING_PLAN_RETRY_POLICY_CONFIG.retryableCodes)
-      .toEqual(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'])
+      .toEqual(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'])
     expect(GLM_CODING_PLAN_RETRY_POLICY_CONFIG.retryableCodes).not.toContain('QUOTA')
     expect(GLM_CODING_PLAN_RETRY_POLICY_CONFIG.retryableCodes).not.toContain('AUTH')
   })

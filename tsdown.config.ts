@@ -8,6 +8,7 @@ const clientExternals = [
   'react-dom/client',
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-ui-slots/client',
   '@deepseek-ai/dsh-client-runtime/client',
 ]
 
@@ -36,11 +37,13 @@ const host: UserConfig = {
       '@deepseek-ai/dsh-host-webserver',
       '@deepseek-ai/dsh-attachment',
       '@deepseek-ai/dsh-llm',
-      // Code Mode delegates its program sub-calls to the kernel's executor, so
-      // bundling a second copy would silently defeat "one executor per scope" —
+      // Code Mode delegates its program sub-calls to the kernel's executor/pipeline, so
+      // bundling a second copy would silently defeat "one root/executor per scope" —
       // the bundled copy would apply its own policy pipeline beside the host's.
-      // It must stay an import resolved from the running installation.
+      // They must stay imports resolved from the running installation.
       '@deepseek-ai/dsh-tool-executor-native',
+      '@deepseek-ai/dsh-tool-registry-native',
+      '@deepseek-ai/dsh-tools/pipeline',
       // `ptc-runtime-node` checks `resolved instanceof PtcInspectableValue`, so
       // Code Mode must dynamically resolve the host's own runtime module rather
       // than bundling a second copy whose class identity would never match.

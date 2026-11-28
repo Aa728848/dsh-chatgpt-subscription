@@ -65,6 +65,36 @@ function messageText(data: unknown): string {
   return ''
 }
 
+/** 宿主或插件注入的上下文快照/提醒来源（绝不是真实用户意图）。 */
+const NON_USER_MESSAGE_SOURCE_KINDS: ReadonlySet<string> = new Set([
+  'time-context',
+  'todo/reminder',
+  'runtime-context',
+  'plan-mode',
+  'plan-mode-notice',
+  'team-board-notice',
+  'timeline-cache-notice',
+  'ptc-mode',
+  'tool-registry',
+])
+
+/** 判定一条 `user/message` 事件是否来自系统快照/提醒而非真实用户输入。 */
+function isSyntheticUserMessage(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false
+  const record = data as Record<string, unknown>
+  const message = typeof record['message'] === 'object' && record['message'] !== null
+    ? record['message'] as Record<string, unknown>
+    : record
+  const source = typeof message['source'] === 'object' && message['source'] !== null
+    ? message['source'] as Record<string, unknown>
+    : undefined
+  if (source === undefined) return false
+  const form = source['form']
+  if (form === 'snapshot' || form === 'notice') return true
+  const kind = source['kind']
+  return typeof kind === 'string' && NON_USER_MESSAGE_SOURCE_KINDS.has(kind)
+}
+
 /**
  * 最新用户消息是否明确属于导航任务，或当前会话正处于只读计划模式（`plan/mode` `active: true`）。
  * @param agent - 工具执行事件里的 agent。
@@ -85,9 +115,10 @@ export function cacheWarmupNavigationIntentOf(agent: unknown): boolean {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]!
     if (event.type !== 'user/message') continue
+    if (isSyntheticUserMessage(event.data)) continue
     const rawText = messageText(event.data)
     // DSH 可能在真实用户请求后附系统提醒、运行时上下文、状态锚点与仓库指引；这些不是意图。
-    const reminderAt = rawText.search(/<system-reminder\b|Current runtime context\.|\[V4\.1-Flash State Anchor|\[Open-Model State Anchor/)
+    const reminderAt = rawText.search(/<system-reminder\b|Current runtime context\.|Time sampled while preparing|\[V4\.1-Flash State Anchor|\[Open-Model State Anchor/)
     const text = (reminderAt < 0 ? rawText : rawText.slice(0, reminderAt)).trim()
     // DSH 会在真实请求后追加 reminder-only 的 user/message；跳过它继续向前找。
     if (text === '') continue

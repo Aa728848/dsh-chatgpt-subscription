@@ -283,6 +283,11 @@ export function installCompactionPolicyGuard(
     if (isRecord(config)) {
       observe(readString(config['provider']), readString(config['model']))
     }
+    // DSH 0.2.3-alpha.3+：`agent/pre-step` 载荷直接携带当步 `modelSelection`（切模型压缩先于请求发生）。
+    const modelSelection = source['modelSelection']
+    if (isRecord(modelSelection)) {
+      observe(readString(modelSelection['provider']), readString(modelSelection['model']))
+    }
     // `agent.model?.current?.()` 在首轮或切模型尚未写入 requestHeader 时提供最新选择。
     const modelField = source['model']
     if (isRecord(modelField) && typeof modelField['current'] === 'function') {

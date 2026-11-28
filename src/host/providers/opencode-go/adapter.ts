@@ -20,7 +20,7 @@ import { streamOpenCodeGoResponses } from './mapper-responses.ts'
 import { streamOpenCodeGoGeminiResponse } from './mapper-gemini.ts'
 import { createOpenCodeGoLineDriver, isOpenCodeGoProtocolUnsupported, openCodeGoProtocolTarget } from './protocol.ts'
 
-const RETRY_POLICY = resolveRetryPolicy({ mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'], backoff: { initialDelayMs: 1500, maxDelayMs: 15000, jitterRatio: 0.2 } }, 'dsh-chatgpt-subscription.opencode-go.retry')
+const RETRY_POLICY = resolveRetryPolicy({ mode: 'normal', maxRetries: 3, retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'INVALID_TOOL_ARGUMENTS'], backoff: { initialDelayMs: 1500, maxDelayMs: 15000, jitterRatio: 0.2 } }, 'dsh-chatgpt-subscription.opencode-go.retry')
 
 export interface OpenCodeGoAdapterOptions {
   fetchFn?: typeof fetch

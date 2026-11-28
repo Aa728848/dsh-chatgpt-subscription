@@ -53,6 +53,7 @@ function createContext(options: {
   const listeners: { event: string; listener: (...args: unknown[]) => unknown; options?: unknown }[] = []
   const disposers: (() => void)[] = []
   const executorRef: { value?: unknown } = {}
+  let seededCatalog: readonly unknown[] = []
   const services: Record<string, unknown> = { ptcRuntime: options.runtime }
   if (options.sandboxPolicy !== undefined) services['sandboxPolicy'] = options.sandboxPolicy
   if (options.workingDirectory !== undefined) services['workingDirectory'] = options.workingDirectory
@@ -68,8 +69,18 @@ function createContext(options: {
     execute: options.execute ?? (async () => ({ results: [] })),
   }
   if (options.exposeExecutor === true) {
-    tools['setExecutor'] = (executor: unknown) => {
-      executorRef.value = executor
+    tools['setRoot'] = (registry: { include?(source: unknown): () => void; getAll?(scope?: unknown): readonly unknown[] }) => {
+      registry.include?.({
+        get: (name: string) => seededCatalog.find((entry) => (entry as { name?: unknown })?.name === name),
+        getAll: () => seededCatalog,
+      })
+      executorRef.value = {
+        describe(defs: readonly unknown[]) {
+          seededCatalog = defs
+          return registry.getAll?.()
+        },
+        registry,
+      }
       return () => undefined
     }
   }
@@ -628,6 +639,139 @@ describe('Code Mode 入口的会话授权', () => {
       expect(matched.hostMatched).toBe(true)
       expect(matched.PtcImage).toBe(ptcMod.PtcImage)
       expect(matched.PtcInspectableValue).toBe(ptcMod.PtcInspectableValue)
+    }
+  })
+
+  it('0.2.3-alpha.3 真实 Cordis + ToolsService setRoot：遮蔽直呼由内核拒绝、程序内子调用走完整策略管线、tools:sdk 按 toolStep 渲染', async () => {
+    const { Context } = await import('@deepseek-ai/cordis')
+    const SystemPromptMod = await import('@deepseek-ai/dsh-system-prompt')
+    const SystemPrompt = SystemPromptMod.default ?? SystemPromptMod.SystemPrompt
+    const toolsMod = await import('@deepseek-ai/dsh-tools')
+    const ToolRuntime = toolsMod.default ?? toolsMod.ToolRuntime
+    const defineTool = toolsMod.defineTool
+
+    const ctx = new Context()
+    try {
+      try {
+        const sessionProjectionPkg = '@deepseek-ai/dsh-session-projection'
+        const projections = (await import(sessionProjectionPkg)) as {
+          default?: unknown
+          SessionProjections?: unknown
+        }
+        const SessionProjections = projections.default ?? projections.SessionProjections ?? projections
+        if (SessionProjections) await (ctx.plugin as (plugin: unknown) => unknown)(SessionProjections)
+      } catch {
+        // 旧代 harness 无独立 session-projection 包。
+      }
+      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(ToolRuntime)
+      const toolsService = ctx.tools as unknown as {
+        setRoot?: unknown
+        setExecutor?: unknown
+        getAll?(scope?: unknown): readonly { name: string }[]
+        execute(input: unknown): Promise<{ results: readonly { callId: string; result: { isError: boolean; value?: unknown; error?: { info?: { code?: unknown } } } }[] }>
+        guard(fn: (exec: { name: string; arguments: Record<string, unknown> }) => string | undefined): () => void
+        register(def: unknown): () => void
+      }
+      if (typeof toolsService.setRoot !== 'function') return
+
+      const maskedCalls: unknown[] = []
+      const preExecuteSeen: string[] = []
+      toolsService.register(defineTool({
+        name: 'read',
+        description: 'Read a file.',
+        parameters: { path: { type: 'string', required: true } },
+        output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+        execute(args: { path: string }) {
+          maskedCalls.push(args)
+          return Promise.resolve(`content:${args.path}`)
+        },
+      }))
+      toolsService.register(defineTool({
+        name: 'progress_update',
+        description: 'Report progress.',
+        parameters: {},
+        output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+        execute: () => Promise.resolve('ok'),
+      }))
+
+      let runtimeCallResult: unknown
+      let guardDeniedMessage: string | undefined
+      const fakeRuntime = {
+        language: 'typescript',
+        programFormat: 'function-body',
+        resolve: (req: Record<string, unknown>) => ({ ...req, sandboxPolicy: { mode: 'read-only' }, timeoutMs: 60_000 }),
+        async run(spec: { bindings: readonly { functions: Record<string, (args: unknown) => Promise<unknown>> }[] }) {
+          runtimeCallResult = await spec.bindings[0]!.functions['read']!({ path: 'ok.ts' })
+          try {
+            await spec.bindings[0]!.functions['read']!({ path: 'secret.env' })
+          } catch (error) {
+            guardDeniedMessage = error instanceof Error ? error.message : String(error)
+          }
+          return { value: runtimeCallResult, logs: [] }
+        },
+      }
+      ctx.provide('ptcRuntime' as never, fakeRuntime as never)
+
+      // 挂一条宿主策略与一条单调守卫，确认程序内子调用完整经过 ToolExecutionPipeline
+      ctx.on('tools/pre-execute' as never, (async (exec: { name: string }, next: () => Promise<unknown>) => {
+        preExecuteSeen.push(exec.name)
+        return next()
+      }) as never)
+      toolsService.guard((exec) =>
+        exec.name === 'read' && exec.arguments['path'] === 'secret.env' ? 'blocked secret file' : undefined)
+
+      apply(ctx, { nativeToolsOnly: true, nativeTools: ['progress_update'] })
+
+      const fakeAgent = { id: 'agent-1', ctx, session: { id: 'sess-1', append: () => undefined } }
+      // 1. 仅原生白名单与 code_run 暴露在模型工具表，read 与发现工具被遮蔽（且绝不抛 ToolCompositionError）
+      const visibleNames = toolsService.getAll!(fakeAgent).map((d) => d.name)
+      expect(visibleNames).toContain('code_run')
+      expect(visibleNames).toContain('progress_update')
+      expect(visibleNames).not.toContain('read')
+      expect(visibleNames).not.toContain('code_tools_search')
+
+      const pipelinePkg = '@deepseek-ai/dsh-tools/pipeline'
+      const pipelineMod = (await import(pipelinePkg)) as {
+        ToolStep: { capture(tools: unknown, agent: unknown): unknown }
+      }
+      const step = pipelineMod.ToolStep.capture(toolsService, fakeAgent)
+
+      // 2. 系统提示词在声明了 code_run 的 toolStep 下输出 tools:sdk 段
+      const assembled = await ctx.systemPrompt.assemble({ scope: fakeAgent as never, toolStep: step as never } as never)
+      const sdk = assembled.sections.find((s) => s.name === 'tools:sdk')
+      expect(sdk?.text).toContain('code_run')
+
+      // 3. 模型直呼被遮蔽工具 read：内核在 pre-execute 之前直接以 UNKNOWN_TOOL 拒绝
+      const directDenied = await toolsService.execute({
+        calls: [{ type: 'tool-call', id: 'c-direct', name: 'read', arguments: JSON.stringify({ path: 'ok.ts' }) }],
+        signal: new AbortController().signal,
+        agent: fakeAgent,
+        toolStep: step,
+      })
+      expect(directDenied.results[0]?.result.isError).toBe(true)
+      expect(directDenied.results[0]?.result.error?.info?.code).toBe('UNKNOWN_TOOL')
+      expect(maskedCalls).toEqual([])
+
+      // 4. 通过 code_run 程序内调用 read：走真实 ToolExecutionPipeline，放行 ok.ts 且守卫拦截 secret.env
+      const nested = await toolsService.execute({
+        calls: [{
+          type: 'tool-call',
+          id: 'c-code',
+          name: 'code_run',
+          arguments: JSON.stringify({ code: 'return await tools.read({ path: "ok.ts" })', description: 'read inside code' }),
+        }],
+        signal: new AbortController().signal,
+        agent: fakeAgent,
+        toolStep: step,
+      })
+      expect(nested.results[0]?.result.isError).toBe(false)
+      expect(runtimeCallResult).toBe('content:ok.ts')
+      expect(maskedCalls).toEqual([{ path: 'ok.ts' }])
+      expect(preExecuteSeen).toContain('read')
+      expect(guardDeniedMessage).toContain('blocked secret file')
+    } finally {
+      await ctx.fiber.dispose()
     }
   })
 })
