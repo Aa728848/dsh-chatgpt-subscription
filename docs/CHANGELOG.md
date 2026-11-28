@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **[codemode] 修复 Cordis 代理下解析宿主运行时目录报错**：安全读取 `ctx` 上未声明 `inject` 的 `loader` / `baseDir` 属性，避免抛出代理访问异常。
+
 ## 0.91.0 - 2026-11-28
 
 - **[glm-coding-plan] 新增 GLM-5.4 支持**：双区上线 `GLM-5.4`（1M 上下文、128K 输出、原生多模态、强制思考及历史思考链回放），并针对其 Loop Transformer 架构优化状态锚节奏与长考防循环引导。

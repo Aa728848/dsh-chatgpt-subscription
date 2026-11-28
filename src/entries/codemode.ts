@@ -247,35 +247,43 @@ function isRealPtcRuntimeInstance(runtime: object | undefined): boolean {
   return false
 }
 
-/** 从 Cordis ctx / loader 上尽量收集宿主运行根目录。 */
-function contextBaseDirs(source: unknown, roots: Set<string>): void {
-  if (typeof source !== 'object' || source === null) return
-  const record = source as Record<string, unknown>
-  const addDir = (value: unknown): void => {
-    if (typeof value === 'string' && value.trim().length > 0) roots.add(value.trim())
-  }
-  addDir(record['baseDir'])
-  const root = record['root']
-  if (typeof root === 'object' && root !== null && root !== source) {
-    addDir((root as Record<string, unknown>)['baseDir'])
-    const rootLoader = (root as Record<string, unknown>)['loader']
-    if (typeof rootLoader === 'object' && rootLoader !== null) {
-      addDir((rootLoader as Record<string, unknown>)['baseDir'])
-    }
-  }
-  const loader = record['loader']
-  if (typeof loader === 'object' && loader !== null) {
-    addDir((loader as Record<string, unknown>)['baseDir'])
-  }
-  if (typeof record['get'] === 'function') {
+/** 安全读取可能是 Cordis Context 代理对象上的属性：未声明 inject 的服务属性优先走 `get()` 并吞掉反射异常。 */
+function safeReadProp(target: unknown, key: string): unknown {
+  if (typeof target !== 'object' || target === null) return undefined
+  const record = target as Record<string, unknown>
+  if (typeof record['get'] === 'function' && key !== 'root' && key !== 'ctx') {
     try {
-      const loaderService = (record['get'] as (name: string) => unknown).call(source, 'loader')
-      if (typeof loaderService === 'object' && loaderService !== null) {
-        addDir((loaderService as Record<string, unknown>)['baseDir'])
-      }
+      const viaGet = (record['get'] as (name: string) => unknown).call(target, key)
+      if (viaGet !== undefined) return viaGet
     } catch {
       // ignore
     }
+  }
+  try {
+    return record[key]
+  } catch {
+    return undefined
+  }
+}
+
+/** 从 Cordis ctx / loader 上尽量收集宿主运行根目录。 */
+function contextBaseDirs(source: unknown, roots: Set<string>): void {
+  if (typeof source !== 'object' || source === null) return
+  const addDir = (value: unknown): void => {
+    if (typeof value === 'string' && value.trim().length > 0) roots.add(value.trim())
+  }
+  addDir(safeReadProp(source, 'baseDir'))
+  const root = safeReadProp(source, 'root')
+  if (typeof root === 'object' && root !== null && root !== source) {
+    addDir(safeReadProp(root, 'baseDir'))
+    const rootLoader = safeReadProp(root, 'loader')
+    if (typeof rootLoader === 'object' && rootLoader !== null) {
+      addDir(safeReadProp(rootLoader, 'baseDir'))
+    }
+  }
+  const loader = safeReadProp(source, 'loader')
+  if (typeof loader === 'object' && loader !== null) {
+    addDir(safeReadProp(loader, 'baseDir'))
   }
 }
 
@@ -361,7 +369,7 @@ export async function resolveHostPtcRuntimeClasses(
       }
     }
     contextBaseDirs(ctx, roots)
-    contextBaseDirs((rawRuntime as Record<string, unknown>)['ctx'], roots)
+    contextBaseDirs(safeReadProp(rawRuntime, 'ctx'), roots)
     for (const dir of candidatePackageRoots()) roots.add(dir)
 
     const seenUrls = new Set<string>()

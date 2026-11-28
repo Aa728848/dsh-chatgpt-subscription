@@ -774,4 +774,26 @@ describe('Code Mode 入口的会话授权', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('Cordis 代理拒绝裸读未声明 inject 的 loader/baseDir 属性时仍能安全解析宿主 PTC 类', async () => {
+    const ptcMod = await import('@deepseek-ai/dsh-ptc-runtime')
+    const runtime = Object.create(ptcMod.PtcRuntime.prototype) as object
+    const throwingProxy = new Proxy(
+      {
+        get: (name: string) => (name === 'loader' ? { baseDir: process.cwd() } : undefined),
+      },
+      {
+        get(target, prop, receiver) {
+          if (prop === 'loader' || prop === 'baseDir') {
+            throw new Error(`cannot get property "${String(prop)}" without inject`)
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      },
+    )
+    const resolved = await resolveHostPtcRuntimeClasses(runtime, throwingProxy)
+    expect(resolved.hostMatched).toBe(true)
+    expect(resolved.PtcImage).toBe(ptcMod.PtcImage)
+    expect(resolved.PtcInspectableValue).toBe(ptcMod.PtcInspectableValue)
+  })
 })
