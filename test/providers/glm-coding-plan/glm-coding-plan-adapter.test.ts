@@ -173,9 +173,9 @@ describe('GLM 适配器：ladder 由装配层传入', () => {
     expect(plan.body.reasoning_effort).toBeUndefined()
   })
 
-  it('目录的 thinkingDisableable 被传进 mapper：GLM-5.2 可关、GLM-5.3 恒开', () => {
+  it('目录的 thinkingDisableable 被传进 mapper：GLM-5.2 可关、GLM-5.3 / GLM-5.4 恒开', () => {
     // 官方规则集逐字：GLM-5.2 的 reasoningLevel.values 是 ["disabled","high","max"]，
-    // GLM-5.3 家族是 ["low","high","max"]——没有 disabled。
+    // GLM-5.3 / GLM-5.4 是 ["low","high","max"]——没有 disabled。
     const none = { reasoningEffort: 'none' as never }
     const glm52 = buildGlmRequestPlan(options('GLM-5.2', none), {
       region: 'intl',
@@ -190,6 +190,16 @@ describe('GLM 适配器：ladder 由装配层传入', () => {
     })
     expect(glm53.body.thinking).toEqual({ type: 'enabled' })
     expect(glm53.body.output_config).toEqual({ effort: 'low' })
+
+    const glm54 = buildGlmRequestPlan(options('GLM-5.4', none), {
+      region: 'cn',
+      entry: resolveGlmModel('GLM-5.4'),
+    })
+    expect(glm54.wire).toBe('anthropic')
+    expect(glm54.url).toBe('https://open.bigmodel.cn/api/anthropic/v1/messages')
+    expect(glm54.body.max_tokens).toBe(128_000)
+    expect(glm54.body.thinking).toEqual({ type: 'enabled' })
+    expect(glm54.body.output_config).toEqual({ effort: 'low' })
   })
 
   it('GLM-5-Turbo 是开关型：关思考时只发 disabled', () => {

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **[glm-coding-plan / open-models] 新增旗舰模型 `GLM-5.4` 及 Loop Transformer 专项运行时优化**：
+  - `glm-coding-plan` 随包模型目录新增 `GLM-5.4`（国区/国际区双区支持、`wire: 'anthropic'`、1M 上下文 / 128K 输出上限、原生多模态输入、`low/high/max` 强制思考不可关、Anthropic 面自动原样回放带签名历史思考块适配其默认 Preserved Thinking）。
+  - `open-models` 拆出独立画像 `glm-54`（`isGlm54OpenModel`），面向其 Loop Transformer（28 层中段双轮循环 + 跨轮复用第 1 轮 DSA `top-k=2048` 索引与第 2 轮 128-token 局部滑窗）与官方点名的长考自纠循环特征：状态锚定档至 20 步 / 128K 低上下文静默 / 首档 240K，配套定制静态尾部纪律段（引导依托隐式循环深度与 Preserved Thinking 增量推进、避免 marathon thinking 空转）、前缀缓存三件套、`[OBS | ...]` 入库前观测头与推理坍塌守卫。
+
 - **[claude-api] 新增独立端点的主备账号池与分级缓存**：每个账号可配置不同 Base URL + API Key，旧单 Key 自动成为主账号；支持主备、轮询和粘性调度，网络/超时/5xx、鉴权失败及 429 在有备用账号时自动切换，400 和已有流式输出后的失败不跨账号重放，取消请求不误冷却。模型目录继续由主账号刷新并全线路共享；主对话与子代理/后台请求可分别选择 5m/1h，默认均为 5m。
 
 - **[claude / claude-api] 子代理完成后自动压缩自身上下文**：两条线路各新增默认开启的开关。子代理回合正常完成并进入空闲后调用其 `/compact`，便于后续 `send_message` 复用；主对话和其他线路不受影响，压缩失败不改变已完成的任务结果。
@@ -13,7 +17,7 @@
   - **LLM 重试策略与上下文提醒细节**：16 条 LLM provider 线路的 `retryableCodes` 补充 `INVALID_TOOL_ARGUMENTS`（对齐内核 `DEFAULT_RETRYABLE_CODES`）；`retrieval-intent` 优先按 `source.form`（`snapshot` / `notice`）与 `source.kind` 跳过 `todo/reminder` 与新旧 `time-context` 系统消息，防止覆盖真实用户导航意图；`deepseek-v41-flash/observation-tagger` 与 `open-models/observation-guard` 改用 `isRealUserMessage()` 白名单判定回合重置，避免 `todo-reminder` / `runtime-context`（`form: 'snapshot'`）误清零失控与只读空转计数器。
   - **借力 `0.2.3-alpha.3` 强化前缀缓存保护与模型效果**：
     - `glm-coding-plan`（Anthropic + OpenAI 双面）、`minimax-code`、`qianwen-token-plan` 与 `step-code` 接入 `toolUpdate: 'in-history'` 历史内动态工具更新：通过共享 `midConversationUpdateToUserMessage` 将中途 `tool-addition` / `tool-removal` 渲染为原位 `<system-reminder>` 并剥离 `deferLoading`，移除工具时不缩减声明前缀，避免触发 `UNSUPPORTED_OPTION` 或整段缓存失效；`opendesign` 与 `cline-pass` 补齐 `systemPromptUpdate: 'in-history'` 声明。
-    - DeepSeek V4.1 Flash 与全系开源模型共享状态锚（`state-anchor`）打通 `sessionProjections` 的 `todos` 与 `0.2.3-alpha.3` `todoReminder.unfinishedTodos` 持久化投影（并支持 `todo/write` 事件兜底与开源模型 Code Mode 嵌套 `todo_write` 采集），冷恢复与跨回合长任务中持续在锚点输出紧凑 `TASKS` 进度。
+    - DeepSeek V4.1 Flash 与全系开源模型共享状态锚（`state-anchor`）打通 `sessionProjections` 的 `todos` 与 `0.2.3-alpha.3` `todoReminder.unfinishedTodos` 持久化投影（并支持 `todo/write` 事件兜底与开源模型 Code Mode 嵌套 `todo_write` 采集），冷恢复与跨回合长任务中持续在锚点输出紧凑 `TASKS` 进度；同时对照各模型公开技术报告的注意力架构重新分档降频并引入低上下文周期静默门槛（`anchorMinPeriodicTokens` / `ANCHOR_MIN_PERIODIC_TOKENS`：Kimi K3.1 Pro 调至 24 步 / 128K 静默 / 首档 256K，DeepSeek-V4 20 步 / 128K，GLM-5 / MiniMax-M3 / Qwen / Kimi K3 18 步 / 96K，Ling 等 16 步 / 64K，DeepSeek V4.1 Flash 14 步 / 64K，Step 12 步 / 48K，MiMo 5:1 SWA-128 保持 8 步 / 0 静默，低上下文无未完成待办时延后至 `2×` 步数兜底，避免高注意力模型在低中上下文被截断摘要频繁打断）。
     - `cache-warmup` 与 `progress-updates` 系统提示词分节补充 `retirement` 退役文案并按工具 scope 可见性门控（工具被隐藏时不渲染）；`cache-warmup` 同步按会话首步路由锁定，非受控/未准入线路整场会话不注入 `cache_warmup_result` 引导词以节省上下文 token。
   - **依赖与跨世代验证**：`peerDependencies` 覆盖至 `^0.2.3-alpha.3`、Cordis `4.2.0-alpha.2` / Loader `1.2.0-alpha.2` / Schemastery `3.20.0-alpha.2` 与 `react@^18.2.0 || ^19.0.0`，新增可选 peer `@deepseek-ai/dsh-tool-registry-native`。三代验证结果：
     - `0.2.3-alpha.3`（React 19.3.1，51 个 DSH 包）：全量 `tsc --force`、`npm run build`、`npm ci --dry-run`、`npm pack --dry-run`（1302 文件 / 4.7 MB）通过；Vitest **460 passed | 3 skipped (463)** 文件，**7741 passed | 10 skipped (7751)** 测试，0 失败。

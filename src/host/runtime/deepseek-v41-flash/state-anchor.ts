@@ -47,15 +47,17 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-/** 同一自主回合每隔多少步追加一次周期状态锚。 */
-export const ANCHOR_STEP_INTERVAL = 10
+/** 同一自主回合每隔多少步追加一次周期状态锚（匹配 CSA2 + FP4 890B/tok 压缩后的长链路节奏）。 */
+export const ANCHOR_STEP_INTERVAL = 14
+
+/** 周期状态锚的低上下文静默门槛（低于该值且无未完成待办时跳过周期锚，达到 2× 步数仍兜底）。 */
+export const ANCHOR_MIN_PERIODIC_TOKENS = 64_000
 
 /** 触发上下文水位锚定的估算 token 门槛（对应 CSA2 候选池竞争开始加剧的区间）。 */
 export const ANCHOR_CONTEXT_WATERMARKS: readonly number[] = Object.freeze([
-  180_000,
-  350_000,
-  550_000,
-  750_000,
+  200_000,
+  400_000,
+  650_000,
 ])
 
 /** 连续工具失败达到该次数时，立即注入一次防自反馈重试死循环锚点。 */
@@ -142,8 +144,10 @@ interface AnchorSessionState {
 export interface StateAnchorOptions {
   /** 活引用读取器；返回 false 时彻底旁路。默认 true。 */
   readonly enabled?: () => boolean
-  /** 可选自定义步数周期（测试用，默认 10）。 */
+  /** 可选自定义步数周期（测试用，默认 14）。 */
   readonly stepInterval?: number
+  /** 可选自定义低上下文周期静默门槛（测试用，默认 64_000；0 表示不静默）。 */
+  readonly minPeriodicTokens?: number
   /** 可选自定义水位表（测试用）。 */
   readonly contextWatermarks?: readonly number[]
   /** 可选自定义连败阈值（测试用，默认 2）。 */
@@ -462,6 +466,7 @@ export function installDeepSeekV41FlashStateAnchor(
 ): () => void {
   const host = typeof ctx === 'object' && ctx !== null ? (ctx as EventHostLike) : undefined
   const stepInterval = Math.max(1, options.stepInterval ?? ANCHOR_STEP_INTERVAL)
+  const minPeriodicTokens = Math.max(0, options.minPeriodicTokens ?? ANCHOR_MIN_PERIODIC_TOKENS)
   const watermarks = options.contextWatermarks ?? ANCHOR_CONTEXT_WATERMARKS
   const errorThreshold = Math.max(1, options.consecutiveErrorThreshold ?? ANCHOR_CONSECUTIVE_ERROR_THRESHOLD)
   const estimateTokens = options.estimateContextTokens ?? defaultEstimateContextTokens
@@ -567,12 +572,22 @@ export function installDeepSeekV41FlashStateAnchor(
       if (events !== undefined) recoverGoalFromEvents(state.goals, events, currentTurn)
     }
 
-    // 3. 检查三大克制触发条件（优先级：连败防卡死 > 水位首次跨越 > 步数周期）。
+    // 先同步持久化 todo 投影，供低上下文周期门控与锚点正文共用。
+    const projectedTasks = readSessionTaskLine(host, payload?.agent)
+    if (projectedTasks !== undefined) state.taskLine = projectedTasks
+    const hasOpenTasks = state.taskLine.length > 0 && !/^\d+\/\d+\s+done$/.test(state.taskLine)
+
+    // 3. 检查三大克制触发条件（优先级：连败防卡死 > 压缩恢复 > 水位首次跨越 > 步数周期）。
     let trigger: StateAnchorTrigger | undefined
     let nextWatermarkIndex = state.crossedWatermarkIndex
     for (let i = state.crossedWatermarkIndex + 1; i < watermarks.length; i += 1) {
       if (approxTokens >= watermarks[i]!) nextWatermarkIndex = i
     }
+
+    const stepsSinceAnchor = state.stepsInTurn - state.lastAnchoredStep
+    const periodicEligible = approxTokens >= minPeriodicTokens
+      || hasOpenTasks
+      || stepsSinceAnchor >= stepInterval * 2
 
     if (state.errorAnchorPending && state.consecutiveToolErrors >= errorThreshold) {
       trigger = 'consecutive-errors'
@@ -586,14 +601,13 @@ export function installDeepSeekV41FlashStateAnchor(
       state.crossedWatermarkIndex = nextWatermarkIndex
     } else if (
       state.stepsInTurn >= stepInterval
-      && state.stepsInTurn - state.lastAnchoredStep >= stepInterval
+      && stepsSinceAnchor >= stepInterval
+      && periodicEligible
     ) {
       trigger = 'periodic'
     }
 
     if (trigger === undefined) return decision
-    const projectedTasks = readSessionTaskLine(host, payload?.agent)
-    if (projectedTasks !== undefined) state.taskLine = projectedTasks
     const goal = currentGoal(state.goals)
     // 周期锚只是重申；既无目标也无任务时没有可重申的内容。
     if (trigger === 'periodic' && goal.length === 0 && state.taskLine.length === 0) return decision

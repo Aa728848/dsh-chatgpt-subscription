@@ -111,6 +111,8 @@ export interface OpenModelStateAnchorOptions {
   readonly enabled?: () => boolean
   /** 可选自定义步数周期覆盖（测试用）。 */
   readonly stepIntervalOverride?: number
+  /** 可选自定义低上下文周期静默门槛覆盖（测试用；0 表示不静默）。 */
+  readonly minPeriodicTokensOverride?: number
   /** 可选自定义水位表覆盖（测试用）。 */
   readonly contextWatermarksOverride?: readonly number[]
   /** 可选连续工具报错阈值（默认 2）。 */
@@ -342,13 +344,24 @@ export function installOpenModelStateAnchor(
     }
 
     const stepInterval = Math.max(1, options.stepIntervalOverride ?? profile.anchorStepInterval)
+    const minPeriodicTokens = Math.max(0, options.minPeriodicTokensOverride ?? profile.anchorMinPeriodicTokens)
     const watermarks = options.contextWatermarksOverride ?? profile.anchorWatermarks
+
+    // 先同步持久化 todo 投影，供低上下文周期门控与锚点正文共用。
+    const projectedTasks = readSessionTaskLine(host, payload?.agent)
+    if (projectedTasks !== undefined) state.taskLine = projectedTasks
+    const hasOpenTasks = state.taskLine.length > 0 && !/^\d+\/\d+\s+done$/.test(state.taskLine)
 
     let trigger: 'periodic' | 'watermark' | 'consecutive-errors' | undefined
     let nextWatermarkIndex = state.crossedWatermarkIndex
     for (let i = state.crossedWatermarkIndex + 1; i < watermarks.length; i += 1) {
       if (approxTokens >= watermarks[i]!) nextWatermarkIndex = i
     }
+
+    const stepsSinceAnchor = state.stepsInTurn - state.lastAnchoredStep
+    const periodicEligible = approxTokens >= minPeriodicTokens
+      || hasOpenTasks
+      || stepsSinceAnchor >= stepInterval * 2
 
     if (state.errorAnchorPending && state.consecutiveToolErrors >= errorThreshold) {
       trigger = 'consecutive-errors'
@@ -358,14 +371,13 @@ export function installOpenModelStateAnchor(
       state.crossedWatermarkIndex = nextWatermarkIndex
     } else if (
       state.stepsInTurn >= stepInterval
-      && state.stepsInTurn - state.lastAnchoredStep >= stepInterval
+      && stepsSinceAnchor >= stepInterval
+      && periodicEligible
     ) {
       trigger = 'periodic'
     }
 
     if (trigger === undefined) return decision
-    const projectedTasks = readSessionTaskLine(host, payload?.agent)
-    if (projectedTasks !== undefined) state.taskLine = projectedTasks
     const goal = currentGoal(state.goals)
     // 周期锚只是重申；既无目标也无待办任务时没有可重申的内容。
     if (trigger === 'periodic' && goal.length === 0 && state.taskLine.length === 0) return decision

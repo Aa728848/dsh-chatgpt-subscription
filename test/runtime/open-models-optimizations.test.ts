@@ -27,6 +27,7 @@ import {
   OPEN_MODEL_ANCHOR_SOURCE_KIND,
   OPEN_MODEL_DISCIPLINE_ORDER,
   OPEN_MODEL_GUARD_NOTICE_SOURCE_KIND,
+  OPEN_MODEL_PROFILES,
   installOpenModelDiscipline,
   installOpenModelObservationGuard,
   installOpenModelStateAnchor,
@@ -145,7 +146,10 @@ describe('开源模型精准识别与隔离矩阵', () => {
     expect(matchOpenModelProfile('moonshotai/Kimi-K3.1-Pro', 'command-code')?.family).toBe('kimi-k31')
     expect(matchOpenModelProfile('kimi-k3-1', 'workbuddy-subscription')?.family).toBe('kimi-k31')
 
-    // GLM-5.x
+    // GLM-5.4（Loop Transformer 独立画像）与 GLM-5.x 精准分家族
+    expect(matchOpenModelProfile('GLM-5.4', 'glm-coding-plan')?.family).toBe('glm-54')
+    expect(matchOpenModelProfile('glm-5.4[1m]', 'glm-coding-plan')?.family).toBe('glm-54')
+    expect(matchOpenModelProfile('zai-org/GLM-5.4', 'command-code')?.family).toBe('glm-54')
     expect(matchOpenModelProfile('GLM-5.3', 'glm-coding-plan')?.family).toBe('glm-5')
     expect(matchOpenModelProfile('GLM-5.3-Flash', 'glm-coding-plan')?.family).toBe('glm-5')
     expect(matchOpenModelProfile('z-ai/glm-5.3-flashx', 'command-code')?.family).toBe('glm-5')
@@ -247,6 +251,16 @@ describe('静态尾部纪律注入（零破缓存、末尾追加、差异化规�
     expect(String(k3Only.sections[1]?.text)).toContain('plain valid JavaScript')
     expect(String(k3Only.sections[1]?.text)).not.toContain('hardcoding expected outputs')
 
+    // GLM-5.4：专属 Loop Transformer / 防 marathon thinking 纪律段，与 GLM-5.3 独立隔离
+    const glm54Agent = createFakeAgent({ provider: 'glm-coding-plan', model: 'GLM-5.4' })
+    const glm54 = await host.runWaterfall('system-prompt/assemble', [{}, { scope: glm54Agent }], () => ({
+      sections: [{ name: 'persona', text: 'P' }],
+    }))
+    expect(glm54.sections).toHaveLength(2)
+    expect(glm54.sections[1]?.name).toBe('plugin:open-model-discipline:glm-54')
+    expect(String(glm54.sections[1]?.text)).toContain('GLM-5.4 Execution Guidance')
+    expect(String(glm54.sections[1]?.text)).toContain('prolonged self-correction loops')
+
     // DeepSeek-V4 Pro：有轻量执行纪律，但没有 V4.1-Flash 的强输出排版段
     const v4ProAgent = createFakeAgent({ provider: 'deepseek', model: 'deepseek-v4-pro' })
     const v4Pro = await host.runWaterfall('system-prompt/assemble', [{}, { scope: v4ProAgent }], () => ({
@@ -311,7 +325,7 @@ describe('零改前缀尾部 State Anchor（适配 SWA 短窗与 1M 稀疏/线�
     expect(anchorText).toContain('GOAL: Fix parser edge case in auth.ts')
     expect(anchorText).toContain('FILES: src/auth.ts')
 
-    // 2) Kimi K3.1：跨越 160K 水位线触发水位锚点
+    // 2) Kimi K3.1 Pro：170K 低中水位不再过早打断，跨越 256K 首道水位线精准触发水位锚点
     const kimiAgent = createFakeAgent({ provider: 'kimi-code', model: 'k3.1-pro', sessionId: 'kimi-1' })
     await host.runWaterfall(
       'agent/pre-step',
@@ -319,6 +333,14 @@ describe('零改前缀尾部 State Anchor（适配 SWA 短窗与 1M 稀疏/线�
       () => ({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'Implement cache guard' }] }] }),
     )
     currentTokens = 170_000
+    const belowWatermarkRes = await host.runWaterfall(
+      'agent/pre-step',
+      [{ agent: kimiAgent, messages: [] }],
+      () => ({ kind: 'enter', messages: [] }),
+    ) as { messages?: Array<{ content?: Array<{ text?: string }> }> }
+    expect(belowWatermarkRes.messages).toHaveLength(0)
+
+    currentTokens = 260_000
     const watermarkRes = await host.runWaterfall(
       'agent/pre-step',
       [{ agent: kimiAgent, messages: [] }],
@@ -836,6 +858,52 @@ describe('开源模型总成开关与推理坍塌守卫按模型隔离', () => {
       messages: Array<{ content: Array<{ text: string }> }>
     }
     expect(afterNested.messages[0]!.content[0]!.text).toContain('TASKS: 1/2 done | NEXT: Push branch')
+    dispose()
+  })
+
+  it('按公开技术报告注意力架构分档：Kimi K3.1 Pro 低上下文静默至 2x 步数兜底，高上下文按 24 步周期触发', async () => {
+    expect(OPEN_MODEL_PROFILES['mimo-open'].anchorStepInterval).toBe(8)
+    expect(OPEN_MODEL_PROFILES['mimo-open'].anchorMinPeriodicTokens).toBe(0)
+    expect(OPEN_MODEL_PROFILES['step-open'].anchorStepInterval).toBe(12)
+    expect(OPEN_MODEL_PROFILES['long-sparse-open'].anchorStepInterval).toBe(16)
+    expect(OPEN_MODEL_PROFILES['kimi-k3'].anchorStepInterval).toBe(18)
+    expect(OPEN_MODEL_PROFILES['glm-5'].anchorStepInterval).toBe(18)
+    expect(OPEN_MODEL_PROFILES['glm-54'].anchorStepInterval).toBe(20)
+    expect(OPEN_MODEL_PROFILES['glm-54'].anchorMinPeriodicTokens).toBe(128_000)
+    expect(OPEN_MODEL_PROFILES['glm-54'].anchorWatermarks[0]).toBe(240_000)
+    expect(OPEN_MODEL_PROFILES['minimax-m3'].anchorStepInterval).toBe(18)
+    expect(OPEN_MODEL_PROFILES['qwen-open'].anchorStepInterval).toBe(18)
+    expect(OPEN_MODEL_PROFILES['deepseek-v4'].anchorStepInterval).toBe(20)
+    expect(OPEN_MODEL_PROFILES['kimi-k31'].anchorStepInterval).toBe(24)
+    expect(OPEN_MODEL_PROFILES['kimi-k31'].anchorMinPeriodicTokens).toBe(128_000)
+    expect(OPEN_MODEL_PROFILES['kimi-k31'].anchorWatermarks[0]).toBe(256_000)
+
+    const host = createFakeHost()
+    let tokens = 60_000
+    const dispose = installOpenModelStateAnchor(host.ctx, {
+      contextWatermarksOverride: [],
+      estimateContextTokens: () => tokens,
+    })
+    const k31Agent = createFakeAgent({ provider: 'kimi-code', model: 'k3.1-pro', sessionId: 'k31-quiet' })
+    const userMsg = { role: 'user', content: [{ type: 'text', text: 'Refactor router carefully' }] }
+    await host.runWaterfall('agent/pre-step', [{ agent: k31Agent, messages: [userMsg] }], () => ({ kind: 'enter', messages: [userMsg] }))
+
+    // 低上下文（60K < 128K）且无未完成 todo：跑满 47 步都不打断，第 48 步（2×24）才兜底锚一次
+    for (let step = 1; step <= 47; step += 1) {
+      const res = await host.runWaterfall('agent/pre-step', [{ agent: k31Agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as { messages: unknown[] }
+      expect(res.messages).toHaveLength(0)
+    }
+    const fallback48 = await host.runWaterfall('agent/pre-step', [{ agent: k31Agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as { messages: unknown[] }
+    expect(fallback48.messages).toHaveLength(1)
+
+    // 跨过 128K 后按 24 步周期准时触发
+    tokens = 140_000
+    for (let step = 1; step <= 23; step += 1) {
+      const res = await host.runWaterfall('agent/pre-step', [{ agent: k31Agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as { messages: unknown[] }
+      expect(res.messages).toHaveLength(0)
+    }
+    const periodic24 = await host.runWaterfall('agent/pre-step', [{ agent: k31Agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as { messages: unknown[] }
+    expect(periodic24.messages).toHaveLength(1)
     dispose()
   })
 })

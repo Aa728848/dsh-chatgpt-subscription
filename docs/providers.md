@@ -235,7 +235,7 @@
   - 通过 ZCode CLI OAuth 控制面（`zcode.z.ai/api/v1/oauth/cli/*`）轮询授权并自动兑换套餐专用 Coding Plan Key，也可只读导入 `~/.zcode/v2/credentials.json`；上游无 `refresh_token` 接口，令牌过期需重新发起登录（国际区业务 JWT 自动提前续期）。
 - **协议与目录**：
   - 走套餐专用 Anthropic Messages 端点 `{apiHost}/api/anthropic/v1/messages`（绝不误走扣充值余额的通用开放平台 `/api/paas/v4`）；
-  - 随包目录转录自官方 `zai-org/ZCode` 的 `zcode-builtin.json`（`GLM-5.3`、`GLM-5.3-Flash`、`GLM-5.2`、`GLM-5-Turbo`），思考档位走 `output_config.effort`，`system` 与末条非 system 消息自动布置 `ephemeral` 缓存断点；
+  - 随包目录收录 GLM Coding Plan 主力模型（`GLM-5.4`、`GLM-5.3`、`GLM-5.3-Flash`、`GLM-5.2`、`GLM-5-Turbo`；其中 `GLM-5.3`/`GLM-5.2`/`GLM-5-Turbo` 逐字转录自 `zai-org/ZCode` 的 `zcode-builtin.json`，`GLM-5.4` 按官方 1M/128K 原生多模态强制思考规格补齐），思考档位走 `output_config.effort`，`system` 与末条非 system 消息自动布置 `ephemeral` 缓存断点；
   - 全部兑换与业务端点均支持 `DSH_GLM_*` 环境变量覆盖。
 - **验证边界**：本线路基于官方开源仓库与契约构建并通过完整 mock 回归验收，尚未在生产环境用真实付费/体验账号完成端到端实机联调，首次接入建议先结合设置卡「测试连接」验证。
 

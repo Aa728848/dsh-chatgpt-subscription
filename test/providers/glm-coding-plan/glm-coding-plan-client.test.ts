@@ -106,6 +106,7 @@ describe('GLM 目录逐模型能力表', () => {
   })
 
   it('梯子逐模型不同，且空数组只落在「不发思考控制字段」那一行', () => {
+    expect(glmReasoningEfforts('GLM-5.4')).toEqual(['low', 'high', 'max'])
     expect(glmReasoningEfforts('GLM-5.3')).toEqual(['low', 'high', 'max'])
     // 反例：glm-5.2 两个档位。
     expect(glmReasoningEfforts('GLM-5.2')).toEqual(['high', 'max'])
@@ -113,14 +114,21 @@ describe('GLM 目录逐模型能力表', () => {
     expect(glmReasoningEfforts('GLM-5-Turbo')).toEqual([])
   })
 
-  it('四个模型全是 Coding Plan 模型；缺的反而是 Start Plan 不含 GLM-5.3', () => {
+  it('五个模型全是 Coding Plan 模型；缺的反而是 Start Plan 不含 GLM-5.4 / GLM-5.3', () => {
     // 证据：zcode-builtin.json revision 31 的 builtinProviderModelRules 给
-    // account:{zai,bigmodel}-{individual,team}-coding-plan 逐条启用这四个 id。
+    // account:{zai,bigmodel}-{individual,team}-coding-plan 启用全系主力模型，新旗舰 GLM-5.4 同属 Coding Plan。
     const ids = GLM_MODEL_CATALOG.map((entry) => entry.id)
-    for (const id of ['GLM-5.3', 'GLM-5.3-Flash', 'GLM-5.2', 'GLM-5-Turbo']) {
+    for (const id of ['GLM-5.4', 'GLM-5.3', 'GLM-5.3-Flash', 'GLM-5.2', 'GLM-5-Turbo']) {
       expect(ids).toContain(id)
     }
-    expect([...GLM_START_PLAN_EXCLUDED_MODEL_IDS]).toEqual(['GLM-5.3'])
+    const glm54 = resolveGlmModel('glm-5.4')
+    expect(glm54.id).toBe('GLM-5.4')
+    expect(glm54.wire).toBe('anthropic')
+    expect(glm54.thinkingDisableable).toBe(false)
+    expect(glm54.supportsImages).toBe(true)
+    expect(glm54.defaultContextWindow).toBe(1_000_000)
+    expect(glm54.defaultMaxTokens).toBe(128_000)
+    expect([...GLM_START_PLAN_EXCLUDED_MODEL_IDS]).toEqual(['GLM-5.4', 'GLM-5.3'])
     // 套餐归属是**账号**的属性：同一个 id 在 Start Plan 规则下没被启用，
     // 但那不代表它是「Start Plan 独有」——GLM-5.2 / GLM-5-Turbo 同时在 Coding Plan 里。
     expect(GLM_START_PLAN_EXCLUDED_MODEL_IDS).not.toContain('GLM-5.2')

@@ -224,6 +224,7 @@ describe('DeepSeek V4.1 Flash Append-Only SWA-128 state anchor & effort drift gu
     let mockTokens = 50_000
     const dispose = installDeepSeekV41FlashStateAnchor(ctx, {
       stepInterval: 3,
+      minPeriodicTokens: 0,
       contextWatermarks: [180_000, 350_000],
       consecutiveErrorThreshold: 2,
       estimateContextTokens: () => mockTokens,
@@ -317,6 +318,7 @@ describe('DeepSeek V4.1 Flash Append-Only SWA-128 state anchor & effort drift gu
     const { ctx, emitWaterfall } = createEventHost()
     const dispose = installDeepSeekV41FlashStateAnchor(ctx, {
       stepInterval: 1,
+      minPeriodicTokens: 0,
       contextWatermarks: [],
       estimateContextTokens: () => 0,
     })
@@ -358,7 +360,7 @@ describe('DeepSeek V4.1 Flash Append-Only SWA-128 state anchor & effort drift gu
 
   it('lets the latest turn override a contradicting earlier one, and drops EARLIER once tasks exist', async () => {
     const { ctx, emitWaterfall } = createEventHost()
-    const dispose = installDeepSeekV41FlashStateAnchor(ctx, { stepInterval: 1, contextWatermarks: [], estimateContextTokens: () => 0 })
+    const dispose = installDeepSeekV41FlashStateAnchor(ctx, { stepInterval: 1, minPeriodicTokens: 0, contextWatermarks: [], estimateContextTokens: () => 0 })
     const flashAgent = makeAgent('opendesign', 'deepseek-v4.1-flash-1017', 'sess-override', 'high')
     const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] })
     const run = async (turn: number, messages: unknown[]) => await emitWaterfall(
@@ -819,6 +821,37 @@ describe('Existing prefix-cache & compaction guards isolated to DeepSeek V4.1 Fl
       messages: Array<{ content: Array<{ text: string }> }>
     }
     expect(fromEvents.messages[0]!.content[0]!.text).toContain('TASKS: 0/1 done | NEXT: Verify build')
+    dispose()
+  })
+
+  it('defers periodic anchors in low-context sessions without open tasks until 2x interval or token threshold', async () => {
+    const { ctx, emitWaterfall } = createEventHost()
+    let approx = 20_000
+    const dispose = installDeepSeekV41FlashStateAnchor(ctx, {
+      stepInterval: 3,
+      minPeriodicTokens: 64_000,
+      contextWatermarks: [],
+      estimateContextTokens: () => approx,
+    })
+    const agent = makeAgent('opendesign', 'deepseek-v4.1-flash-1017', 'sess-low-ctx-quiet', 'high')
+    const goal = { role: 'user', content: [{ type: 'text', text: 'Polish docs' }] }
+    await emitWaterfall('agent/pre-step', [{ agent, messages: [goal] }], () => ({ kind: 'enter', messages: [goal] }))
+    // 第 1..5 步（低上下文且无未完成 todo）：第 3 步被静默跳过，直到 2×stepInterval = 第 6 步兜底触发
+    for (let step = 1; step <= 5; step += 1) {
+      const res = await emitWaterfall('agent/pre-step', [{ agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as { messages: unknown[] }
+      expect(res.messages).toHaveLength(0)
+    }
+    const fallback = await emitWaterfall('agent/pre-step', [{ agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as { messages: unknown[] }
+    expect(fallback.messages).toHaveLength(1)
+
+    // 跨过 64K 门槛后，下一次 3 步即正常触发
+    approx = 70_000
+    for (let step = 1; step <= 2; step += 1) {
+      const res = await emitWaterfall('agent/pre-step', [{ agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as { messages: unknown[] }
+      expect(res.messages).toHaveLength(0)
+    }
+    const highCtx = await emitWaterfall('agent/pre-step', [{ agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as { messages: unknown[] }
+    expect(highCtx.messages).toHaveLength(1)
     dispose()
   })
 })

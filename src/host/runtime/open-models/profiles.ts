@@ -35,6 +35,7 @@ export type OpenModelFamily =
   | 'kimi-k3'
   | 'kimi-k31'
   | 'glm-5'
+  | 'glm-54'
   | 'deepseek-v4'
   | 'minimax-m3'
   | 'qwen-open'
@@ -66,8 +67,14 @@ export interface OpenModelProfile {
   readonly observationHeader: boolean
   /** 是否启用 Append-Only 尾部零改前缀状态锚。 */
   readonly stateAnchor: boolean
-  /** 状态锚的周期步数间隔（SWA 短窗更短，1M 稀疏/线性较克制）。 */
+  /** 状态锚的周期步数间隔（SWA 短窗更短，1M 高精度稀疏/线性模型更克制）。 */
   readonly anchorStepInterval: number
+  /**
+   * 周期状态锚的低上下文静默门槛（估算上下文低于该值且无未完成待办任务时，跳过周期锚
+   * 避免用截断摘要干扰高清原文；达到 `2 × anchorStepInterval` 步时仍作长链路兜底）。
+   * 极短滑窗（如 MiMo 5:1 SWA-128）设为 0 以始终保持局部滑窗新鲜。
+   */
+  readonly anchorMinPeriodicTokens: number
   /** 状态锚触发的上下文 token 水位线。 */
   readonly anchorWatermarks: readonly number[]
   /** 尾部状态锚中的精简规则行。 */
@@ -106,7 +113,8 @@ const KIMI_K31_EXPLICIT_PATTERN = /^kimi[-_.]?k3[._-]1(?:$|[-_.])/i
 const KIMI_K31_SHORT_PATTERN = /^k3[._-]1(?:$|[-_.])/i
 /** 任意线路下显式标明 Kimi K 系列型号的裸模型名（如 `moonshotai/Kimi-K3.1-Pro`、`kimi-k3-1`、`kimi-k2.7-code`）。 */
 const KIMI_EXPLICIT_OPEN_PATTERN = /^kimi[-_.]?k(?:3(?:\.1)?|2\.[5-8]|2[-_.]thinking)(?:$|[-_.])/i
-const GLM_5_PATTERN = /^glm[-_.]?5(?:$|[-_.a-z0-9])/i
+const GLM_54_PATTERN = /^glm[-_.]?5[._-]4(?:$|[-_.a-z0-9\[])/i
+const GLM_5_PATTERN = /^glm[-_.]?5(?:$|[-_.a-z0-9\[])/i
 const DEEPSEEK_V4_NON_V41_PATTERN = /^(?:public[-_.]model[-_.])?deepseek[-_.]?v4[-_.]?(?:pro|flash)(?:$|[-_.])/i
 const MINIMAX_OPEN_PATTERN = /^minimax[-_.]?m(?:3(?:\.1)?|2\.[57])(?:$|[-_.])/i
 const QWEN_OPEN_PATTERN = /^(?:qwen(?:4(?:\.0)?|3(?:\.[5-9])?)|qwq)(?:$|[-_.])/i
@@ -142,6 +150,13 @@ export function isMinimaxOpenModel(model: unknown): boolean {
   if (typeof model !== 'string') return false
   const bare = bareOpenModelId(model)
   return bare.length > 0 && MINIMAX_OPEN_PATTERN.test(bare)
+}
+
+/** 精准判断模型名是否属于 GLM-5.4（Loop Transformer）系列（任意线路）。 */
+export function isGlm54OpenModel(model: unknown): boolean {
+  if (typeof model !== 'string') return false
+  const bare = bareOpenModelId(model)
+  return bare.length > 0 && GLM_54_PATTERN.test(bare)
 }
 
 /** 精准判断模型名是否属于 GLM-5.x 系列（任意线路）。 */
@@ -205,8 +220,9 @@ const KIMI_BASE_PROFILE_FIELDS = {
   cacheWarmup: true,
   observationHeader: true,
   stateAnchor: true,
-  anchorStepInterval: 10,
-  anchorWatermarks: Object.freeze([160_000, 320_000, 550_000, 750_000]),
+  anchorStepInterval: 18,
+  anchorMinPeriodicTokens: 96_000,
+  anchorWatermarks: Object.freeze([200_000, 400_000, 650_000]),
   anchorRuleLine: 'RULE: Reference exact file paths/symbols for sparse retrieval; once evidence is sufficient, execute the edit/write or deliver instead of continuing read-only loops.',
   collapseGuard: true,
   readOnlySpinGuard: true,
@@ -229,10 +245,16 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     ].join('\n'),
   }),
 
+  // Kimi K3.1 Pro（93 层 = 69 KDA + 24 Gated DSA top-k=2048 + AttnRes，1M）：
+  // 相比 K3 升级了 Gated DSA 与跨层 AttnRes，RULER@1M / MRCR 极强；仅在高水位候选池
+  // 拥挤（≥256K）或超长自主步数（24 步 / 有未完成待办）时锚定，避免低上下文打断。
   'kimi-k31': Object.freeze({
     ...KIMI_BASE_PROFILE_FIELDS,
     family: 'kimi-k31',
     label: 'Kimi-K3.1',
+    anchorStepInterval: 24,
+    anchorMinPeriodicTokens: 128_000,
+    anchorWatermarks: Object.freeze([256_000, 480_000, 720_000]),
     disciplineSectionName: 'plugin:open-model-discipline:kimi-k31',
     disciplineText: [
       '## Kimi K3.1 Pro Execution Guidance',
@@ -243,6 +265,8 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     ].join('\n'),
   }),
 
+  // GLM-5 / 5.2 / 5.3（744B/40B MoE，MLA + DSA top-k=2048 + 4 层块 IndexShare，1M）：
+  // 跨 4 层复用稀疏索引在 220K+ 后候选池竞争上升，低上下文检索稳定无需过频打断。
   'glm-5': Object.freeze({
     family: 'glm-5',
     label: 'GLM-5',
@@ -251,8 +275,9 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     cacheWarmup: true,
     observationHeader: true,
     stateAnchor: true,
-    anchorStepInterval: 10,
-    anchorWatermarks: Object.freeze([180_000, 350_000, 550_000, 750_000]),
+    anchorStepInterval: 18,
+    anchorMinPeriodicTokens: 96_000,
+    anchorWatermarks: Object.freeze([220_000, 450_000, 700_000]),
     anchorRuleLine: 'RULE: Follow GOAL, the latest request, with explicit file paths; do not restate settled reasoning across long turns; finish once acceptance criteria pass.',
     collapseGuard: true,
     readOnlySpinGuard: false,
@@ -268,6 +293,39 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     ].join('\n'),
   }),
 
+  // GLM-5.4（~750B Loop Transformer：26 prelude + 28 middle×2 循环 + 24 coda = 106 等效层，
+  // Gated Progressive Updates + Hybrid KV Cache 复用第 1 轮 DSA top-k=2048 索引与第 2 轮
+  // 128-token 局部滑窗，1M 上下文，默认 Preserved Thinking；权重尚待安全评估后开源）：
+  // 1) 循环深度令中低上下文追踪更稳，周期锚放宽至 20 步 / 128K 静默 / 首档 240K；
+  // 2) `[OBS | ...]` 观测头与精确路径引用同时服务第 1 轮选索引与第 2 轮复用；
+  // 3) 静态纪律段 + 推理坍塌守卫专门针对官方博客点名的「marathon thinking」过长自纠循环。
+  'glm-54': Object.freeze({
+    family: 'glm-54',
+    label: 'GLM-5.4',
+    camp: 'block-sparse',
+    prefixCacheGuard: true,
+    cacheWarmup: true,
+    observationHeader: true,
+    stateAnchor: true,
+    anchorStepInterval: 20,
+    anchorMinPeriodicTokens: 128_000,
+    anchorWatermarks: Object.freeze([240_000, 480_000, 720_000]),
+    anchorRuleLine: 'RULE: Follow GOAL, the latest request, with exact file paths; rely on preserved reasoning instead of restarting marathon analysis; verify and converge once criteria pass.',
+    collapseGuard: true,
+    readOnlySpinGuard: false,
+    sanitizeEscAnsi: false,
+    unmanagedRunawayGuard: false,
+    disciplineSectionName: 'plugin:open-model-discipline:glm-54',
+    disciplineText: [
+      '## GLM-5.4 Execution Guidance',
+      '',
+      'Preserve high signal in long contexts by batching related reads/searches and returning concise structured findings rather than raw logs. Cite exact file paths and symbol names so reused sparse-attention indices stay locked onto the active code across turns.',
+      '',
+      'Match explicit reasoning length to task complexity: rely on your internal depth and preserved reasoning chain to advance incrementally instead of entering prolonged self-correction loops on straightforward steps. Once verification passes or two attempts hit the same blocker, converge or inspect the root definition directly, and follow `[Open-Model State Anchor]` notices on long tasks.',
+    ].join('\n'),
+  }),
+
+  // DeepSeek-V4 Pro / Flash（CSA + HCA，1M；无 V4.1-Flash 的极端 FP4 KV 与大面积跨层索引复用）：
   'deepseek-v4': Object.freeze({
     family: 'deepseek-v4',
     label: 'DeepSeek-V4',
@@ -276,8 +334,9 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     cacheWarmup: true,
     observationHeader: true,
     stateAnchor: true,
-    anchorStepInterval: 10,
-    anchorWatermarks: Object.freeze([180_000, 350_000, 550_000, 750_000]),
+    anchorStepInterval: 20,
+    anchorMinPeriodicTokens: 128_000,
+    anchorWatermarks: Object.freeze([240_000, 480_000, 720_000]),
     anchorRuleLine: 'RULE: Follow GOAL, the latest request; verify facts via tools instead of prolonged speculation; switch route after consecutive failures.',
     collapseGuard: true,
     readOnlySpinGuard: false,
@@ -293,6 +352,7 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     ].join('\n'),
   }),
 
+  // MiniMax-M3 / M3.1 Flash（MSA 分组块稀疏 GQA arXiv:2606.13392，1M）与 M2.7（200K 稠密 GQA）：
   'minimax-m3': Object.freeze({
     family: 'minimax-m3',
     label: 'MiniMax-M3',
@@ -301,8 +361,9 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     cacheWarmup: true,
     observationHeader: true,
     stateAnchor: true,
-    anchorStepInterval: 10,
-    anchorWatermarks: Object.freeze([150_000, 320_000, 550_000, 750_000]),
+    anchorStepInterval: 18,
+    anchorMinPeriodicTokens: 96_000,
+    anchorWatermarks: Object.freeze([200_000, 420_000, 680_000]),
     anchorRuleLine: 'RULE: Keep exact paths and active edits anchored in recent context; use concise structured outputs to stay within block-sparse attention budget.',
     collapseGuard: true,
     readOnlySpinGuard: false,
@@ -318,6 +379,7 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     ].join('\n'),
   }),
 
+  // Qwen 3.5–4（3:1 Gated DeltaNet + 1 Full Gated Attention 检查点，256K–1M）：
   'qwen-open': Object.freeze({
     family: 'qwen-open',
     label: 'Qwen',
@@ -326,8 +388,9 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     cacheWarmup: true,
     observationHeader: true,
     stateAnchor: true,
-    anchorStepInterval: 10,
-    anchorWatermarks: Object.freeze([160_000, 320_000, 550_000, 750_000]),
+    anchorStepInterval: 18,
+    anchorMinPeriodicTokens: 96_000,
+    anchorWatermarks: Object.freeze([200_000, 400_000, 650_000]),
     anchorRuleLine: 'RULE: Act on verified facts instead of re-enumerating already-inspected directories; reference exact symbols and converge once verified.',
     collapseGuard: true,
     readOnlySpinGuard: false,
@@ -343,6 +406,7 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     ].join('\n'),
   }),
 
+  // Step-3.5 / 3.7 Flash（3:1 Gated SWA W=512 + Full）与 Step-5（交错 Gated SWA，1M）：
   'step-open': Object.freeze({
     family: 'step-open',
     label: 'Step',
@@ -351,8 +415,9 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     cacheWarmup: true,
     observationHeader: true,
     stateAnchor: true,
-    anchorStepInterval: 8,
-    anchorWatermarks: Object.freeze([120_000, 220_000, 450_000, 700_000]),
+    anchorStepInterval: 12,
+    anchorMinPeriodicTokens: 48_000,
+    anchorWatermarks: Object.freeze([160_000, 340_000, 580_000]),
     anchorRuleLine: 'RULE: Follow GOAL, the latest request, and keep FILES in recent context; batch reads cleanly and deliver once acceptance checks pass.',
     collapseGuard: true,
     readOnlySpinGuard: false,
@@ -366,6 +431,8 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     ].join('\n'),
   }),
 
+  // MiMo-V2.5 / V2.6（5:1 极窄 SWA W=128，83% 的层局部窗口仅 128 tokens）：
+  // 即使在低上下文也会迅速把原始目标滚出局部滑窗，保留 8 步周期且不设低上下文静默门槛。
   'mimo-open': Object.freeze({
     family: 'mimo-open',
     label: 'MiMo',
@@ -375,7 +442,8 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     observationHeader: true,
     stateAnchor: true,
     anchorStepInterval: 8,
-    anchorWatermarks: Object.freeze([140_000, 300_000, 550_000, 750_000]),
+    anchorMinPeriodicTokens: 0,
+    anchorWatermarks: Object.freeze([160_000, 340_000, 600_000]),
     anchorRuleLine: 'RULE: Keep GOAL and active FILES anchored in the local sliding window; verify via tools and finish once criteria pass.',
     collapseGuard: true,
     readOnlySpinGuard: false,
@@ -389,6 +457,7 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     ].join('\n'),
   }),
 
+  // Ling-3.1（7:1 KDA）、Hunyuan Hy4（Gated DSA + IndexCache）、LongCat-2.0 与本地推理模型：
   'long-sparse-open': Object.freeze({
     family: 'long-sparse-open',
     label: 'Open-Sparse',
@@ -397,8 +466,9 @@ export const OPEN_MODEL_PROFILES: Readonly<Record<OpenModelFamily, OpenModelProf
     cacheWarmup: true,
     observationHeader: true,
     stateAnchor: true,
-    anchorStepInterval: 10,
-    anchorWatermarks: Object.freeze([160_000, 320_000, 550_000, 750_000]),
+    anchorStepInterval: 16,
+    anchorMinPeriodicTokens: 64_000,
+    anchorWatermarks: Object.freeze([180_000, 380_000, 620_000]),
     anchorRuleLine: 'RULE: Keep GOAL and exact file paths anchored; verify via tools and converge once acceptance checks pass.',
     collapseGuard: true,
     readOnlySpinGuard: false,
@@ -417,6 +487,7 @@ export function matchOpenModelProfile(model: unknown, provider?: unknown): OpenM
   if (isDeepSeekV41Flash(model, provider)) return undefined
   if (isKimiK31OpenModel(model, provider)) return OPEN_MODEL_PROFILES['kimi-k31']
   if (isKimiOpenModel(model, provider)) return OPEN_MODEL_PROFILES['kimi-k3']
+  if (isGlm54OpenModel(model)) return OPEN_MODEL_PROFILES['glm-54']
   if (isGlm5OpenModel(model)) return OPEN_MODEL_PROFILES['glm-5']
   if (isDeepSeekV4NonV41Model(model, provider)) return OPEN_MODEL_PROFILES['deepseek-v4']
   if (isMinimaxOpenModel(model)) return OPEN_MODEL_PROFILES['minimax-m3']

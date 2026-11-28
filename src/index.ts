@@ -2676,6 +2676,7 @@ export {
 export {
   ANCHOR_CONSECUTIVE_ERROR_THRESHOLD,
   ANCHOR_CONTEXT_WATERMARKS,
+  ANCHOR_MIN_PERIODIC_TOKENS,
   ANCHOR_STEP_INTERVAL,
   DEEPSEEK_OFFICIAL_PROVIDERS,
   DEEPSEEK_V41_FLASH_ANCHOR_PREFIX,
@@ -2721,7 +2722,9 @@ export {
   installOpenModelStateAnchor,
   installOpenModelsOptimizations,
   isDeepSeekV4NonV41Model,
+  isGlm54OpenModel,
   isGlm5OpenModel,
+  isKimiK31OpenModel,
   isKimiOpenModel,
   isLongSparseOpenModel,
   isMimoOpenModel,

@@ -97,7 +97,7 @@ describe('状态锚目标采集：只有真人指令能改写 GOAL', () => {
 
   it('开源模型：继续、目标续跑与子代理汇报都不会顶掉原目标', async () => {
     const host = createHost()
-    installOpenModelStateAnchor(host.ctx, { stepIntervalOverride: 1, estimateContextTokens: () => 0 })
+    installOpenModelStateAnchor(host.ctx, { stepIntervalOverride: 1, minPeriodicTokensOverride: 0, estimateContextTokens: () => 0 })
     const agent = agentOf('kimi-code', 'k3.1-pro', 'open-goal')
     const goal = 'GOAL: 把 auth.ts 的解析器边界问题修好并补测试'
 
@@ -114,7 +114,7 @@ describe('状态锚目标采集：只有真人指令能改写 GOAL', () => {
 
   it('V4.1 Flash：目标续跑不会把用户目标挤出，子代理以任务说明为目标', async () => {
     const host = createHost()
-    installDeepSeekV41FlashStateAnchor(host.ctx, { stepInterval: 1, contextWatermarks: [], estimateContextTokens: () => 0 })
+    installDeepSeekV41FlashStateAnchor(host.ctx, { stepInterval: 1, minPeriodicTokens: 0, contextWatermarks: [], estimateContextTokens: () => 0 })
     const agent = agentOf('opendesign', 'deepseek-v4.1-flash-1017', 'flash-goal')
 
     await anchorLines(host, agent, 1, [user('Migrate settings storage')])

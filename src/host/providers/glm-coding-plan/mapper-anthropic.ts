@@ -189,7 +189,7 @@ export interface GlmThinkingControl {
  * 形状逐字照官方开源客户端 `zai-org/ZCode` 的 `config/provider/zcode-builtin.json`
  * （`modelConfigRules.modelApiRules` 里 `apiTypeMatch: "anthropic-messages"` 的逐模型 map）：
  *
- * - `.*glm-5\.3.*`（GLM-5.3 / GLM-5.3-Flash）：
+ * - `.*glm-5\.[34].*`（GLM-5.4 / GLM-5.3 / GLM-5.3-Flash）：
  *   `{"thinking":{"type":"enabled"},"output_config":{"effort": reasoningLevel}}`
  *   ——这一族**没有** `disabled` 分支，所以官方也没给 `disabled` 这个档位值。
  * - `.*GLM-5\.2.*`：`reasoningLevel == "disabled" ? {"thinking":{"type":"disabled"}} :
@@ -375,8 +375,9 @@ function computeVisibleContentHash(blocks: unknown): string {
 /**
  * 仅当历史消息携带上游原发、带有效 `signature`（或 `redacted_thinking.data`）且
  * `provider/route/model/visibleContentHash` 全部精确匹配的 `replayState` 时，原样回放
- * 思考块以支持 GLM-5.2/5.3 的 Preserved / Interleaved Thinking；任何无签名或跨模型/
- * 跨线路/已被改写的块一律静默跳过，绝不发出无签名 thinking 块引发 400。
+ * 思考块以支持 GLM-5.2/5.3/5.4 的 Preserved / Interleaved Thinking（GLM-5.4 默认开启
+ * `clear_thinking: false`，原样回放带签名思考块可维持跨轮推理连续性与前缀缓存命中率）；
+ * 任何无签名或跨模型/跨线路/已被改写的块一律静默跳过，绝不发出无签名 thinking 块引发 400。
  */
 function replayedGlmThinkingBlock(
   message: Message,

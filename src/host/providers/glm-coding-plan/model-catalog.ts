@@ -185,6 +185,21 @@ const GLM5_TURBO_MAX_OUTPUT = 64_000
  */
 const GLM_MODEL_FACTS: readonly GlmModelFacts[] = [
   {
+    id: 'GLM-5.4',
+    name: 'GLM-5.4',
+    regions: BOTH,
+    // 官方 docs.z.ai / Coding Plan 档位仍为 low / high / max（默认 max），
+    // 且与 GLM-5.3 同属强制思考模型：发 thinking.type: "disabled" 会被网关报 400/1210 拒绝。
+    reasoningEfforts: GLM53_EFFORTS,
+    thinkingDisableable: false,
+    wire: 'anthropic',
+    // 模型本体原生支持多模态（Image / Video / Text / File），且叠加 Coding Plan 站点规则均为 true。
+    supportsImages: true,
+    defaultContextWindow: 1_000_000,
+    defaultMaxTokens: GLM5_MAX_OUTPUT,
+    description: '新一代旗舰（Loop Transformer），1M 上下文，原生多模态，强制思考。',
+  },
+  {
     id: 'GLM-5.3',
     name: 'GLM-5.3',
     regions: BOTH,
@@ -287,7 +302,7 @@ export const GLM_MODEL_CATALOG: readonly GlmModelEntry[] = GLM_MODEL_FACTS.map(w
  * 「模型 id 反推不出账号套餐」：同一个 id 在不同 provider 规则下被启用的集合是不同的，
  * 而套餐归属是**账号**的属性，不是模型的属性。
  */
-export const GLM_START_PLAN_EXCLUDED_MODEL_IDS: readonly string[] = ['GLM-5.3']
+export const GLM_START_PLAN_EXCLUDED_MODEL_IDS: readonly string[] = ['GLM-5.4', 'GLM-5.3']
 
 /** 目录里全部 id，声明顺序即设置页的默认顺序。 */
 export const GLM_MODEL_IDS: readonly string[] = GLM_MODEL_CATALOG.map((model) => model.id)
