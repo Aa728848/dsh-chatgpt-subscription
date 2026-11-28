@@ -24,6 +24,7 @@ function runCapture(command) {
 
 async function main() {
   const pkgPath = path.join(projectRoot, 'package.json');
+  const lockPath = path.join(projectRoot, 'package-lock.json');
   const compatPath = path.join(projectRoot, 'src/compat.ts');
   const changelogPath = path.join(projectRoot, 'docs/CHANGELOG.md');
 
@@ -54,6 +55,23 @@ async function main() {
     console.log(`[1/5] package.json 版本号已更新为: ${targetVersion}`);
   } else {
     console.log(`[1/5] package.json 版本号已是: ${targetVersion}`);
+  }
+
+  if (fs.existsSync(lockPath)) {
+    const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    let lockChanged = false;
+    if (lock.version !== targetVersion) {
+      lock.version = targetVersion;
+      lockChanged = true;
+    }
+    if (lock.packages && lock.packages[''] && lock.packages[''].version !== targetVersion) {
+      lock.packages[''].version = targetVersion;
+      lockChanged = true;
+    }
+    if (lockChanged) {
+      fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n', 'utf8');
+      console.log(`[1/5] package-lock.json 版本号已更新为: ${targetVersion}`);
+    }
   }
 
   if (fs.existsSync(compatPath)) {
@@ -88,6 +106,7 @@ async function main() {
 
   // 3. 执行门禁检查
   console.log('\n[3/5] 执行全量类型检查与单元测试...');
+  run('npx tsc -b --force');
   run('npm run typecheck');
   run('npm test');
 
@@ -102,13 +121,15 @@ async function main() {
 
   // 5. Git Commit & Tag
   console.log('\n[5/5] Git 提交与打 Tag...');
-  run('git add package.json src/compat.ts docs/CHANGELOG.md');
+  const releaseFiles = ['package.json', 'src/compat.ts', 'docs/CHANGELOG.md'];
+  if (fs.existsSync(lockPath)) releaseFiles.push('package-lock.json');
+  run(`git add ${releaseFiles.join(' ')}`);
 
-  const status = runCapture('git status --porcelain package.json src/compat.ts docs/CHANGELOG.md');
+  const status = runCapture(`git status --porcelain ${releaseFiles.join(' ')}`);
   if (status) {
     run(`git commit -m "chore(release): bump package version to ${targetVersion}"`);
   } else {
-    console.log('package.json 与 CHANGELOG.md 无新变更需 commit。');
+    console.log('发版元数据无新变更需 commit。');
   }
 
   const tagName = `v${targetVersion}`;

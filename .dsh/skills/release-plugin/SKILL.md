@@ -26,18 +26,19 @@ graph TD
 
 1. **Commit Audit & SemVer**: Compare commits from the last release tag to `HEAD` and determine the version number.
 2. **Version & Changelog Sync**:
-   - Update `"version"` in `package.json`.
-   - In `CHANGELOG.md`, move items under `## Unreleased` into a new `## <version> - YYYY-MM-DD` section, leaving a fresh `## Unreleased` placeholder above it.
+   - Update `"version"` in `package.json`, `package-lock.json` (root + `packages[""]`), and `PLUGIN_VERSION` in `src/compat.ts`.
+   - In `docs/CHANGELOG.md`, move items under `## Unreleased` into a new `## <version> - YYYY-MM-DD` section, leaving a fresh `## Unreleased` placeholder above it. Keep release notes **concise and user-facing** (1–2 plain-language sentences per item; never dump internal function/variable names, package lists, or test-count logs into `docs/CHANGELOG.md`).
 3. **Verification & Clean Build**:
-   - Run `npm run typecheck` and `npm test`.
+   - Check `git status` to ensure no stray temporary files exist (e.g. `pnpm-lock.yaml` / `pnpm-workspace.yaml` — this repo uses **npm** exclusively).
+   - Run `npx tsc -b --force` (after shared type or harness bumps), `npm run typecheck`, and `npm test`.
    - Wipe `lib/` and rebuild (`rm -rf lib && npm run build`) to ensure no deleted source declarations leak into the bundle.
    - Run `npm pack --dry-run` to preview published files.
 4. **Git Commit & Tag**:
    - Commit changes: `git commit -m "chore(release): bump package version to <version>"`.
    - Create annotated/lightweight tag: `git tag v<version>`.
 5. **Push & CI Publishing**:
-   - Push to GitHub: `git push origin master --tags`.
-   - The `.github/workflows/release.yml` workflow triggers on `v*` tags, extracting release notes from `CHANGELOG.md`, publishing to npm via `secrets.NPM_TOKEN`, and creating the GitHub Release.
+   - Push to GitHub: `git push origin master` and `git push origin v<version>` (or `--tags`).
+   - The `.github/workflows/release.yml` workflow triggers on `v*` tags, extracting release notes from `docs/CHANGELOG.md`, publishing to npm via `secrets.NPM_TOKEN`, and creating the GitHub Release.
 
 ---
 
@@ -59,13 +60,16 @@ git status
 # - Prerelease (e.g. 0.13.2-alpha.1): Test builds (must be published with --tag alpha).
 ```
 
-### Step 2: Update package.json & CHANGELOG.md
+### Step 2: Update Versions & Archive `docs/CHANGELOG.md`
 
-1. **Update `package.json`**:
-   Change `"version": "x.y.z"` to the new version.
+1. **Sync version across three files** (a unit test asserts `PLUGIN_VERSION === package.json.version`, and CI runs `npm ci` against `package-lock.json`):
+   - `package.json`: `"version": "<version>"`
+   - `package-lock.json`: root `"version"` and `packages[""].version`
+   - `src/compat.ts`: `export const PLUGIN_VERSION = '<version>' as const`
 
-2. **Archive `CHANGELOG.md`**:
-   Rename the current `## Unreleased` contents to `## <version> - YYYY-MM-DD`, keeping a fresh `## Unreleased` block at the top:
+2. **Archive `docs/CHANGELOG.md` (concise, user-facing prose only)**:
+   Move current `## Unreleased` items into `## <version> - YYYY-MM-DD`, keeping a fresh `## Unreleased` block at the top.
+   - **Writing rule**: write for end users — 1–2 concise sentences per bullet describing user-visible changes and impact. Never dump internal symbol/function names, file paths, or multi-generation test-count logs here (keep detailed technical audit & verification numbers inside `.dsh/skills/dsh-harness-upgrade/references/<ver>.md`).
    ```markdown
    # Changelog
 
@@ -73,19 +77,19 @@ git status
 
    ## <version> - YYYY-MM-DD
 
-   - **[Line / Feature] Title (#Issue)**
-     - Details...
+   - **[line / area] Short user-facing summary**: Plain-language description of what changed and why it matters.
    ```
 
 ### Step 3: Verification & Clean Build
 
-As noted in `AGENTS.md`, `lib/` is incremental and keeps declaration files of deleted sources. **Always clean before rebuilding**:
+As noted in `AGENTS.md`, `lib/` is incremental and keeps declaration files of deleted sources. **Always clean before rebuilding**, and check `git status` for stray files (never commit `pnpm-lock.yaml` / `pnpm-workspace.yaml`):
 
 ```powershell
-# 1. Typecheck
+# 1. Force full TypeScript check (avoids stale .tsbuildinfo) + test/scripts check
+npx tsc -b --force
 npm run typecheck
 
-# 2. Full test suite
+# 2. Full test suite (verifies PLUGIN_VERSION sync & BOM-free package integrity)
 npm test
 
 # 3. Clean build
@@ -99,13 +103,16 @@ npm pack --dry-run
 ### Step 4: Git Commit & Tag
 
 ```powershell
-# 1. Stage release metadata
-git add package.json CHANGELOG.md
+# 1. Verify no stray untracked files (e.g. pnpm-lock.yaml)
+git status -sb
 
-# 2. Commit with conventional prefix
+# 2. Stage release metadata
+git add package.json package-lock.json src/compat.ts docs/CHANGELOG.md
+
+# 3. Commit with conventional prefix
 git commit -m "chore(release): bump package version to <version>"
 
-# 3. Tag with v prefix (must match v* for GitHub Actions)
+# 4. Tag with v prefix (must match v* for GitHub Actions)
 git tag v<version>
 ```
 
@@ -115,7 +122,7 @@ git tag v<version>
 # Optional: Set local proxy if GitHub connection stalls
 # $env:all_proxy="http://127.0.0.1:7890"
 
-# Push branch and tags
+# Push branch and tag
 git push origin master
 git push origin v<version>
 ```
@@ -123,7 +130,7 @@ git push origin v<version>
 Once pushed, GitHub Actions `.github/workflows/release.yml` will automatically:
 1. Validate types and run the test suite.
 2. Clean and build production assets.
-3. Extract matching release notes from `CHANGELOG.md`.
+3. Extract matching release notes from `docs/CHANGELOG.md`.
 4. Publish to npm registry using `NPM_TOKEN`.
 5. Create a GitHub Release with the extracted notes and upload the `.tgz` tarball.
 
@@ -163,5 +170,8 @@ npm publish --access public --tag alpha
 ## 5. Traps & Invariants
 
 1. **`lib/` Stale Files**: Never publish without `rm -rf lib && npm run build`. The build cache does not track deleted source files.
-2. **Prerelease Tags**: npm 11+ refuses to publish prereleases without an explicit `--tag <dist-tag>`.
-3. **Automation Tokens vs Publish Tokens**: Always use an `Automation` token in `~/.npmrc` and CI secrets; `Publish` tokens require interactive 2FA OTP for write actions.
+2. **Version Triple-Sync**: `package.json`, `package-lock.json` (root + `packages[""]`), and `src/compat.ts` (`PLUGIN_VERSION`) must all match. A stale `PLUGIN_VERSION` fails `responses-client.test.ts`; a drifted lockfile breaks `npm ci` in CI.
+3. **npm-Only Repo**: Never commit `pnpm-lock.yaml` or `pnpm-workspace.yaml` generated during local debugging.
+4. **BOM-Free Files & GitHub Release Edits**: Never save repo files with a UTF-8 BOM (`package-integrity.test.ts` fails). If editing a published GitHub Release via `gh release edit v<ver> --notes-file <file>` on Windows PowerShell, pass a BOM-free UTF-8 file rather than piping through PowerShell stdout (which can prepend `\uFEFF`).
+5. **Prerelease Tags**: npm 11+ refuses to publish prereleases without an explicit `--tag <dist-tag>`.
+6. **Automation Tokens vs Publish Tokens**: Always use an `Automation` token in `~/.npmrc` and CI secrets; `Publish` tokens require interactive 2FA OTP for write actions.

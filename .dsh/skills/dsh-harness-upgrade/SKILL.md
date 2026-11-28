@@ -176,10 +176,12 @@ The seam each guard owns, and what a harness bump has to keep answering:
 
 | Guard | The one seam it flattens | What a bump must keep answering |
 |---|---|---|
-| `plan-mode-cache-guard.ts` | the dynamic `plan:policy` and `plan:status` (≥0.2.3) system sections, `{ when }` on `exit_plan_mode` (≤0.2.3-alpha.2), and `tools.include(AgentToolRegistry)` (≥0.2.3-alpha.3) | does the official service still register those dynamic sections, is `plan:status` still the active/inactive signal once `plan:policy` stays non-empty, does `retire: true` stay ignored, and does it still disclose `exit_plan_mode` through `AgentToolRegistry` + `tools.include()` (or `{ when }` on older builds)? |
-| `tool-result-pruner-guard.ts` | the pruner instance's `pruneSession` | is the service still called `toolResultPruner`, and is it still reachable from `ctx.reflect.store` **and** from `agent.ctx.get('toolResultPruner')`? |
-| `ptc-sdk-cache-guard.ts` | `tools.definitions(scope, toolSet)` (≤0.2.3-alpha.2), `tools/change` epoch (≥0.2.3-alpha.3), and the `tools:sdk` system section | does the tool layer expose `definitions` or `tools/change`, and is the PTC section still named `tools:sdk`? |
-| `compaction-policy-guard.ts` | the compaction engine's `config.modelPolicies`, `agent/pre-step.modelSelection` observation, and the `summarize` entry point | do the budget keys (`retainRatio`, `thresholdRatio`, `headroomTokens`, `retainTokens`, `maxTokens`) still exist, and is `modelPolicies` still resolved by a `find` over `provider`/`model`? |
+| `src/host/runtime/guards/plan-mode-cache-guard.ts` | the dynamic `plan:policy` and `plan:status` (≥0.2.3) system sections, `{ when }` on `exit_plan_mode` (≤0.2.3-alpha.2), and `tools.include(AgentToolRegistry)` (≥0.2.3-alpha.3) | does the official service still register those dynamic sections, is `plan:status` still the active/inactive signal once `plan:policy` stays non-empty, does `retire: true` stay ignored, and does it still disclose `exit_plan_mode` through `AgentToolRegistry` + `tools.include()` (or `{ when }` on older builds)? |
+| `src/host/runtime/guards/team-policy-cache-guard.ts` | dynamic `team:policy` sections and `tools.include(AgentToolRegistry)` for the 4 `team_task_*` tools (≥0.2.3-alpha.3) | does `tool-agent-team` still expose `team_task_*` through `AgentToolRegistry` + `tools.include()`, and does flattening keep original `ToolDefinition` object identity intact? |
+| `src/host/runtime/guards/timeline-cache-guard.ts` | dynamic `timeline_tasks` tool description changes (`tools.definitions` on ≤0.2.3-alpha.2; `system-prompt/assemble` freezing `assembly.tools` on ≥0.2.3-alpha.3) | never shallow-clone `tools.getAll()` definitions on ≥0.2.3-alpha.3 (breaks `ToolStep.declares()` identity checks and triggers `UNKNOWN_TOOL`); does `assembly.tools` still carry the rendered tool list? |
+| `src/host/runtime/guards/tool-result-pruner-guard.ts` | the pruner instance's `pruneSession` | is the service still called `toolResultPruner`, and is it still reachable from `ctx.reflect.store` **and** from `agent.ctx.get('toolResultPruner')`? |
+| `src/host/runtime/guards/ptc-sdk-cache-guard.ts` | `tools.definitions(scope, toolSet)` (≤0.2.3-alpha.2), `tools/change` epoch (≥0.2.3-alpha.3), and the `tools:sdk` system section | does the tool layer expose `definitions` or `tools/change`, and is the PTC section still named `tools:sdk`? |
+| `src/host/runtime/guards/compaction-policy-guard.ts` | the compaction engine's `config.modelPolicies`, `agent/pre-step.modelSelection` observation, and the `summarize` entry point | do the budget keys (`retainRatio`, `thresholdRatio`, `headroomTokens`, `retainTokens`, `maxTokens`) still exist, and is `modelPolicies` still resolved by a `find` over `provider`/`model`? |
 
 The compaction policy guard is the one guard that deliberately **rewrites** the
 guarded service instead of only flattening a rebuild: it replaces the engine's
@@ -268,6 +270,13 @@ into the same trap. The regression tests live under the describe block
 that the listener calls `next()` and returns its exact result — with
 `agent.ctx` present, with `agent.ctx` absent, and with the scan throwing.
 
+### 3b. Optional leverage audit (present to the user before adopting)
+
+In addition to breaking changes, check whether the new harness introduces capabilities that can strengthen **prefix-cache stability** or **model execution quality**, and present them as an opt-in checklist before implementing:
+
+- **Prefix-cache levers**: `toolUpdate: 'in-history'` / `systemPromptUpdate: 'in-history'` on provider routes, tool-scope visibility gating & `retirement` notices on plugin system prompt sections (`cache-warmup`, `progress-updates`), or new dynamic tool sources that need a cache guard.
+- **Model/runtime levers**: new persisted `sessionProjections` (e.g., `todos` / `todoReminder.unfinishedTodos` feeding state anchors), new synthetic message `source.form` / `source.kind` values (verify `isRealUserMessage()` whitelist filtering in `retrieval-intent`, `observation-tagger`, and `observation-guard`), or updated default retryable codes (`DEFAULT_RETRYABLE_CODES`).
+
 ## 4. Verification recipe
 
 New baseline, in the repo:
@@ -294,9 +303,8 @@ generation's dependency closure and produces fake failures:
 
 ```bash
 ROOM=/tmp/plugin-old && rm -rf $ROOM && mkdir -p $ROOM
-cd <repo> && cp -r src test presets bin lib widgets cordis.patch.yml package.json \
-  tsconfig.json tsconfig.client.json tsconfig.host.json vitest.config.ts \
-  icon.svg README.md CHANGELOG.md LICENSE $ROOM/
+cd <repo> && cp -r src test presets config assets locale lib widgets docs cordis.patch.yml package.json \
+  tsconfig.json tsdown.config.ts vitest.config.ts README.md LICENSE $ROOM/
 cd $ROOM
 node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));\
 for(const k of Object.keys(p.devDependencies)){if(k.startsWith('@deepseek-ai/dsh-')){\
@@ -329,16 +337,12 @@ carries `lib/`, so pruning something like `mermaid` "because only a renderer tes
 uses it" makes `test/routes.test.ts` fail with a 404 that says nothing about the
 plugin.
 
-Record the numbers from all three runs in the CHANGELOG entry.
+Record the detailed verification numbers from all three runs in `references/<harness-version>.md` (not in `docs/CHANGELOG.md`).
 
 ## 5. Recording a round
 
-Add the user-facing story to `CHANGELOG.md` under `## Unreleased` (what changed in
-the harness, what the plugin now does, how it behaves on the old generation, and
-the verification numbers), then copy `references/_template.md` to
-`references/<harness-version>.md` and fill it in: the harness evidence (file paths
-at the tag), the plugin files that bridge it, and anything left unverified. The
-next upgrade starts by reading the newest file in `references/`.
+- **`docs/CHANGELOG.md` (user-facing, concise)**: add 1–3 brief, plain-language bullets under `## Unreleased` stating only what users notice (new compatibility, new capabilities, cache/stability gains). Never dump internal function/class names, package lists, or clean-room test counts into `docs/CHANGELOG.md` — GitHub Releases extract directly from it.
+- **`references/<harness-version>.md` (engineering archive)**: copy `references/_template.md` and record the full harness evidence (file paths at the tag), the plugin files that bridge it, the three-generation verification numbers, and anything left unverified. The next upgrade starts by reading the newest file in `references/`.
 
 ## 6. Traps learned the hard way
 
@@ -413,6 +417,26 @@ next upgrade starts by reading the newest file in `references/`.
   the user is already waiting on, and (2) a shape-only assertion passes
   forever. Assert against the real boundary (`adoptSessionEvent`) — and verify
   the new test **fails** when the fix is reverted, or it is not a regression test.
+- **Never bare-read uninjected properties on a Cordis `Context` proxy.** Cordis
+  throws `cannot get property "<name>" without inject` synchronously even behind
+  optional chaining (`ctx?.loader`), which broke both `dispatch_ledger` (#144,
+  `allowedRoutes`) and `src/entries/codemode.ts` (v0.91.1, `ctx.loader` /
+  `root.loader`). Always read optional host services through `ctx.get(name)`
+  inside a `try/catch` helper (`safeProp` / `safeReadProp`).
+- **Never shallow-clone `ToolDefinition` objects returned by `tools.getAll()`.**
+  Starting in 0.2.3-alpha.3, `ToolStep.declares()` checks tool declarations by
+  object identity (`===`). Cloning a `ToolDefinition` to freeze its description
+  breaks execution with `UNKNOWN_TOOL`; freeze descriptions on `assembly.tools`
+  inside `system-prompt/assemble` instead, and return original references from
+  `tools.include` wrappers.
+- **Use a positive real-user whitelist (`isRealUserMessage`) instead of only excluding `form === 'notice'`.**
+  From 0.2.3-alpha.3, DSH injects `todo-reminder` and `runtime-context` user
+  messages with `form: 'snapshot'`. Guards or intent classifiers that only skip
+  `notice` treat snapshots as new user turns and prematurely reset runaway or
+  read-only spin counters.
+- **Use npm exclusively in this repository.** CI runs `npm ci` against
+  `package-lock.json`. Never run `pnpm` inside the repo root (it leaves behind
+  untracked `pnpm-lock.yaml` / `pnpm-workspace.yaml` files).
 
 ## 7. Current state
 
