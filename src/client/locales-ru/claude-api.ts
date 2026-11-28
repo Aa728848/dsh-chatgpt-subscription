@@ -1,6 +1,11 @@
 import type { ClaudeApiLocaleKey } from '../providers/claude-api/locales.ts'
+import { accountPoolRu } from './account-pool.ts'
 export const dictionary: Record<ClaudeApiLocaleKey, string> = {
-  title: 'Claude API', pageDesc: 'Один API-ключ для эндпоинта Anthropic Messages или совместимого шлюза; запросы отправляются в формате официального клиента Claude Code.', loading: 'Чтение состояния линии…',
+  ...accountPoolRu,
+  strategySequential: 'Последовательно (сначала основной, затем резервный)',
+  noAccounts: 'Аккаунтов пока нет. Добавьте адрес и API-ключ.',
+  title: 'Claude API', pageDesc: 'У каждого аккаунта свой API-ключ и совместимый эндпоинт Messages; сначала используется основной, при сбое — резервный.', loading: 'Чтение состояния линии…',
+  accountAlias: 'Имя аккаунта', editAccount: 'Изменить', saveAccount: 'Сохранить аккаунт', cancel: 'Отмена', keyKeepPlaceholder: 'Оставьте пустым, чтобы сохранить текущий ключ',
   enabled: 'Включить Claude API', keySection: 'API-ключ', keyPlaceholder: 'sk-ant-…', saveKey: 'Сохранить ключ', savingKey: 'Сохранение…', removeKey: 'Удалить ключ', removingKey: 'Удаление…',
   keyConfigured: 'Ключ хранится в зашифрованном виде и не показывается на странице или в журналах.', keyMissing: 'API-ключ не настроен. Вставьте ключ, выданный консолью Anthropic или вашим совместимым шлюзом.',
   storagePath: 'Зашифрованное хранилище', clientVersion: 'Версия Claude Code', versionSourceEnv: 'задана переменной окружения', versionSourceNpm: 'из npm', versionSourceCached: 'последняя полученная', versionSourceDefault: 'встроенная по умолчанию', versionPending: 'обновится до {version} после простоя',
@@ -14,7 +19,8 @@ export const dictionary: Record<ClaudeApiLocaleKey, string> = {
   catalogEmpty: 'Настройте ключ, чтобы прочитать каталог моделей.', catalogLoading: 'Чтение каталога моделей…', catalogError: 'Ошибка синхронизации каталога', catalogStale: 'Показан последний успешный каталог; фоновое обновление не удалось.',
   reasoningSection: 'Рассуждение', defaultEffort: 'Уровень рассуждения по умолчанию', effortHint: 'Передаётся только моделям, поддерживающим этот уровень; выбор в текущей сессии имеет приоритет.', effortDefault: 'По умолчанию модели', effortNone: 'Выкл.', effortLow: 'Низкий', effortMedium: 'Средний', effortHigh: 'Высокий', effortXhigh: 'Очень высокий', effortMax: 'Максимальный',
   optionsSection: 'Параметры запросов', optionsHint: 'Эти параметры действуют только на запросы этой линии.',
-  cacheTtl: 'Срок кэша промпта', cacheTtl5m: '5 минут', cacheTtl1h: '1 час', fastMode: 'Быстрый режим', serverCompaction: 'Сжатие на стороне сервера',
+  cacheTtl: 'Срок кэша основного диалога', subagentCacheTtl: 'Срок кэша субагентов и фоновых запросов', subagentCacheTtlHint: 'Субагенты, сжатие контекста, заголовки и другие запросы вне основного диалога.', cacheTtl5m: '5 минут', cacheTtl1h: '1 час', fastMode: 'Быстрый режим', serverCompaction: 'Сжатие на стороне сервера',
+  autoCompactSubagents: 'Автоматически сжимать субагентов после завершения', autoCompactSubagentsHint: 'Включено по умолчанию. Сжимается только контекст субагента; основной диалог не меняется, а ошибка сжатия не меняет результат задачи.',
   moreNotes: 'Тарификация и совместимость', cacheTtlNote: 'При выборе 1 часа запись в кэш оплачивается по двойной базовой цене входных токенов. При длительности 1 час, пока работают субагенты или фоновые задачи, линия примерно каждые 55 минут отправляет один небольшой запрос поддержания кэша, чтобы срок кэша не истёк; при длительности 5 минут этого не происходит.',
   fastModeNote: 'Быстрый режим оплачивается по повышенному тарифу и действует только для моделей, которые его поддерживают.', serverCompactionNote: 'Если эндпоинт не поддерживает сжатие на стороне сервера, линия возвращается к клиентскому сжатию.',
   contextSection: 'Контекстные окна', contextHint: 'По умолчанию используется окно из каталога; здесь его можно изменить для каждой модели.', tokens: 'токенов', save: 'Сохранить', saving: 'Сохранение…', reset: 'Сбросить', resetAll: 'Сбросить все', contextEmpty: 'Нет включённых моделей.',

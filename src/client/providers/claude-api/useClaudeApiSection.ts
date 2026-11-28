@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  CLAUDE_API_DEFAULT_BASE_URL,
   CLAUDE_API_PROVIDER_ID,
   normalizeClaudeApiBaseUrl,
+  type ClaudeApiAccountSummaryDto,
   type ClaudeApiBaseUrlError,
   type ClaudeApiCacheTtl,
   type ClaudeApiConnectionDto,
@@ -9,17 +11,18 @@ import {
   type ClaudeApiSettingsUpdateDto,
   type ClaudeApiStatusDto,
 } from '../../../shared/claude-api-contracts.ts'
+import type { AccountRotationStrategy } from '../../../shared/account-pool-contracts.ts'
 import { contextDraftsFor } from '../../common/ContextWindowEditor.tsx'
 import { parsePositiveCapacity } from '../../common/format.ts'
-import { CLAUDE_API_CLIENT_ROUTES as ROUTES, get, messageOf, post, request } from './api.ts'
+import { CLAUDE_API_CLIENT_ROUTES as ROUTES, get, messageOf, post } from './api.ts'
 
-export interface ClaudeApiSectionProps { onModelChange?: () => void }
+export interface ClaudeApiSectionProps {
+  onModelChange?: () => void
+}
 
-// The host answers a key save and an endpoint change at once with the built-in model
-// table and refreshes the real catalog behind that answer, while the regular poll is
-// 60 s apart. Two short follow-up reads show the refreshed list without that wait.
+// The host answers an account save or catalog refresh with the current table and
+// refreshes the real catalog in the background while the regular poll is 60 s apart.
 const FOLLOW_UP_READ_DELAYS_MS = [2_000, 6_000] as const
-
 function isStatus(value: unknown): value is ClaudeApiStatusDto {
   if (typeof value !== 'object' || value === null) return false
   const record = value as { providerId?: unknown; models?: unknown }
@@ -32,21 +35,18 @@ export function useClaudeApiSection({ onModelChange }: ClaudeApiSectionProps = {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [connection, setConnection] = useState<ClaudeApiConnectionDto | null>(null)
+  const [accountFormOpen, setAccountFormOpen] = useState(false)
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null)
+  const [aliasValue, setAliasValue] = useState('')
   const [keyValue, setKeyValue] = useState('')
-  // null means "showing the stored endpoint"; a string is what the user is typing.
-  const [endpointDraft, setEndpointDraftState] = useState<string | null>(null)
+  const [endpointDraft, setEndpointDraftState] = useState('')
   const [endpointError, setEndpointError] = useState<ClaudeApiBaseUrlError | null>(null)
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({})
   const [capacityInvalid, setCapacityInvalid] = useState(false)
   const [savingModel, setSavingModel] = useState<string | null>(null)
-  // Request bookkeeping. `inFlight` counts every request of this card. `stamp` moves
-  // when any request starts and when a change settles, so a read whose stamp is no
-  // longer current overlapped something newer and must not set state. `changeSeq`
-  // orders the changes among themselves.
   const inFlight = useRef(0)
   const stamp = useRef(0)
   const changeSeq = useRef(0)
-  // What the drafts were last seeded with: a draft that differs from it was typed.
   const seededDrafts = useRef<Record<string, string>>({})
   const adopt = useCallback((next: ClaudeApiStatusDto, keepTypedDrafts = false) => {
     const seeded = contextDraftsFor({ models: next.models, contextWindowOverrides: next.contextWindowOverrides })
@@ -64,13 +64,9 @@ export function useClaudeApiSection({ onModelChange }: ClaudeApiSectionProps = {
     try {
       const next = await get<ClaudeApiStatusDto>(ROUTES.status)
       if (stamp.current === mine) adopt(next, keepTypedDrafts)
-    }
-    catch (cause) { if (!quiet) setError(messageOf(cause)) }
+    } catch (cause) { if (!quiet) setError(messageOf(cause)) }
     finally { inFlight.current -= 1; setLoading(false) }
   }, [adopt])
-  // Sends one change. Its answer is applied only while no later change has started,
-  // so an older answer arriving late cannot replace a newer one. The bookkeeping is
-  // closed before `apply` runs, because `apply` may itself read the status.
   const change = useCallback(async <T>(run: () => Promise<T>, apply: (value: T) => void | Promise<void>): Promise<T> => {
     inFlight.current += 1
     stamp.current += 1
@@ -81,8 +77,6 @@ export function useClaudeApiSection({ onModelChange }: ClaudeApiSectionProps = {
     if (changeSeq.current === mine) await apply(value)
     return value
   }, [])
-  // The key and catalog routes are only specified as "{ ok, value }": adopt a status
-  // when that is what came back, otherwise read it, so the card never renders a guess.
   const settle = useCallback(async (value: unknown) => {
     if (isStatus(value)) adopt(value)
     else await loadStatus(true)
@@ -92,9 +86,6 @@ export function useClaudeApiSection({ onModelChange }: ClaudeApiSectionProps = {
     for (const timer of followUpTimers.current) window.clearTimeout(timer)
     followUpTimers.current = []
   }, [])
-  // A newer change restarts the pair, so reads never stack up behind repeated saves.
-  // A follow-up is skipped while another request of the card is in flight, and it
-  // keeps what the user has typed: it exists to bring in the catalog, nothing else.
   const scheduleFollowUps = useCallback(() => {
     cancelFollowUps()
     followUpTimers.current = FOLLOW_UP_READ_DELAYS_MS.map(delay => window.setTimeout(() => {
@@ -118,25 +109,56 @@ export function useClaudeApiSection({ onModelChange }: ClaudeApiSectionProps = {
     } catch (cause) { setError(messageOf(cause)); throw cause }
     finally { setBusy(null) }
   }, [adopt, change, onModelChange])
-  const saveKey = useCallback(async () => {
-    const apiKey = keyValue.trim()
-    if (apiKey === '') return
-    setBusy('key'); setError(null)
+  const openAddAccount = useCallback(() => {
+    setAccountFormOpen(true); setEditingAccountId(null); setAliasValue(''); setKeyValue('')
+    setEndpointDraftState(status?.defaultBaseUrl ?? CLAUDE_API_DEFAULT_BASE_URL); setEndpointError(null); setConnection(null)
+  }, [status?.defaultBaseUrl])
+  const openEditAccount = useCallback((account: ClaudeApiAccountSummaryDto) => {
+    setAccountFormOpen(true); setEditingAccountId(account.id); setAliasValue(account.alias); setKeyValue('')
+    setEndpointDraftState(account.baseUrl); setEndpointError(null); setConnection(null)
+  }, [])
+  const cancelAccountForm = useCallback(() => {
+    setAccountFormOpen(false); setEditingAccountId(null); setAliasValue(''); setKeyValue(''); setEndpointError(null)
+  }, [])
+  const saveAccount = useCallback(async () => {
+    const normalized = normalizeClaudeApiBaseUrl(endpointDraft)
+    if (!normalized.ok) { setEndpointError(normalized.reason); return }
+    if (editingAccountId === null && keyValue.trim() === '') return
+    setBusy('account'); setError(null); setEndpointError(null)
     try {
-      await change(() => post<unknown>(ROUTES.key, { apiKey }), settle)
-      setKeyValue(''); setConnection(null); onModelChange?.(); scheduleFollowUps()
+      await change(() => post<unknown>(ROUTES.accounts, {
+        action: 'save',
+        ...(editingAccountId === null ? {} : { accountId: editingAccountId }),
+        alias: aliasValue,
+        baseUrl: normalized.value,
+        ...(keyValue.trim() === '' ? {} : { apiKey: keyValue.trim() }),
+      }), settle)
+      cancelAccountForm(); setConnection(null); onModelChange?.(); scheduleFollowUps()
     } catch (cause) { setError(messageOf(cause)) }
     finally { setBusy(null) }
-  }, [change, keyValue, onModelChange, scheduleFollowUps, settle])
-  const removeKey = useCallback(async () => {
-    setBusy('remove-key'); setError(null)
-    try { await change(() => request<unknown>(ROUTES.key, { method: 'DELETE' }), settle); setConnection(null); onModelChange?.() }
+  }, [aliasValue, cancelAccountForm, change, editingAccountId, endpointDraft, keyValue, onModelChange, scheduleFollowUps, settle])
+  const accountAction = useCallback(async (action: string, accountId: string) => {
+    setBusy(action + '-' + accountId); setError(null)
+    try {
+      await change(() => post<unknown>(ROUTES.accounts, { action, accountId }), settle)
+      if (action === 'delete' && editingAccountId === accountId) cancelAccountForm()
+      setConnection(null)
+      if (action === 'set-primary' || action === 'delete') {
+        onModelChange?.()
+        scheduleFollowUps()
+      }
+    } catch (cause) { setError(messageOf(cause)) }
+    finally { setBusy(null) }
+  }, [cancelAccountForm, change, editingAccountId, onModelChange, scheduleFollowUps, settle])
+  const setStrategy = useCallback(async (rotationStrategy: AccountRotationStrategy) => {
+    setBusy('strategy'); setError(null)
+    try { await change(() => post<unknown>(ROUTES.accounts, { action: 'strategy', strategy: rotationStrategy }), settle) }
     catch (cause) { setError(messageOf(cause)) }
     finally { setBusy(null) }
-  }, [change, onModelChange, settle])
-  const testConnection = useCallback(async () => {
-    setBusy('connection'); setError(null)
-    try { await change(() => post<ClaudeApiConnectionDto>(ROUTES.test, {}), setConnection); await loadStatus(true) }
+  }, [change, settle])
+  const testConnection = useCallback(async (accountId?: string) => {
+    setBusy('connection' + (accountId ? '-' + accountId : '')); setError(null)
+    try { await change(() => post<ClaudeApiConnectionDto>(ROUTES.test, accountId ? { accountId } : {}), setConnection); await loadStatus(true) }
     catch (cause) { setError(messageOf(cause)) }
     finally { setBusy(null) }
   }, [change, loadStatus])
@@ -146,16 +168,6 @@ export function useClaudeApiSection({ onModelChange }: ClaudeApiSectionProps = {
     catch (cause) { setError(messageOf(cause)) }
     finally { setBusy(null) }
   }, [change, onModelChange, scheduleFollowUps, settle])
-  const saveEndpoint = useCallback(async () => {
-    const result = normalizeClaudeApiBaseUrl(endpointDraft ?? status?.baseUrl ?? '')
-    if (!result.ok) { setEndpointError(result.reason); return }
-    setEndpointError(null)
-    try { await update({ baseUrl: result.value }, 'endpoint'); setEndpointDraftState(null); setConnection(null); scheduleFollowUps() } catch { /* exposed */ }
-  }, [endpointDraft, scheduleFollowUps, status, update])
-  const restoreEndpoint = useCallback(async () => {
-    setEndpointError(null)
-    try { await update({ baseUrl: null }, 'endpoint-reset'); setEndpointDraftState(null); setConnection(null); scheduleFollowUps() } catch { /* exposed */ }
-  }, [scheduleFollowUps, update])
   const toggleModel = useCallback((id: string, enabled: boolean) => {
     if (status === null) return
     const ids = status.models.filter(model => model.id === id ? enabled : model.enabled).map(model => model.id)
@@ -168,7 +180,7 @@ export function useClaudeApiSection({ onModelChange }: ClaudeApiSectionProps = {
   const saveContextWindow = useCallback(async (id: string) => {
     const parsed = parsePositiveCapacity(contextDrafts[id] ?? '')
     if (parsed === null) { setCapacityInvalid(true); return }
-    setSavingModel(id)
+    setCapacityInvalid(false); setSavingModel(id)
     try { await update({ contextWindowOverrides: { [id]: parsed } }, 'context:' + id) } catch { /* exposed */ }
     finally { setSavingModel(null) }
   }, [contextDrafts, update])
@@ -182,15 +194,19 @@ export function useClaudeApiSection({ onModelChange }: ClaudeApiSectionProps = {
     if (Object.keys(overrides).length > 0) await update({ contextWindowOverrides: overrides }, 'context')
   }, [status, update])
   return {
-    status, loading, busy, error, connection, keyValue, endpointDraft, endpointError, contextDrafts, capacityInvalid, savingModel,
-    setKeyValue,
+    status, loading, busy, error, connection, accountFormOpen, editingAccountId, aliasValue, keyValue, endpointDraft, endpointError,
+    contextDrafts, capacityInvalid, savingModel,
+    setAliasValue, setKeyValue,
     setEndpointDraft: (draft: string) => { setEndpointDraftState(draft); setEndpointError(null) },
     setContextDraft: (id: string, draft: string) => { setCapacityInvalid(false); setContextDrafts(current => ({ ...current, [id]: draft })) },
-    saveKey, removeKey, testConnection, refreshCatalog, saveEndpoint, restoreEndpoint, update, toggleModel, setAllModels,
+    openAddAccount, openEditAccount, cancelAccountForm, saveAccount, accountAction, setStrategy,
+    testConnection, refreshCatalog, update, toggleModel, setAllModels,
     saveContextWindow, resetContextWindow, resetAllContextWindows,
     setDefaultEffort: (defaultReasoningEffort: ClaudeApiReasoningEffort | null) => update({ defaultReasoningEffort }, 'effort'),
     setCacheTtl: (cacheTtl: ClaudeApiCacheTtl) => update({ cacheTtl }, 'options'),
+    setSubagentCacheTtl: (subagentCacheTtl: ClaudeApiCacheTtl) => update({ subagentCacheTtl }, 'options'),
     setFastMode: (fastMode: boolean) => update({ fastMode }, 'options'),
     setServerCompaction: (serverCompaction: boolean) => update({ serverCompaction }, 'options'),
+    setAutoCompactSubagents: (autoCompactSubagents: boolean) => update({ autoCompactSubagents }, 'options'),
   }
 }

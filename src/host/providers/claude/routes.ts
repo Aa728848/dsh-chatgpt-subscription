@@ -385,6 +385,7 @@ export async function getClaudeWebStatus(
     subagentCacheTtl: settings.subagentCacheTtl,
     fastMode: settings.fastMode,
     cacheKeepalive: settings.cacheKeepalive,
+    autoCompactSubagents: settings.autoCompactSubagents,
     selectedAccountId: settings.selectedAccountId,
     accounts: poolAccounts.map((summary): PoolClaudeAccountSummaryDto => summary),
     rotationStrategy: poolData?.rotationStrategy ?? 'sequential',
@@ -780,6 +781,10 @@ export function registerClaudeRoutes(
           if (body.cacheKeepalive !== undefined) {
             if (typeof body.cacheKeepalive !== 'boolean') return sendJson(response, 400, { ok: false, error: 'cacheKeepalive must be boolean.' })
             patch.cacheKeepalive = body.cacheKeepalive
+          }
+          if (body.autoCompactSubagents !== undefined) {
+            if (typeof body.autoCompactSubagents !== 'boolean') return sendJson(response, 400, { ok: false, error: 'autoCompactSubagents must be boolean.' })
+            patch.autoCompactSubagents = body.autoCompactSubagents
           }
           if (body.selectedAccountId !== undefined) {
             const selected = body.selectedAccountId

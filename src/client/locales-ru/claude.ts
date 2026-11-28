@@ -98,6 +98,8 @@ export const dictionary: Record<ClaudeLocaleKey, string> = {
   fastModeHint: 'Host отправляет speed: fast только поддерживаемым моделям; при отказе исправляет запрос и запоминает результат.',
   cacheKeepalive: 'cache-keepalive (cache_touch)',
   cacheKeepaliveHint: 'По умолчанию выключено; для диалога 1 ч сначала cache_touch, при ошибке — прежний keepalive. Реальная подписка напрямую ещё не проверена.',
+  autoCompactSubagents: 'Автоматически сжимать субагентов после завершения',
+  autoCompactSubagentsHint: 'Включено по умолчанию. После запуска сжимается только контекст самого субагента для последующих обращений; основной диалог не меняется, а ошибка сжатия не меняет результат задачи.',
   effortLow: 'Низкий (low)',
   effortMedium: 'Средний (medium)',
   effortHigh: 'Высокий (high)',

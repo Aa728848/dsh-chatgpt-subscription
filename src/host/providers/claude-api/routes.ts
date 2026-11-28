@@ -16,6 +16,7 @@ import type { ClaudeApiCatalogManager } from './catalog-manager.ts'
 import { testClaudeApiConnection } from './client.ts'
 import type { ClaudeApiClientVersionResolver } from './client-version.ts'
 import { claudeApiModelOptions } from './model-catalog.ts'
+import { ClaudeApiAccountPool, claudeApiPoolFor } from './account-pool.ts'
 import type {
   ClaudeApiCredentialStore,
   ClaudeApiSettingsPatch,
@@ -59,34 +60,42 @@ export interface ClaudeApiRouteDeps {
 
 /** Local-first status; the network refresh begins behind the answer. */
 export async function getClaudeApiWebStatus(
-  store: ClaudeApiCredentialStore,
+  store: ClaudeApiCredentialStore | ClaudeApiAccountPool,
   settingsStore: ClaudeApiSettingsStore,
   catalog: ClaudeApiCatalogManager,
   deps: ClaudeApiRouteDeps,
 ): Promise<ClaudeApiStatusDto> {
-  const [credentials, settings] = await Promise.all([
-    store.read().catch(() => null),
+  const pool = claudeApiPoolFor(store, settingsStore)
+  const [data, settings] = await Promise.all([
+    pool.read().catch(() => null),
     settingsStore.read(),
     catalog.warm(),
   ])
+  const accounts = data?.accounts ?? []
+  const primary = accounts.find(account => account.isPrimary) ?? accounts[0]
   const snapshot = catalog.snapshot()
   const models = claudeApiModelOptions(snapshot.entries, settings, snapshot.live)
-  if (credentials !== null) catalog.startRefresh(false)
+  if (primary !== undefined) catalog.startRefresh(false)
   return {
     providerId: CLAUDE_API_PROVIDER_ID,
     enabled: settings.enabled,
-    authenticated: credentials !== null,
-    storagePath: store.path(),
-    baseUrl: settings.baseUrl,
+    authenticated: primary !== undefined,
+    storagePath: pool.path(),
+    baseUrl: primary?.credentials.baseUrl ?? settings.baseUrl,
     defaultBaseUrl: CLAUDE_API_DEFAULT_BASE_URL,
+    accounts: data === null ? [] : pool.summariesOf(data),
+    ...(data?.activeAccountId === undefined ? {} : { activeAccountId: data.activeAccountId }),
+    rotationStrategy: data?.rotationStrategy ?? 'sequential',
     models,
     contextWindowOverrides: settings.contextWindowOverrides,
     defaultReasoningEffort: settings.defaultReasoningEffort,
     cacheTtl: settings.cacheTtl,
+    subagentCacheTtl: settings.subagentCacheTtl,
     fastMode: settings.fastMode,
     serverCompaction: settings.serverCompaction,
+    autoCompactSubagents: settings.autoCompactSubagents,
     clientVersion: deps.version.current(),
-    catalog: credentials === null ? { state: 'idle', fetchedAt: null, error: null } : catalog.dto(),
+    catalog: primary === undefined ? { state: 'idle', fetchedAt: null, error: null } : catalog.dto(),
     serving: readOption(deps.serving, true),
     conflict: readOption(deps.conflict, null),
   }
@@ -108,7 +117,6 @@ function parseSettingsPatch(body: Record<string, unknown>, catalog: ClaudeApiCat
     }
   }
   if (body.enabledModelIds !== undefined) {
-    // null is the shipped default, not a patch value: an empty array is the explicit all-off.
     if (!Array.isArray(body.enabledModelIds) || body.enabledModelIds.some(id => typeof id !== 'string')) throw new Error('enabledModelIds must be a string array')
     const selected = [...new Set(body.enabledModelIds as string[])]
     if (selected.some(id => !ids.has(id))) throw new Error('enabledModelIds contains a model outside the current catalog')
@@ -133,6 +141,10 @@ function parseSettingsPatch(body: Record<string, unknown>, catalog: ClaudeApiCat
     if (!isClaudeApiCacheTtl(body.cacheTtl)) throw new Error('invalid cacheTtl')
     patch.cacheTtl = body.cacheTtl
   }
+  if (body.subagentCacheTtl !== undefined) {
+    if (!isClaudeApiCacheTtl(body.subagentCacheTtl)) throw new Error('invalid subagentCacheTtl')
+    patch.subagentCacheTtl = body.subagentCacheTtl
+  }
   if (body.fastMode !== undefined) {
     if (typeof body.fastMode !== 'boolean') throw new Error('fastMode must be boolean')
     patch.fastMode = body.fastMode
@@ -141,27 +153,35 @@ function parseSettingsPatch(body: Record<string, unknown>, catalog: ClaudeApiCat
     if (typeof body.serverCompaction !== 'boolean') throw new Error('serverCompaction must be boolean')
     patch.serverCompaction = body.serverCompaction
   }
+  if (body.autoCompactSubagents !== undefined) {
+    if (typeof body.autoCompactSubagents !== 'boolean') throw new Error('autoCompactSubagents must be boolean')
+    patch.autoCompactSubagents = body.autoCompactSubagents
+  }
   return patch
 }
 
-/**
- * Route table mirrored by src/client/claude-api/api.ts. The settings body is a
- * ClaudeApiSettingsUpdateDto; the key is removed with DELETE /key (the prefix
- * router dispatches on request.method, so no extra registration is needed).
- */
 export function registerClaudeApiRoutes(
   ctx: Context,
-  store: ClaudeApiCredentialStore,
+  store: ClaudeApiCredentialStore | ClaudeApiAccountPool,
   settingsStore: ClaudeApiSettingsStore,
   catalog: ClaudeApiCatalogManager,
   deps: ClaudeApiRouteDeps,
 ): () => void {
-  const status = () => getClaudeApiWebStatus(store, settingsStore, catalog, deps)
+  const pool = claudeApiPoolFor(store, settingsStore)
+  const status = () => getClaudeApiWebStatus(pool, settingsStore, catalog, deps)
+  const changed = async (catalogChanged = true) => {
+    if (catalogChanged) {
+      catalog.reset()
+      ctx.emit?.('llm/adapters-updated')
+      catalog.startRefresh(true)
+    }
+    return status()
+  }
   return ctx.webServer.register({
     kind: 'prefix', path: CLAUDE_API_ROUTE_PREFIX,
     handler: async (request: IncomingMessage, response: ServerResponse) => {
       const pathname = new URL(request.url || '/', 'http://dsh.local').pathname
-      const path = pathname === CLAUDE_API_ROUTE_PREFIX ? '' : pathname.slice(CLAUDE_API_ROUTE_PREFIX.length).replace(/^\//, '')
+      const path = pathname === CLAUDE_API_ROUTE_PREFIX ? '' : pathname.slice(CLAUDE_API_ROUTE_PREFIX.length).replace(/^[/]/, '')
       const method = request.method ?? 'GET'
       try {
         if (path === 'status') {
@@ -173,49 +193,97 @@ export function registerClaudeApiRoutes(
           if (!isSameOriginMutation(request)) return crossOrigin(response)
           const patch = parseSettingsPatch(await readJson(request), catalog)
           const before = await settingsStore.read()
-          const next = await settingsStore.update(patch)
-          if (next.baseUrl !== before.baseUrl) {
+          const primary = await pool.stableAccount()
+          const beforeBaseUrl = primary?.credentials.baseUrl ?? before.baseUrl
+          if (patch.baseUrl !== undefined && primary !== null) {
+            await pool.saveAccount({
+              accountId: primary.id,
+              baseUrl: patch.baseUrl === null ? CLAUDE_API_DEFAULT_BASE_URL : patch.baseUrl,
+            })
+          }
+          const settingsPatch = patch.baseUrl !== undefined && primary !== null ? { ...patch, baseUrl: undefined } : patch
+          const next = await settingsStore.update(settingsPatch)
+          const afterPrimary = await pool.stableAccount()
+          const afterBaseUrl = afterPrimary?.credentials.baseUrl ?? next.baseUrl
+          const baseUrlChanged = afterBaseUrl !== beforeBaseUrl
+          if (baseUrlChanged) {
             catalog.reset()
             catalog.startRefresh(true)
           }
           if (patch.enabled !== undefined || patch.enabledModelIds !== undefined || patch.contextWindowOverrides !== undefined
-            || patch.defaultReasoningEffort !== undefined || next.baseUrl !== before.baseUrl) ctx.emit?.('llm/adapters-updated')
+            || patch.defaultReasoningEffort !== undefined || baseUrlChanged) ctx.emit?.('llm/adapters-updated')
           return sendJson(response, 200, { ok: true, value: await status() })
+        }
+        if (path === 'accounts') {
+          if (method !== 'POST') return methodNotAllowed(response)
+          if (!isSameOriginMutation(request)) return crossOrigin(response)
+          const body = await readJson(request)
+          const action = typeof body.action === 'string' ? body.action : 'save'
+          const accountId = typeof body.accountId === 'string' ? body.accountId : undefined
+          const beforePrimary = await pool.stableAccount()
+          if (action === 'save') {
+            const baseUrl = normalizeClaudeApiBaseUrl(body.baseUrl)
+            if (!baseUrl.ok) throw new Error('Invalid baseUrl (' + baseUrl.reason + ').')
+            await pool.saveAccount({
+              ...(accountId === undefined ? {} : { accountId }),
+              ...(typeof body.alias === 'string' ? { alias: body.alias } : {}),
+              baseUrl: baseUrl.value,
+              ...(typeof body.apiKey === 'string' ? { apiKey: body.apiKey } : {}),
+            })
+          } else if (action === 'strategy') {
+            const strategy = body.strategy
+            if (strategy !== 'sequential' && strategy !== 'round-robin' && strategy !== 'sticky') throw new Error('Unsupported rotation strategy.')
+            await pool.setStrategy(strategy)
+          } else {
+            if (accountId === undefined || accountId === '') throw new Error('An account id is required.')
+            if (action === 'set-primary') await pool.setPrimary(accountId)
+            else if (action === 'delete') await pool.deleteAccount(accountId)
+            else if (action === 'clear-cooldown') await pool.clearCooldown(accountId)
+            else if (action === 'clear-auth') await pool.clearAuthFailed(accountId)
+            else throw new Error('Unsupported account action.')
+          }
+          const afterPrimary = await pool.stableAccount()
+          const primaryChanged = beforePrimary?.id !== afterPrimary?.id
+            || beforePrimary?.credentials.apiKey !== afterPrimary?.credentials.apiKey
+            || beforePrimary?.credentials.baseUrl !== afterPrimary?.credentials.baseUrl
+          return sendJson(response, 200, { ok: true, value: await changed(primaryChanged) })
         }
         if (path === 'key') {
           if (method === 'DELETE') {
             if (!isSameOriginMutation(request)) return crossOrigin(response)
-            await store.delete()
-            catalog.reset()
-            ctx.emit?.('llm/adapters-updated')
-            return sendJson(response, 200, { ok: true, value: await status() })
+            const primary = await pool.stableAccount()
+            if (primary !== null) await pool.deleteAccount(primary.id)
+            return sendJson(response, 200, { ok: true, value: await changed() })
           }
           if (method !== 'POST') return methodNotAllowed(response)
           if (!isSameOriginMutation(request)) return crossOrigin(response)
           const body = await readJson(request)
           const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : ''
           if (apiKey === '' || apiKey.length > 4096) throw new Error('A valid Claude API key is required.')
-          await store.write({ apiKey, authenticatedAt: Date.now() })
-          catalog.reset()
-          ctx.emit?.('llm/adapters-updated')
-          // Background: the answer carries the fallback table, the refresh replaces it behind the poll.
-          catalog.startRefresh(true)
-          return sendJson(response, 200, { ok: true, value: await status() })
+          const primary = await pool.stableAccount()
+          await pool.saveAccount({
+            ...(primary === null ? {} : { accountId: primary.id }),
+            baseUrl: primary?.credentials.baseUrl ?? (await settingsStore.read()).baseUrl,
+            apiKey,
+          })
+          return sendJson(response, 200, { ok: true, value: await changed() })
         }
         if (path === 'test') {
           if (method !== 'POST') return methodNotAllowed(response)
           if (!isSameOriginMutation(request)) return crossOrigin(response)
-          const [credentials, settings] = await Promise.all([store.read().catch(() => null), settingsStore.read()])
-          if (credentials === null) {
+          const body = await readJson(request)
+          const accountId = typeof body.accountId === 'string' && body.accountId !== '' ? body.accountId : undefined
+          const account = await pool.accountForTest(accountId)
+          if (account === null) {
             const missing: ClaudeApiConnectionDto = {
               connected: false, latencyMs: 0, checkedAt: Date.now(), modelCount: 0,
-              error: 'Claude API has no API key.',
+              error: 'Claude API has no configured account.',
             }
             return sendJson(response, 200, { ok: true, value: missing })
           }
           const result = await testClaudeApiConnection({
-            baseUrl: settings.baseUrl,
-            apiKey: credentials.apiKey,
+            baseUrl: account.credentials.baseUrl,
+            apiKey: account.credentials.apiKey,
             version: deps.version.current().value,
             fetchFn: deps.fetchFn ?? fetch,
           })

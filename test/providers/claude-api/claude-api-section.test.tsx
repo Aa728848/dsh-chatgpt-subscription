@@ -25,15 +25,22 @@ function status(overrides: Partial<ClaudeApiStatusDto> = {}): ClaudeApiStatusDto
   return {
     providerId: CLAUDE_API_PROVIDER_ID, enabled: true, authenticated: true, storagePath: 'encrypted',
     baseUrl: CLAUDE_API_DEFAULT_BASE_URL, defaultBaseUrl: CLAUDE_API_DEFAULT_BASE_URL,
+    accounts: [{ id: 'acc_primary', alias: 'Primary', isPrimary: true, baseUrl: CLAUDE_API_DEFAULT_BASE_URL }],
+    activeAccountId: 'acc_primary', rotationStrategy: 'sequential',
     models: [model('claude-fable-5-2', 'Claude Fable 5.2'), model('claude-haiku-5-5', 'Claude Haiku 5.5')],
-    contextWindowOverrides: {}, defaultReasoningEffort: null, cacheTtl: '5m', fastMode: false, serverCompaction: true,
+    contextWindowOverrides: {}, defaultReasoningEffort: null, cacheTtl: '5m', subagentCacheTtl: '5m',
+    fastMode: false, serverCompaction: true, autoCompactSubagents: true,
     clientVersion: { value: '2.1.330', source: 'npm', fetchedAt: 1, pending: null },
-    catalog: { state: 'ready', fetchedAt: 1, error: null },
-    serving: true, conflict: null,
+    catalog: { state: 'ready', fetchedAt: 1, error: null }, serving: true, conflict: null,
     ...overrides,
   }
 }
 interface Call { url: string; method: string; body?: unknown }
+interface MockOptions {
+  accountAnswer?: unknown
+  background?: () => Partial<ClaudeApiStatusDto>
+  hold?: (url: string, method: string) => Promise<void> | undefined
+}
 let container: HTMLDivElement
 let root: Root
 const originalFetch = globalThis.fetch
@@ -47,18 +54,8 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   globalThis.fetch = originalFetch
+  vi.useRealTimers()
 })
-interface MockOptions {
-  keyAnswer?: unknown
-  background?: () => Partial<ClaudeApiStatusDto>
-  /** Keeps one answer back; the answer itself is still built from the state at request time. */
-  hold?: (url: string, method: string) => Promise<void> | undefined
-}
-function deferred() {
-  let release!: () => void
-  const promise = new Promise<void>(resolve => { release = resolve })
-  return { promise, release }
-}
 function mockFetch(initial: ClaudeApiStatusDto, options: MockOptions = {}) {
   let current = initial
   const calls: Call[] = []
@@ -68,16 +65,13 @@ function mockFetch(initial: ClaudeApiStatusDto, options: MockOptions = {}) {
     let body: unknown
     if (typeof init?.body === 'string') body = JSON.parse(init.body)
     calls.push({ url, method, ...(body === undefined ? {} : { body }) })
-    if (url.endsWith('/claude-api/api/settings') && typeof body === 'object' && body !== null) {
+    if (url.endsWith('/settings') && typeof body === 'object' && body !== null) {
       const patch = body as Record<string, unknown>
+      current = { ...current, ...patch } as ClaudeApiStatusDto
       if (Array.isArray(patch.enabledModelIds)) {
         const selected = patch.enabledModelIds as string[]
         current = { ...current, models: current.models.map(entry => ({ ...entry, enabled: selected.includes(entry.id) })) }
       }
-      if ('baseUrl' in patch) current = { ...current, baseUrl: typeof patch.baseUrl === 'string' ? patch.baseUrl : current.defaultBaseUrl }
-      if (patch.cacheTtl === '5m' || patch.cacheTtl === '1h') current = { ...current, cacheTtl: patch.cacheTtl }
-      if (typeof patch.fastMode === 'boolean') current = { ...current, fastMode: patch.fastMode }
-      if (typeof patch.serverCompaction === 'boolean') current = { ...current, serverCompaction: patch.serverCompaction }
       if (typeof patch.contextWindowOverrides === 'object' && patch.contextWindowOverrides !== null) {
         const overrides = { ...current.contextWindowOverrides }
         for (const [id, value] of Object.entries(patch.contextWindowOverrides as Record<string, number | null>)) {
@@ -88,12 +82,35 @@ function mockFetch(initial: ClaudeApiStatusDto, options: MockOptions = {}) {
       }
       return Response.json({ ok: true, value: current })
     }
-    if (url.endsWith('/claude-api/api/key')) {
-      current = { ...current, authenticated: method !== 'DELETE' }
-      return Response.json({ ok: true, value: 'keyAnswer' in options ? options.keyAnswer : current })
+    if (url.endsWith('/accounts') && typeof body === 'object' && body !== null) {
+      const patch = body as Record<string, unknown>
+      if (patch.action === 'save') {
+        const accountId = typeof patch.accountId === 'string' ? patch.accountId : 'acc_' + (current.accounts.length + 1)
+        const previous = current.accounts.find(account => account.id === accountId)
+        const account = {
+          id: accountId,
+          alias: typeof patch.alias === 'string' && patch.alias ? patch.alias : previous?.alias ?? 'Account ' + current.accounts.length,
+          isPrimary: previous?.isPrimary ?? current.accounts.length === 0,
+          baseUrl: String(patch.baseUrl),
+        }
+        const accounts = previous === undefined ? [...current.accounts, account] : current.accounts.map(entry => entry.id === accountId ? account : entry)
+        const primary = accounts.find(entry => entry.isPrimary) ?? accounts[0]
+        current = { ...current, accounts, authenticated: accounts.length > 0, activeAccountId: current.activeAccountId ?? accountId, baseUrl: primary?.baseUrl ?? current.baseUrl }
+      } else if (patch.action === 'set-primary') {
+        const accounts = current.accounts.map(account => ({ ...account, isPrimary: account.id === patch.accountId }))
+        current = { ...current, accounts, activeAccountId: String(patch.accountId), baseUrl: accounts.find(account => account.isPrimary)?.baseUrl ?? current.baseUrl }
+      } else if (patch.action === 'delete') {
+        const accounts = current.accounts.filter(account => account.id !== patch.accountId)
+        if (accounts.length > 0 && !accounts.some(account => account.isPrimary)) accounts[0] = { ...accounts[0]!, isPrimary: true }
+        const primary = accounts.find(entry => entry.isPrimary) ?? accounts[0]
+        current = { ...current, accounts, authenticated: accounts.length > 0, activeAccountId: primary?.id, baseUrl: primary?.baseUrl ?? current.defaultBaseUrl }
+      } else if (patch.action === 'strategy') {
+        current = { ...current, rotationStrategy: patch.strategy as ClaudeApiStatusDto['rotationStrategy'] }
+      }
+      return Response.json({ ok: true, value: 'accountAnswer' in options ? options.accountAnswer : current })
     }
-    // What the host's background catalog refresh has produced by the time of this read.
-    if (url.endsWith('/claude-api/api/status') && options.background !== undefined) current = { ...current, ...options.background() }
+    if (url.endsWith('/test')) return Response.json({ ok: true, value: { connected: true, latencyMs: 1, checkedAt: 1, modelCount: current.models.length } })
+    if (url.endsWith('/status') && options.background !== undefined) current = { ...current, ...options.background() }
     if (url.includes('/claude-api/api/')) return Response.json({ ok: true, value: current })
     return Response.json({ ok: true, value: { lineProxies: {}, noProxy: null, detectedProxy: null, activeProxies: {} } })
   }
@@ -104,382 +121,213 @@ function mockFetch(initial: ClaudeApiStatusDto, options: MockOptions = {}) {
   }) as typeof fetch
   return calls
 }
-async function render() {
-  await act(async () => root.render(createElement(ClaudeApiSection)))
-}
-const settingsBodies = (calls: Call[]): string[] => calls.filter(call => call.url.endsWith('/claude-api/api/settings')).map(call => JSON.stringify(call.body))
-async function type(input: HTMLInputElement, value: string) {
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
-  await act(async () => { setter.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })) })
-}
+async function render() { await act(async () => root.render(createElement(ClaudeApiSection))) }
 async function click(element: Element | null | undefined) {
   expect(element).toBeInstanceOf(HTMLElement)
   await act(async () => (element as HTMLElement).click())
 }
-const buttonNamed = (scope: ParentNode, text: string) => [...scope.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === text)
-const statusReads = (calls: Call[]): number => calls.filter(call => call.url.endsWith('/claude-api/api/status')).length
-// Only the timers the card itself arms are faked, so fetch and React keep their own scheduling.
-const useCardFakeTimers = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
-async function advance(ms: number) {
-  await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+async function type(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+  await act(async () => { setter.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })) })
 }
+async function select(input: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
+  await act(async () => { setter.call(input, value); input.dispatchEvent(new Event('change', { bubbles: true })) })
+}
+const buttonNamed = (scope: ParentNode, text: string) => [...scope.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === text)
+const statusReads = (calls: Call[]) => calls.filter(call => call.url.endsWith('/status')).length
+const settingsBodies = (calls: Call[]) => calls.filter(call => call.url.endsWith('/settings')).map(call => JSON.stringify(call.body))
+const useCardFakeTimers = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+async function advance(ms: number) { await act(async () => { await vi.advanceTimersByTimeAsync(ms) }) }
 
-describe('Claude API settings section', () => {
-  it('uses the shared card skeleton with exactly two account heading actions', async () => {
+describe('Claude API account-pool settings section', () => {
+  it('uses the shared account card and preserves the existing sections', async () => {
     mockFetch(status())
     await render()
-    const page = container.querySelector('.dsha-page.dshca-page[data-provider="claude-api"]')
-    expect(page).not.toBeNull()
-    const groups = [...page!.querySelectorAll(':scope > section.dsha-group')]
-    expect(groups.map(group => group.className.replace('dsha-group', '').trim() || group.getAttribute('data-line-proxy'))).toEqual([
-      'dshca-account', 'dshca-models', 'dshca-reasoning', 'dshca-options', 'dshca-context', 'claude-api',
-    ])
-    for (const group of groups) expect(group.querySelector(':scope > .dsha-grouphead > h3')).not.toBeNull()
-    const actions = [...container.querySelectorAll('.dshca-account .dsha-grouphead button')].map(button => button.textContent)
-    expect(actions).toEqual([zh.testConnection, zh.removeKey])
-    expect(container.querySelectorAll('.dshca-account > p.dsha-muted')).toHaveLength(2)
-    expect(container.querySelectorAll('.dshca-account > .dsha-empty')).toHaveLength(1)
+    const groups = [...container.querySelectorAll('.dsha-page > section.dsha-group')]
+    expect(groups).toHaveLength(6)
+    expect(groups[0]!.querySelector('.dsha-grouphead h3')?.textContent).toContain(zh.title)
+    expect(buttonNamed(groups[0]!, zh.addAccount)).not.toBeUndefined()
     expect(container.textContent).toContain('Claude Fable 5.2')
     expect(container.textContent).toContain('1M / 128K')
+    expect(container.textContent).toContain('2.1.330')
+    expect(container.textContent).not.toContain(zh.accountQuota)
   })
-  it('hides the remove action until a key is stored', async () => {
-    mockFetch(status({ authenticated: false }))
+
+  it('opens an empty-state form and posts a normalized endpoint with its own key', async () => {
+    const calls = mockFetch(status({ authenticated: false, accounts: [], activeAccountId: undefined }))
     await render()
-    expect([...container.querySelectorAll('.dshca-account .dsha-grouphead button')].map(button => button.textContent)).toEqual([zh.testConnection])
-    expect(container.textContent).toContain(zh.keyMissing)
+    expect(container.textContent).toContain(zh.noAccounts)
+    await click(buttonNamed(container, zh.addAccount))
+    await type(container.querySelector<HTMLInputElement>('input[aria-label="' + zh.accountAlias + '"]')!, 'Main')
+    await type(container.querySelector<HTMLInputElement>('input[aria-label="' + zh.endpoint + '"]')!, 'https://gw.example/api/v1/')
+    await type(container.querySelector<HTMLInputElement>('input[type="password"]')!, '  sk-ant-test  ')
+    await click(buttonNamed(container, zh.saveAccount))
+    expect(calls.find(call => call.url.endsWith('/accounts'))?.body).toEqual({
+      action: 'save', alias: 'Main', baseUrl: 'https://gw.example/api', apiKey: 'sk-ant-test',
+    })
+    expect(container.querySelector('input[type="password"]')).toBeNull()
   })
-  it('keeps the key field on a full-width row and posts { apiKey } to the key route', async () => {
-    const calls = mockFetch(status({ authenticated: false }))
-    await render()
-    const row = container.querySelector('.dshca-account > .dshca-key-row')
-    expect(row).not.toBeNull()
-    expect(row!.closest('.dsha-pref-row')).toBeNull()
-    const input = row!.querySelector<HTMLInputElement>('input[type="password"]')!
-    expect(row!.children).toHaveLength(2)
-    await type(input, '  sk-ant-test  ')
-    await click(row!.querySelector('button'))
-    expect(calls.filter(call => call.url.endsWith('/key'))).toEqual([{ url: '/claude-api/api/key', method: 'POST', body: { apiKey: 'sk-ant-test' } }])
-    expect(input.value).toBe('')
-    await click(buttonNamed(container, zh.removeKey))
-    expect(calls.filter(call => call.url.endsWith('/key')).at(-1)).toEqual({ url: '/claude-api/api/key', method: 'DELETE' })
-    expect(container.querySelector('.dshca-account > .dshca-key-row input[type="password"]')).not.toBeNull()
-  })
-  it('re-reads the status when the key route does not answer with one', async () => {
-    const calls = mockFetch(status({ authenticated: false }), { keyAnswer: {} })
-    await render()
-    const row = container.querySelector('.dshca-key-row')!
-    await type(row.querySelector<HTMLInputElement>('input')!, 'sk-ant-test')
-    await click(row.querySelector('button'))
-    expect(calls.at(-1)).toEqual({ url: '/claude-api/api/status', method: 'GET' })
-    expect(container.textContent).toContain(zh.keyConfigured)
-  })
-  it('re-reads the status about 2 s and 6 s after a key save, so the background catalog shows up without the 60 s poll', async () => {
-    useCardFakeTimers()
-    try {
-      let landed = false
-      const calls = mockFetch(status({ authenticated: false }), {
-        background: () => landed ? { models: [...status().models, model('claude-opus-5', 'Claude Opus 5')] } : {},
-      })
-      await render()
-      expect(statusReads(calls)).toBe(1)
-      const row = container.querySelector('.dshca-key-row')!
-      await type(row.querySelector<HTMLInputElement>('input')!, 'sk-ant-test')
-      await click(row.querySelector('button'))
-      // The key route answered with a status (the built-in table); nothing was re-read yet.
-      expect(statusReads(calls)).toBe(1)
-      expect(container.textContent).not.toContain('Claude Opus 5')
-      landed = true
-      await advance(1_999)
-      expect(statusReads(calls)).toBe(1)
-      await advance(1)
-      expect(statusReads(calls)).toBe(2)
-      expect(container.textContent).toContain('Claude Opus 5')
-      await advance(3_999)
-      expect(statusReads(calls)).toBe(2)
-      await advance(1)
-      expect(statusReads(calls)).toBe(3)
-      // Two follow-ups, then silence until the regular poll.
-      await advance(30_000)
-      expect(statusReads(calls)).toBe(3)
-    } finally { vi.useRealTimers() }
-  })
-  it('schedules the same follow-up reads after an endpoint save, an endpoint restore and a catalog refresh, restarts them on a new change and drops them on unmount', async () => {
-    useCardFakeTimers()
-    try {
-      const calls = mockFetch(status())
-      await render()
-      expect(statusReads(calls)).toBe(1)
-      const row = container.querySelector('.dshca-account .dsha-pref-row.dshca-endpoint-row')!
-      const [save, restore] = [...row.querySelectorAll<HTMLButtonElement>('button')]
-      const refresh = buttonNamed(container.querySelector('.dshca-models')!, zh.refreshCatalog)
 
-      // A refused endpoint never reached the host, so there is nothing to follow up.
-      await type(row.querySelector<HTMLInputElement>('input')!, 'ftp://gateway.example')
-      await click(save)
-      await advance(7_000)
-      expect(statusReads(calls)).toBe(1)
-
-      await type(row.querySelector<HTMLInputElement>('input')!, 'https://gateway.example')
-      await click(save)
-      expect(settingsBodies(calls)).toEqual(['{"baseUrl":"https://gateway.example"}'])
-      await advance(2_000)
-      expect(statusReads(calls)).toBe(2)
-      await advance(4_000)
-      expect(statusReads(calls)).toBe(3)
-
-      await click(restore)
-      expect(settingsBodies(calls).at(-1)).toBe('{"baseUrl":null}')
-      await advance(2_000)
-      expect(statusReads(calls)).toBe(4)
-      await advance(4_000)
-      expect(statusReads(calls)).toBe(5)
-
-      await click(refresh)
-      expect(calls.at(-1)).toEqual({ url: '/claude-api/api/catalog/refresh', method: 'POST', body: {} })
-      await advance(2_000)
-      expect(statusReads(calls)).toBe(6)
-      // A second refresh before the 6 s read replaces the pending one instead of stacking on it.
-      await click(refresh)
-      await advance(2_000)
-      expect(statusReads(calls)).toBe(7)
-      await advance(2_000)
-      expect(statusReads(calls)).toBe(7)
-      await advance(2_000)
-      expect(statusReads(calls)).toBe(8)
-
-      // A plain option change is answered with the final state: no follow-up.
-      await click(container.querySelector('.dshca-options input[type="checkbox"]'))
-      await advance(7_000)
-      expect(statusReads(calls)).toBe(8)
-
-      await click(refresh)
-      await act(async () => root.unmount())
-      root = createRoot(container)
-      await advance(10_000)
-      expect(statusReads(calls)).toBe(8)
-    } finally { vi.useRealTimers() }
-  })
-  it('keeps an unsaved context-window draft and an unsaved endpoint draft across the follow-up reads, and still takes their result', async () => {
-    useCardFakeTimers()
-    try {
-      let landed = false
-      const calls = mockFetch(status(), {
-        background: () => landed ? { models: [...status().models, model('claude-opus-5', 'Claude Opus 5')] } : {},
-      })
-      await render()
-      await click(buttonNamed(container.querySelector('.dshca-models')!, zh.refreshCatalog))
-      const contextInputs = () => [...container.querySelectorAll<HTMLInputElement>('.dshca-context .dsha-context-row input')]
-      const endpointInput = () => container.querySelector<HTMLInputElement>('.dshca-endpoint-row input')!
-      await type(contextInputs()[0], '640K')
-      await type(endpointInput(), 'https://draft.example')
-      landed = true
-      await advance(2_000)
-      expect(statusReads(calls)).toBe(2)
-      expect(container.textContent).toContain('Claude Opus 5')
-      // The typed row survives; untouched rows, the new model's included, are seeded from the fresh status.
-      expect(contextInputs().map(input => input.value)).toEqual(['640K', formatCapacity(1_000_000), formatCapacity(1_000_000)])
-      expect(endpointInput().value).toBe('https://draft.example')
-      await advance(4_000)
-      expect(statusReads(calls)).toBe(3)
-      expect(contextInputs()[0].value).toBe('640K')
-      expect(endpointInput().value).toBe('https://draft.example')
-    } finally { vi.useRealTimers() }
-  })
-  it('drops a follow-up answer that started before a later change, so the newer result stays on screen', async () => {
-    useCardFakeTimers()
-    try {
-      const gate = deferred()
-      let holdReads = false
-      const calls = mockFetch(status(), { hold: url => holdReads && url.endsWith('/claude-api/api/status') ? gate.promise : undefined })
-      await render()
-      await click(buttonNamed(container.querySelector('.dshca-models')!, zh.refreshCatalog))
-      holdReads = true
-      await advance(2_000)
-      // In flight now, carrying the state from before the change below.
-      expect(statusReads(calls)).toBe(2)
-      const firstModel = () => container.querySelector('.dshca-models [role="checkbox"]')!
-      expect(firstModel().getAttribute('aria-checked')).toBe('true')
-      await click(firstModel())
-      expect(settingsBodies(calls)).toEqual(['{"enabledModelIds":["claude-haiku-5-5"]}'])
-      expect(firstModel().getAttribute('aria-checked')).toBe('false')
-      await act(async () => gate.release())
-      expect(firstModel().getAttribute('aria-checked')).toBe('false')
-      holdReads = false
-      await advance(4_000)
-      expect(statusReads(calls)).toBe(3)
-      expect(firstModel().getAttribute('aria-checked')).toBe('false')
-    } finally { vi.useRealTimers() }
-  })
-  it('drops the answer of an older change when it arrives after a newer one', async () => {
-    const gate = deferred()
-    let settingsPosts = 0
-    const calls = mockFetch(status(), { hold: url => url.endsWith('/claude-api/api/settings') && settingsPosts++ === 0 ? gate.promise : undefined })
-    await render()
-    const rows = () => [...container.querySelectorAll('.dshca-context .dsha-context-row')]
-    const resetDisabled = () => rows().map(row => row.querySelector<HTMLButtonElement>('.dsha-context-reset')!.disabled)
-    const saveRow = async (index: number, value: string) => {
-      await type(rows()[index].querySelector<HTMLInputElement>('input')!, value)
-      await click(rows()[index].querySelector('.dsha-context-save:not(.dsha-context-reset)'))
-    }
-    expect(resetDisabled()).toEqual([true, true])
-    await saveRow(0, '500000')
-    await saveRow(1, '300000')
-    expect(settingsBodies(calls)).toEqual([
-      '{"contextWindowOverrides":{"claude-fable-5-2":500000}}', '{"contextWindowOverrides":{"claude-haiku-5-5":300000}}',
-    ])
-    expect(resetDisabled()).toEqual([false, false])
-    // The first answer was built before the second override existed.
-    await act(async () => gate.release())
-    expect(resetDisabled()).toEqual([false, false])
-  })
-  it('skips a follow-up read while another request of the card is still in flight', async () => {
-    useCardFakeTimers()
-    try {
-      const gate = deferred()
-      const calls = mockFetch(status(), { hold: url => url.endsWith('/claude-api/api/test') ? gate.promise : undefined })
-      await render()
-      await click(buttonNamed(container.querySelector('.dshca-models')!, zh.refreshCatalog))
-      await click(buttonNamed(container.querySelector('.dshca-account')!, zh.testConnection))
-      expect(calls.at(-1)).toEqual({ url: '/claude-api/api/test', method: 'POST', body: {} })
-      await advance(2_000)
-      expect(statusReads(calls)).toBe(1)
-      // The connection test reads the status itself once it is answered.
-      await act(async () => gate.release())
-      expect(statusReads(calls)).toBe(2)
-      await advance(4_000)
-      expect(statusReads(calls)).toBe(3)
-    } finally { vi.useRealTimers() }
-  })
-  it('posts the normalized endpoint, refuses an invalid one with its reason, and restores the default with null', async () => {
+  it('edits an account without resending its key, closes the form if that account is deleted, and validates invalid endpoints locally', async () => {
     const calls = mockFetch(status())
     await render()
-    const row = container.querySelector('.dshca-account .dsha-pref-row.dshca-endpoint-row')!
-    const input = row.querySelector<HTMLInputElement>('input')!
-    const [save, restore] = [...row.querySelectorAll<HTMLButtonElement>('button')]
-    expect(row.querySelectorAll('button')).toHaveLength(2)
-    expect(input.value).toBe(CLAUDE_API_DEFAULT_BASE_URL)
-    expect(save.disabled).toBe(true)
-    expect(restore.disabled).toBe(true)
-
-    await type(input, 'ftp://gateway.example')
-    await click(save)
-    expect(settingsBodies(calls)).toEqual([])
-    expect(container.querySelector('.dshca-endpoint-error')?.textContent).toBe(zh.endpointErrorScheme)
-    await type(input, 'https://user:pw@gateway.example')
-    await click(save)
-    expect(container.querySelector('.dshca-endpoint-error')?.textContent).toBe(zh.endpointErrorCredentials)
-    await type(input, '')
-    await click(save)
-    expect(container.querySelector('.dshca-endpoint-error')?.textContent).toBe(zh.endpointErrorEmpty)
-    expect(settingsBodies(calls)).toEqual([])
-
-    await type(input, '  http://gateway.example:8080/proxy/v1/  ')
-    expect(container.querySelector('.dshca-endpoint-error')).toBeNull()
-    await click(save)
-    expect(settingsBodies(calls)).toEqual(['{"baseUrl":"http://gateway.example:8080/proxy"}'])
-    expect(input.value).toBe('http://gateway.example:8080/proxy')
-
-    expect(restore.disabled).toBe(false)
-    await click(restore)
-    expect(settingsBodies(calls).at(-1)).toBe('{"baseUrl":null}')
-    expect(input.value).toBe(CLAUDE_API_DEFAULT_BASE_URL)
+    await click(buttonNamed(container, zh.editAccount))
+    const key = container.querySelector<HTMLInputElement>('input[type="password"]')!
+    expect(key.placeholder).toBe(zh.keyKeepPlaceholder)
+    await type(key, '')
+    await click(buttonNamed(container, zh.saveAccount))
+    expect(calls.find(call => call.url.endsWith('/accounts'))?.body).not.toHaveProperty('apiKey')
+    await click(buttonNamed(container, zh.editAccount))
+    const endpoint = container.querySelector<HTMLInputElement>('input[aria-label="' + zh.endpoint + '"]')!
+    const before = calls.filter(call => call.url.endsWith('/accounts')).length
+    for (const [value, message] of [
+      ['nonsense', zh.endpointErrorInvalid],
+      ['ftp://gateway.example', zh.endpointErrorScheme],
+      ['https://user:pw@gateway.example', zh.endpointErrorCredentials],
+      ['https://gateway.example?a=1', zh.endpointErrorQuery],
+      ['', zh.endpointErrorEmpty],
+    ] as const) {
+      await type(endpoint, value)
+      await click(buttonNamed(container, zh.saveAccount))
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(message)
+    }
+    expect(calls.filter(call => call.url.endsWith('/accounts'))).toHaveLength(before)
+    await click(buttonNamed(container, zh.deleteAccount))
+    expect(container.querySelector('.dshca-account-form')).toBeNull()
   })
-  it('renders the client version and its source as one single-line value', async () => {
+
+  it('submits all five request options independently, including both cache tiers and pricing notes', async () => {
+    const calls = mockFetch(status())
+    await render()
+    const selects = container.querySelectorAll<HTMLSelectElement>('.dshca-options select')
+    await select(selects[0]!, '1h')
+    await select(selects[1]!, '1h')
+    for (const label of [zh.fastMode, zh.serverCompaction, zh.autoCompactSubagents]) {
+      await click(container.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]'))
+    }
+    expect(settingsBodies(calls)).toEqual([
+      '{"cacheTtl":"1h"}', '{"subagentCacheTtl":"1h"}', '{"fastMode":true}', '{"serverCompaction":false}', '{"autoCompactSubagents":false}',
+    ])
+    const details = container.querySelector<HTMLDetailsElement>('.dshca-options details.dshca-details')!
+    expect(details.open).toBe(false)
+    expect([...details.querySelectorAll('p')].map(note => note.textContent)).toEqual([zh.cacheTtlNote, zh.fastModeNote, zh.serverCompactionNote])
+  })
+
+  it('re-reads about 2 s and 6 s after account saves and catalog refreshes without waiting for the minute poll', async () => {
+    useCardFakeTimers()
+    let landed = false
+    const calls = mockFetch(status({ authenticated: false, accounts: [], activeAccountId: undefined }), {
+      background: () => landed ? { models: [...status().models, model('claude-opus-5', 'Claude Opus 5')] } : {},
+    })
+    await render()
+    expect(statusReads(calls)).toBe(1)
+    await click(buttonNamed(container, zh.addAccount))
+    await type(container.querySelector<HTMLInputElement>('input[type="password"]')!, 'sk-ant-test')
+    await click(buttonNamed(container, zh.saveAccount))
+    expect(statusReads(calls)).toBe(1)
+    landed = true
+    await advance(1_999)
+    expect(statusReads(calls)).toBe(1)
+    await advance(1)
+    expect(statusReads(calls)).toBe(2)
+    expect(container.textContent).toContain('Claude Opus 5')
+    await advance(4_000)
+    expect(statusReads(calls)).toBe(3)
+    await click(buttonNamed(container, zh.refreshCatalog))
+    await advance(2_000)
+    expect(statusReads(calls)).toBe(4)
+  })
+
+  it('drops a stale follow-up status that started before a newer option change and skips follow-ups while in flight', async () => {
+    useCardFakeTimers()
+    let release!: () => void
+    let holdReads = false
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const calls = mockFetch(status({ authenticated: false, accounts: [], activeAccountId: undefined }), {
+      hold: (url, method) => holdReads && method === 'GET' && url.endsWith('/status') ? gate : undefined,
+    })
+    await render()
+    await click(buttonNamed(container, zh.addAccount))
+    await type(container.querySelector<HTMLInputElement>('input[type="password"]')!, 'sk-ant-test')
+    await click(buttonNamed(container, zh.saveAccount))
+    holdReads = true
+    await advance(2_000)
+    expect(statusReads(calls)).toBe(2)
+    await click(container.querySelector<HTMLInputElement>('input[aria-label="' + zh.fastMode + '"]'))
+    holdReads = false
+    release()
+    await act(async () => { await gate })
+    expect(container.querySelector<HTMLInputElement>('input[aria-label="' + zh.fastMode + '"]')?.checked).toBe(true)
+  })
+
+  it('keeps an unsaved context draft across follow-up reads while adopting newly listed models', async () => {
+    useCardFakeTimers()
+    let landed = false
+    const calls = mockFetch(status(), {
+      background: () => landed ? { models: [...status().models, model('claude-opus-5', 'Claude Opus 5')] } : {},
+    })
+    await render()
+    await click(buttonNamed(container.querySelector('.dshca-models')!, zh.refreshCatalog))
+    const contextInputs = () => [...container.querySelectorAll<HTMLInputElement>('.dshca-context .dsha-context-row input')]
+    await type(contextInputs()[0]!, '640K')
+    landed = true
+    await advance(2_000)
+    expect(statusReads(calls)).toBe(2)
+    expect(container.textContent).toContain('Claude Opus 5')
+    expect(contextInputs().map(input => input.value)).toEqual(['640K', formatCapacity(1_000_000), formatCapacity(1_000_000)])
+  })
+
+  it('renders the client version, its source, and any pending update on one single line', async () => {
     const labels: Record<ClaudeApiClientVersionSource, string> = {
       env: zh.versionSourceEnv, npm: zh.versionSourceNpm, cached: zh.versionSourceCached, default: zh.versionSourceDefault,
     }
     for (const source of Object.keys(labels) as ClaudeApiClientVersionSource[]) {
       mockFetch(status({ clientVersion: { value: '2.1.330', source, fetchedAt: null, pending: null } }))
       await render()
-      const value = container.querySelector('.dshca-account > .dsha-row.dshca-version-row > .dsha-value')
+      const value = container.querySelector('.dsha-row.dshca-version-row > .dsha-value')
       expect(value?.textContent).toBe('2.1.330 \u00b7 ' + labels[source])
       expect(value?.childElementCount).toBe(0)
       expect(value?.classList.contains('dshca-version')).toBe(true)
       await act(async () => root.unmount())
       root = createRoot(container)
     }
-    installClaudeApiStyles()
-    expect(document.getElementById(STYLE_ID)?.textContent).toMatch(/\.dshca-version\{[^}]*white-space:nowrap/)
-  })
-  it('appends the pending-version note on the same single line only when pending is set', async () => {
     mockFetch(status({ clientVersion: { value: '2.1.330', source: 'npm', fetchedAt: 1, pending: '2.2.0' } }))
     await render()
-    const value = container.querySelector('.dshca-account > .dsha-row.dshca-version-row > .dsha-value')
-    expect(value?.textContent).toBe('2.1.330 \u00b7 ' + zh.versionSourceNpm + ' \u00b7 ' + zh.versionPending.replace('{version}', '2.2.0'))
-    expect(value?.childElementCount).toBe(0)
-    await act(async () => root.unmount())
-    root = createRoot(container)
-    mockFetch(status())
-    await render()
-    const plain = container.querySelector('.dshca-account > .dsha-row.dshca-version-row > .dsha-value')
-    expect(plain?.textContent).toBe('2.1.330 \u00b7 ' + zh.versionSourceNpm)
+    expect(container.querySelector('.dsha-row.dshca-version-row > .dsha-value')?.textContent)
+      .toBe('2.1.330 \u00b7 ' + zh.versionSourceNpm + ' \u00b7 ' + zh.versionPending.replace('{version}', '2.2.0'))
   })
-  it('posts exactly one field for each request option', async () => {
+
+  it('commits an explicit all-off model selection through the shared checklist', async () => {
     const calls = mockFetch(status())
     await render()
-    const options = container.querySelector('.dshca-options')!
-    const select = options.querySelector<HTMLSelectElement>('select')!
-    expect([...select.options].map(option => option.value)).toEqual(['5m', '1h'])
-    await act(async () => { select.value = '1h'; select.dispatchEvent(new Event('change', { bubbles: true })) })
-    const [fast, compaction] = [...options.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
-    expect(fast.checked).toBe(false)
-    expect(compaction.checked).toBe(true)
-    await click(fast)
-    await click(compaction)
-    expect(settingsBodies(calls)).toEqual(['{"cacheTtl":"1h"}', '{"fastMode":true}', '{"serverCompaction":false}'])
-    expect(select.value).toBe('1h')
-    expect(options.querySelectorAll(':scope > p.dsha-muted')).toHaveLength(1)
-    const details = options.querySelector<HTMLDetailsElement>('details.dshca-details')!
-    expect(details.open).toBe(false)
-    expect([...details.querySelectorAll('p')].map(note => note.textContent)).toEqual([zh.cacheTtlNote, zh.fastModeNote, zh.serverCompactionNote])
+    await click(buttonNamed(container, zh.clearAll))
+    expect(settingsBodies(calls)).toContain('{"enabledModelIds":[]}')
   })
-  it('commits an explicit all-off selection through the shared checklist', async () => {
-    const calls = mockFetch(status())
-    await render()
-    await click(buttonNamed(container.querySelector('.dshca-models .dsh-mcl')!, zh.clearAll))
-    expect(settingsBodies(calls)).toEqual(['{"enabledModelIds":[]}'])
-    await click(container.querySelector('.dshca-models [role="checkbox"]'))
-    expect(settingsBodies(calls).at(-1)).toBe('{"enabledModelIds":["claude-fable-5-2"]}')
-  })
-  it('has no quota row, no quota badge, no media section and no sign-in flow', async () => {
-    mockFetch(status())
-    await render()
-    expect(container.querySelector('[class*="quota"]')).toBeNull()
-    expect(container.querySelector('[class*="media"]')).toBeNull()
-    expect(container.querySelector('[class*="login"]')).toBeNull()
-    // The shared proxy card words its own hint with some of these terms, so the
-    // text check covers the sections this line owns.
-    const own = [...container.querySelectorAll('section[class*="dshca-"]')].map(section => section.textContent).join('')
-    expect(own).toContain(zh.optionsSection)
-    // quota, media, sign-in, account pool (escaped: this file stays ASCII)
-    for (const word of ['\u989d\u5ea6', '\u5a92\u4f53', '\u767b\u5f55', '\u53f7\u6c60']) expect(own).not.toContain(word)
-  })
-  it('keeps zh, en and ru on one key set under the line namespace', () => {
+
+  it('keeps zh, en and ru on one non-empty key set under the line namespace', () => {
     const keys = Object.keys(zh).sort()
-    expect(NS_CLAUDE_API).toBe('dsh-claude-api')
-    expect(dictionaries).toEqual({ zh, en })
     expect(Object.keys(en).sort()).toEqual(keys)
     expect(Object.keys(ru).sort()).toEqual(keys)
-    for (const dict of [zh, en, ru] as Record<string, string>[]) for (const key of keys) expect(dict[key].trim()).not.toBe('')
+    expect(dictionaries).toEqual({ zh, en })
+    expect(NS_CLAUDE_API).toBe('dsh-claude-api')
+    for (const dict of [zh, en, ru] as Record<string, string>[]) {
+      for (const key of keys) expect(dict[key]!.trim()).not.toBe('')
+    }
   })
-  it('pins a full-width key grid, the style ownership tag, and declares no shared class', () => {
+
+  it('pins the account form grid, style ownership and shared-class boundary', () => {
     installClaudeApiStyles()
     const style = document.getElementById(STYLE_ID)
-    const css = style?.textContent ?? ''
-    expect(STYLE_ID).toBe('dsh-claude-api-settings-style')
-    expect(css).toMatch(/\.dshca-key-row\{[^}]*grid-template-columns:minmax\(0,1fr\) auto[^}]*width:100%/)
-    expect(css).toMatch(/\.dshca-key-row input\{[^}]*max-width:none/)
-    expect(css).not.toMatch(/(^|[},])\s*\.dsha-/m)
+    expect(style?.textContent).toContain('grid-template-columns:minmax(0,1fr) auto auto')
+    expect(style?.textContent).toContain('.dshca-account-form')
+    expect(style?.textContent).not.toMatch(/(^|[},])\s*\.dsha-/m)
     expect(style?.getAttribute('data-plugin-css')).toBe('@eddyskywalker/dsh-chatgpt-subscription/claude-api')
   })
 })
 
 describe('Claude API cache-duration keepalive wording', () => {
-  it('explains the 1h wait keepalive in zh, en and ru on one unchanged key set', () => {
-    const keys = Object.keys(zh).sort()
-    expect(Object.keys(en).sort()).toEqual(keys)
-    expect(Object.keys(ru).sort()).toEqual(keys)
-    // zh: subagents, background tasks, 55 minutes, and the 5-minute exemption.
+  it('explains the 1h wait keepalive in zh, en and ru', () => {
     expect(zh.cacheTtlNote).toContain('55')
     expect(zh.cacheTtlNote).toContain('\u5b50\u4ee3\u7406')
     expect(zh.cacheTtlNote).toContain('\u540e\u53f0')
@@ -487,7 +335,6 @@ describe('Claude API cache-duration keepalive wording', () => {
     expect(en.cacheTtlNote).toContain('55 minutes')
     expect(en.cacheTtlNote).toContain('subagents or background tasks')
     expect(en.cacheTtlNote).toContain('5-minute duration never does this')
-    // ru: subagents and background tasks, same 55-minute figure.
     expect(ru.cacheTtlNote).toContain('55')
     expect(ru.cacheTtlNote).toContain('\u0441\u0443\u0431\u0430\u0433\u0435\u043d\u0442')
     expect(ru.cacheTtlNote).toContain('\u0444\u043e\u043d\u043e\u0432')

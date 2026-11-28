@@ -5,7 +5,9 @@ import {
   CompactAfterTurnController,
   createCompactAfterTurnHandler,
   installCompactAfterTurn,
+  resolveCompactAgentProvider,
   type CompactNow,
+  type CompactAfterTurnAgent,
 } from '../../src/host/runtime/compact-after-turn/index.ts'
 import { COMPACT_AFTER_TURN_PATH } from '../../src/shared/compact-after-turn.ts'
 
@@ -198,6 +200,142 @@ describe('CompactAfterTurnController', () => {
     await flush()
     expect(seen?.aborted).toBe(true)
     expect(controller.state('s1')).toMatchObject({ phase: 'off', last: { kind: 'failed' } })
+  })
+})
+
+
+describe('CompactAfterTurnController automatic subagent policy', () => {
+  function automatic(enabled: (agent: CompactAfterTurnAgent) => boolean | Promise<boolean>, compactNow: CompactNow = vi.fn(async () => ({ id: 'auto' }))) {
+    const tasks: Array<() => void> = []
+    const controller = new CompactAfterTurnController({
+      compactor: () => compactNow,
+      autoCompact: enabled,
+      now: () => 2000,
+      defer: task => { tasks.push(task) },
+    })
+    const flush = async () => {
+      for (const task of tasks.splice(0)) task()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+    return { controller, compactNow, flush }
+  }
+
+  it('compacts the child after every completed run and deduplicates repeated idle', async () => {
+    const { controller, compactNow, flush } = automatic(() => true)
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(compactNow).toHaveBeenCalledTimes(1)
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(compactNow).toHaveBeenCalledTimes(2)
+  })
+
+  it('does nothing when the line is disabled or the child was aborted', async () => {
+    const disabled = automatic(() => false)
+    disabled.controller.observe(SESSION, turnEnd('completed'))
+    disabled.controller.onStatus(AGENT, 'idle')
+    await disabled.flush()
+    expect(disabled.compactNow).not.toHaveBeenCalled()
+
+    const aborted = automatic(() => true)
+    aborted.controller.observe(SESSION, turnEnd('aborted'))
+    aborted.controller.onStatus(AGENT, 'idle')
+    await aborted.flush()
+    expect(aborted.compactNow).not.toHaveBeenCalled()
+  })
+
+
+  it('rechecks the switch after a busy automatic attempt instead of becoming a one-shot arm', async () => {
+    let enabled = true
+    const compactNow = vi.fn<CompactNow>()
+      .mockRejectedValueOnce(Object.assign(new Error('busy'), { code: 'busy' }))
+      .mockResolvedValueOnce({ id: 'auto-2' })
+    const { controller, flush } = automatic(() => enabled, compactNow)
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(controller.state('s1').phase).toBe('off')
+    enabled = false
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(compactNow).toHaveBeenCalledTimes(1)
+    enabled = true
+    controller.observe(SESSION, turnEnd('completed'))
+    controller.onStatus(AGENT, 'idle')
+    await flush()
+    expect(compactNow).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the parent and other providers untouched and preserves the task result on failure', async () => {
+    const failing = automatic(agent => agent.session?.id === 'child', vi.fn(async () => { throw new Error('summary failed') }))
+    failing.controller.observe({ id: 'parent' }, turnEnd('completed'))
+    failing.controller.onStatus({ session: { id: 'parent' } }, 'idle')
+    // Parent must never flash `compacting` or block manual arming before the policy runs.
+    expect(failing.controller.state('parent').phase).toBe('off')
+    expect(() => failing.controller.setArmed('parent', true)).not.toThrow()
+    expect(failing.controller.setArmed('parent', false).phase).toBe('off')
+    await failing.flush()
+    expect(failing.compactNow).not.toHaveBeenCalled()
+    expect(failing.controller.state('parent').last).toBeNull()
+    const child = { session: { id: 'child' } }
+    failing.controller.observe(child.session, turnEnd('completed'))
+    failing.controller.onStatus(child, 'idle')
+    await expect(failing.flush()).resolves.toBeUndefined()
+    expect(failing.compactNow).toHaveBeenCalledTimes(1)
+    expect(failing.controller.state('child').last).toMatchObject({ kind: 'failed', detail: 'summary failed' })
+  })
+
+  it('does not pollute unrelated sessions lacking a compaction engine and skips non-completed turn ends', async () => {
+    const tasks: Array<() => void> = []
+    const controller = new CompactAfterTurnController({
+      compactor: () => undefined,
+      autoCompact: agent => agent.session?.id === 'child',
+      now: () => 2000,
+      defer: task => { tasks.push(task) },
+    })
+    controller.observe({ id: 'parent' }, turnEnd('completed'))
+    controller.onStatus({ session: { id: 'parent' } }, 'idle')
+    for (const task of tasks.splice(0)) task()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(controller.state('parent')).toMatchObject({ phase: 'off', last: null })
+
+    const errRun = automatic(() => true)
+    errRun.controller.observe(SESSION, turnEnd('error'))
+    errRun.controller.onStatus(AGENT, 'idle')
+    await errRun.flush()
+    expect(errRun.compactNow).not.toHaveBeenCalled()
+  })
+
+  it('cancels a pending automatic check if the child resumes running or is disposed', async () => {
+    let resolvePolicy!: (value: boolean) => void
+    const pending = automatic(() => new Promise<boolean>(resolve => { resolvePolicy = resolve }))
+    pending.controller.observe(SESSION, turnEnd('completed'))
+    pending.controller.onStatus(AGENT, 'idle')
+    const flushing = pending.flush()
+    // Child starts a new turn while policy check is still pending.
+    pending.controller.onStatus(AGENT, 'running')
+    resolvePolicy(true)
+    await flushing
+    expect(pending.compactNow).not.toHaveBeenCalled()
+  })
+
+  it('resolves provider across DSH 0.2.3-alpha.3 agent.model, session.requestHeader, and legacy agent.options', () => {
+    expect(resolveCompactAgentProvider({
+      model: { current: () => ({ provider: 'claude-api' }) },
+      session: { requestHeader: () => ({ config: { provider: 'kimi-code' } }) },
+      options: { provider: 'codex-chatgpt' },
+    })).toBe('claude-api')
+    expect(resolveCompactAgentProvider({
+      session: { requestHeader: () => ({ config: { provider: 'claude' } }) },
+      options: { provider: 'codex-chatgpt' },
+    })).toBe('claude')
+    expect(resolveCompactAgentProvider({
+      options: { provider: 'claude-subscription' },
+    })).toBe('claude-subscription')
   })
 })
 

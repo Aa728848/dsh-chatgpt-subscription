@@ -1,4 +1,6 @@
 /** Public host/client contract for the Claude API line. No API key and no device id cross this boundary. */
+import type { AccountRotationStrategy, PoolAccountSummaryDto } from './account-pool-contracts.ts'
+
 export const CLAUDE_API_PROVIDER_ID = 'claude-api'
 export const CLAUDE_API_PROVIDER_NAME = 'Claude API'
 export const CLAUDE_API_ROUTE_PREFIX = '/claude-api/api'
@@ -52,6 +54,18 @@ export interface ClaudeApiCatalogDto {
   error: string | null
 }
 
+export interface ClaudeApiAccountSummaryDto extends PoolAccountSummaryDto {
+  baseUrl: string
+}
+
+export interface ClaudeApiAccountInputDto {
+  accountId?: string
+  alias?: string
+  baseUrl: string
+  /** Required for a new account; omitted preserves the current key when editing. */
+  apiKey?: string
+}
+
 export interface ClaudeApiStatusDto {
   providerId: typeof CLAUDE_API_PROVIDER_ID
   enabled: boolean
@@ -59,12 +73,17 @@ export interface ClaudeApiStatusDto {
   storagePath: string
   baseUrl: string
   defaultBaseUrl: string
+  accounts: ClaudeApiAccountSummaryDto[]
+  activeAccountId?: string
+  rotationStrategy: AccountRotationStrategy
   models: readonly ClaudeApiModelDto[]
   contextWindowOverrides: Readonly<Record<string, number>>
   defaultReasoningEffort: ClaudeApiReasoningEffort | null
   cacheTtl: ClaudeApiCacheTtl
+  subagentCacheTtl: ClaudeApiCacheTtl
   fastMode: boolean
   serverCompaction: boolean
+  autoCompactSubagents: boolean
   clientVersion: ClaudeApiClientVersionDto
   catalog: ClaudeApiCatalogDto
   serving: boolean
@@ -80,8 +99,10 @@ export interface ClaudeApiSettingsUpdateDto {
   contextWindowOverrides?: Record<string, number | null>
   defaultReasoningEffort?: ClaudeApiReasoningEffort | null
   cacheTtl?: ClaudeApiCacheTtl
+  subagentCacheTtl?: ClaudeApiCacheTtl
   fastMode?: boolean
   serverCompaction?: boolean
+  autoCompactSubagents?: boolean
 }
 
 export interface ClaudeApiConnectionDto {

@@ -4,7 +4,8 @@ export const STYLE_ID = 'dsh-claude-api-settings-style'
 export function installClaudeApiStyles(): void {
   installPluginStyle('claude-api', `
 .dshca-page{display:flex;flex-direction:column;gap:12px}
-.dshca-key-row{align-items:stretch;display:grid;gap:8px;grid-template-columns:minmax(0,1fr) auto;margin-top:10px;width:100%}
+.dshca-account-form{border-top:0.5px solid var(--dsw-alias-border-l2);margin-top:10px;padding-top:10px}
+.dshca-key-row{align-items:stretch;display:grid;gap:8px;grid-template-columns:minmax(0,1fr) auto auto;margin-top:10px;width:100%}
 .dshca-key-row input{box-sizing:border-box;display:block;height:32px;max-width:none;min-width:0;width:100%}
 .dshca-key-row .dsha-btn{align-items:center;display:inline-flex;height:32px;justify-content:center;min-width:80px;white-space:nowrap}
 .dshca-endpoint-control{align-items:center;display:flex;flex:1 1 auto;gap:8px;justify-content:flex-end;min-width:0}

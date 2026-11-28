@@ -108,6 +108,8 @@ export interface ClaudeModelSettings {
   fastMode: boolean
   /** Permit first-party cache_touch for 1h main requests. Default off. */
   cacheKeepalive: boolean
+  /** Compact a delegated session after each completed run. Default on. */
+  autoCompactSubagents: boolean
   /** Host-only install id used in metadata.user_id; never included in ClaudeWebStatus. */
   deviceId: string
   /**
@@ -140,6 +142,7 @@ export interface ClaudeSettingsPatch {
   defaultReasoningEffort?: string | null
   fastMode?: boolean
   cacheKeepalive?: boolean
+  autoCompactSubagents?: boolean
   /** `null` restores the subscription default (the one-hour tier). */
   cacheTtl?: ClaudeCacheTtl | null
   /** `null` restores the official default for work outside the main conversation (five minutes). */
@@ -165,6 +168,7 @@ export function defaultClaudeSettings(): ClaudeModelSettings {
     defaultReasoningEffort: null,
     fastMode: false,
     cacheKeepalive: false,
+    autoCompactSubagents: true,
     deviceId: '',
     cacheTtl: null,
     subagentCacheTtl: null,
@@ -466,6 +470,7 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
   const defaultReasoningEffort = nonEmptyString(record.defaultReasoningEffort) ?? null
   const fastMode = record.fastMode === true
   const cacheKeepalive = record.cacheKeepalive === true
+  const autoCompactSubagents = record.autoCompactSubagents !== false
   const deviceId = typeof record.deviceId === 'string' && /^[0-9a-f]{64}$/.test(record.deviceId) ? record.deviceId : ''
   // An unrecognised tier is read as "not set" rather than passed through: a
   // value the wire would reject must not become a stored preference.
@@ -480,6 +485,7 @@ export function parseClaudeModelSettings(value: unknown): ClaudeModelSettings {
     defaultReasoningEffort,
     fastMode,
     cacheKeepalive,
+    autoCompactSubagents,
     deviceId,
     cacheTtl,
     subagentCacheTtl,
@@ -503,6 +509,7 @@ function mergeClaudeSettings(current: ClaudeModelSettings, patch: ClaudeSettings
       : current.defaultReasoningEffort,
     fastMode: patch.fastMode ?? current.fastMode,
     cacheKeepalive: patch.cacheKeepalive ?? current.cacheKeepalive,
+    autoCompactSubagents: patch.autoCompactSubagents ?? current.autoCompactSubagents,
     deviceId: current.deviceId,
     cacheTtl: patch.cacheTtl !== undefined ? patch.cacheTtl : current.cacheTtl,
     subagentCacheTtl: patch.subagentCacheTtl !== undefined ? patch.subagentCacheTtl : current.subagentCacheTtl,
@@ -846,6 +853,7 @@ export function registerClaudePreferenceStore(
     defaultReasoningEffort: z.union([z.string(), z.const(null)]).default(null),
     fastMode: z.boolean().default(false),
     cacheKeepalive: z.boolean().default(false),
+    autoCompactSubagents: z.boolean().default(true),
     deviceId: z.string().default(''),
     cacheTtl: z.union([z.const('5m'), z.const('1h'), z.const(null)]).default(null),
     subagentCacheTtl: z.union([z.const('5m'), z.const('1h'), z.const(null)]).default(null),
@@ -858,6 +866,7 @@ export function registerClaudePreferenceStore(
     defaultReasoningEffort: string | null
     fastMode: boolean
     cacheKeepalive: boolean
+    autoCompactSubagents: boolean
     deviceId: string
     cacheTtl: ClaudeCacheTtl | null
     subagentCacheTtl: ClaudeCacheTtl | null
@@ -875,6 +884,7 @@ export function registerClaudePreferenceStore(
         defaultReasoningEffort: value.defaultReasoningEffort,
         fastMode: value.fastMode === true,
         cacheKeepalive: value.cacheKeepalive === true,
+        autoCompactSubagents: value.autoCompactSubagents !== false,
         deviceId: typeof value.deviceId === 'string' && /^[0-9a-f]{64}$/.test(value.deviceId) ? value.deviceId : '',
         cacheTtl: isClaudeCacheTtl(value.cacheTtl) ? value.cacheTtl : null,
         subagentCacheTtl: isClaudeCacheTtl(value.subagentCacheTtl) ? value.subagentCacheTtl : null,

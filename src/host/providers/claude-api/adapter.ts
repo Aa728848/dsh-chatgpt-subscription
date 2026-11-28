@@ -10,9 +10,10 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { randomUUID } from 'node:crypto'
 import { localizedProviderName } from '../../common/i18n/index.ts'
-import { LlmError, normalizeGenerateOptions } from '../../common/llm-compat.ts'
+import { LlmError, normalizeGenerateOptions, type GenerateOptions as NormalizedGenerateOptions } from '../../common/llm-compat.ts'
 import { CONTEXT_OVERFLOW_CODE, isHttpContextOverflow } from '../../common/context-overflow.ts'
 import { STREAM_IDLE_TIMEOUT_CODE, STREAM_IDLE_TIMEOUT_MS, wrapStreamWithWatchdog, type StreamActivity } from '../../common/idle-watchdog.ts'
 import {
@@ -20,6 +21,7 @@ import {
   requestImageTargetOrOriginal,
   resolveRequestImages,
   type AttachmentImageReader,
+  type ResolvedRequestImages,
 } from '../../common/request-images.ts'
 import type { PromptCacheOverride } from '../../common/prompt-cache-policy.ts'
 import { promptCacheActivityStore } from '../../common/cache-activity.ts'
@@ -37,6 +39,7 @@ import {
   type ClaudeApiModelEntry,
 } from './model-catalog.ts'
 import { ClaudeApiCredentialStore, ClaudeApiSettingsStore, claudeApiCredentialFingerprint, type ClaudeApiSettings } from './token-store.ts'
+import { ClaudeApiAccountPool, claudeApiPoolFor, type ClaudeApiPoolAccount } from './account-pool.ts'
 import type { ClaudeApiClientVersionResolver } from './client-version.ts'
 import type { ClaudeApiCompactionStore } from './compaction-store.ts'
 import { ClaudeApiCapabilityMemory } from './capability-memory.ts'
@@ -75,6 +78,10 @@ const RETRY_POLICY = resolveRetryPolicy({
 const UNSUPPORTED_TTL_MS = 30 * 60_000
 /** Upper bound of remembered per-session main-turn efforts; the oldest session is dropped first. */
 const SESSION_EFFORT_CAP = 500
+/** Hard ceiling on pooled accounts attempted within one stream call. */
+const MAX_FAILOVER_ATTEMPTS = 5
+/** Ceiling on any Retry-After cooldown imposed on one account. */
+const MAX_COOLDOWN_MS = 60 * 60_000
 /** Wait-time keepalive evidence; only this line's MAIN turns write it. */
 const claudeApiCacheActivity = promptCacheActivityStore(PROVIDER_ID)
 
@@ -113,13 +120,36 @@ export interface ClaudeApiAdapterOptions {
   version: ClaudeApiClientVersionResolver
   compactionStore: ClaudeApiCompactionStore
   capabilityMemory?: ClaudeApiCapabilityMemory
+  isDelegatedSession?: (sessionId: string) => boolean
 }
 interface ClassifiedError extends LlmError {
   status?: number
   claudeApiStatus?: number
   claudeApiDetail?: string
+  claudeApiRetryAfterMs?: number
   /** Redacted raw error body, so the compaction predicates can read code/type fields too. */
   claudeApiBody?: string
+}
+
+export type ClaudeApiFailoverKind = 'auth' | 'rate-limit' | 'unavailable'
+
+/** Only endpoint/account failures move a request; request-content failures stay put. */
+export function claudeApiFailoverKind(error: unknown): ClaudeApiFailoverKind | null {
+  const candidate = error as Partial<ClassifiedError>
+  const status = candidate.claudeApiStatus ?? candidate.status
+  if (status === 401 || status === 403) return 'auth'
+  if (status === 429) return 'rate-limit'
+  if (status === 408 || (typeof status === 'number' && status >= 500)) return 'unavailable'
+  const code = typeof candidate.code === 'string' ? candidate.code : ''
+  return code === 'TRANSPORT' || code === 'TIMEOUT' || code === STREAM_IDLE_TIMEOUT_CODE ? 'unavailable' : null
+}
+
+function retryAfterMs(value: string | null): number | undefined {
+  if (value === null) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000
+  const at = Date.parse(value)
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined
 }
 
 /** The stored compaction block a built body replays at the head, or null when it carries none. */
@@ -140,21 +170,28 @@ function effortLadder(entry: ClaudeApiModelEntry): string[] {
 export async function classifyClaudeApiResponse(response: Response, apiKey?: string): Promise<ClassifiedError> {
   const raw = await response.text().catch(() => '')
   const detail = parseClaudeApiError(response.status, raw, apiKey)
-  const options = { status: response.status }
+  const retryAfter = retryAfterMs(response.headers.get('retry-after'))
+  const options = {
+    status: response.status,
+    ...(response.status === 429 && retryAfter !== undefined && retryAfter > 0 ? { providerRetryAfterMs: retryAfter } : {}),
+  }
   let error: ClassifiedError
   if (isHttpContextOverflow(response.status, detail.message)) error = new LlmError('Claude API context window exceeded: ' + detail.message, CONTEXT_OVERFLOW_CODE, options)
   else if (response.status === 401 || response.status === 403) error = new LlmError('Claude API rejected the API key: ' + detail.message, 'AUTH', options)
   else if (response.status === 404) error = new LlmError('Claude API model or endpoint was not found: ' + detail.message, 'NOT_FOUND', options)
+  else if (response.status === 408) error = new LlmError('Claude API request timed out: ' + detail.message, 'TIMEOUT', options)
   else if (response.status === 429) error = new LlmError('Claude API rate limit reached: ' + detail.message, 'RATE_LIMIT', options)
   else if (response.status >= 500) error = new LlmError('Claude API upstream service error (' + response.status + '): ' + detail.message, 'SERVER_ERROR', options)
   else error = new LlmError(detail.message, 'PROVIDER_ERROR', options)
   error.claudeApiStatus = response.status
   error.claudeApiDetail = detail.message
+  if (retryAfter !== undefined) error.claudeApiRetryAfterMs = retryAfter
   error.claudeApiBody = claudeApiSafeDetail(raw, apiKey, 8000)
   return error
 }
 
 export class ClaudeApiAdapter extends LlmAdapter {
+  private readonly pool: ClaudeApiAccountPool
   private readonly fetchFn: typeof fetch
   private readonly capabilityMemory: ClaudeApiCapabilityMemory
   private readonly firstParty = new ClaudeCodeFirstPartyTracker()
@@ -163,12 +200,13 @@ export class ClaudeApiAdapter extends LlmAdapter {
   /** The effort each session's most recent MAIN turn resolved; null means "no effort sent". */
   private readonly sessionEfforts = new Map<string, string | null>()
   constructor(
-    private readonly store: ClaudeApiCredentialStore,
+    store: ClaudeApiCredentialStore | ClaudeApiAccountPool,
     private readonly settingsStore: ClaudeApiSettingsStore,
     private readonly catalog: ClaudeApiCatalogManager,
     private readonly options: ClaudeApiAdapterOptions,
   ) {
     super()
+    this.pool = claudeApiPoolFor(store, settingsStore)
     this.fetchFn = fetchWithContextBudgetRecovery(options.fetchFn ?? fetch)
     this.capabilityMemory = options.capabilityMemory ?? new ClaudeApiCapabilityMemory()
   }
@@ -183,27 +221,27 @@ export class ClaudeApiAdapter extends LlmAdapter {
   }
 
   async listModels(provider?: string): Promise<readonly LlmResolvedModelInfo[]> {
-    const [settings, credentials] = await Promise.all([this.settingsStore.read(), this.store.read().catch(() => null)])
+    const [settings, account] = await Promise.all([this.settingsStore.read(), this.pool.stableAccount()])
     await this.catalog.warm()
     await this.capabilityMemory.warm()
-    if (!settings.enabled || credentials === null) return []
+    if (!settings.enabled || account === null) return []
     const snapshot = this.catalog.snapshot()
     const allowed = convergeClaudeApiSelection(snapshot.entries, settings, snapshot.live)
-    return snapshot.entries.filter(entry => allowed.has(entry.id)).map(entry => this.modelInfo(provider || PROVIDER_ID, entry, settings))
+    return snapshot.entries.filter(entry => allowed.has(entry.id)).map(entry => this.modelInfo(provider || PROVIDER_ID, entry, settings, account.credentials.baseUrl))
   }
 
   async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     if (signal?.aborted) throw new LlmError('Claude API model resolution was aborted.', 'ABORTED')
-    const [settings] = await Promise.all([this.settingsStore.read(), this.catalog.warm(), this.capabilityMemory.warm()])
+    const [settings, account] = await Promise.all([this.settingsStore.read(), this.pool.stableAccount(), this.catalog.warm(), this.capabilityMemory.warm()])
     const entry = resolveClaudeApiModel(model, this.catalog.snapshot().entries)
     const contextWindow = claudeApiContextWindow(entry, settings)
     return {
-      ...this.modelInfo(provider, entry, settings),
+      ...this.modelInfo(provider, entry, settings, account?.credentials.baseUrl ?? settings.baseUrl),
       ...outputReservation(contextWindow, entry.maxOutputTokens),
     }
   }
 
-  private modelInfo(provider: string, entry: ClaudeApiModelEntry, settings: ClaudeApiSettings): LlmResolvedModelInfo {
+  private modelInfo(provider: string, entry: ClaudeApiModelEntry, settings: ClaudeApiSettings, baseUrl: string): LlmResolvedModelInfo {
     const ladder = effortLadder(entry)
     const configured = settings.defaultReasoningEffort
     const defaultEffort = configured !== null && ladder.includes(configured) ? ReasoningEffortId(configured) : undefined
@@ -212,7 +250,7 @@ export class ClaudeApiAdapter extends LlmAdapter {
       inputModalities: entry.supportsImages ? ['text', 'image'] : ['text'],
       context: { contextWindow: claudeApiContextWindow(entry, settings) },
       // A model that keeps system messages in history can take tool changes there too.
-      ...(entry.midConversationSystem && !this.capabilityMemory.get(settings.baseUrl, entry.id).systemRoleUnsupported
+      ...(entry.midConversationSystem && !this.capabilityMemory.get(baseUrl, entry.id).systemRoleUnsupported
         ? { toolUpdate: 'in-history' as const } : {}),
       ...(ladder.length === 0 ? {} : {
         reasoning: {
@@ -293,7 +331,12 @@ export class ClaudeApiAdapter extends LlmAdapter {
     return response
   }
 
-  private async *pump(response: Response, state: ClaudeApiStreamState, activity?: StreamActivity): AsyncGenerator<StreamChunk> {
+  private async *pump(
+    response: Response,
+    state: ClaudeApiStreamState,
+    signal: AbortSignal,
+    activity?: StreamActivity,
+  ): AsyncGenerator<StreamChunk> {
     if (response.body === null) throw new LlmError('Claude API returned no response stream.', 'PROVIDER_ERROR')
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
@@ -320,9 +363,24 @@ export class ClaudeApiAdapter extends LlmAdapter {
         assertClaudeApiStreamComplete(state)
         for (const chunk of closeClaudeApiStream(state)) yield chunk
       }
+    } catch (error) {
+      if (error instanceof LlmError) throw error
+      if (signal.aborted) {
+        if (timeoutOf(signal, STREAM_IDLE_TIMEOUT_CODE) !== undefined) {
+          throw new LlmError('Claude API stream idle timeout.', STREAM_IDLE_TIMEOUT_CODE, { cause: error })
+        }
+        throw new LlmError('Claude API request was aborted.', 'ABORTED', { cause: error })
+      }
+      throw new LlmError('Claude API response stream failed.', 'TRANSPORT', { cause: error })
     } finally {
       await reader.cancel().catch(() => undefined)
     }
+  }
+
+  private isMainConversation(options: { purpose?: unknown }, sessionId: string | undefined): boolean {
+    if (options.purpose !== undefined) return false
+    if (sessionId === undefined) return true
+    try { return this.options.isDelegatedSession?.(sessionId) !== true } catch { return true }
   }
 
   private async *requestStream(
@@ -331,10 +389,11 @@ export class ClaudeApiAdapter extends LlmAdapter {
     signal: AbortSignal,
     activity?: StreamActivity,
   ): AsyncGenerator<StreamChunk> {
-    const [settings, credentials] = await Promise.all([this.settingsStore.read(), this.store.read()])
-    if (credentials === null) throw new LlmError('Claude API key is not configured.', 'MISSING_CREDENTIAL')
-    await this.options.compactionStore.warm()
-    await this.capabilityMemory.warm()
+    const [accountSettings] = await Promise.all([
+      this.settingsStore.read(),
+      this.options.compactionStore.warm(),
+      this.capabilityMemory.warm(),
+    ])
     // History is sent append-only: no static-prefix reordering on this line. The billing
     // block already differs per conversation, and hoisting reminders past a checkpoint
     // would both defeat the block replay and shift every earlier turn's prefix.
@@ -342,6 +401,63 @@ export class ClaudeApiAdapter extends LlmAdapter {
     const images = await resolveRequestImages(normalized, this.options.attachments, signal)
     const requestOptions = offloadOldestRequestImages(normalized, CLAUDE_API_MAX_REQUEST_IMAGE_BYTES, images)
     const sessionId = requestOptions.sessionId?.trim() || undefined
+    const mainConversation = this.isMainConversation(requestOptions, sessionId)
+    const settings: ClaudeApiSettings = {
+      ...accountSettings,
+      cacheTtl: mainConversation ? accountSettings.cacheTtl : accountSettings.subagentCacheTtl,
+    }
+    const tried = new Set<string>()
+    while (true) {
+      if (signal.aborted) throw new LlmError('Claude API request was aborted.', 'ABORTED')
+      let account: ClaudeApiPoolAccount
+      try {
+        const effective = await this.pool.getEffectiveAccount(tried, this.fetchFn)
+        account = effective.account
+        tried.add(account.id)
+      } catch (error) {
+        if (error instanceof LlmError) throw error
+        throw new LlmError(error instanceof Error ? error.message : 'Claude API account is not configured.', 'MISSING_CREDENTIAL')
+      }
+      let emitted = false
+      try {
+        for await (const chunk of this.requestStreamForAccount(requestOptions, images, sessionId, mainConversation, entry, signal, activity, settings, account)) {
+          emitted = true
+          yield chunk
+        }
+        return
+      } catch (error) {
+        if (signal.aborted || emitted) throw error
+        const kind = claudeApiFailoverKind(error)
+        if (kind === null) throw error
+        const classified = error as ClassifiedError
+        const reason = error instanceof Error ? error.message : String(error)
+        if (kind === 'auth') await this.pool.markAuthFailed(account.id, reason, 'invalid').catch(() => undefined)
+        const canFailover = tried.size < MAX_FAILOVER_ATTEMPTS && await this.pool.hasAnotherAvailableAccount(tried)
+        if (!canFailover) throw error
+        // Cool down transient/rate-limit failures only when another account can serve the retry,
+        // so single-account retries from DSH's retry policy are not blocked by a local cooldown lock.
+        if (kind === 'rate-limit') {
+          const duration = Math.min(MAX_COOLDOWN_MS, Math.max(10_000, classified.claudeApiRetryAfterMs ?? 60_000))
+          await this.pool.markCooldown(account.id, duration, reason).catch(() => undefined)
+        } else if (kind === 'unavailable') {
+          await this.pool.markCooldown(account.id, 30_000, reason).catch(() => undefined)
+        }
+      }
+    }
+  }
+
+  private async *requestStreamForAccount(
+    requestOptions: NormalizedGenerateOptions,
+    images: ResolvedRequestImages,
+    sessionId: string | undefined,
+    mainConversation: boolean,
+    entry: ClaudeApiModelEntry,
+    signal: AbortSignal,
+    activity: StreamActivity | undefined,
+    settings: ClaudeApiSettings,
+    account: ClaudeApiPoolAccount,
+  ): AsyncGenerator<StreamChunk> {
+    const credentials = account.credentials
     // A compaction request follows the session's CURRENT effort (user decision). The host's
     // compaction engine names no reasoningEffort, so without this the settings default -
     // possibly stale since the user switched the session's effort - would win. The chosen
@@ -370,11 +486,11 @@ export class ClaudeApiAdapter extends LlmAdapter {
       const sessionUuid = sessionId !== undefined ? claudeApiSessionUuid(sessionId) : randomUUID()
       const deviceId = await this.settingsStore.ensureDeviceId()
       // Stored blocks are replayed only against the credential + endpoint that produced them.
-      const scope = claudeApiCredentialFingerprint(credentials, settings.baseUrl)
+      const scope = claudeApiCredentialFingerprint(credentials, credentials.baseUrl)
       // Unknown claude-* ids try fast mode optimistically ('ga' first); the capability
       // memory holds what upstream taught us about this endpoint+model.
       const fastEligible = settings.fastMode && entry.known === false && entry.id.toLowerCase().startsWith('claude-')
-      const facts = this.capabilityMemory.get(settings.baseUrl, entry.id)
+      const facts = this.capabilityMemory.get(credentials.baseUrl, entry.id)
       let activeEntry: ClaudeApiModelEntry = fastEligible
         ? { ...entry, fastMode: facts.fastMode === 'unsupported' ? null : facts.fastMode === 'beta' ? 'beta' : 'ga' }
         : entry
@@ -388,7 +504,7 @@ export class ClaudeApiAdapter extends LlmAdapter {
       const context: ClaudeApiRequestContext = {
         entry: activeEntry, settings: callSettings, version: version.value, deviceId, sessionUuid, firstParty,
         compactionBlocks: {
-          lookup: summary => entry.serverCompaction && !this.isUnsupported(settings.baseUrl, entry.id)
+          lookup: summary => entry.serverCompaction && !this.isUnsupported(credentials.baseUrl, entry.id)
             ? this.options.compactionStore.lookup(summary, scope)
             : undefined,
         },
@@ -399,27 +515,27 @@ export class ClaudeApiAdapter extends LlmAdapter {
       const thinkingState = { corrected: false }
       const openCorrected = async (rebuild: () => Record<string, unknown>): Promise<Response> => {
         try {
-          return await this.openRequest(rebuild(), activeEntry, credentials.apiKey, version, sessionUuid, settings.baseUrl, signal, context.firstParty, !thinkingState.corrected && !facts.thinkingTokenCountUnsupported)
+          return await this.openRequest(rebuild(), activeEntry, credentials.apiKey, version, sessionUuid, credentials.baseUrl, signal, context.firstParty, !thinkingState.corrected && !facts.thinkingTokenCountUnsupported)
         } catch (error) {
           const classified = error as ClassifiedError
           const errorBody = classified.claudeApiBody ?? classified.claudeApiDetail ?? ''
           if (classified.claudeApiStatus !== 400) throw error
           if (!systemState.corrected && entry.midConversationSystem && isClaudeApiSystemRoleUnsupported(errorBody)) {
             systemState.corrected = true
-            await this.capabilityMemory.setSystemRoleUnsupported(settings.baseUrl, entry.id)
+            await this.capabilityMemory.setSystemRoleUnsupported(credentials.baseUrl, entry.id)
             activeEntry = { ...activeEntry, midConversationSystem: false }
           } else if (!thinkingState.corrected && isClaudeThinkingTokenCountUnsupported(errorBody)) {
             thinkingState.corrected = true
-            await this.capabilityMemory.setThinkingTokenCountUnsupported(settings.baseUrl, entry.id)
+            await this.capabilityMemory.setThinkingTokenCountUnsupported(credentials.baseUrl, entry.id)
           } else if (!fastEligible) {
             throw error
           } else if (!speedState.unsupported && isClaudeApiSpeedUnsupported(errorBody)) {
             speedState.unsupported = true
-            await this.capabilityMemory.setFastMode(settings.baseUrl, entry.id, 'unsupported')
+            await this.capabilityMemory.setFastMode(credentials.baseUrl, entry.id, 'unsupported')
             activeEntry = { ...activeEntry, fastMode: null }
           } else if (!speedState.beta && isClaudeApiSpeedNeedsBeta(errorBody)) {
             speedState.beta = true
-            await this.capabilityMemory.setFastMode(settings.baseUrl, entry.id, 'beta')
+            await this.capabilityMemory.setFastMode(credentials.baseUrl, entry.id, 'beta')
             activeEntry = { ...activeEntry, fastMode: 'beta' }
           } else {
             throw error
@@ -434,7 +550,7 @@ export class ClaudeApiAdapter extends LlmAdapter {
       // line deliberately routed to this one; otherwise the unchanged client-side request.
       const stripped = isClaudeApiCompactionRequest(requestOptions) ? stripClaudeApiCompactionDirective(requestOptions) : null
       const eligible = stripped !== null && settings.serverCompaction && entry.serverCompaction
-        && !this.isUnsupported(settings.baseUrl, entry.id)
+        && !this.isUnsupported(credentials.baseUrl, entry.id)
       if (eligible) {
         let compBody = buildClaudeApiCompactionRequest(callOptions, images, context)
         let response: Response | null = null
@@ -460,10 +576,10 @@ export class ClaudeApiAdapter extends LlmAdapter {
               const retryClassified = retryError as ClassifiedError
               const retryBody = retryClassified.claudeApiBody ?? retryClassified.claudeApiDetail ?? ''
               if (!(retryClassified.claudeApiStatus === 400 && isClaudeApiCompactionUnsupported(400, retryBody))) throw retryError
-              await this.markUnsupported(settings.baseUrl, entry.id, retryBody)
+              await this.markUnsupported(credentials.baseUrl, entry.id, retryBody)
             }
           } else if (classified.claudeApiStatus === 400 && isClaudeApiCompactionUnsupported(400, errorBody)) {
-            await this.markUnsupported(settings.baseUrl, entry.id, errorBody)
+            await this.markUnsupported(credentials.baseUrl, entry.id, errorBody)
           } else {
             throw error
           }
@@ -472,7 +588,7 @@ export class ClaudeApiAdapter extends LlmAdapter {
           // Buffer the whole compaction answer: nothing is yielded unless the block is usable.
           const state = createClaudeApiStreamState()
           const buffered: StreamChunk[] = []
-          for await (const chunk of this.pump(response, state, activity)) buffered.push(chunk)
+          for await (const chunk of this.pump(response, state, signal, activity)) buffered.push(chunk)
           const comp = state.compaction
           if (comp !== null && comp.content.trim() !== '') {
             await this.options.compactionStore.remember({
@@ -483,12 +599,12 @@ export class ClaudeApiAdapter extends LlmAdapter {
             for (const chunk of buffered) yield chunk
             return
           }
-          await this.markUnsupported(settings.baseUrl, entry.id, '')
+          await this.markUnsupported(credentials.baseUrl, entry.id, '')
         }
         // Fall through: the SAME call now sends the original client-side request.
       }
 
-      const mainTurn = requestOptions.purpose === undefined && sessionId !== undefined
+      const mainTurn = mainConversation && sessionId !== undefined
       // Remember the effort this MAIN turn resolves, at issuance (even if the request
       // later fails): the session's next compaction follows exactly this value.
       if (mainTurn) {
@@ -521,7 +637,7 @@ export class ClaudeApiAdapter extends LlmAdapter {
         } else if (blockRejected && isClaudeApiCompactionUnsupported(400, errorBody)) {
           // The model/endpoint cannot take compaction at all: mark the pair and retry once
           // in text form, but KEEP the block for models that do support it.
-          await this.markUnsupported(settings.baseUrl, entry.id, errorBody)
+          await this.markUnsupported(credentials.baseUrl, entry.id, errorBody)
         } else {
           throw error
         }
@@ -533,7 +649,7 @@ export class ClaudeApiAdapter extends LlmAdapter {
       activity?.pulse()
       const mainState = createClaudeApiStreamState()
       try {
-        yield* this.pump(response, mainState, activity)
+        yield* this.pump(response, mainState, signal, activity)
       } finally {
         // Add the measured prompt size, keeping the issue time: this record must never
         // move lastActiveAt later than the moment the request was sent.

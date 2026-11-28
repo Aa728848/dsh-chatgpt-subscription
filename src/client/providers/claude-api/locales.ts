@@ -1,6 +1,10 @@
+import { accountPoolEn, accountPoolZh } from '../../common/account-pool-labels.ts'
+
 export const NS_CLAUDE_API = 'dsh-claude-api'
 export const zh = {
-  title: 'Claude API', pageDesc: '用一个 API Key 直连 Anthropic Messages 端点或兼容网关，请求形态与官方 Claude Code 客户端一致。', loading: '正在读取线路状态…',
+  ...accountPoolZh,
+  title: 'Claude API', pageDesc: '每个账号可配置独立 API Key 与 Anthropic Messages 兼容端点；默认主账号优先，故障时自动切换。', loading: '正在读取线路状态…',
+  accountAlias: '账号名称', editAccount: '编辑', saveAccount: '保存账号', cancel: '取消', keyKeepPlaceholder: '留空则保留当前 Key',
   enabled: '启用 Claude API', keySection: 'API Key', keyPlaceholder: 'sk-ant-…', saveKey: '保存密钥', savingKey: '保存中…', removeKey: '移除密钥', removingKey: '移除中…',
   keyConfigured: '密钥已安全保存；不会显示在页面或日志中。', keyMissing: '尚未配置 API Key。请粘贴 Anthropic 控制台或兼容网关签发的密钥。',
   storagePath: '加密存储', clientVersion: 'Claude Code 版本', versionSourceEnv: '环境变量指定', versionSourceNpm: '来自 npm', versionSourceCached: '上次获取', versionSourceDefault: '内置默认', versionPending: '空闲后更新为 {version}',
@@ -14,7 +18,8 @@ export const zh = {
   catalogEmpty: '配置 Key 后读取模型目录。', catalogLoading: '正在读取模型目录…', catalogError: '目录同步失败', catalogStale: '显示上次成功目录；后台刷新失败。',
   reasoningSection: '推理', defaultEffort: '默认推理等级', effortHint: '仅向支持该等级的模型发送；单次会话的选择优先。', effortDefault: '跟随模型默认', effortNone: '关闭', effortLow: '低', effortMedium: '中', effortHigh: '高', effortXhigh: '更高', effortMax: '最高',
   optionsSection: '请求选项', optionsHint: '这些选项只作用于本线路发出的请求。',
-  cacheTtl: '提示缓存时长', cacheTtl5m: '5 分钟', cacheTtl1h: '1 小时', fastMode: '快速模式', serverCompaction: '服务端压缩',
+  cacheTtl: '主对话的提示缓存时长', subagentCacheTtl: '子代理与后台请求的缓存时长', subagentCacheTtlHint: '子代理、上下文压缩、生成标题等主对话以外的请求。', cacheTtl5m: '5 分钟', cacheTtl1h: '1 小时', fastMode: '快速模式', serverCompaction: '服务端压缩',
+  autoCompactSubagents: '子代理完成后自动压缩', autoCompactSubagentsHint: '默认开启。只压缩子代理自己的上下文，不影响主对话；压缩失败不影响任务结果。',
   moreNotes: '计费与兼容说明', cacheTtlNote: '选择 1 小时后，缓存写入按基础输入价格的 2 倍计费。选择 1 小时时，子代理或后台任务运行期间本线路约每 55 分钟发一次很小的续热请求，避免缓存过期；5 分钟时长不会这样做。',
   fastModeNote: '快速模式按溢价计费，并且只对支持它的模型生效。', serverCompactionNote: '端点不支持服务端压缩时，自动退回客户端压缩。',
   contextSection: '上下文窗口', contextHint: '默认取模型目录中的窗口大小；可在这里按模型调整。', tokens: 'tokens', save: '保存', saving: '保存中…', reset: '重置', resetAll: '全部重置', contextEmpty: '没有已启用的模型。',
@@ -22,7 +27,9 @@ export const zh = {
 } as const
 export type ClaudeApiLocaleKey = keyof typeof zh
 export const en: Record<ClaudeApiLocaleKey, string> = {
-  title: 'Claude API', pageDesc: 'One API key against the Anthropic Messages endpoint or a compatible gateway, sent in the request shape of the official Claude Code client.', loading: 'Reading the line status…',
+  ...accountPoolEn,
+  title: 'Claude API', pageDesc: 'Each account has its own API key and compatible Messages endpoint. The primary account serves first, with automatic failover.', loading: 'Reading the line status…',
+  accountAlias: 'Account name', editAccount: 'Edit', saveAccount: 'Save account', cancel: 'Cancel', keyKeepPlaceholder: 'Leave blank to keep the current key',
   enabled: 'Enable Claude API', keySection: 'API Key', keyPlaceholder: 'sk-ant-…', saveKey: 'Save key', savingKey: 'Saving…', removeKey: 'Remove key', removingKey: 'Removing…',
   keyConfigured: 'The key is stored securely and never rendered or logged.', keyMissing: 'No API key is configured. Paste a key issued by the Anthropic console or by your compatible gateway.',
   storagePath: 'Encrypted storage', clientVersion: 'Claude Code version', versionSourceEnv: 'pinned by environment', versionSourceNpm: 'from npm', versionSourceCached: 'last fetched', versionSourceDefault: 'built-in default', versionPending: 'updates to {version} when idle',
@@ -36,7 +43,8 @@ export const en: Record<ClaudeApiLocaleKey, string> = {
   catalogEmpty: 'Configure a key to read the model catalog.', catalogLoading: 'Reading the model catalog…', catalogError: 'Catalog sync failed', catalogStale: 'Showing the last good catalog; background refresh failed.',
   reasoningSection: 'Reasoning', defaultEffort: 'Default reasoning effort', effortHint: 'Sent only to models that support the level; a per-session choice wins.', effortDefault: 'Model default', effortNone: 'Off', effortLow: 'Low', effortMedium: 'Medium', effortHigh: 'High', effortXhigh: 'Extra high', effortMax: 'Maximum',
   optionsSection: 'Request options', optionsHint: 'These options apply only to requests sent by this line.',
-  cacheTtl: 'Prompt cache duration', cacheTtl5m: '5 minutes', cacheTtl1h: '1 hour', fastMode: 'Fast mode', serverCompaction: 'Server-side compaction',
+  cacheTtl: 'Main conversation prompt cache duration', subagentCacheTtl: 'Cache duration for subagents and background requests', subagentCacheTtlHint: 'Subagents, context compaction, titles and other requests outside the main conversation.', cacheTtl5m: '5 minutes', cacheTtl1h: '1 hour', fastMode: 'Fast mode', serverCompaction: 'Server-side compaction',
+  autoCompactSubagents: 'Compact subagents after completion', autoCompactSubagentsHint: 'On by default. Only the subagent’s own context is compacted; the main conversation is untouched and failure does not change the task result.',
   moreNotes: 'Pricing and compatibility notes', cacheTtlNote: 'With 1 hour selected, cache writes are billed at twice the base input price. With the 1-hour duration, while subagents or background tasks are running the line sends one small keepalive request about every 55 minutes so the cache does not expire; the 5-minute duration never does this.',
   fastModeNote: 'Fast mode is premium-priced and only applies to models that support it.', serverCompactionNote: 'When the endpoint does not support server-side compaction, the line falls back to client compaction.',
   contextSection: 'Context windows', contextHint: 'The catalog window is used by default; adjust it per model here.', tokens: 'tokens', save: 'Save', saving: 'Saving…', reset: 'Reset', resetAll: 'Reset all', contextEmpty: 'No models are enabled.',

@@ -8,6 +8,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { CLAUDE_API_DEFAULT_BASE_URL, CLAUDE_API_ROUTE_PREFIX } from '../../../src/shared/claude-api-contracts.ts'
 import { flushCatalogSnapshots } from '../../../src/host/common/catalog-snapshot.ts'
 import { ClaudeApiCatalogManager } from '../../../src/host/providers/claude-api/catalog-manager.ts'
+import { ClaudeApiAccountPool, type ClaudeApiPoolAccount } from '../../../src/host/providers/claude-api/account-pool.ts'
+import type { PoolData } from '../../../src/host/common/account-pool.ts'
 import { ClaudeApiClientVersionResolver } from '../../../src/host/providers/claude-api/client-version.ts'
 import { CLAUDE_API_MODELS } from '../../../src/host/providers/claude-api/model-catalog.ts'
 import { registerClaudeApiRoutes } from '../../../src/host/providers/claude-api/routes.ts'
@@ -42,6 +44,15 @@ async function fixture() {
   }
   const store = new ClaudeApiCredentialStore(path.join(home, 'storages', 'credentials.json'), backend)
   const settingsStore = new ClaudeApiSettingsStore(path.join(home, 'storages', 'settings.json'))
+  let poolData: PoolData<ClaudeApiPoolAccount> | null = null
+  const pool = new ClaudeApiAccountPool({
+    store, settingsStore,
+    backend: {
+      load: async () => poolData,
+      save: async value => { poolData = structuredClone(value) },
+      clear: async () => { poolData = null },
+    },
+  })
   const version = new ClaudeApiClientVersionResolver({
     fetchFn: vi.fn(async () => { throw new Error('offline') }) as unknown as typeof fetch,
     filePath: path.join(home, 'storages', 'client-version.json'),
@@ -52,14 +63,14 @@ async function fixture() {
     urls.push(String(input))
     return Response.json(LISTING)
   }) as unknown as typeof fetch
-  const catalog = new ClaudeApiCatalogManager(store, settingsStore, { version, fetchFn })
+  const catalog = new ClaudeApiCatalogManager(pool, settingsStore, { version, fetchFn })
   let handler: Handler | undefined
   const emit = vi.fn()
   const ctx = {
     webServer: { register: (config: { handler: Handler }) => { handler = config.handler; return () => undefined } },
     emit,
   } as unknown as Context
-  const dispose = registerClaudeApiRoutes(ctx, store, settingsStore, catalog, {
+  const dispose = registerClaudeApiRoutes(ctx, pool, settingsStore, catalog, {
     version, fetchFn, serving: () => true, conflict: () => null,
   })
   async function invoke(method: string, suffix: string, body?: unknown, origin = 'http://localhost') {
@@ -76,12 +87,13 @@ async function fixture() {
     await handler!(request, response)
     return { status, body: responseBody, json: (responseBody ? JSON.parse(responseBody) : {}) as { ok: boolean; value?: any; error?: string } }
   }
-  return { store, settingsStore, catalog, version, fetchFn, urls, emit, dispose, invoke, getCredentials: () => credentials }
+  return { store, pool, settingsStore, catalog, version, fetchFn, urls, emit, dispose, invoke, getCredentials: () => credentials }
 }
 
 const MUTATIONS: Array<[string, string, unknown]> = [
   ['POST', '/settings', { enabled: false }],
   ['POST', '/key', { apiKey: KEY }],
+  ['POST', '/accounts', { action: 'save', baseUrl: 'https://backup.example', apiKey: KEY }],
   ['DELETE', '/key', undefined],
   ['POST', '/test', undefined],
   ['POST', '/catalog/refresh', undefined],
@@ -234,6 +246,31 @@ describe('Claude API HTTP routes', () => {
     expect(denied.body).toContain('[REDACTED]')
     f.dispose()
   })
+
+  it('adds accounts with independent endpoints, sets primary and tests only the selected account', async () => {
+    const f = await fixture()
+    const primary = await f.invoke('POST', '/accounts', { action: 'save', alias: 'Main', baseUrl: 'https://main.example/v1/', apiKey: 'sk-main' })
+    expect(primary.status).toBe(200)
+    expect(primary.json.value.accounts).toHaveLength(1)
+    expect(primary.json.value.accounts[0]).toMatchObject({ alias: 'Main', baseUrl: 'https://main.example', isPrimary: true })
+    const emitCountAfterPrimary = f.emit.mock.calls.length
+    const backup = await f.invoke('POST', '/accounts', { action: 'save', alias: 'Backup', baseUrl: 'https://backup.example', apiKey: 'sk-backup' })
+    expect(backup.json.value.accounts).toHaveLength(2)
+    expect(backup.body).not.toContain('sk-main')
+    expect(backup.body).not.toContain('sk-backup')
+    // Adding a backup account leaves the primary-scoped catalog untouched.
+    expect(f.emit.mock.calls.length).toBe(emitCountAfterPrimary)
+    const backupId = backup.json.value.accounts.find((account: any) => account.alias === 'Backup').id
+    const promoted = await f.invoke('POST', '/accounts', { action: 'set-primary', accountId: backupId })
+    expect(promoted.json.value.baseUrl).toBe('https://backup.example')
+    expect(f.emit.mock.calls.length).toBe(emitCountAfterPrimary + 1)
+    await f.invoke('POST', '/test', { accountId: backupId })
+    expect(f.urls.at(-1)).toContain('https://backup.example/v1/models')
+    const strategy = await f.invoke('POST', '/accounts', { action: 'strategy', strategy: 'sticky' })
+    expect(strategy.json.value.rotationStrategy).toBe('sticky')
+    f.dispose()
+  })
+
   it('answers 404 for an unknown path and 405 for a wrong method', async () => {
     const f = await fixture()
     expect((await f.invoke('GET', '/nope')).status).toBe(404)

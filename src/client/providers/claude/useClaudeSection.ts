@@ -129,6 +129,7 @@ export interface ClaudeSectionView {
     updateSubagentCacheTtl(ttl: ClaudeCacheTtl | null): Promise<void>
     updateFastMode(checked: boolean): Promise<void>
     updateCacheKeepalive(checked: boolean): Promise<void>
+    updateAutoCompactSubagents(checked: boolean): Promise<void>
     saveContextWindow(modelId: string): Promise<void>
     resetContextWindow(modelId: string): Promise<void>
     resetAllContextWindows(): Promise<void>
@@ -516,7 +517,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
     }
   }
 
-  const updateBooleanSetting = async (field: 'fastMode' | 'cacheKeepalive', checked: boolean) => {
+  const updateBooleanSetting = async (field: 'fastMode' | 'cacheKeepalive' | 'autoCompactSubagents', checked: boolean) => {
     try {
       const updated = await api.request<ClaudeWebStatus>('/settings', {
         method: 'POST', body: JSON.stringify({ [field]: checked }),
@@ -529,6 +530,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
   }
   const updateFastMode = (checked: boolean) => updateBooleanSetting('fastMode', checked)
   const updateCacheKeepalive = (checked: boolean) => updateBooleanSetting('cacheKeepalive', checked)
+  const updateAutoCompactSubagents = (checked: boolean) => updateBooleanSetting('autoCompactSubagents', checked)
 
   const saveContextWindow = async (modelId: string) => {
     const raw = contextDrafts[modelId] || ''
@@ -700,7 +702,7 @@ export function useClaudeSection({ onModelChange, loadModelDirectory }: ClaudeSe
       updateCacheTtl,
       updateSubagentCacheTtl,
       updateFastMode,
-      updateCacheKeepalive,
+      updateCacheKeepalive, updateAutoCompactSubagents,
       saveContextWindow,
       resetContextWindow,
       resetAllContextWindows,

@@ -38,7 +38,11 @@ import { ResponsesClient } from './host/providers/codex-chatgpt/responses-client
 import { registerHubOverviewRoutes, type HubSummarySource } from './host/infra/hub/hub-overview.ts'
 import { registerUpdateRoutes } from './host/infra/hub/update-check.ts'
 import { registerRoutes } from './host/providers/codex-chatgpt/routes.ts'
-import { installCompactAfterTurn, type CompactAfterTurnHost } from './host/runtime/compact-after-turn/index.ts'
+import {
+  installCompactAfterTurn,
+  resolveCompactAgentProvider,
+  type CompactAfterTurnHost,
+} from './host/runtime/compact-after-turn/index.ts'
 import { installAdvisor } from './host/runtime/advisor/index.ts'
 import { CODEX_MODEL_CATALOG } from './shared/model-catalog.ts'
 import { createPlatformTokenStore } from './host/infra/storage/platform-token-store.ts'
@@ -209,6 +213,7 @@ import {
 import {
   installDispatchExecutionGuard,
   resolveDispatchExecutionGuardEnabled,
+  isDelegatedCaller,
   isDelegatedSession,
 } from './host/runtime/guards/dispatch-execution-guard.ts'
 import { canonicalPromptSourceText, installDispatchLedger } from './host/runtime/dispatch-ledger/index.ts'
@@ -312,6 +317,7 @@ import { createRelayOneImageTool } from './host/providers/relayone/image-tool.ts
 import { createRelayOneVideoTool } from './host/providers/relayone/video-tool.ts'
 import { RelayOneQuotaReader } from './host/providers/relayone/quota.ts'
 import { ClaudeApiAdapter } from './host/providers/claude-api/adapter.ts'
+import { ClaudeApiAccountPool } from './host/providers/claude-api/account-pool.ts'
 import { registerClaudeApiRoutes, warmClaudeApiCatalogOnStartup } from './host/providers/claude-api/routes.ts'
 import { ClaudeApiCredentialStore, ClaudeApiSettingsStore } from './host/providers/claude-api/token-store.ts'
 import { ClaudeApiCatalogManager } from './host/providers/claude-api/catalog-manager.ts'
@@ -1188,6 +1194,7 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
   // watches turn and delegation events, never imposes a deadline on a child,
   // and continuously warms the parent cache every 20 minutes while children run.
   let claudeAdapter: ClaudeAdapter | undefined
+  let claudeApiPreferences: ClaudeApiSettingsStore | undefined
   ctx.effect(() => {
     const dispose = installKimiCacheWait(ctx as unknown as KimiCacheWaitContext, {
       warmup: () => resolveCacheWaitWarmupEnabled(pluginConfig, process.env),
@@ -1216,7 +1223,23 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     scoped.effect(() => () => { compactionEngine = undefined }, 'dsh-chatgpt-subscription: compaction engine')
   })
   ctx.effect(() => {
-    const dispose = installCompactAfterTurn(ctx as unknown as CompactAfterTurnHost, { engine: () => compactionEngine })
+    const dispose = installCompactAfterTurn(ctx as unknown as CompactAfterTurnHost, {
+      engine: () => compactionEngine,
+      autoCompact: async (agent) => {
+        const sessionId = agent.session?.id
+        const delegated = isDelegatedCaller(agent, ctx)
+          || (typeof sessionId === 'string' && isDelegatedSession(sessionId, ctx))
+        if (!delegated) return false
+        const provider = resolveCompactAgentProvider(agent)
+        if (provider === CLAUDE_PROVIDER_ID || provider === 'claude' || provider === 'claude-subscription') {
+          return claudePreferences.status().autoCompactSubagents
+        }
+        if (provider === CLAUDE_API_PROVIDER_ID) {
+          return (await claudeApiPreferences?.read())?.autoCompactSubagents === true
+        }
+        return false
+      },
+    })
     if (dispose === undefined) {
       ctx.logger.warn('[dsh-chatgpt-subscription] compact-after-turn skipped: this harness exposes no event bus')
       return () => undefined
@@ -1787,29 +1810,32 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
     })
     void warmRelayOneCatalogOnStartup(relayOneCatalog).catch(() => undefined)
 
-    // Claude API: one encrypted key, custom endpoint, official Claude Code request shape. No pool.
+    // Claude API: pooled encrypted keys, each with its own compatible endpoint.
     const claudeApiStore = new ClaudeApiCredentialStore()
     const claudeApiSettings = new ClaudeApiSettingsStore()
+    claudeApiPreferences = claudeApiSettings
+    const claudeApiPool = new ClaudeApiAccountPool({ store: claudeApiStore, settingsStore: claudeApiSettings })
     const claudeApiVersion = claudeCodeVersion
     const stopClaudeApiVersion = claudeApiVersion.start()
     const claudeApiCompaction = new ClaudeApiCompactionStore()
     void claudeApiCompaction.warm().catch(() => undefined)
-    const claudeApiCatalog = new ClaudeApiCatalogManager(claudeApiStore, claudeApiSettings, {
+    const claudeApiCatalog = new ClaudeApiCatalogManager(claudeApiPool, claudeApiSettings, {
       version: claudeApiVersion,
       fetchFn: proxyFetchFor(CLAUDE_API_PROVIDER_ID),
       onChanged: () => ctx.emit?.('llm/adapters-updated'),
     })
-    const claudeApiAdapter = new ClaudeApiAdapter(claudeApiStore, claudeApiSettings, claudeApiCatalog, {
+    const claudeApiAdapter = new ClaudeApiAdapter(claudeApiPool, claudeApiSettings, claudeApiCatalog, {
       fetchFn: modelFetch[CLAUDE_API_PROVIDER_ID],
       attachments: ctx.attachments,
       promptCache: promptCacheOverrides[CLAUDE_API_PROVIDER_ID],
       version: claudeApiVersion,
       compactionStore: claudeApiCompaction,
+      isDelegatedSession: (sessionId) => isDelegatedSession(sessionId, ctx),
     })
     const claudeApiClaim = claimProviderRoute(ctx, {
       providerId: CLAUDE_API_PROVIDER_ID, label: CLAUDE_API_PROVIDER_NAME, adapter: claudeApiAdapter,
     })
-    const disposeClaudeApiRoutes = registerClaudeApiRoutes(ctx, claudeApiStore, claudeApiSettings, claudeApiCatalog, {
+    const disposeClaudeApiRoutes = registerClaudeApiRoutes(ctx, claudeApiPool, claudeApiSettings, claudeApiCatalog, {
       version: claudeApiVersion,
       serving: () => claudeApiClaim.serving(),
       conflict: () => claudeApiClaim.conflict(),
@@ -2153,8 +2179,9 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
       {
         id: 'claude-api', providerId: CLAUDE_API_PROVIDER_ID, canToggle: true,
         read: async () => {
-          const [current, credentials] = await Promise.all([claudeApiSettings.read(), claudeApiStore.read()])
-          if (credentials === null) {
+          const [current, data] = await Promise.all([claudeApiSettings.read(), claudeApiPool.read().catch(() => null)])
+          const accounts = data?.accounts ?? []
+          if (accounts.length === 0) {
             return {
               enabled: current.enabled,
               accountCount: 0,
@@ -2168,10 +2195,13 @@ export function apply(ctx: Context, pluginConfig: Config = {}): void {
           const models = claudeApiModelOptions(snapshot.entries, current, snapshot.live)
           const enabledModels = models.filter(model => model.enabled)
           const total = catalogTotal(models.length)
+          const summaries = data === null ? [] : claudeApiPool.summariesOf(data)
+          const accountHint = accountHintOf(summaries)
           return {
             enabled: current.enabled,
-            accountCount: 1,
-            authenticated: true,
+            accountCount: accounts.length,
+            authenticated: routable(summaries),
+            ...(accountHint ? { accountHint } : {}),
             enabledModelCount: enabledModels.length,
             totalModelCount: total,
             ...(enabledModels.length > 0 ? { modelIds: enabledModels.map(model => model.id) } : {}),
@@ -3533,6 +3563,7 @@ export * from './shared/relayone-contracts.ts'
 export { createRelayOneImageTool } from './host/providers/relayone/image-tool.ts'
 export { createRelayOneVideoTool } from './host/providers/relayone/video-tool.ts'
 export { ClaudeApiAdapter } from './host/providers/claude-api/adapter.ts'
+export { ClaudeApiAccountPool, claudeApiPoolPath } from './host/providers/claude-api/account-pool.ts'
 export { registerClaudeApiRoutes, getClaudeApiWebStatus, warmClaudeApiCatalogOnStartup } from './host/providers/claude-api/routes.ts'
 export { ClaudeApiCredentialStore, ClaudeApiSettingsStore } from './host/providers/claude-api/token-store.ts'
 export { ClaudeApiCatalogManager } from './host/providers/claude-api/catalog-manager.ts'
