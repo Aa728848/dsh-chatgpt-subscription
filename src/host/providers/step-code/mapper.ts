@@ -22,7 +22,7 @@ import {
   LlmError,
   extractSystemText,
   leadingSystemEndIndex,
-  midConversationSystemToUserMessage,
+  midConversationUpdateToUserMessage,
   type FinishReason,
   type GenerateOptions,
   type Message,
@@ -247,11 +247,11 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
   const out: Message[] = []
   for (let index = leadingEnd; index < options.messages.length; index += 1) {
     const message = options.messages[index]!
-    if (message.role !== 'system') {
+    if (message.role !== 'system' && message.role !== 'developer') {
       out.push(message)
       continue
     }
-    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    const reminder = midConversationUpdateToUserMessage(message, sanitizeText)
     if (reminder !== undefined) out.push(reminder)
   }
   return out

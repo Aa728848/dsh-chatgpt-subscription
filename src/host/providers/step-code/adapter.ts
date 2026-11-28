@@ -431,6 +431,7 @@ export class StepCodeAdapter extends LlmAdapter {
       id: model,
       name: entry.name,
       inputModalities: entry.supportsImages ? ['text', 'image'] : ['text'],
+      toolUpdate: 'in-history',
       context: { contextWindow: contextWindow > 0 ? contextWindow : defaultContextWindowFor(model, catalog) },
       ...(declaredCap === undefined
         ? {}

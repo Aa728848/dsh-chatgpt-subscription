@@ -11,7 +11,7 @@ import {
   LlmError,
   extractSystemText,
   leadingSystemEndIndex,
-  midConversationSystemToUserMessage,
+  midConversationUpdateToUserMessage,
   type ContentBlock,
   type FinishReason,
   type GenerateOptions,
@@ -117,13 +117,6 @@ function safeJsonParse(text: string): unknown {
 
 function sanitizeText(text: string): string {
   return text.replace(/\0/g, '')
-}
-
-function unsupportedOption(detail: string): LlmError {
-  return new LlmError(
-    `${PROVIDER_NAME} 的 OpenAI 兼容面不支持这个调用方式：${detail}`,
-    UNSUPPORTED_OPTION_CODE,
-  )
 }
 
 // ---------------------------------------------------------------------------
@@ -455,11 +448,11 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
   const out: Message[] = []
   for (let index = leadingEnd; index < options.messages.length; index += 1) {
     const message = options.messages[index]!
-    if (message.role !== 'system') {
+    if (message.role !== 'system' && message.role !== 'developer') {
       out.push(message)
       continue
     }
-    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    const reminder = midConversationUpdateToUserMessage(message, sanitizeText)
     if (reminder !== undefined) out.push(reminder)
   }
   return out
@@ -553,11 +546,6 @@ export function buildChatRequest(
   images: ResolvedRequestImages = NO_RESOLVED_IMAGES,
   route: GlmOpenAiModelRoute = UNDECLARED_MODEL_ROUTE,
 ): Record<string, unknown> {
-  // 会话折叠的工具历史需要一套「中途增删工具」的协议，本面没有。
-  if (options.toolHistory !== undefined) {
-    throw unsupportedOption('本线路每次请求都发完整的工具声明，不支持会话折叠的工具增删历史。')
-  }
-
   const messages: OpenAIMessage[] = []
   const system = leadingSystemText(options)
   // 这个端点上 system 轮是可选的，所以没有提示词就省略，而不是塞一句中性的。
@@ -616,16 +604,12 @@ export function buildChatRequest(
     ...(options.stop && options.stop.length > 0 ? { stop: options.stop } : {}),
     ...(options.tools && options.tools.length > 0
       ? {
-          tools: options.tools.map((tool) => {
-            // 延迟加载是 Anthropic 面的术语，这个面没有对应字段；原样发过去等于撒谎。
-            if (tool.deferLoading === true) {
-              throw unsupportedOption(`工具 ${tool.name} 声明了 deferLoading，OpenAI 兼容面没有延迟加载。`)
-            }
-            return {
-              type: 'function',
-              function: { name: tool.name, description: tool.description, parameters: stripMetaSchema(tool.parameters) },
-            }
-          }),
+          tools: options.tools.map((tool) => ({
+            // `toolUpdate: 'in-history'` 下的延迟声明在此剥离 `deferLoading`（OpenAI 兼容面不认该字段），
+            // 工具增删变化由历史中的 `<system-reminder>` 原位传达，移除工具时不改写声明前缀。
+            type: 'function',
+            function: { name: tool.name, description: tool.description, parameters: stripMetaSchema(tool.parameters) },
+          })),
           tool_choice: 'auto',
         }
       : {}),

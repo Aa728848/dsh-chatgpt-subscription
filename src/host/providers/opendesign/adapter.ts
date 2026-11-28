@@ -219,6 +219,7 @@ export class OpenDesignAdapter extends LlmAdapter {
       id: modelId,
       name: info.displayName,
       inputModalities: info.input as LlmResolvedModelInfo['inputModalities'],
+      systemPromptUpdate: 'in-history',
       ...(toolUpdateMode() === undefined ? {} : { toolUpdate: toolUpdateMode() }),
       context: { contextWindow: info.contextWindow },
       ...outputReservation(info.contextWindow, info.maxTokens),

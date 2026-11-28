@@ -158,11 +158,23 @@ export interface ProgressUpdatesContext {
 /** 工具注册面。 */
 interface ToolsService {
   register(tool: ToolDefinition): () => void
+  get?(name: string, scope?: unknown): unknown
+}
+
+/** 提示词分节装配上下文（只读作用域）。 */
+interface PromptSectionContextLike {
+  readonly scope?: unknown
+  readonly agent?: unknown
 }
 
 /** 提示词分节注册面。 */
 interface SystemPromptService {
-  section(section: { name: string, order: number, text: () => string }): () => void
+  section(section: {
+    name: string
+    order: number
+    retirement?: string
+    text: (context?: PromptSectionContextLike) => string
+  }): () => void
 }
 
 /** 只读路由注册面。 */
@@ -543,13 +555,30 @@ export function installProgressUpdates(ctx: ProgressUpdatesContext, options: Pro
   // 会话中途改字会让整段前缀失效并重新计费；开关的语义交给工具（关闭时 execute
   // 返回 displayed:false），语言档位（zh/en）交给下面那条尾部消息。systemPrompt 是
   // 可选服务：没装它的宿主上这条引导不存在，插件照样工作。
+  const baseProgressText = progressSectionText()
   track(() => {
     const systemPrompt = serviceOf<SystemPromptService>('systemPrompt')
     if (systemPrompt === undefined) return () => undefined
     return systemPrompt.section({
       name: PROGRESS_SECTION_NAME,
       order: PROGRESS_SECTION_ORDER,
-      text: progressSectionText(),
+      retirement: 'The progress_update tool is no longer available. Its instructions no longer apply.',
+      text: (context?: PromptSectionContextLike): string => {
+        const scope = context?.scope ?? context?.agent
+        if (scope !== undefined) {
+          const tools = serviceOf<ToolsService>('tools')
+          if (typeof tools?.get === 'function') {
+            try {
+              if (tools.get(NOTIFY_USER_TOOL) !== undefined && tools.get(NOTIFY_USER_TOOL, scope) === undefined) {
+                return ''
+              }
+            } catch {
+              // 探测失败不阻止正常渲染。
+            }
+          }
+        }
+        return baseProgressText()
+      },
     })
   }, 'dsh-chatgpt-subscription: progress update prompt section')
 

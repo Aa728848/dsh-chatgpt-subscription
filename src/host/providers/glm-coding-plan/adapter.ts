@@ -456,6 +456,7 @@ export class GlmCodingPlanAdapter extends LlmAdapter {
       id: model,
       name: entry.name,
       inputModalities: entry.supportsImages ? ['text', 'image'] : ['text'],
+      toolUpdate: 'in-history',
       context: { contextWindow: contextWindow > 0 ? contextWindow : entry.defaultContextWindow },
       ...outputReservation(contextWindow > 0 ? contextWindow : entry.defaultContextWindow, entry.defaultMaxTokens),
       // 空梯子 = 该模型不接受 reasoning_effort，这时**不**声明 reasoning 段，

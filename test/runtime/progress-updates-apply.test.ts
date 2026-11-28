@@ -259,6 +259,7 @@ describe('apply: 提示词引导', () => {
     expect(render(undefined)).toBe(stable)
     enabled.set(false)
     expect(render(undefined)).toBe(stable)
+    expect((section as { retirement?: unknown }).retirement).toContain('progress_update')
   })
 
   it('引导词讲清什么时候用、标题与正文的分工，以及 subagent 的边界', () => {

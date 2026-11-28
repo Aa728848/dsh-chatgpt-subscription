@@ -1039,4 +1039,42 @@ describe('DSH 0.2.3-alpha.3 根注册表、守卫、审计与提醒适配', () =
     }
     expect(cacheWarmupNavigationIntentOf(navAgent)).toBe(true)
   })
+
+  it('国产长缓存线路（MiniMax / GLM / 千问 / Step）支持历史内 tool-addition / tool-removal 渲染并剥离 deferLoading', () => {
+    const baseMsgs: Message[] = [
+      { role: 'system', content: [{ type: 'text', text: 'System root.' }] },
+      { role: 'user', content: [{ type: 'text', text: 'Start task' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Working...' }] },
+      {
+        role: 'developer',
+        content: [
+          { type: 'tool-addition', toolName: 'team_task_create' },
+          { type: 'tool-removal', toolName: 'legacy_tool' },
+        ],
+      } as unknown as Message,
+      { role: 'user', content: [{ type: 'text', text: 'Continue' }] },
+    ]
+    const tools = [{
+      name: 'team_task_create',
+      description: 'Create team task',
+      parameters: { type: 'object', properties: {} },
+      deferLoading: true as const,
+    }]
+    const opts = (provider: string, model: string): GenerateOptions => ({ provider, model, messages: baseMsgs, tools })
+
+    const payloads = [
+      buildMinimaxRequest(opts('minimax-code', 'MiniMax-M3.1')),
+      buildGlmAnthropicRequest(opts('glm-coding-plan', 'GLM-5.3'), { ladder: ['low', 'high'] }),
+      buildGlmOpenAiRequest(opts('glm-coding-plan', 'GLM-5.3')),
+      buildQianwenChatRequest(opts('qianwen-token-plan', 'qwen3.5-plus')).body,
+      buildStepCodeChatRequest(opts('step-code', 'step-3.5-flash')),
+    ]
+    for (const payload of payloads) {
+      const json = JSON.stringify(payload)
+      expect(json).toContain('The tool \\"team_task_create\\" is now available.')
+      expect(json).toContain('\\"legacy_tool\\" is no longer available.')
+      expect(json).not.toContain('defer_loading')
+      expect(json).not.toContain('deferLoading')
+    }
+  })
 })

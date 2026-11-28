@@ -752,4 +752,73 @@ describe('Existing prefix-cache & compaction guards isolated to DeepSeek V4.1 Fl
     expect(proDenied.ok).toBe(false)
     expect(proDenied.error?.code).toBe('WRONG_PROVIDER')
   })
+
+  it('recovers unfinished todos from sessionProjections (todos -> todoReminder -> todo/write events) for V4.1 Flash state anchor', async () => {
+    let projectedTodos: unknown = null
+    let projectedReminder: unknown = {
+      unfinishedTodos: [
+        { content: 'Run full test suite', status: 'in_progress' },
+        { content: 'Update changelog', status: 'pending' },
+      ],
+      assistantMessagesSinceAnchor: 5,
+    }
+    const { ctx, emitWaterfall } = createEventHost()
+    ;(ctx as Record<string, unknown>)['get'] = (name: string) => name === 'sessionProjections'
+      ? {
+          stateOf: (_session: unknown, key: string) => {
+            if (key === 'todos') return projectedTodos
+            if (key === 'todoReminder') return projectedReminder
+            return undefined
+          },
+        }
+      : undefined
+
+    const dispose = installDeepSeekV41FlashStateAnchor(ctx, {
+      stepInterval: 2,
+      contextWatermarks: [],
+      estimateContextTokens: () => 0,
+    })
+    const agent = makeAgent('opendesign', 'deepseek-v4.1-flash-1017', 'sess-todo-proj', 'high')
+    // 冷恢复场景：没有经历过 todo_write 内存事件，第 1 步目标 + 2 步后触发周期锚
+    const goal = { role: 'user', content: [{ type: 'text', text: 'Ship release safely' }] }
+    await emitWaterfall('agent/pre-step', [{ agent, messages: [goal] }], () => ({ kind: 'enter', messages: [goal] }))
+    await emitWaterfall('agent/pre-step', [{ agent, messages: [] }], () => ({ kind: 'enter', messages: [] }))
+    const anchored = await emitWaterfall('agent/pre-step', [{ agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as {
+      messages: Array<{ content: Array<{ text: string }> }>
+    }
+    expect(anchored.messages).toHaveLength(1)
+    expect(anchored.messages[0]!.content[0]!.text).toContain('TASKS: 0/2 done | NOW: Run full test suite | NEXT: Update changelog')
+
+    // 当 todos 投影本身有更新时优先于 todoReminder
+    projectedTodos = [
+      { content: 'Run full test suite', status: 'completed' },
+      { content: 'Update changelog', status: 'in_progress' },
+    ]
+    await emitWaterfall('agent/pre-step', [{ agent, messages: [] }], () => ({ kind: 'enter', messages: [] }))
+    const updated = await emitWaterfall('agent/pre-step', [{ agent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as {
+      messages: Array<{ content: Array<{ text: string }> }>
+    }
+    expect(updated.messages[0]!.content[0]!.text).toContain('TASKS: 1/2 done | NOW: Update changelog')
+
+    // 清空投影后若历史事件仍有 todo/write，老代无投影路径也能从 events 恢复
+    projectedTodos = undefined
+    projectedReminder = undefined
+    const eventAgent = {
+      id: 'sess-todo-events',
+      options: { provider: 'opendesign', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' },
+      session: {
+        header: { id: 'sess-todo-events' },
+        events: [
+          { type: 'todo/write', data: { todos: [{ content: 'Verify build', status: 'pending' }] } },
+        ],
+      },
+    }
+    await emitWaterfall('agent/pre-step', [{ agent: eventAgent, messages: [goal] }], () => ({ kind: 'enter', messages: [goal] }))
+    await emitWaterfall('agent/pre-step', [{ agent: eventAgent, messages: [] }], () => ({ kind: 'enter', messages: [] }))
+    const fromEvents = await emitWaterfall('agent/pre-step', [{ agent: eventAgent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as {
+      messages: Array<{ content: Array<{ text: string }> }>
+    }
+    expect(fromEvents.messages[0]!.content[0]!.text).toContain('TASKS: 0/1 done | NEXT: Verify build')
+    dispose()
+  })
 })

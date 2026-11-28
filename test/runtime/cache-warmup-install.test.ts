@@ -656,6 +656,14 @@ describe('cache warmup host integration', () => {
     settings = { enabled: false }
     expect(section?.text()).toBe(text)
     expect(text).toContain('cache_warmup_result')
+
+    // 受控线路会话渲染引导词且整场会话锁定，非受控线路（如 openai / 非准入官方模型）返回空串节省系统提示词 token
+    const kimiScope = { session: { header: { id: 's-kimi' }, requestHeader: () => ({ config: { provider: 'kimi-code', model: 'k3.1-pro' } }) } }
+    const uncontrolledScope = { session: { header: { id: 's-openai' }, requestHeader: () => ({ config: { provider: 'openai', model: 'gpt-5' } }) } }
+    const renderWithContext = section?.text as (context?: unknown) => string
+    expect(renderWithContext({ scope: kimiScope })).toBe(CACHE_WARMUP_GUIDANCE)
+    expect(renderWithContext({ scope: uncontrolledScope })).toBe('')
+    expect((section as { retirement?: unknown }).retirement).toContain('cache_warmup_result')
   })
 
   it('prefers the request header route over the agent options', () => {

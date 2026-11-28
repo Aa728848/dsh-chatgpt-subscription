@@ -201,9 +201,23 @@ describe('请求 body 形状', () => {
     expect(messagesOf(body)[0]).toEqual({ role: 'user', content: 'hello' })
   })
 
-  it('工具 schema 去掉 $schema；工具历史折叠与 deferLoading 抛不支持', () => {
+  it('工具 schema 去掉 $schema，并支持 toolHistory / deferLoading 与历史内工具增删提醒', () => {
     const body = buildChatRequest(baseOptions({
+      toolHistory: { tools: [], updates: [] },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
+        {
+          role: 'developer',
+          content: [
+            { type: 'tool-addition', toolName: 'read_file' },
+            { type: 'tool-removal', toolName: 'old_tool' },
+          ],
+        } as unknown as Message,
+        { role: 'user', content: [{ type: 'text', text: 'next' }] },
+      ],
       tools: [{
+        deferLoading: true,
         name: 'read_file',
         description: 'Read a file',
         parameters: { $schema: 'http://json-schema.org/draft-07/schema#', type: 'object', properties: { path: { type: 'string' } } },
@@ -214,28 +228,14 @@ describe('请求 body 形状', () => {
     expect(tools[0]!.function.name).toBe('read_file')
     expect(tools[0]!.function.parameters.$schema).toBeUndefined()
     expect(tools[0]!.function.parameters.properties.path).toEqual({ type: 'string' })
+    expect(tools[0]!.defer_loading).toBeUndefined()
+    expect(tools[0]!.deferLoading).toBeUndefined()
     expect(body.tool_choice).toBe('auto')
-
-    // 会话折叠的工具历史需要一套「中途增删工具」的协议，本面没有。
-    const folded = () => buildChatRequest(baseOptions({ toolHistory: { tools: [], updates: [] } }))
-    expect(folded).toThrow(LlmError)
-    try {
-      folded()
-    } catch (error) {
-      expect((error as LlmError).code).toBe(UNSUPPORTED_OPTION_CODE)
-      expect((error as LlmError).code).toBe('UNSUPPORTED_OPTION')
-    }
-
-    // deferLoading 是 Anthropic 面的术语。
-    const deferred = () => buildChatRequest(baseOptions({
-      tools: [{ deferLoading: true, name: 'read_file', description: 'Read a file', parameters: { type: 'object' } }],
-    }), undefined, FULL_ROUTE)
-    expect(deferred).toThrow(LlmError)
-    try {
-      deferred()
-    } catch (error) {
-      expect((error as LlmError).code).toBe(UNSUPPORTED_OPTION_CODE)
-    }
+    const wireMessages = messagesOf(body)
+    const reminder = wireMessages.find(m => m.role === 'user' && typeof m.content === 'string' && m.content.includes('read_file'))
+    expect(reminder).toBeDefined()
+    expect(reminder!.content).toContain('<system-reminder>')
+    expect(reminder!.content).toContain('"old_tool" is no longer available.')
   })
 
   it('不支持的选项报 harness 的通用码 UNSUPPORTED_OPTION，不自造线路前缀', () => {

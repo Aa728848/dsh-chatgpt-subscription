@@ -16,7 +16,7 @@
  * @module @eddyskywalker/dsh-chatgpt-subscription/host/open-models/state-anchor
  */
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/message'
-import { defaultEstimateContextTokens } from '../deepseek-v41-flash/state-anchor.ts'
+import { defaultEstimateContextTokens, readSessionTaskLine, summarizeTodos } from '../deepseek-v41-flash/state-anchor.ts'
 import {
   absorbGoalMessages,
   createGoalLedger,
@@ -88,6 +88,7 @@ interface ToolExecutionResultLike {
 interface EventHostLike {
   on?(name: string, listener: (...args: never[]) => unknown, options?: unknown): unknown
   off?(name: string, listener: (...args: never[]) => unknown): unknown
+  get?(name: string): unknown
 }
 
 interface AnchorSessionState {
@@ -100,6 +101,8 @@ interface AnchorSessionState {
   lastErrorTool: string | undefined
   errorAnchorPending: boolean
   activeFiles: string[]
+  /** 最近一次 `todo_write` 或持久化 `todos` / `todoReminder` 投影归纳出的紧凑任务进度。 */
+  taskLine: string
   observedChars: number
 }
 
@@ -139,6 +142,7 @@ function createSessionState(): AnchorSessionState {
     lastErrorTool: undefined,
     errorAnchorPending: false,
     activeFiles: [],
+    taskLine: '',
     observedChars: 0,
   }
 }
@@ -188,6 +192,7 @@ export function renderOpenModelStateAnchorText(input: {
   readonly goal: string
   readonly goalMerged?: boolean | undefined
   readonly earlierGoal?: string | undefined
+  readonly tasks?: string | undefined
   readonly activeFiles: readonly string[]
   readonly consecutiveErrors: number
   readonly lastErrorTool?: string
@@ -195,7 +200,9 @@ export function renderOpenModelStateAnchorText(input: {
   const header = `${OPEN_MODEL_ANCHOR_PREFIX} | model=${input.profile.label} | step=${input.step} | ctx~${formatApproxTokens(input.approxTokens)} | trigger=${input.reason}]`
   const lines = [header]
   if (input.goal.length > 0) lines.push(`${input.goalMerged === true ? 'GOAL (later parts override earlier)' : 'GOAL'}: ${input.goal}`)
-  if (input.goal.length > 0 && input.earlierGoal !== undefined && input.earlierGoal.length > 0) {
+  const hasTasks = input.tasks !== undefined && input.tasks.length > 0
+  if (hasTasks) lines.push(`TASKS: ${input.tasks}`)
+  if (!hasTasks && input.goal.length > 0 && input.earlierGoal !== undefined && input.earlierGoal.length > 0) {
     lines.push(`EARLIER (context only; GOAL wins on conflict): ${input.earlierGoal}`)
   }
   if (input.activeFiles.length > 0) lines.push(`FILES: ${input.activeFiles.join(', ')}`)
@@ -357,9 +364,11 @@ export function installOpenModelStateAnchor(
     }
 
     if (trigger === undefined) return decision
+    const projectedTasks = readSessionTaskLine(host, payload?.agent)
+    if (projectedTasks !== undefined) state.taskLine = projectedTasks
     const goal = currentGoal(state.goals)
-    // 周期锚只是重申；没有目标时没有可重申的内容。
-    if (trigger === 'periodic' && goal.length === 0) return decision
+    // 周期锚只是重申；既无目标也无待办任务时没有可重申的内容。
+    if (trigger === 'periodic' && goal.length === 0 && state.taskLine.length === 0) return decision
 
     if (incoming.some(msg => isRecord(msg) && isRecord(msg['source']) && msg['source']['kind'] === OPEN_MODEL_ANCHOR_SOURCE_KIND)) {
       return decision
@@ -374,6 +383,7 @@ export function installOpenModelStateAnchor(
       goal,
       goalMerged: state.goals.turns[state.goals.turns.length - 1]?.merged === true,
       earlierGoal: earlierGoals(state.goals),
+      tasks: state.taskLine,
       activeFiles: state.activeFiles,
       consecutiveErrors: state.consecutiveToolErrors,
       lastErrorTool: state.lastErrorTool,
@@ -392,17 +402,23 @@ export function installOpenModelStateAnchor(
   ): Promise<unknown> => {
     const decision = await next()
     if (disposed || !isEnabled(options.enabled)) return decision
-    if (exec?.parent !== undefined) return decision
     const matched = matchOpenModelScope(exec?.agent)
     if (matched === undefined || !matched.profile.stateAnchor) return decision
 
     const state = stateFor(exec?.agent, matched.route.sessionId)
     if (state === undefined) return decision
 
+    // Code Mode 中 `todo_write` 以嵌套调用出现，任务进度同样需要实时采集。
+    const isError = result?.isError === true || (isRecord(decision) && decision['kind'] === 'block')
+    if (!isError && exec?.name === 'todo_write') {
+      const tasks = summarizeTodos(exec.arguments)
+      if (tasks !== undefined) state.taskLine = tasks
+    }
+    if (exec?.parent !== undefined) return decision
+
     const targetFile = extractTargetFile(exec?.arguments)
     if (targetFile !== undefined) recordActiveFile(state, targetFile)
 
-    const isError = result?.isError === true || (isRecord(decision) && decision['kind'] === 'block')
     if (isError) {
       state.consecutiveToolErrors += 1
       state.lastErrorTool = typeof exec?.name === 'string' ? exec.name : undefined

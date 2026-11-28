@@ -242,29 +242,39 @@ describe('请求体投影', () => {
     expect(body.thinking).toBeUndefined()
   })
 
-  it('声明 deferLoading 的工具抛 UNSUPPORTED_OPTION', () => {
-    try {
-      buildGlmAnthropicRequest(options({
-        tools: [{ name: 'grep', description: 'd', parameters: {}, deferLoading: true }],
-      }), { ladder: LADDER })
-      expect.unreachable('deferLoading 必须被拒绝')
-    } catch (error) {
-      expect((error as { code: string }).code).toBe(UNSUPPORTED_OPTION_CODE)
-    }
+  it('支持 toolUpdate: in-history：剥离 deferLoading 且不向端点发 defer_loading 字段', () => {
+    const body = buildGlmAnthropicRequest(options({
+      tools: [{ name: 'grep', description: 'd', parameters: { type: 'object' }, deferLoading: true }],
+    }), { ladder: LADDER })
+    const tools = body.tools as Array<Record<string, unknown>>
+    expect(tools).toHaveLength(1)
+    expect(tools[0]!.name).toBe('grep')
+    expect(tools[0]!.defer_loading).toBeUndefined()
+    expect(tools[0]!.deferLoading).toBeUndefined()
   })
 
-  it('历史里的会话中途增减工具抛 UNSUPPORTED_OPTION', () => {
-    for (const block of [{ type: 'tool-addition', toolName: 'grep' }, { type: 'tool-removal', toolName: 'grep' }]) {
-      try {
-        buildGlmAnthropicRequest(
-          options({ messages: [{ role: 'user', content: [block] } as unknown as Message] }),
-          { ladder: LADDER },
-        )
-        expect.unreachable('会话中途增减工具必须被拒绝')
-      } catch (error) {
-        expect((error as { code: string }).code).toBe(UNSUPPORTED_OPTION_CODE)
-      }
-    }
+  it('历史里的 tool-addition 与 tool-removal 原位渲染为 <system-reminder> 文本而不抛错', () => {
+    const body = buildGlmAnthropicRequest(
+      options({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'hi' }] } as Message,
+          { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } as Message,
+          {
+            role: 'developer',
+            content: [
+              { type: 'tool-addition', toolName: 'grep' },
+              { type: 'tool-removal', toolName: 'legacy' },
+            ],
+          } as unknown as Message,
+          { role: 'user', content: [{ type: 'text', text: 'continue' }] } as Message,
+        ],
+      }),
+      { ladder: LADDER },
+    )
+    const serialized = JSON.stringify(body.messages)
+    expect(serialized).toContain('The tool \\"grep\\" is now available.')
+    expect(serialized).toContain('\\"legacy\\" is no longer available.')
+    expect(serialized).toContain('<system-reminder>')
   })
 
   it('工具结果被投影成 user 轮的 tool_result', () => {

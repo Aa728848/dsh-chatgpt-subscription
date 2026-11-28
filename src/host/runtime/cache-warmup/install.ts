@@ -24,7 +24,7 @@ import {
   type CacheWarmupLogger,
 } from './logging.ts'
 import { CACHE_WARMUP_PTC_TRANSPORT_TOOLS, isPtcTransportName } from './projection.ts'
-import { createCacheWarmupResultTool } from './result-tool.ts'
+import { CACHE_WARMUP_RESULT_TOOL, createCacheWarmupResultTool } from './result-tool.ts'
 import { CACHE_WARMUP_RETRIEVAL_TOOLS, cacheWarmupNavigationIntentOf } from './retrieval-intent.ts'
 import type { CacheWarmupSettings } from './settings.ts'
 import { CONTROLLED_PROVIDERS, type ControlledProvider } from '../../common/model-request-control.ts'
@@ -196,11 +196,24 @@ export interface CacheWarmupContext {
 /** 工具服务注册面。 */
 interface ToolsService {
   register(tool: ToolDefinition): () => void
+  get?(name: string, scope?: unknown): unknown
+}
+
+/** 提示词分节装配上下文（只读作用域与模型选择）。 */
+interface PromptSectionContextLike {
+  readonly scope?: unknown
+  readonly agent?: unknown
+  readonly modelSelection?: unknown
 }
 
 /** 提示词分节注册面。 */
 interface SystemPromptService {
-  section(section: { name: string, order: number, text: () => string }): () => void
+  section(section: {
+    name: string
+    order: number
+    retirement?: string
+    text: (context?: PromptSectionContextLike) => string
+  }): () => void
 }
 
 /** {@link cacheWarmupSnapshot} 读出来、本模块会用的那几个字段。 */
@@ -388,15 +401,65 @@ export function installCacheWarmup(ctx: CacheWarmupContext, options: CacheWarmup
     }))
   }, 'dsh-chatgpt-subscription: cache warmup result tool')
 
-  // 引导词：文本恒定，不随开关变化（见 CACHE_WARMUP_GUIDANCE）。systemPrompt 是
-  // 可选服务：没装它的宿主上这条引导不存在，插件照样工作。
+  // 引导词：同一会话内首步锁定、绝不随开关中途改字（保护前缀缓存）；同时按工具可见性
+  // 与受支持线路门控——在 Claude / Codex 等不走缓存预热的线路或禁用了该工具的 scope 中
+  // 返回空串，避免浪费系统提示词 token 并配合 0.2.3+ `retirement` 优雅退役。
+  const sectionVisibleBySession = new WeakMap<object, boolean>()
+  const isRouteEligibleForGuidance = (route: CacheWarmupRoute): boolean => {
+    if (route.provider === undefined) return true
+    if (CONTROLLED_PROVIDERS.includes(route.provider as ControlledProvider)) return true
+    if (options.admitRoute !== undefined) {
+      try {
+        return options.admitRoute(route) === true
+      } catch {
+        return false
+      }
+    }
+    return false
+  }
+  const baseSectionText = cacheWarmupSectionText()
   track(() => {
     const systemPrompt = serviceOf<SystemPromptService>('systemPrompt')
     if (systemPrompt === undefined) return () => undefined
     return systemPrompt.section({
       name: CACHE_WARMUP_SECTION_NAME,
       order: CACHE_WARMUP_SECTION_ORDER,
-      text: cacheWarmupSectionText(),
+      retirement: 'The cache_warmup_result tool is no longer available. Its instructions no longer apply.',
+      text: (context?: PromptSectionContextLike): string => {
+        const scope = context?.scope ?? context?.agent
+        if (scope === undefined) return baseSectionText()
+        const tools = serviceOf<ToolsService>('tools')
+        if (typeof tools?.get === 'function') {
+          try {
+            if (tools.get(CACHE_WARMUP_RESULT_TOOL) !== undefined && tools.get(CACHE_WARMUP_RESULT_TOOL, scope) === undefined) {
+              return ''
+            }
+          } catch {
+            // 探测失败（例如 0.2.3 根注册表尚未挂载）不阻止正常渲染。
+          }
+        }
+        const bucket = typeof scope === 'object' && scope !== null
+          ? ((scope as { session?: unknown }).session && typeof (scope as { session?: unknown }).session === 'object'
+              ? (scope as { session: object }).session
+              : scope)
+          : undefined
+        if (bucket !== undefined) {
+          const locked = sectionVisibleBySession.get(bucket)
+          if (locked !== undefined) return locked ? baseSectionText() : ''
+        }
+        const scopeRoute = readScopeRoute(scope, context?.modelSelection)
+        const fallbackRoute = cacheWarmupRouteOf(scope)
+        const resolved: CacheWarmupRoute = {
+          provider: scopeRoute.provider ?? fallbackRoute.provider,
+          model: scopeRoute.model ?? fallbackRoute.model,
+          sessionId: scopeRoute.sessionId ?? fallbackRoute.sessionId,
+        }
+        const eligible = isRouteEligibleForGuidance(resolved)
+        if (bucket !== undefined && resolved.provider !== undefined) {
+          sectionVisibleBySession.set(bucket, eligible)
+        }
+        return eligible ? baseSectionText() : ''
+      },
     })
   }, 'dsh-chatgpt-subscription: cache warmup prompt section')
 

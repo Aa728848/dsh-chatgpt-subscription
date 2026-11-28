@@ -5,8 +5,10 @@ import { createHash } from 'node:crypto'
 import {
   LlmError,
   extractSystemText,
+  formatMidConversationSystemReminder,
+  formatToolUpdateNotice,
   leadingSystemEndIndex,
-  midConversationSystemToUserMessage,
+  midConversationUpdateToUserMessage,
   type ContentBlock,
   type FinishReason,
   type GenerateOptions,
@@ -341,6 +343,10 @@ function anthropicUserContent(message: Message, images: ResolvedRequestImages): 
       })
     }
   }
+  const toolNotice = formatToolUpdateNotice(message.content)
+  if (toolNotice !== '') {
+    blocks.push({ type: 'text', text: formatMidConversationSystemReminder(toolNotice) })
+  }
   return blocks
 }
 
@@ -586,11 +592,11 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
   const out: Message[] = []
   for (let index = leadingEnd; index < options.messages.length; index += 1) {
     const message = options.messages[index]!
-    if (message.role !== 'system') {
+    if (message.role !== 'system' && message.role !== 'developer') {
       out.push(message)
       continue
     }
-    const reminder = midConversationSystemToUserMessage(message, sanitizeText)
+    const reminder = midConversationUpdateToUserMessage(message, sanitizeText)
     if (reminder !== undefined) out.push(reminder)
   }
   return out
@@ -599,28 +605,6 @@ function nonSystemMessages(options: GenerateOptions): Message[] {
 /** 本面送不出去的选项，报 `UNSUPPORTED_OPTION` 而不是丢掉。 */
 function unsupported(detail: string): LlmError {
   return new LlmError(PROVIDER_NAME + ' 的 Anthropic 面不支持该选项：' + detail, UNSUPPORTED_OPTION_CODE)
-}
-
-/**
- * 历史里的 `tool-addition` / `tool-removal` 块检查。
- *
- * 这两种块是 DSH 对「会话中途增减工具声明」的表达，而 Messages 线每轮都发完整工具表，
- * 没有对应的字段。静默丢掉的后果是：模型看不见那次增减，而请求看起来完全正常——
- * 所以这里拒绝，把决定交回给装配层（W6）而不是在这里猜。
- */
-function assertNoUnsupportedHistory(options: GenerateOptions): void {
-  for (const message of options.messages) {
-    if (!Array.isArray(message.content)) continue
-    for (const block of message.content) {
-      if (!isRecord(block)) continue
-      if (block.type === 'tool-addition') {
-        throw unsupported('会话中途新增工具（tool-addition）只能由装配层在请求里展开成完整工具表。')
-      }
-      if (block.type === 'tool-removal') {
-        throw unsupported('会话中途移除工具（tool-removal）只能由装配层在请求里展开成完整工具表。')
-      }
-    }
-  }
 }
 
 /** 本面这一次请求的构建选项。 */
@@ -657,8 +641,6 @@ export function buildGlmAnthropicRequest(
   options: GenerateOptions,
   request: GlmAnthropicRequestOptions = {},
 ): Record<string, unknown> {
-  assertNoUnsupportedHistory(options)
-
   const ladder = request.ladder ?? []
   const images = request.images ?? NO_RESOLVED_IMAGES
   const control = glmThinkingControl(
@@ -680,12 +662,10 @@ export function buildGlmAnthropicRequest(
     throw unsupported('模型思考开启时不能同时指定 temperature（thinking 与 temperature 在本协议里互斥）。')
   }
 
+  // `toolUpdate: 'in-history'` 模式下，中途新增工具会携带 `deferLoading: true` 追加在声明表末尾，
+  // 并在历史里以 `tool-addition` 激活；本面剥离 `deferLoading`（GLM 端点不认 `defer_loading` 字段）
+  // 并将历史增删块渲染为原位 `<system-reminder>`，从而在移除工具时完全保住前缀缓存。
   const tools = options.tools ?? []
-  for (const tool of tools) {
-    if (tool.deferLoading === true) {
-      throw unsupported('工具 ' + tool.name + ' 声明了 deferLoading，本面每轮都发完整工具表，没有延迟加载的对应字段。')
-    }
-  }
 
   const replayScope: GlmAnthropicReplayScope = request.replayScope ?? {
     provider: PROVIDER_ID,

@@ -100,6 +100,7 @@ export class QianwenTokenPlanAdapter extends LlmAdapter {
     return {
       provider, id: model, name: entry.name,
       inputModalities: entry.supportsImages ? ['text', 'image'] : ['text'],
+      toolUpdate: 'in-history',
       context: { contextWindow },
       ...outputReservation(contextWindow, entry.maxOutputTokens),
       ...(entry.reasoningEfforts.length === 0 ? {} : {

@@ -237,6 +237,38 @@ export function formatMidConversationSystemReminder(text: string): string {
 }
 
 /**
+ * Format `tool-addition` and `tool-removal` blocks from a mid-conversation
+ * `developer` message into concise, imperative model-facing text so routes that
+ * declare `toolUpdate: 'in-history'` keep top-level tool declarations and prefix
+ * caches intact without relying on vendor-specific wire extensions.
+ */
+export function formatToolUpdateNotice(content: readonly ContentBlock[] | undefined): string {
+  if (!Array.isArray(content) || content.length === 0) return ''
+  const added: string[] = []
+  const removed: string[] = []
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    const name = typeof block.toolName === 'string' ? block.toolName.trim() : ''
+    if (name === '') continue
+    if (block.type === 'tool-addition') added.push(name)
+    else if (block.type === 'tool-removal') removed.push(name)
+  }
+  const quote = (names: readonly string[]): string => names.map(name => `"${name}"`).join(', ')
+  const lines: string[] = []
+  if (added.length > 0) {
+    lines.push(added.length === 1
+      ? `[The tool ${quote(added)} is now available.]`
+      : `[The tools ${quote(added)} are now available.]`)
+  }
+  if (removed.length > 0) {
+    lines.push(removed.length === 1
+      ? `[${quote(removed)} is no longer available. Do not call it again: any call will fail.]`
+      : `[${quote(removed)} are no longer available. Do not call them again: any call will fail.]`)
+  }
+  return lines.join('\n')
+}
+
+/**
  * Convert a mid-conversation `role: 'system'` message into an in-place `user`
  * `<system-reminder>` message, preserving any non-text blocks (e.g. images) if present.
  * Returns `undefined` when the message carries neither non-empty text nor non-text blocks.
@@ -252,6 +284,30 @@ export function midConversationSystemToUserMessage(
   if (text === '' && extras.length === 0) return undefined
   const content: ContentBlock[] = [
     ...(text === '' ? [] : [{ type: 'text' as const, text: formatMidConversationSystemReminder(text) }]),
+    ...extras,
+  ]
+  return { ...message, role: 'user', content }
+}
+
+/**
+ * Convert a mid-conversation `system` or `developer` message (including
+ * `tool-addition` / `tool-removal` updates) into an in-place `user`
+ * `<system-reminder>` message so gateways without mid-conversation system/developer
+ * roles preserve prefix caches without dropping tool availability changes.
+ */
+export function midConversationUpdateToUserMessage(
+  message: Message,
+  sanitize?: (text: string) => string,
+): Message | undefined {
+  const toolNotice = formatToolUpdateNotice(message.content)
+  const plainText = extractSystemText(message.content, sanitize)
+  const combined = [toolNotice, plainText].filter(part => part !== '').join('\n\n')
+  const extras = Array.isArray(message.content)
+    ? message.content.filter((block) => block.type !== 'text' && block.type !== 'tool-addition' && block.type !== 'tool-removal')
+    : []
+  if (combined === '' && extras.length === 0) return undefined
+  const content: ContentBlock[] = [
+    ...(combined === '' ? [] : [{ type: 'text' as const, text: formatMidConversationSystemReminder(combined) }]),
     ...extras,
   ]
   return { ...message, role: 'user', content }

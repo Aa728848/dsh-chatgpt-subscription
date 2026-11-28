@@ -787,4 +787,55 @@ describe('开源模型总成开关与推理坍塌守卫按模型隔离', () => {
 
     handle.dispose()
   })
+
+  it('开源模型共享状态锚采集嵌套 todo_write 并联动 todoReminder 持久化投影输出 TASKS', async () => {
+    const host = createFakeHost()
+    let projectedReminder: unknown = {
+      unfinishedTodos: [
+        { content: 'Patch mapper', status: 'completed' },
+        { content: 'Run vitest', status: 'in_progress' },
+      ],
+    }
+    ;(host.ctx as Record<string, unknown>)['get'] = (name: string) => name === 'sessionProjections'
+      ? {
+          stateOf: (_session: unknown, key: string) => (key === 'todoReminder' ? projectedReminder : null),
+        }
+      : undefined
+    const dispose = installOpenModelStateAnchor(host.ctx, {
+      stepIntervalOverride: 2,
+      contextWatermarksOverride: [],
+      estimateContextTokens: () => 0,
+    })
+    const kimiAgent = createFakeAgent({ provider: 'kimi-code', model: 'k3.1-pro', sessionId: 'kimi-todo' })
+    const userMsg = { role: 'user', content: [{ type: 'text', text: 'Finish provider upgrade' }] }
+    await host.runWaterfall('agent/pre-step', [{ agent: kimiAgent, messages: [userMsg] }], () => ({ kind: 'enter', messages: [userMsg] }))
+    await host.runWaterfall('agent/pre-step', [{ agent: kimiAgent, messages: [] }], () => ({ kind: 'enter', messages: [] }))
+    const anchored = await host.runWaterfall('agent/pre-step', [{ agent: kimiAgent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as {
+      messages: Array<{ content: Array<{ text: string }> }>
+    }
+    expect(anchored.messages).toHaveLength(1)
+    expect(anchored.messages[0]!.content[0]!.text).toContain('TASKS: 1/2 done | NOW: Run vitest')
+
+    // 无投影时，Code Mode 嵌套 todo_write（parent !== undefined）同样被实时采集
+    projectedReminder = undefined
+    await host.runWaterfall(
+      'tools/post-execute',
+      [
+        {
+          name: 'todo_write',
+          parent: { name: 'code_run' },
+          agent: kimiAgent,
+          arguments: { todos: [{ content: 'Run vitest', status: 'completed' }, { content: 'Push branch', status: 'pending' }] },
+        },
+        { isError: false },
+      ],
+      () => ({ kind: 'accept' }),
+    )
+    await host.runWaterfall('agent/pre-step', [{ agent: kimiAgent, messages: [] }], () => ({ kind: 'enter', messages: [] }))
+    const afterNested = await host.runWaterfall('agent/pre-step', [{ agent: kimiAgent, messages: [] }], () => ({ kind: 'enter', messages: [] })) as {
+      messages: Array<{ content: Array<{ text: string }> }>
+    }
+    expect(afterNested.messages[0]!.content[0]!.text).toContain('TASKS: 1/2 done | NEXT: Push branch')
+    dispose()
+  })
 })

@@ -115,6 +115,7 @@ interface ToolExecutionResultLike {
 interface EventHostLike {
   on?(name: string, listener: (...args: never[]) => unknown, options?: unknown): unknown
   off?(name: string, listener: (...args: never[]) => unknown): unknown
+  get?(name: string): unknown
   logger?: { warn?(message: string, ...rest: unknown[]): void }
 }
 
@@ -182,10 +183,9 @@ function createSessionState(): AnchorSessionState {
   }
 }
 
-/** 把 `todo_write` 参数归纳成紧凑进度行：完成数/总数、进行中与下一项。 */
-export function summarizeTodos(args: unknown): string | undefined {
-  if (!isRecord(args) || !Array.isArray(args['todos'])) return undefined
-  const todos = args['todos'].filter(isRecord)
+/** 把原始 `TodoItem[]` 归纳成紧凑进度行：完成数/总数、进行中与下一项。 */
+export function summarizeTodoItems(rawTodos: readonly unknown[]): string {
+  const todos = rawTodos.filter(isRecord)
   if (todos.length === 0) return ''
   const label = (todo: Record<string, unknown>): string => {
     const text = typeof todo['content'] === 'string' ? todo['content'].replace(/\s+/g, ' ').trim() : ''
@@ -198,6 +198,71 @@ export function summarizeTodos(args: unknown): string | undefined {
   if (now !== undefined && label(now).length > 0) parts.push(`NOW: ${label(now)}`)
   if (pending !== undefined && label(pending).length > 0) parts.push(`NEXT: ${label(pending)}`)
   return parts.join(' | ')
+}
+
+/** 把 `todo_write` 参数归纳成紧凑进度行：完成数/总数、进行中与下一项。 */
+export function summarizeTodos(args: unknown): string | undefined {
+  if (!isRecord(args) || !Array.isArray(args['todos'])) return undefined
+  return summarizeTodoItems(args['todos'])
+}
+
+/**
+ * 从持久化会话投影（优先 `todos`，次选 DSH 0.2.3-alpha.3+ `todoReminder.unfinishedTodos`）
+ * 或历史 `todo/write` 事件读取当前紧凑任务进度。
+ *
+ * 解决会话冷恢复与跨回合未完成待办无法从进程内内存恢复的问题；无投影且无 `todo/write`
+ * 事件时返回 `undefined`，让调用方保留内存态（向后兼容老代宿主与精简单测）。
+ */
+export function readSessionTaskLine(ctx: unknown, agent: unknown): string | undefined {
+  if (!isRecord(agent) || !isRecord(agent['session'])) return undefined
+  const session = agent['session']
+  if (isRecord(ctx) && typeof ctx['get'] === 'function') {
+    let projections: unknown
+    try {
+      projections = (ctx['get'] as (name: string) => unknown).call(ctx, 'sessionProjections')
+    } catch {
+      projections = undefined
+    }
+    if (isRecord(projections) && typeof projections['stateOf'] === 'function') {
+      const stateOf = projections['stateOf'] as (target: unknown, key: string) => unknown
+      try {
+        const currentTodos = stateOf.call(projections, session, 'todos')
+        if (Array.isArray(currentTodos)) return summarizeTodoItems(currentTodos)
+      } catch {
+        // 未注册 `todos` 投影时静默回退。
+      }
+      try {
+        const reminder = stateOf.call(projections, session, 'todoReminder')
+        if (isRecord(reminder) && Array.isArray(reminder['unfinishedTodos']) && reminder['unfinishedTodos'].length > 0) {
+          return summarizeTodoItems(reminder['unfinishedTodos'])
+        }
+      } catch {
+        // 老代宿主没有 `todoReminder` 投影时静默回退。
+      }
+    }
+  }
+  const sessionLike = session as { events?: readonly SessionEventLike[]; snapshotEvents?: () => readonly SessionEventLike[] }
+  let events: readonly SessionEventLike[] | undefined
+  if (Array.isArray(sessionLike.events)) {
+    events = sessionLike.events
+  } else if (typeof sessionLike.snapshotEvents === 'function') {
+    try {
+      const snap = sessionLike.snapshotEvents()
+      if (Array.isArray(snap)) events = snap
+    } catch {
+      events = undefined
+    }
+  }
+  if (events !== undefined) {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type !== 'todo/write') continue
+      if (isRecord(event.data) && Array.isArray(event.data['todos'])) {
+        return summarizeTodoItems(event.data['todos'])
+      }
+    }
+  }
+  return undefined
 }
 
 function shortFileLabel(rawPath: string): string {
@@ -527,6 +592,8 @@ export function installDeepSeekV41FlashStateAnchor(
     }
 
     if (trigger === undefined) return decision
+    const projectedTasks = readSessionTaskLine(host, payload?.agent)
+    if (projectedTasks !== undefined) state.taskLine = projectedTasks
     const goal = currentGoal(state.goals)
     // 周期锚只是重申；既无目标也无任务时没有可重申的内容。
     if (trigger === 'periodic' && goal.length === 0 && state.taskLine.length === 0) return decision

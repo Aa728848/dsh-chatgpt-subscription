@@ -214,6 +214,7 @@ export class ClinePassAdapter extends LlmAdapter {
       // rewrites the cached prefix and pays for the whole prompt again. The
       // mapper renders both changes as system text (see toolUpdateNotice); no
       // native dynamic-tools schema is sent. An older harness ignores the field.
+      systemPromptUpdate: 'in-history',
       toolUpdate: 'in-history',
       context: { contextWindow: info.contextWindow },
       ...outputReservation(info.contextWindow, info.maxTokens),

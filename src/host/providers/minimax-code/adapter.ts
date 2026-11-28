@@ -928,6 +928,7 @@ export class MinimaxCodeAdapter extends LlmAdapter {
       id: modelId,
       name: entry?.name ?? modelId,
       inputModalities: modalitiesForModel(modelId),
+      toolUpdate: 'in-history',
       context: { contextWindow },
       // Do not materialize the wire ceiling as a fixed DSH output reservation:
       // on M2.7 it leaves too little budget for compaction. requestStream applies

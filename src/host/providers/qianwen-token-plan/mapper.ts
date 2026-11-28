@@ -3,7 +3,7 @@ import { CONTEXT_OVERFLOW_CODE, isContextOverflow } from '../../common/context-o
 import {
   LlmError,
   extractSystemText,
-  midConversationSystemToUserMessage,
+  midConversationUpdateToUserMessage,
   type FinishReason,
   type GenerateOptions,
   type Message,
@@ -222,7 +222,7 @@ export function buildQianwenChatRequest(
       conversation.push(message)
       continue
     }
-    const reminder = midConversationSystemToUserMessage(message, clean)
+    const reminder = midConversationUpdateToUserMessage(message, clean)
     if (reminder !== undefined) conversation.push(reminder)
   }
   let encryptedReplays = 0
