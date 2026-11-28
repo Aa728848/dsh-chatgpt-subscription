@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.91.0 - 2026-11-28
+
 - **[glm-coding-plan / open-models] 新增旗舰模型 `GLM-5.4` 及 Loop Transformer 专项运行时优化**：
   - `glm-coding-plan` 随包模型目录新增 `GLM-5.4`（国区/国际区双区支持、`wire: 'anthropic'`、1M 上下文 / 128K 输出上限、原生多模态输入、`low/high/max` 强制思考不可关、Anthropic 面自动原样回放带签名历史思考块适配其默认 Preserved Thinking）。
   - `open-models` 拆出独立画像 `glm-54`（`isGlm54OpenModel`），面向其 Loop Transformer（28 层中段双轮循环 + 跨轮复用第 1 轮 DSA `top-k=2048` 索引与第 2 轮 128-token 局部滑窗）与官方点名的长考自纠循环特征：状态锚定档至 20 步 / 128K 低上下文静默 / 首档 240K，配套定制静态尾部纪律段（引导依托隐式循环深度与 Preserved Thinking 增量推进、避免 marathon thinking 空转）、前缀缓存三件套、`[OBS | ...]` 入库前观测头与推理坍塌守卫。
