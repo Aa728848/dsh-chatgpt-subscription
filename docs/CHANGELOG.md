@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.92.0 - 2026-11-29
+
+- **[relayone] 新增 GPT 原生上下文压缩**：在支持的 Responses / sub2api 上游自动使用 remote-v2 加密检查点，按 Key 和模型隔离回放；不支持或检查点失效时安全回退到完整历史与 DSH 压缩，可设 `DSH_RELAYONE_REMOTE_COMPACTION=0` 关闭。
+- **[codex-chatgpt / relayone] 提高 sub2api 压缩兼容性**：保留仅出现在流式输出项事件中的加密检查点，避免终止响应为空时误判压缩失败。
+
 ## 0.91.1 - 2026-11-28
 
 - **[codemode] 修复 Cordis 代理下解析宿主运行时目录报错**：安全读取 `ctx` 上未声明 `inject` 的 `loader` / `baseDir` 属性，避免抛出代理访问异常。
